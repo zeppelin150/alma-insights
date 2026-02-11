@@ -1,0 +1,47 @@
+# ═══════════════════════════════════════
+# Alma Insights — Configuration
+# ═══════════════════════════════════════
+
+app:
+  name: "Alma Insights"
+  version: "1.0.0"
+
+# ── Data Sources ──
+zendesk:
+  # Option A: Direct Zendesk API
+  subdomain: "alma"          # → alma.zendesk.com
+  api_token: ""              # Set via environment variable ZENDESK_API_TOKEN
+  email: ""                  # Set via environment variable ZENDESK_EMAIL
+
+  # Option B: Lightdash SQL query
+  lightdash:
+    enabled: true
+    base_url: ""
+    project_id: ""
+    api_key: ""              # Set via environment variable LIGHTDASH_API_KEY
+
+# ── Gemini CLI ──
+gemini:
+  cli_path: ""               # Path to Gemini CLI executable
+  model: "gemini-pro"
+  temperature: 0.2
+  max_conversations_per_report: 300
+  pii_redaction: true        # Redact PII before sending to Gemini
+
+# ── Export ──
+export:
+  google_drive:
+    enabled: false
+    folder_id: ""            # Google Drive folder for report uploads
+    credentials_path: ""     # Path to service account JSON
+
+# ── Links ──
+links:
+  guru_folder: "https://app.getguru.com/folders/YOUR_FOLDER_ID"
+  typeform_feedback: "https://YOUR_WORKSPACE.typeform.com/to/YOUR_FORM_ID"
+
+# ── Display ──
+display:
+  default_date_range_days: 90
+  max_search_results: 200
+  conversations_per_page: 50

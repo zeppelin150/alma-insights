@@ -1,0 +1,43 @@
+# Data (ephemeral, recreated at runtime)
+/data/
+*.db
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.spec
+
+# Environment
+.env
+.venv/
+env/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+analysis_log.jsonl
+
+# Exports
+exports/
+*.pdf
+
+# Credentials (never commit)
+*credentials*.json
+*token*.json
+*secret*
+dist/
+nul
