@@ -26,8 +26,8 @@ jobs:
           path: dist/AlmaInsights-win64.zip
           retention-days: 30
 
-  build-macos-arm:
-    runs-on: macos-14          # Apple Silicon (M1/M2) runner
+  build-macos:
+    runs-on: macos-14          # Apple Silicon (M1/M2/M3)
     steps:
       - uses: actions/checkout@v4
 
@@ -35,31 +35,12 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Build macOS ARM distribution
+      - name: Build macOS distribution
         run: python3 installer/build_release.py --platform macos
 
-      - name: Upload macOS ARM artifact
+      - name: Upload macOS artifact
         uses: actions/upload-artifact@v4
         with:
           name: AlmaInsights-macOS-arm64
           path: dist/AlmaInsights-macOS-arm64.zip
-          retention-days: 30
-
-  build-macos-intel:
-    runs-on: macos-13          # Intel runner
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Build macOS Intel distribution
-        run: python3 installer/build_release.py --platform macos
-
-      - name: Upload macOS Intel artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: AlmaInsights-macOS-x86_64
-          path: dist/AlmaInsights-macOS-x86_64.zip
           retention-days: 30
