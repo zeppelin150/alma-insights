@@ -365,6 +365,7 @@ def create_macos_app_bundle(install_dir):
     launcher = macos_dir / "launch"
     launcher.write_text(
         f'#!/bin/bash\n'
+        f'xattr -rd com.apple.quarantine "{install_dir / "python"}" 2>/dev/null\n'
         f'cd "{install_dir / "app"}"\n'
         f'exec "{python_exe}" "{main_py}"\n'
     )
