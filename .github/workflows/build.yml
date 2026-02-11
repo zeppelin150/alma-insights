@@ -1,0 +1,65 @@
+name: Build Release
+
+on:
+  workflow_dispatch:       # Manual trigger from GitHub UI
+  push:
+    tags:
+      - 'v*'              # Auto-trigger on version tags (v1.0.0, etc.)
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build Windows distribution
+        run: python installer/build_release.py --platform windows
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AlmaInsights-win64
+          path: dist/AlmaInsights-win64.zip
+          retention-days: 30
+
+  build-macos-arm:
+    runs-on: macos-14          # Apple Silicon (M1/M2) runner
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build macOS ARM distribution
+        run: python3 installer/build_release.py --platform macos
+
+      - name: Upload macOS ARM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AlmaInsights-macOS-arm64
+          path: dist/AlmaInsights-macOS-arm64.zip
+          retention-days: 30
+
+  build-macos-intel:
+    runs-on: macos-13          # Intel runner
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build macOS Intel distribution
+        run: python3 installer/build_release.py --platform macos
+
+      - name: Upload macOS Intel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AlmaInsights-macOS-x86_64
+          path: dist/AlmaInsights-macOS-x86_64.zip
+          retention-days: 30
