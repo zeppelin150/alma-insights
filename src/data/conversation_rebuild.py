@@ -162,6 +162,9 @@ def rebuild_conversations(
             "group_name": "",
             "tags": [],
             "custom_fields": {},
+            "assignment_to_resolution_hours": assign_res,
+            "total_resolution_hours": total_res,
+            "first_reply_hours": first_reply,
         })
 
         # ── Build thread from sorted events ──

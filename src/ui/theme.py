@@ -106,18 +106,19 @@ def get_stylesheet():
 
     QComboBox {{
         background: {ALMA_WHITE}; border: 1px solid {ALMA_BORDER}; border-radius: 8px;
-        padding: 8px 12px; font-size: 13px; min-width: 120px;
+        padding: 8px 12px; font-size: 13px; color: {ALMA_TEXT_DARK}; min-width: 120px;
     }}
     QComboBox:hover {{ border-color: {ALMA_GREEN_LIGHT}; }}
     QComboBox::drop-down {{ subcontrol-origin: padding; subcontrol-position: center right; width: 30px; border: none; }}
     QComboBox QAbstractItemView {{
         background: {ALMA_WHITE}; border: 1px solid {ALMA_BORDER}; border-radius: 6px;
-        padding: 4px; selection-background-color: {ALMA_GREEN_LIGHT}; selection-color: white;
+        padding: 4px; color: {ALMA_TEXT_DARK};
+        selection-background-color: {ALMA_GREEN_LIGHT}; selection-color: white;
     }}
 
     QDateEdit {{
         background: {ALMA_WHITE}; border: 1px solid {ALMA_BORDER}; border-radius: 8px;
-        padding: 8px 12px; font-size: 13px;
+        padding: 8px 12px; font-size: 13px; color: {ALMA_TEXT_DARK};
     }}
     QDateEdit:focus {{ border-color: {ALMA_GREEN_LIGHT}; }}
 

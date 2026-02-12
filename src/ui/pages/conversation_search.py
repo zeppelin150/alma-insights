@@ -154,7 +154,7 @@ class ConversationSearchPage(QWidget):
         df_label.setStyleSheet(f"font-size: 11px; font-weight: 600; color: {ALMA_TEXT_MID}; letter-spacing: 0.5px;")
         self.date_from = QDateEdit()
         self.date_from.setCalendarPopup(True)
-        self.date_from.setDate(QDate(2025, 11, 1))
+        self.date_from.setDate(QDate(2020, 1, 1))
         self.date_from.setDisplayFormat("MMM d, yyyy")
 
         df_col = QVBoxLayout()
@@ -430,6 +430,7 @@ class ConversationSearchPage(QWidget):
     def _on_ingestion_complete(self, stats):
         """Handle completed ingestion from dialog."""
         self.populate_trc_filter()
+        self._sync_date_filters_to_data()
         self.run_search()
 
         convos = stats.get("conversations", 0)
@@ -468,8 +469,9 @@ class ConversationSearchPage(QWidget):
             progress.setValue(100)
             progress.close()
 
-            # Update UI
+            # Update UI — adjust date filters to match imported data
             self.populate_trc_filter()
+            self._sync_date_filters_to_data()
             self.run_search()
 
             # Update badge
@@ -496,6 +498,21 @@ class ConversationSearchPage(QWidget):
                 self, "Import Error",
                 f"Failed to import CSV:\n\n{str(e)}"
             )
+
+    def _sync_date_filters_to_data(self):
+        """Set date filter range to match the data in the database."""
+        try:
+            min_date, max_date = self.db.get_date_range()
+            if min_date:
+                qd = QDate.fromString(min_date[:10], "yyyy-MM-dd")
+                if qd.isValid():
+                    self.date_from.setDate(qd)
+            if max_date:
+                qd = QDate.fromString(max_date[:10], "yyyy-MM-dd")
+                if qd.isValid():
+                    self.date_to.setDate(qd)
+        except Exception:
+            pass
 
     def populate_trc_filter(self):
         """Load TRC codes from database into the filter dropdown."""
@@ -527,8 +544,8 @@ class ConversationSearchPage(QWidget):
 
         count = len(results)
         self.results_label.setText(
-            f"{count} conversation{'s' if count != 1 else ''} found"
-            + (" (showing first 200)" if count >= 200 else "")
+            f"{count:,} conversation{'s' if count != 1 else ''} found"
+            + (" (showing first 1,000)" if count >= 1000 else "")
         )
 
         # Log the search
@@ -541,7 +558,7 @@ class ConversationSearchPage(QWidget):
     def clear_filters(self):
         self.keyword_input.clear()
         self.trc_combo.setCurrentIndex(0)
-        self.date_from.setDate(QDate(2025, 11, 1))
+        self.date_from.setDate(QDate(2020, 1, 1))
         self.date_to.setDate(QDate.currentDate())
         self.csat_combo.setCurrentIndex(0)
         self.results_table.setRowCount(0)

@@ -1,6 +1,7 @@
 """
 Alma Insights — Placeholder Pages
-These will be fully built in Session 2.
+Remaining placeholder(s) for pages not yet built.
+TRC Analytics and Trending Topics have been moved to their own modules.
 """
 
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QFrame
@@ -40,7 +41,7 @@ class PlaceholderPage(QWidget):
         emoji.setAlignment(Qt.AlignCenter)
         card_layout.addWidget(emoji)
 
-        coming = QLabel("Coming in Session 2")
+        coming = QLabel("Coming Soon")
         coming.setStyleSheet(f"font-size: 16px; font-weight: 600; color: {ALMA_TEXT_MID}; margin-top: 12px;")
         coming.setAlignment(Qt.AlignCenter)
         card_layout.addWidget(coming)
@@ -54,30 +55,6 @@ class PlaceholderPage(QWidget):
 
         layout.addWidget(card)
         layout.addStretch()
-
-
-class DashboardPage(PlaceholderPage):
-    def __init__(self, db_manager, parent=None):
-        super().__init__(
-            title="TRC Analytics Dashboard",
-            subtitle="Ticket volume, resolution times, CSAT, and trends by TRC code",
-            description="Volume charts, resolution time trends, CSAT heatmaps, and filterable metrics tables — all computed from your Zendesk data.",
-            icon="📊",
-            parent=parent,
-        )
-        self.db = db_manager
-
-
-class TrendingPage(PlaceholderPage):
-    def __init__(self, db_manager, parent=None):
-        super().__init__(
-            title="Trending Topics",
-            subtitle="Automatically detected rising terms and phrases in ticket text",
-            description="TF-IDF analysis surfaces terms with increasing frequency — an early warning system for emerging RCM issue patterns.",
-            icon="📈",
-            parent=parent,
-        )
-        self.db = db_manager
 
 
 class ReportsPage(PlaceholderPage):

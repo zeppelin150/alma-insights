@@ -85,7 +85,7 @@ class DatasetRow(QFrame):
         remove_btn.setObjectName("GhostButton")
         remove_btn.setFixedSize(28, 28)
         remove_btn.setStyleSheet(f"""
-            QPushButton {{ color: {ALMA_TEXT_LIGHT}; font-size: 14px; border-radius: 4px; padding: 0; }}
+            QPushButton {{ background: transparent; color: {ALMA_TEXT_LIGHT}; font-size: 14px; border-radius: 4px; padding: 0; }}
             QPushButton:hover {{ color: {ALMA_ERROR}; background: rgba(196,30,30,0.08); }}
         """)
         remove_btn.setCursor(Qt.PointingHandCursor)

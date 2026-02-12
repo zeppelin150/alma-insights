@@ -266,6 +266,9 @@ def ingest_csv(file_path, db, progress_callback=None):
             "group_name": "",
             "tags": [],
             "custom_fields": {},
+            "assignment_to_resolution_hours": t["assignment_to_resolution_hours"],
+            "total_resolution_hours": t["total_resolution_hours"],
+            "first_reply_hours": t["first_reply_hours"],
         })
 
         # Build thread from comments — sorted chronologically with NULL handling

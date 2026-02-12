@@ -13,7 +13,10 @@ from PySide6.QtGui import QIcon, QFont
 
 from src.ui.theme import *
 from src.ui.pages.conversation_search import ConversationSearchPage
-from src.ui.pages.placeholders import DashboardPage, TrendingPage, ReportsPage
+from src.ui.pages.trc_analytics import TRCAnalyticsPage
+from src.ui.pages.trending_topics import TrendingTopicsPage
+from src.ui.pages.incidents_page import IncidentsPage
+from src.ui.pages.placeholders import ReportsPage
 from src.ui.pages.settings_page import SettingsPage
 from src.ui.dialogs.help_dialog import HelpDialog
 from src.data.db_manager import DatabaseManager
@@ -24,8 +27,9 @@ class MainWindow(QMainWindow):
     PAGE_CONVERSATIONS = 0
     PAGE_DASHBOARD = 1
     PAGE_TRENDING = 2
-    PAGE_REPORTS = 3
-    PAGE_SETTINGS = 4
+    PAGE_INCIDENTS = 3
+    PAGE_REPORTS = 4
+    PAGE_SETTINGS = 5
 
     def __init__(self):
         super().__init__()
@@ -138,6 +142,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._sidebar_btn("🔍  Conversations", self.PAGE_CONVERSATIONS))
         layout.addWidget(self._sidebar_btn("📊  TRC Analytics", self.PAGE_DASHBOARD))
         layout.addWidget(self._sidebar_btn("📈  Trending Topics", self.PAGE_TRENDING))
+        layout.addWidget(self._sidebar_btn("🚨  Incidents", self.PAGE_INCIDENTS))
 
         # Divider
         div1 = QFrame()
@@ -211,19 +216,24 @@ class MainWindow(QMainWindow):
         self.conversations_page.data_loaded.connect(self._on_data_loaded)
         self.content_stack.addWidget(self.conversations_page)
 
-        # Page 1: Dashboard (placeholder)
-        self.dashboard_page = DashboardPage(self.db)
+        # Page 1: TRC Analytics
+        self.dashboard_page = TRCAnalyticsPage(self.db)
         self.content_stack.addWidget(self.dashboard_page)
 
-        # Page 2: Trending (placeholder)
-        self.trending_page = TrendingPage(self.db)
+        # Page 2: Trending Topics
+        self.trending_page = TrendingTopicsPage(self.db)
         self.content_stack.addWidget(self.trending_page)
 
-        # Page 3: Reports (placeholder)
+        # Page 3: Incidents
+        self.incidents_page = IncidentsPage(self.db)
+        self.incidents_page.scan_complete.connect(self._update_incident_badge)
+        self.content_stack.addWidget(self.incidents_page)
+
+        # Page 4: Reports (placeholder)
         self.reports_page = ReportsPage(self.db)
         self.content_stack.addWidget(self.reports_page)
 
-        # Page 4: Settings
+        # Page 5: Settings
         self.settings_page = SettingsPage()
         self.settings_page.datasets_changed.connect(self._on_datasets_changed)
         self.settings_page.test_data_changed.connect(self._on_test_data_toggled)
@@ -269,11 +279,20 @@ class MainWindow(QMainWindow):
 
         self.ticket_count_label.setText(f"{count} conversations in database")
 
-        # Populate TRC filter
+        # Populate TRC filters on all pages
         self.conversations_page.populate_trc_filter()
+        self.dashboard_page.populate_trc_filter()
+        self.trending_page.populate_trc_filter()
+        self.incidents_page.populate_trc_filter()
+
+        # Rebuild hourly counts for incident monitoring
+        self.db.populate_hourly_counts()
 
         # Auto-search on launch
         QTimer.singleShot(100, self.conversations_page.run_search)
+
+        # Initialize incident badge
+        self._update_incident_badge(0)
 
     # ═══════════════════════════════════════════
     #  SETTINGS WIRING
@@ -305,7 +324,12 @@ class MainWindow(QMainWindow):
             self.ticket_count_label.setText(f"{count} conversations in database")
             self.conversations_page.set_data_source_label("Testing data")
             self.conversations_page.populate_trc_filter()
+            self.dashboard_page.populate_trc_filter()
+            self.trending_page.populate_trc_filter()
+            self.incidents_page.populate_trc_filter()
             self.conversations_page.run_search()
+            # Rebuild hourly counts for incident monitoring
+            self.db.populate_hourly_counts()
         else:
             # Clear all data — live mode
             self.db.conn.execute("DELETE FROM conversations")
@@ -315,6 +339,9 @@ class MainWindow(QMainWindow):
             self.ticket_count_label.setText("0 conversations in database")
             self.conversations_page.set_data_source_label("No data loaded")
             self.conversations_page.populate_trc_filter()
+            self.dashboard_page.populate_trc_filter()
+            self.trending_page.populate_trc_filter()
+            self.incidents_page.populate_trc_filter()
             self.conversations_page.clear_filters()
             self.status_label.setText("Test data cleared — import or pull live data")
 
@@ -324,10 +351,33 @@ class MainWindow(QMainWindow):
         self.ticket_count_label.setText(f"{count} conversations in database")
         source = "CSV" if "total_csv_rows" in stats else "Lightdash"
         self.status_label.setText(f"Imported {count:,} conversations from {source}")
+        # Refresh TRC filters on analytics pages
+        self.dashboard_page.populate_trc_filter()
+        self.trending_page.populate_trc_filter()
+        self.incidents_page.populate_trc_filter()
+        # Rebuild hourly counts and auto-run incident scan
+        self.db.populate_hourly_counts()
+        self.incidents_page.auto_run_scan()
+        # Auto-run θ EWMA scan after data import
+        self.incidents_page.auto_run_theta_scan()
 
     def _on_debug_mode_toggled(self, enabled):
         """Settings: debug canary toggle changed."""
         self.conversations_page.update_debug_mode(enabled)
+
+    # ═══════════════════════════════════════════
+    #  INCIDENT BADGE
+    # ═══════════════════════════════════════════
+
+    def _update_incident_badge(self, count_2theta: int = 0):
+        """Update sidebar badge for Incidents with 2θ flag count."""
+        for btn, page_idx in self._sidebar_buttons:
+            if page_idx == self.PAGE_INCIDENTS:
+                if count_2theta > 0:
+                    btn.setText(f"🚨  Incidents ({count_2theta})")
+                else:
+                    btn.setText("🚨  Incidents")
+                break
 
     # ═══════════════════════════════════════════
     #  DIALOGS
