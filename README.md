@@ -59,10 +59,10 @@ Python packages (installed automatically by setup):
 | Feature | Status | Description |
 |---------|--------|-------------|
 | 🔍 Conversation Search | ✅ Live | Search rebuilt ticket threads by keyword, TRC, date, CSAT |
-| 📊 TRC Analytics | 🚧 Session 2 | Volume, resolution time, CSAT metrics by TRC |
-| 📈 Trending Topics | 🚧 Session 2 | TF-IDF trending terms detection |
-| 🤖 AI Reports | 🚧 Session 2 | Gemini-powered theme/sentiment/trend reports |
-| ⚙️ Settings | 🚧 Session 2 | Data source and Gemini CLI configuration |
+| 📊 TRC Analytics | ✅ Live (Phase I) | Volume, resolution time, CSAT metrics by TRC |
+| 📈 Trending Topics | ✅ Live (phase I) | TF-IDF trending terms detection |
+| 🤖 AI Reports | 🚧 WIP | Gemini-powered theme/sentiment/trend reports |
+| ⚙️ Settings | 🚧 WIP | Data source and Gemini CLI configuration |
 
 ---
 
