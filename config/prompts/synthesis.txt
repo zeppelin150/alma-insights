@@ -1,0 +1,10 @@
+Based on the following RCM support ticket analytics, identify:
+1. The most significant emerging issues and why they matter
+2. Causal relationships between TRC categories
+3. 2-3 actionable recommendations for operations
+4. Early warning signals needing immediate attention
+
+DATA:
+{data_block}
+
+Cite specific metrics and TRC codes for each finding.

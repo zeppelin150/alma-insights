@@ -6,7 +6,7 @@ Used for both "Test Connection" and full API pull.
 
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QTextEdit, QFrame, QProgressBar, QApplication, QDateEdit,
+    QTextEdit, QFrame, QProgressBar, QApplication,
     QGroupBox, QMessageBox, QSizePolicy
 )
 from PySide6.QtCore import Qt, QDate, QThread, Signal, QObject
@@ -14,6 +14,7 @@ from PySide6.QtGui import QFont, QTextCursor
 import sys
 
 from src.ui.theme import *
+from src.ui.widgets.date_picker import ModernDatePicker
 
 
 # ═══════════════════════════════════
@@ -240,17 +241,13 @@ class IngestionDialog(QDialog):
         date_layout = QHBoxLayout(date_group)
         date_layout.setSpacing(12)
 
-        self.date_from = QDateEdit()
-        self.date_from.setCalendarPopup(True)
+        self.date_from = ModernDatePicker()
         self.date_from.setDate(QDate.currentDate().addDays(-7))
-        self.date_from.setDisplayFormat("MMM d, yyyy")
         date_layout.addWidget(QLabel("From:"))
         date_layout.addWidget(self.date_from)
 
-        self.date_to = QDateEdit()
-        self.date_to.setCalendarPopup(True)
+        self.date_to = ModernDatePicker()
         self.date_to.setDate(QDate.currentDate())
-        self.date_to.setDisplayFormat("MMM d, yyyy")
         date_layout.addWidget(QLabel("To:"))
         date_layout.addWidget(self.date_to)
         date_layout.addStretch()

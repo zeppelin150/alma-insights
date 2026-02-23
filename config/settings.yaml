@@ -1,47 +1,93 @@
-# ═══════════════════════════════════════
-# Alma Insights — Configuration
-# ═══════════════════════════════════════
-
+agents:
+  context_limit: 800000
+  min_rate_interval: 25.0
+  num_workers: 3
+  pipeline_version: '5.2'
+  stall_timeout: 300
+ai_enhancements:
+  keywords: true
+  smoothing: true
 app:
-  name: "Alma Insights"
-  version: "1.0.0"
-
-# ── Data Sources ──
-zendesk:
-  # Option A: Direct Zendesk API
-  subdomain: "alma"          # → alma.zendesk.com
-  api_token: ""              # Set via environment variable ZENDESK_API_TOKEN
-  email: ""                  # Set via environment variable ZENDESK_EMAIL
-
-  # Option B: Lightdash SQL query
-  lightdash:
-    enabled: true
-    base_url: ""
-    project_id: ""
-    api_key: ""              # Set via environment variable LIGHTDASH_API_KEY
-
-# ── Gemini CLI ──
-gemini:
-  cli_path: ""               # Path to Gemini CLI executable
-  model: "gemini-pro"
-  temperature: 0.2
-  max_conversations_per_report: 300
-  pii_redaction: true        # Redact PII before sending to Gemini
-
-# ── Export ──
+  name: Alma Insights
+  version: 1.0.0
+behavior:
+  auto_analysis:
+    incidents:
+      control_chart: true
+      enabled: true
+      open_incidents: true
+      theta_anomaly_scan: true
+      trc_status_grid: true
+    trc_analytics:
+      csat_heatmap: true
+      enabled: true
+      metrics_by_trc: true
+      volume_resolution_charts: true
+    trending:
+      cross_trc_correlation: true
+      enabled: true
+      rising_cooling_terms: true
+      sentiment_trend: true
+      topic_clusters: true
+  calendar_sync:
+    ai_reports: false
+    analysis_pages: true
+  section_defaults:
+    custom:
+      incidents:
+        control_chart: true
+        open_incidents: false
+        theta_anomaly_scan: false
+        trc_status_grid: true
+      trc_analytics:
+        csat_heatmap: false
+        metrics_by_trc: false
+        volume_resolution_charts: true
+      trending:
+        cross_trc_correlation: false
+        rising_cooling_terms: false
+        sentiment_trend: true
+        topic_clusters: false
+    preset: all_collapsed
+  source_sync:
+    enabled: false
+display:
+  conversations_per_page: 50
+  default_date_range_days: 90
+  layman_mode: true
+  max_search_results: 200
 export:
   google_drive:
+    credentials_path: ''
     enabled: false
-    folder_id: ""            # Google Drive folder for report uploads
-    credentials_path: ""     # Path to service account JSON
-
-# ── Links ──
+    folder_id: ''
+gemini:
+  cli_path: C:\Users\Chris\AppData\Roaming\npm\gemini.CMD
+  max_conversations_per_report: 300
+  model: gemini-2.5-flash
+  pii_redaction: true
+  temperature: 0.2
 links:
-  guru_folder: "https://app.getguru.com/folders/YOUR_FOLDER_ID"
-  typeform_feedback: "https://YOUR_WORKSPACE.typeform.com/to/YOUR_FORM_ID"
-
-# ── Display ──
-display:
-  default_date_range_days: 90
-  max_search_results: 200
-  conversations_per_page: 50
+  guru_folder: https://app.getguru.com/folders/YOUR_FOLDER_ID
+  typeform_feedback: https://YOUR_WORKSPACE.typeform.com/to/YOUR_FORM_ID
+nlp_scan:
+  batch_size: 25
+  budget_cap: 50.0
+  max_tickets_cli: 5000
+  mode: agentic
+  parallel_workers: 2
+scanning_costs:
+  gemini_plan: flash_2.5
+  monthly_limit: 500.0
+  per_scan_limit: 50.0
+  period_limit: 2000.0
+  period_type: quarterly
+zendesk:
+  api_token: ''
+  email: ''
+  lightdash:
+    api_key: ''
+    base_url: ''
+    enabled: true
+    project_id: ''
+  subdomain: alma

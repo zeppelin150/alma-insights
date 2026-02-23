@@ -1,7 +1,14 @@
 """
-Alma Insights — Custom Chart Widgets
+Alma Insights — Custom Chart Widgets  (Polished Edition)
 QPainter-based charts: BarChart, BoxPlot, Heatmap, LineChart, Sparkline.
 No external charting libraries required.
+
+Visual polish:
+  - Inset background with subtle warm fill and inner border
+  - Dotted grid lines for spatial reference
+  - Gradient bar fills and area fills under lines
+  - Hover tooltips with exact values
+  - Pagination support (set_page / page_size) on bar, box, heatmap
 """
 
 import math
@@ -16,8 +23,53 @@ from src.ui.theme import (
     ALMA_GREEN_DARK, ALMA_GREEN_MID, ALMA_GREEN_LIGHT, ALMA_GREEN_SUBTLE,
     ALMA_CREAM, ALMA_WHITE, ALMA_TEXT_DARK, ALMA_TEXT_MID, ALMA_TEXT_LIGHT,
     ALMA_BORDER, ALMA_BORDER_LIGHT, ALMA_SUCCESS, ALMA_WARNING, ALMA_ERROR,
-    ALMA_INFO,
+    ALMA_INFO, ALMA_BG_ELEVATED,
+    ALMA_CHART_BG, ALMA_CHART_GRID, ALMA_CHART_AXIS, ALMA_CHART_INSET,
 )
+
+
+# ═══════════════════════════════════════════
+#  SHARED PAINT HELPERS
+# ═══════════════════════════════════════════
+
+def _paint_chart_bg(painter: QPainter, rect: QRectF, radius: float = 8):
+    """Transparent chart background — lets the parent card show through.
+
+    Previously drew a filled rounded rect + inner border that blocked text
+    and created an unwanted "ovular" frame inside the already-shadowed card.
+    Now a no-op so chart content paints directly on the card background.
+    """
+    pass
+
+
+def _paint_empty_state(painter: QPainter, rect: QRectF, icon: str, message: str):
+    """Draw a centered empty-state placeholder with icon + text."""
+    # Light tint only for empty state so it doesn't look blank
+    painter.setBrush(QBrush(QColor(ALMA_CHART_BG)))
+    painter.setPen(Qt.NoPen)
+    painter.drawRoundedRect(rect, 8, 8)
+    cy = rect.center().y()
+    # Icon
+    painter.setFont(QFont("Segoe UI", 24))
+    painter.setPen(QColor(ALMA_BORDER))
+    painter.drawText(
+        QRectF(rect.x(), cy - 30, rect.width(), 36),
+        Qt.AlignCenter, icon,
+    )
+    # Message
+    painter.setFont(QFont("Segoe UI", 12))
+    painter.setPen(QColor(ALMA_TEXT_LIGHT))
+    painter.drawText(
+        QRectF(rect.x(), cy + 10, rect.width(), 24),
+        Qt.AlignCenter, message,
+    )
+
+
+def _dotted_pen(color_hex: str, width: float = 1.0) -> QPen:
+    """Create a dotted pen for grid lines."""
+    pen = QPen(QColor(color_hex), width)
+    pen.setStyle(Qt.DotLine)
+    return pen
 
 
 # ═══════════════════════════════════════════
@@ -25,39 +77,49 @@ from src.ui.theme import (
 # ═══════════════════════════════════════════
 
 class BarChartWidget(QWidget):
-    """Horizontal bar chart. Accepts list of (label, value) tuples."""
+    """Horizontal bar chart with gradient fills, grid lines, and pagination."""
 
     bar_clicked = Signal(str)  # emits label
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._data = []  # [(label, value), ...]
-        self._max_items = 20
-        self._overflow_count = 0
+        self._all_data = []     # full dataset [(label, value), ...]
+        self._data = []         # visible page slice
+        self._page = 0
+        self._page_size = 10
         self._bar_color = QColor(ALMA_GREEN_LIGHT)
-        self._bar_height = 24
+        self._bar_height = 26
         self._bar_spacing = 6
-        self._label_width = 140
+        self._label_width = 180
         self._hovered_index = -1
+        self._total_sum = 0
         self.setMouseTracking(True)
 
-    def set_data(self, data, max_items=20):
-        """Set chart data. Data should be sorted descending by value."""
-        self._max_items = max_items
-        if len(data) > max_items:
-            self._overflow_count = len(data) - max_items
-            self._data = data[:max_items]
-        else:
-            self._overflow_count = 0
-            self._data = data
+    def set_data(self, data, max_items=None):
+        """Set full chart data. Sorted descending by value.
+        Pagination replaces the old max_items truncation."""
+        self._all_data = list(data) if data else []
+        self._total_sum = sum(v for _, v in self._all_data) if self._all_data else 0
+        self._page = 0
+        self._apply_page()
+
+    def set_page(self, page: int, page_size: int = None):
+        """Switch to the given page (0-indexed). Called by PaginationBar."""
+        if page_size is not None:
+            self._page_size = page_size
+        self._page = page
+        self._apply_page()
+
+    def _apply_page(self):
+        start = self._page * self._page_size
+        end = start + self._page_size
+        self._data = self._all_data[start:end]
         self.setMinimumHeight(self._calc_height())
         self.update()
 
     def _calc_height(self):
         n = len(self._data)
-        h = 30 + n * (self._bar_height + self._bar_spacing) + 10
-        if self._overflow_count:
-            h += 24
+        h = 16 + n * (self._bar_height + self._bar_spacing) + 8
         return max(h, 60)
 
     def sizeHint(self):
@@ -65,73 +127,75 @@ class BarChartWidget(QWidget):
 
     def paintEvent(self, event):
         if not self._data:
-            return self._paint_empty(event)
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.Antialiasing)
+            _paint_empty_state(painter, QRectF(self.rect()), "\U0001f4ca", "No volume data available")
+            painter.end()
+            return
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         w = self.width()
+        h = self.height()
+
+        # Inset background
+        _paint_chart_bg(painter, QRectF(0, 0, w, h))
 
         max_val = max(v for _, v in self._data) if self._data else 1
         if max_val == 0:
             max_val = 1
 
-        # Title area
         y = 10
         label_font = QFont("Segoe UI", 11)
         value_font = QFont("Segoe UI", 10, QFont.Bold)
         fm = QFontMetrics(label_font)
 
-        bar_area_left = self._label_width + 12
-        bar_area_width = w - bar_area_left - 60  # leave room for value label
+        bar_area_left = self._label_width + 14
+        bar_area_width = w - bar_area_left - 64
+
+        # Vertical grid lines (4 ticks)
+        for frac in (0.25, 0.50, 0.75, 1.0):
+            gx = bar_area_left + frac * bar_area_width
+            painter.setPen(_dotted_pen(ALMA_CHART_GRID))
+            painter.drawLine(QPointF(gx, 6), QPointF(gx, h - 6))
 
         for i, (label, value) in enumerate(self._data):
             bar_y = y + i * (self._bar_height + self._bar_spacing)
 
             # Label
             painter.setFont(label_font)
-            painter.setPen(QColor(ALMA_TEXT_MID))
+            painter.setPen(QColor(ALMA_CHART_AXIS))
             elided = fm.elidedText(label, Qt.ElideRight, self._label_width)
             painter.drawText(
-                QRectF(4, bar_y, self._label_width, self._bar_height),
+                QRectF(8, bar_y, self._label_width, self._bar_height),
                 Qt.AlignVCenter | Qt.AlignRight, elided
             )
 
-            # Bar
-            bar_w = max(2, (value / max_val) * bar_area_width)
+            # Bar — gradient fill
+            bar_w = max(4, (value / max_val) * bar_area_width)
             bar_rect = QRectF(bar_area_left, bar_y + 2, bar_w, self._bar_height - 4)
 
-            color = self._bar_color if i != self._hovered_index else QColor(ALMA_GREEN_SUBTLE)
-            painter.setBrush(QBrush(color))
+            grad = QLinearGradient(bar_rect.topLeft(), bar_rect.topRight())
+            if i == self._hovered_index:
+                grad.setColorAt(0, QColor(ALMA_GREEN_SUBTLE).lighter(115))
+                grad.setColorAt(1, QColor(ALMA_GREEN_SUBTLE))
+            else:
+                grad.setColorAt(0, QColor(ALMA_GREEN_LIGHT).lighter(115))
+                grad.setColorAt(1, self._bar_color)
+
+            painter.setBrush(QBrush(grad))
             painter.setPen(Qt.NoPen)
             painter.drawRoundedRect(bar_rect, 4, 4)
 
             # Value label
             painter.setFont(value_font)
             painter.setPen(QColor(ALMA_TEXT_DARK))
+            val_str = f"{value:,.0f}" if isinstance(value, float) else f"{value:,}"
             painter.drawText(
-                QRectF(bar_area_left + bar_w + 6, bar_y, 50, self._bar_height),
-                Qt.AlignVCenter | Qt.AlignLeft,
-                f"{value:,.0f}" if isinstance(value, float) else f"{value:,}"
+                QRectF(bar_area_left + bar_w + 8, bar_y, 54, self._bar_height),
+                Qt.AlignVCenter | Qt.AlignLeft, val_str
             )
 
-        # Overflow label
-        if self._overflow_count:
-            overflow_y = y + len(self._data) * (self._bar_height + self._bar_spacing) + 4
-            painter.setFont(QFont("Segoe UI", 10))
-            painter.setPen(QColor(ALMA_TEXT_LIGHT))
-            painter.drawText(
-                QRectF(0, overflow_y, w, 20),
-                Qt.AlignCenter,
-                f"and {self._overflow_count} more..."
-            )
-
-        painter.end()
-
-    def _paint_empty(self, event):
-        painter = QPainter(self)
-        painter.setPen(QColor(ALMA_TEXT_LIGHT))
-        painter.setFont(QFont("Segoe UI", 12))
-        painter.drawText(self.rect(), Qt.AlignCenter, "No data")
         painter.end()
 
     def mouseMoveEvent(self, event):
@@ -142,9 +206,20 @@ class BarChartWidget(QWidget):
             if bar_y <= event.position().y() <= bar_y + self._bar_height:
                 idx = i
                 break
+
         if idx != self._hovered_index:
             self._hovered_index = idx
             self.update()
+
+        # Tooltip
+        if 0 <= idx < len(self._data):
+            label, val = self._data[idx]
+            pct = (val / self._total_sum * 100) if self._total_sum else 0
+            val_str = f"{val:,.0f}" if isinstance(val, float) else f"{val:,}"
+            QToolTip.showText(
+                event.globalPosition().toPoint(),
+                f"{label}\n{val_str}  ({pct:.1f}%)"
+            )
 
     def mousePressEvent(self, event):
         if 0 <= self._hovered_index < len(self._data):
@@ -160,45 +235,103 @@ class BarChartWidget(QWidget):
 # ═══════════════════════════════════════════
 
 class BoxPlotWidget(QWidget):
-    """Horizontal box plot chart. Accepts {label: [values]} dict."""
+    """Horizontal box plot chart with gradient fills, outlier dots, and pagination."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._data = {}  # {label: [values]}
-        self._sorted_labels = []
+        self._all_data = {}       # full {label: [values]}
+        self._all_labels = []     # full sorted label list
+        self._data = {}           # visible page slice
+        self._sorted_labels = []  # visible page labels
+        self._page = 0
+        self._page_size = 10
         self._box_height = 28
         self._box_spacing = 8
-        self._label_width = 140
+        self._label_width = 180
+        self._hovered_index = -1
+        self.setMouseTracking(True)
 
-    def set_data(self, data, max_items=10, min_samples=5):
+    def set_data(self, data, max_items=None, min_samples=5):
         """Set data. Filters to labels with >= min_samples values."""
+        if not data:
+            self._all_data = {}
+            self._all_labels = []
+            self._page = 0
+            self._apply_page()
+            return
+
         filtered = {k: v for k, v in data.items() if len(v) >= min_samples}
+        if not filtered:
+            self._all_data = {}
+            self._all_labels = []
+            self._page = 0
+            self._apply_page()
+            return
+
         # Sort by median descending
-        import numpy as np
-        self._sorted_labels = sorted(
-            filtered.keys(),
-            key=lambda k: np.median(filtered[k]),
-            reverse=True
-        )[:max_items]
-        self._data = {k: filtered[k] for k in self._sorted_labels}
+        try:
+            import numpy as np
+            self._all_labels = sorted(
+                filtered.keys(),
+                key=lambda k: np.median(filtered[k]),
+                reverse=True
+            )
+        except ImportError:
+            self._all_labels = sorted(
+                filtered.keys(),
+                key=lambda k: sorted(filtered[k])[len(filtered[k]) // 2],
+                reverse=True
+            )
+
+        self._all_data = {k: filtered[k] for k in self._all_labels}
+        self._page = 0
+        self._apply_page()
+
+    def set_page(self, page: int, page_size: int = None):
+        if page_size is not None:
+            self._page_size = page_size
+        self._page = page
+        self._apply_page()
+
+    def _apply_page(self):
+        start = self._page * self._page_size
+        end = start + self._page_size
+        self._sorted_labels = self._all_labels[start:end]
+        self._data = {k: self._all_data[k] for k in self._sorted_labels}
         self.setMinimumHeight(self._calc_height())
         self.update()
 
     def _calc_height(self):
         n = len(self._sorted_labels)
-        return max(60, 20 + n * (self._box_height + self._box_spacing) + 30)
+        return max(60, 20 + n * (self._box_height + self._box_spacing) + 36)
 
     def sizeHint(self):
         return QSize(400, self._calc_height())
 
     def paintEvent(self, event):
         if not self._data:
-            return self._paint_empty(event)
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.Antialiasing)
+            _paint_empty_state(painter, QRectF(self.rect()), "\U0001f4e6", "Insufficient data for box plots")
+            painter.end()
+            return
 
-        import numpy as np
+        try:
+            import numpy as np
+        except ImportError:
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.Antialiasing)
+            _paint_empty_state(painter, QRectF(self.rect()), "\u26a0\ufe0f", "NumPy required for box plots")
+            painter.end()
+            return
+
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         w = self.width()
+        h = self.height()
+
+        # Inset background
+        _paint_chart_bg(painter, QRectF(0, 0, w, h))
 
         # Find global min/max for X axis
         all_vals = []
@@ -220,6 +353,12 @@ class BoxPlotWidget(QWidget):
         def x_pos(val):
             return plot_left + ((val - global_min) / (global_max - global_min)) * plot_width
 
+        # Vertical grid lines at quartile positions
+        for frac in (0.0, 0.25, 0.50, 0.75, 1.0):
+            gx = plot_left + frac * plot_width
+            painter.setPen(_dotted_pen(ALMA_CHART_GRID))
+            painter.drawLine(QPointF(gx, 6), QPointF(gx, h - 28))
+
         for i, label in enumerate(self._sorted_labels):
             vals = np.array(self._data[label])
             q1, median, q3 = np.percentile(vals, [25, 50, 75])
@@ -231,10 +370,10 @@ class BoxPlotWidget(QWidget):
 
             # Label
             painter.setFont(label_font)
-            painter.setPen(QColor(ALMA_TEXT_MID))
+            painter.setPen(QColor(ALMA_CHART_AXIS))
             elided = fm.elidedText(label, Qt.ElideRight, self._label_width)
             painter.drawText(
-                QRectF(4, cy - self._box_height / 2, self._label_width, self._box_height),
+                QRectF(8, cy - self._box_height / 2, self._label_width, self._box_height),
                 Qt.AlignVCenter | Qt.AlignRight, elided
             )
 
@@ -251,12 +390,16 @@ class BoxPlotWidget(QWidget):
                 wx = x_pos(wv)
                 painter.drawLine(QPointF(wx, cy - cap_h), QPointF(wx, cy + cap_h))
 
-            # Box (Q1 to Q3)
+            # Box (Q1 to Q3) — gradient fill
             box_x = x_pos(q1)
             box_w = max(2, x_pos(q3) - box_x)
             box_rect = QRectF(box_x, cy - self._box_height * 0.35,
                               box_w, self._box_height * 0.7)
-            painter.setBrush(QBrush(QColor(ALMA_INFO).lighter(140)))
+
+            box_grad = QLinearGradient(box_rect.topLeft(), box_rect.bottomLeft())
+            box_grad.setColorAt(0, QColor(ALMA_INFO).lighter(155))
+            box_grad.setColorAt(1, QColor(ALMA_INFO).lighter(130))
+            painter.setBrush(QBrush(box_grad))
             painter.setPen(QPen(QColor(ALMA_INFO), 1))
             painter.drawRoundedRect(box_rect, 3, 3)
 
@@ -268,9 +411,18 @@ class BoxPlotWidget(QWidget):
                 QPointF(median_x, cy + self._box_height * 0.35)
             )
 
+            # Outlier dots (beyond whiskers)
+            outliers = vals[(vals < whisker_low) | (vals > whisker_high)]
+            if len(outliers) > 0:
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QBrush(QColor(ALMA_WARNING).lighter(120)))
+                for ov in outliers[:20]:  # cap at 20 dots per row
+                    ox = x_pos(ov)
+                    painter.drawEllipse(QPointF(ox, cy), 2.5, 2.5)
+
         # X-axis labels
         painter.setFont(small_font)
-        painter.setPen(QColor(ALMA_TEXT_LIGHT))
+        painter.setPen(QColor(ALMA_CHART_AXIS))
         axis_y = y_start + len(self._sorted_labels) * (self._box_height + self._box_spacing) + 4
         for frac in [0, 0.25, 0.5, 0.75, 1.0]:
             val = global_min + frac * (global_max - global_min)
@@ -279,11 +431,32 @@ class BoxPlotWidget(QWidget):
 
         painter.end()
 
+    def mouseMoveEvent(self, event):
+        if not self._sorted_labels:
+            return
+        try:
+            import numpy as np
+        except ImportError:
+            return
+
+        y_start = 10
+        pos_y = event.position().y()
+        for i, label in enumerate(self._sorted_labels):
+            cy = y_start + i * (self._box_height + self._box_spacing) + self._box_height / 2
+            if abs(pos_y - cy) <= self._box_height / 2:
+                vals = np.array(self._data[label])
+                q1, med, q3 = np.percentile(vals, [25, 50, 75])
+                QToolTip.showText(
+                    event.globalPosition().toPoint(),
+                    f"{label}\nQ1: {q1:.1f}h  Median: {med:.1f}h  Q3: {q3:.1f}h\n"
+                    f"Range: {vals.min():.1f}h \u2013 {vals.max():.1f}h  (n={len(vals)})"
+                )
+                return
+
     def _paint_empty(self, event):
         painter = QPainter(self)
-        painter.setPen(QColor(ALMA_TEXT_LIGHT))
-        painter.setFont(QFont("Segoe UI", 12))
-        painter.drawText(self.rect(), Qt.AlignCenter, "Insufficient data for box plots")
+        painter.setRenderHint(QPainter.Antialiasing)
+        _paint_empty_state(painter, QRectF(self.rect()), "\U0001f4e6", "Insufficient data for box plots")
         painter.end()
 
 
@@ -292,37 +465,64 @@ class BoxPlotWidget(QWidget):
 # ═══════════════════════════════════════════
 
 class HeatmapWidget(QWidget):
-    """Grid heatmap with color gradient. Axes: Y=labels, X=time periods."""
+    """Grid heatmap with color gradient, auto-scaling cells, and Y-axis pagination."""
+
+    cell_clicked = Signal(str, str)  # emits (y_label, x_label)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._y_labels = []
+        self._all_y_labels = []
         self._x_labels = []
-        self._values = {}  # {(y_idx, x_idx): float_value}
-        self._cell_width = 64
+        self._values = {}          # {(y_idx, x_idx): float_value}
+        self._y_labels = []        # visible page slice
+        self._page = 0
+        self._page_size = 10
         self._cell_height = 32
         self._label_width = 140
         self._header_height = 40
+        self._hovered_cell = None  # (yi, xi) tuple
+        self.setMouseTracking(True)
 
     def set_data(self, y_labels, x_labels, values):
         """
         values: dict of {(y_idx, x_idx): avg_score} or None for missing.
+        y_idx is global (0-indexed into y_labels).
         """
-        self._y_labels = y_labels
-        self._x_labels = x_labels
-        self._values = values
+        self._all_y_labels = list(y_labels) if y_labels else []
+        self._x_labels = list(x_labels) if x_labels else []
+        self._values = values or {}
+        self._page = 0
+        self._apply_page()
+
+    def set_page(self, page: int, page_size: int = None):
+        if page_size is not None:
+            self._page_size = page_size
+        self._page = page
+        self._apply_page()
+
+    def _apply_page(self):
+        start = self._page * self._page_size
+        end = start + self._page_size
+        self._y_labels = self._all_y_labels[start:end]
+        self._page_offset = start  # for indexing into self._values
         self.setMinimumHeight(self._calc_height())
-        self.setMinimumWidth(self._calc_width())
         self.update()
+
+    @property
+    def _cell_width(self):
+        """Auto-scale cell width to fit available width."""
+        n_cols = len(self._x_labels)
+        if n_cols <= 0:
+            return 64
+        available = self.width() - self._label_width - 20
+        cw = max(36, available / n_cols)
+        return min(cw, 72)  # cap at 72px so cells don't get comically wide
 
     def _calc_height(self):
         return max(60, self._header_height + len(self._y_labels) * self._cell_height + 10)
 
-    def _calc_width(self):
-        return max(300, self._label_width + len(self._x_labels) * self._cell_width + 20)
-
     def sizeHint(self):
-        return QSize(self._calc_width(), self._calc_height())
+        return QSize(500, self._calc_height())
 
     def _color_for_score(self, score):
         """Map CSAT score 1-5 to a color."""
@@ -339,64 +539,148 @@ class HeatmapWidget(QWidget):
 
     def paintEvent(self, event):
         if not self._y_labels or not self._x_labels:
-            return self._paint_empty(event)
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.Antialiasing)
+            _paint_empty_state(painter, QRectF(self.rect()), "\U0001f4ca", "No CSAT data for heatmap")
+            painter.end()
+            return
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
+        w = self.width()
+        h = self.height()
+        cw = self._cell_width
+
+        # Inset background
+        _paint_chart_bg(painter, QRectF(0, 0, w, h))
 
         label_font = QFont("Segoe UI", 10)
         header_font = QFont("Segoe UI", 9, QFont.Bold)
         value_font = QFont("Segoe UI", 9)
         fm = QFontMetrics(label_font)
 
+        # Color legend (top-right)
+        legend_x = w - 160
+        legend_y = 8
+        legend_w = 120
+        legend_h = 12
+        legend_grad = QLinearGradient(legend_x, legend_y, legend_x + legend_w, legend_y)
+        legend_grad.setColorAt(0.0, QColor(ALMA_ERROR).lighter(140))
+        legend_grad.setColorAt(0.33, QColor(ALMA_WARNING).lighter(140))
+        legend_grad.setColorAt(0.66, QColor("#B8A000").lighter(150))
+        legend_grad.setColorAt(1.0, QColor(ALMA_SUCCESS).lighter(140))
+        painter.setBrush(QBrush(legend_grad))
+        painter.setPen(QPen(QColor(ALMA_CHART_INSET), 0.5))
+        painter.drawRoundedRect(QRectF(legend_x, legend_y, legend_w, legend_h), 3, 3)
+        # Legend labels
+        painter.setFont(QFont("Segoe UI", 7))
+        painter.setPen(QColor(ALMA_CHART_AXIS))
+        painter.drawText(QRectF(legend_x - 16, legend_y, 16, legend_h), Qt.AlignVCenter | Qt.AlignRight, "1")
+        painter.drawText(QRectF(legend_x + legend_w + 2, legend_y, 16, legend_h), Qt.AlignVCenter | Qt.AlignLeft, "5")
+
         # Column headers
         painter.setFont(header_font)
-        painter.setPen(QColor(ALMA_TEXT_MID))
+        painter.setPen(QColor(ALMA_CHART_AXIS))
         for xi, xlabel in enumerate(self._x_labels):
-            x = self._label_width + xi * self._cell_width
+            x = self._label_width + xi * cw
             painter.drawText(
-                QRectF(x, 4, self._cell_width, self._header_height - 8),
+                QRectF(x, self._header_height - 20, cw, 16),
                 Qt.AlignCenter, xlabel
             )
 
-        # Rows
-        for yi, ylabel in enumerate(self._y_labels):
-            y = self._header_height + yi * self._cell_height
+        # Rows (paginated — only visible page)
+        for vis_yi, ylabel in enumerate(self._y_labels):
+            global_yi = self._page_offset + vis_yi
+            y = self._header_height + vis_yi * self._cell_height
 
             # Row label
             painter.setFont(label_font)
-            painter.setPen(QColor(ALMA_TEXT_MID))
+            painter.setPen(QColor(ALMA_CHART_AXIS))
             elided = fm.elidedText(ylabel, Qt.ElideRight, self._label_width - 8)
             painter.drawText(
-                QRectF(4, y, self._label_width - 4, self._cell_height),
+                QRectF(8, y, self._label_width - 8, self._cell_height),
                 Qt.AlignVCenter | Qt.AlignRight, elided
             )
 
             # Cells
             for xi in range(len(self._x_labels)):
-                x = self._label_width + xi * self._cell_width
-                val = self._values.get((yi, xi))
+                x = self._label_width + xi * cw
+                val = self._values.get((global_yi, xi))
                 color = self._color_for_score(val)
 
-                cell_rect = QRectF(x + 1, y + 1, self._cell_width - 2, self._cell_height - 2)
-                painter.setBrush(QBrush(color))
+                cell_rect = QRectF(x + 1, y + 1, cw - 2, self._cell_height - 2)
+
+                # Hover highlight
+                is_hovered = (self._hovered_cell == (vis_yi, xi))
+
+                painter.setBrush(QBrush(color.lighter(108) if is_hovered else color))
                 painter.setPen(Qt.NoPen)
                 painter.drawRoundedRect(cell_rect, 4, 4)
+
+                # Subtle bottom-right inner shadow
+                shadow_pen = QPen(QColor(0, 0, 0, 15), 1)
+                painter.setPen(shadow_pen)
+                painter.drawLine(
+                    QPointF(cell_rect.left() + 4, cell_rect.bottom()),
+                    QPointF(cell_rect.right(), cell_rect.bottom()),
+                )
+                painter.drawLine(
+                    QPointF(cell_rect.right(), cell_rect.top() + 4),
+                    QPointF(cell_rect.right(), cell_rect.bottom()),
+                )
 
                 # Value text
                 if val is not None:
                     painter.setFont(value_font)
-                    text_color = QColor(ALMA_TEXT_DARK)
-                    painter.setPen(text_color)
+                    painter.setPen(QColor(ALMA_TEXT_DARK))
                     painter.drawText(cell_rect, Qt.AlignCenter, f"{val:.1f}")
 
         painter.end()
 
+    def mouseMoveEvent(self, event):
+        if not self._y_labels or not self._x_labels:
+            return
+        cw = self._cell_width
+        mx, my = event.position().x(), event.position().y()
+
+        xi = int((mx - self._label_width) / cw) if cw > 0 else -1
+        vis_yi = int((my - self._header_height) / self._cell_height)
+
+        if 0 <= xi < len(self._x_labels) and 0 <= vis_yi < len(self._y_labels):
+            new_cell = (vis_yi, xi)
+            if new_cell != self._hovered_cell:
+                self._hovered_cell = new_cell
+                self.update()
+
+            global_yi = self._page_offset + vis_yi
+            val = self._values.get((global_yi, xi))
+            trc = self._y_labels[vis_yi]
+            period = self._x_labels[xi]
+            val_str = f"{val:.2f}" if val is not None else "No data"
+            QToolTip.showText(
+                event.globalPosition().toPoint(),
+                f"{trc}  |  {period}\nCSAT: {val_str}"
+            )
+        else:
+            if self._hovered_cell is not None:
+                self._hovered_cell = None
+                self.update()
+
+    def leaveEvent(self, event):
+        if self._hovered_cell is not None:
+            self._hovered_cell = None
+            self.update()
+
+    def mousePressEvent(self, event):
+        if self._hovered_cell is not None:
+            vis_yi, xi = self._hovered_cell
+            if 0 <= vis_yi < len(self._y_labels) and 0 <= xi < len(self._x_labels):
+                self.cell_clicked.emit(self._y_labels[vis_yi], self._x_labels[xi])
+
     def _paint_empty(self, event):
         painter = QPainter(self)
-        painter.setPen(QColor(ALMA_TEXT_LIGHT))
-        painter.setFont(QFont("Segoe UI", 12))
-        painter.drawText(self.rect(), Qt.AlignCenter, "No CSAT data for heatmap")
+        painter.setRenderHint(QPainter.Antialiasing)
+        _paint_empty_state(painter, QRectF(self.rect()), "\U0001f4ca", "No CSAT data for heatmap")
         painter.end()
 
 
@@ -406,7 +690,7 @@ class HeatmapWidget(QWidget):
 
 class LineChartWidget(QWidget):
     """
-    Multi-series line chart.
+    Multi-series line chart with area fills, dotted grid, and hover tooltips.
     Accepts {series_label: [(x_label, y_value), ...]} dict.
     """
 
@@ -427,8 +711,9 @@ class LineChartWidget(QWidget):
         self._margin_right = 20
         self._margin_top = 20
         self._margin_bottom = 50
-        self._legend_height = 30
+        self._legend_height = 50
         self.setMinimumHeight(200)
+        self.setMouseTracking(True)
 
     def set_data(self, data, y_min=None, y_max=None, show_zero_line=True, show_bg_tint=False):
         """
@@ -479,6 +764,9 @@ class LineChartWidget(QWidget):
         w = self.width()
         h = self.height() - self._legend_height
 
+        # Inset background
+        _paint_chart_bg(painter, QRectF(0, 0, w, self.height()))
+
         plot_left = self._margin_left
         plot_right = w - self._margin_right
         plot_top = self._margin_top
@@ -502,12 +790,10 @@ class LineChartWidget(QWidget):
         # Background tint (green above 0, red below 0)
         if self._show_bg_tint and self._y_min < 0 < self._y_max:
             zero_y = y_pos(0)
-            # Green above
-            painter.setBrush(QBrush(QColor(ALMA_SUCCESS).lighter(190)))
+            painter.setBrush(QBrush(QColor(ALMA_SUCCESS).lighter(192)))
             painter.setPen(Qt.NoPen)
             painter.drawRect(QRectF(plot_left, plot_top, plot_w, zero_y - plot_top))
-            # Red below
-            painter.setBrush(QBrush(QColor(ALMA_ERROR).lighter(190)))
+            painter.setBrush(QBrush(QColor(ALMA_ERROR).lighter(192)))
             painter.drawRect(QRectF(plot_left, zero_y, plot_w, plot_bottom - zero_y))
 
         # Grid lines and Y-axis labels
@@ -518,12 +804,10 @@ class LineChartWidget(QWidget):
             val = self._y_min + frac * (self._y_max - self._y_min)
             py = y_pos(val)
 
-            # Grid line
-            painter.setPen(QPen(QColor(ALMA_BORDER_LIGHT), 1, Qt.DashLine))
+            painter.setPen(_dotted_pen(ALMA_CHART_GRID))
             painter.drawLine(QPointF(plot_left, py), QPointF(plot_right, py))
 
-            # Label
-            painter.setPen(QColor(ALMA_TEXT_LIGHT))
+            painter.setPen(QColor(ALMA_CHART_AXIS))
             painter.drawText(
                 QRectF(0, py - 8, plot_left - 6, 16),
                 Qt.AlignVCenter | Qt.AlignRight,
@@ -538,7 +822,7 @@ class LineChartWidget(QWidget):
 
         # X-axis labels
         painter.setFont(QFont("Segoe UI", 8))
-        painter.setPen(QColor(ALMA_TEXT_LIGHT))
+        painter.setPen(QColor(ALMA_CHART_AXIS))
         max_labels = max(1, plot_w // 60)
         step = max(1, len(self._x_labels) // max_labels)
         for i, xl in enumerate(self._x_labels):
@@ -553,9 +837,24 @@ class LineChartWidget(QWidget):
         series_list = list(self._data.items())
         for si, (series_label, points) in enumerate(series_list):
             color = QColor(self.SERIES_COLORS[si % len(self.SERIES_COLORS)])
-            pen = QPen(color, 2)
-            painter.setPen(pen)
 
+            # Area fill under line
+            if len(points) >= 2:
+                fill_path = QPainterPath()
+                fill_path.moveTo(x_pos(0), plot_bottom)
+                for pi, (xl, yv) in enumerate(points):
+                    fill_path.lineTo(x_pos(pi), y_pos(yv))
+                fill_path.lineTo(x_pos(len(points) - 1), plot_bottom)
+                fill_path.closeSubpath()
+                fill_color = QColor(color)
+                fill_color.setAlpha(18)
+                painter.setBrush(QBrush(fill_color))
+                painter.setPen(Qt.NoPen)
+                painter.drawPath(fill_path)
+
+            # Line
+            pen = QPen(color, 2.5)
+            painter.setPen(pen)
             path = QPainterPath()
             for pi, (xl, yv) in enumerate(points):
                 px = x_pos(pi)
@@ -564,40 +863,76 @@ class LineChartWidget(QWidget):
                     path.moveTo(px, py)
                 else:
                     path.lineTo(px, py)
-
             painter.setBrush(Qt.NoBrush)
             painter.drawPath(path)
 
             # Data points
             painter.setBrush(QBrush(color))
+            painter.setPen(QPen(QColor(ALMA_BG_ELEVATED), 1.5))
             for pi, (xl, yv) in enumerate(points):
                 px = x_pos(pi)
                 py = y_pos(yv)
-                painter.drawEllipse(QPointF(px, py), 3, 3)
+                painter.drawEllipse(QPointF(px, py), 3.5, 3.5)
 
         # Legend (below chart)
         legend_y = h
         legend_x = plot_left
-        painter.setFont(QFont("Segoe UI", 9))
+        legend_font = QFont("Segoe UI", 9)
+        painter.setFont(legend_font)
+        legend_fm = QFontMetrics(legend_font)
+        available_w = w - plot_left - 10
+
         for si, (series_label, _) in enumerate(series_list):
+            label_w = legend_fm.horizontalAdvance(series_label)
+            item_w = 16 + label_w + 12
+
+            if legend_x + item_w > plot_left + available_w and legend_x > plot_left:
+                legend_x = plot_left
+                legend_y += 20
+
             color = QColor(self.SERIES_COLORS[si % len(self.SERIES_COLORS)])
-            # Color swatch
             painter.setBrush(QBrush(color))
             painter.setPen(Qt.NoPen)
             painter.drawRoundedRect(QRectF(legend_x, legend_y + 4, 12, 12), 2, 2)
-            # Label
             painter.setPen(QColor(ALMA_TEXT_MID))
-            text_rect = QRectF(legend_x + 16, legend_y, 100, 20)
+            text_rect = QRectF(legend_x + 16, legend_y, label_w + 4, 20)
             painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, series_label)
-            legend_x += 120
+            legend_x += item_w
 
         painter.end()
 
+    def mouseMoveEvent(self, event):
+        """Show tooltip with nearest data point info."""
+        if not self._data or not self._x_labels:
+            return
+
+        w = self.width()
+        h = self.height() - self._legend_height
+        plot_left = self._margin_left
+        plot_right = w - self._margin_right
+        plot_w = plot_right - plot_left
+        mx = event.position().x()
+
+        if mx < plot_left or mx > plot_right or len(self._x_labels) <= 1:
+            return
+
+        # Find nearest x index
+        ratio = (mx - plot_left) / plot_w
+        idx = round(ratio * (len(self._x_labels) - 1))
+        idx = max(0, min(idx, len(self._x_labels) - 1))
+
+        lines = [self._x_labels[idx]]
+        for si, (label, points) in enumerate(self._data.items()):
+            if idx < len(points):
+                val = points[idx][1]
+                lines.append(f"{label}: {val:+.3f}")
+
+        QToolTip.showText(event.globalPosition().toPoint(), "\n".join(lines))
+
     def _paint_empty(self, event):
         painter = QPainter(self)
-        painter.setPen(QColor(ALMA_TEXT_LIGHT))
-        painter.setFont(QFont("Segoe UI", 12))
-        painter.drawText(self.rect(), Qt.AlignCenter, "No data for line chart")
+        painter.setRenderHint(QPainter.Antialiasing)
+        _paint_empty_state(painter, QRectF(self.rect()), "\U0001f4c8", "No data for line chart")
         painter.end()
 
 
@@ -606,7 +941,7 @@ class LineChartWidget(QWidget):
 # ═══════════════════════════════════════════
 
 class SparklineWidget(QWidget):
-    """Tiny inline line chart, ~120x30px."""
+    """Tiny inline line chart with area fill, ~120x30px."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -640,8 +975,25 @@ class SparklineWidget(QWidget):
         if vmax == vmin:
             vmax = vmin + 1
 
-        path = QPainterPath()
         n = len(self._values)
+
+        # Area fill
+        fill_path = QPainterPath()
+        fill_path.moveTo(ox, oy + h)
+        for i, v in enumerate(self._values):
+            x = ox + (i / (n - 1)) * w
+            y = oy + h - ((v - vmin) / (vmax - vmin)) * h
+            fill_path.lineTo(x, y)
+        fill_path.lineTo(ox + w, oy + h)
+        fill_path.closeSubpath()
+        fill_color = QColor(self._color)
+        fill_color.setAlpha(15)
+        painter.setBrush(QBrush(fill_color))
+        painter.setPen(Qt.NoPen)
+        painter.drawPath(fill_path)
+
+        # Line
+        path = QPainterPath()
         for i, v in enumerate(self._values):
             x = ox + (i / (n - 1)) * w
             y = oy + h - ((v - vmin) / (vmax - vmin)) * h
@@ -658,6 +1010,7 @@ class SparklineWidget(QWidget):
         last_x = ox + w
         last_y = oy + h - ((self._values[-1] - vmin) / (vmax - vmin)) * h
         painter.setBrush(QBrush(self._color))
+        painter.setPen(QPen(QColor(ALMA_BG_ELEVATED), 1))
         painter.drawEllipse(QPointF(last_x, last_y), 2.5, 2.5)
 
         painter.end()
@@ -715,8 +1068,25 @@ class DualSparklineWidget(QWidget):
             if vmax == vmin:
                 vmax = vmin + 1
 
-            path = QPainterPath()
             n = len(values)
+
+            # Area fill
+            fill_path = QPainterPath()
+            fill_path.moveTo(ox, oy + h)
+            for i, v in enumerate(values):
+                x = ox + (i / (n - 1)) * w
+                y = oy + h - ((v - vmin) / (vmax - vmin)) * h
+                fill_path.lineTo(x, y)
+            fill_path.lineTo(ox + w, oy + h)
+            fill_path.closeSubpath()
+            fc = QColor(color)
+            fc.setAlpha(12)
+            painter.setBrush(QBrush(fc))
+            painter.setPen(Qt.NoPen)
+            painter.drawPath(fill_path)
+
+            # Line
+            path = QPainterPath()
             for i, v in enumerate(values):
                 x = ox + (i / (n - 1)) * w
                 y = oy + h - ((v - vmin) / (vmax - vmin)) * h
@@ -733,6 +1103,7 @@ class DualSparklineWidget(QWidget):
             last_x = ox + w
             last_y = oy + h - ((values[-1] - vmin) / (vmax - vmin)) * h
             painter.setBrush(QBrush(QColor(color)))
+            painter.setPen(QPen(QColor(ALMA_BG_ELEVATED), 1))
             painter.drawEllipse(QPointF(last_x, last_y), 2.0, 2.0)
 
         _draw_series(self._values_a, self._color_a)
@@ -741,13 +1112,9 @@ class DualSparklineWidget(QWidget):
         # Small legend dots in bottom-right
         legend_x = self.width() - 6
         if self._label_a or self._label_b:
-            font = QFont("Segoe UI", 6)
-            painter.setFont(font)
-            # Series B dot
             painter.setBrush(QBrush(self._color_b))
             painter.setPen(Qt.NoPen)
             painter.drawEllipse(QPointF(legend_x, self.height() - 5), 2, 2)
-            # Series A dot
             painter.setBrush(QBrush(self._color_a))
             painter.drawEllipse(QPointF(legend_x - 10, self.height() - 5), 2, 2)
 

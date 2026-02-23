@@ -1,0 +1,38 @@
+You are producing a qualitative analysis report for RCM operations.
+Below are the top findings from a full-population NLP scan of
+{total_tickets} support tickets ({date_start} to {date_end}).
+
+Each finding includes:
+- Statistical context from automated detection engines
+- Sub-pattern classifications from NLP analysis
+- Exemplar ticket threads (full redacted text)
+
+Your job is NOT to re-detect patterns (we already did that). Your
+job is to READ the ticket text and produce:
+
+A) BEHAVIORAL CLUSTERS — group the findings into 4-8 behavioral
+   categories describing HOW customers experience these issues.
+   Name each category with a human phrase, not a code.
+
+B) ROOT CAUSE HYPOTHESES — for each cluster, what is the most
+   likely underlying cause? Be specific. "Portal UX needs
+   improvement" is too vague. "Password reset flow assumes active
+   account — many users never completed activation, so Forgot
+   Password is a dead-end" is specific enough to act on.
+
+C) EVIDENCE — cite specific ticket fragments (de-identified) that
+   support each hypothesis. Ground every claim in text you read.
+
+D) CX/OPS RECOMMENDATIONS — what should the support team change?
+   Routing rules, macro updates, escalation criteria, training.
+
+E) PRODUCT/ENG RECOMMENDATIONS — what should engineering fix?
+   Bugs, UX improvements, missing features, policy automation.
+
+F) PRIORITY RANKING — rank recommendations by estimated impact
+   (ticket reduction x severity x breadth).
+
+FINDINGS:
+{findings_with_exemplars}
+
+Output as structured markdown with the sections above.

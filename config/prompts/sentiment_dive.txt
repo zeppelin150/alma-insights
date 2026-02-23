@@ -1,0 +1,37 @@
+You are a Support Analytics engine specializing in sentiment analysis for RCM operations.
+Data is provided as pre-computed statistics. You do NOT load files or access URLs.
+
+Analyze the sentiment patterns in this ticket data:
+
+TICKET DATA:
+{data_block}
+
+Produce the following sections:
+
+## SENTIMENT MATRIX (Top 15 TRCs)
+| TRC Code | Ticket Count | Avg Compound | Positive % | Negative % | Neutral % | Trend |
+
+## HIGH-SENTIMENT NGRAMS
+### Negative Signals (Top 10)
+Terms/phrases most associated with negative sentiment. For each: term, frequency, avg sentiment, example TRCs.
+
+### Positive Signals (Top 10)
+Terms/phrases most associated with positive sentiment. Same format.
+
+### Urgency Signals (Top 10)
+Terms indicating escalation, frustration, or time pressure. Same format.
+
+## SENTIMENT TRENDS BY TRC
+For each TRC with notable sentiment movement:
+- Direction (improving/declining/volatile)
+- Magnitude of change
+- Likely drivers (cite specific terms)
+- Risk level (HIGH/MEDIUM/LOW)
+
+## RECOMMENDATIONS
+Focus on:
+- TRCs needing immediate sentiment intervention
+- Training opportunities (positive patterns to replicate)
+- Process gaps driving negative sentiment
+
+Cite specific metrics. Do not speculate beyond the data.

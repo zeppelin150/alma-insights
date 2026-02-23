@@ -1,0 +1,64 @@
+You are classifying support tickets for an RCM (Revenue Cycle Management) healthcare platform. All tickets in this batch belong to the same Ticket Reason Code (TRC):
+
+TRC: {trc_path}
+
+This TRC categorizes the OPERATIONAL ISSUE. Your job is to find the QUALITATIVE SUB-PATTERNS — the specific friction, confusion, or experience that led each customer to file this ticket.
+
+STATISTICAL CONTEXT FOR THIS TRC:
+{statistical_context}
+
+{sub_taxonomy_section}
+
+MANIFEST:
+- Tickets in this batch: {n_tickets}
+- Comments: {n_comments}
+- Date range: {date_start} to {date_end}
+- Chunk: {chunk_n} of {chunk_total}
+
+TICKETS:
+{ticket_jsonl}
+
+For EACH ticket, call the store_classification tool using a fenced code block. Output one block per ticket, with NO text before, between, or after:
+
+```tool_call
+{{"tool": "store_classification", "args": {{
+  "ticket_id": "<ticket_id>",
+  "sub_cluster": "<behavioral sub-pattern, <8 words>",
+  "sub_cluster_confidence": <0.0-1.0>,
+  "is_novel": <true|false>,
+  "novel_justification": "<why this is genuinely new, or null>",
+  "sentiment_intensity": <1-5>,
+  "sentiment_polarity": "<positive|negative|mixed|neutral>",
+  "friction_type": "<one of: access_blocked, self_serve_failure, automation_loop, incorrect_charge, missing_information, policy_confusion, feature_broken, feature_missing, process_delay, communication_gap, escalation_demand, repeat_contact, positive_feedback, other>",
+  "anomaly_flag": "<normal|unusual|critical>",
+  "anomaly_reason": "<why flagged, or null>",
+  "entities": {{"payer": null, "product_area": null, "feature": null}},
+  "key_phrases": ["<phrase1>", "<phrase2>"],
+  "root_cause_hint": "<one sentence hypothesis>",
+  "summary": "<1-2 sentence de-identified summary>"
+}}}}
+```
+
+You MUST classify ALL {n_tickets} tickets. Output exactly {n_tickets} tool_call blocks.
+No JSON arrays. No preamble. No explanation. No text between blocks.
+
+CLASSIFICATION RULES:
+- FIRST, attempt to match each ticket to an existing sub-pattern using the names, descriptions, and n-grams provided above.
+- If a ticket partially matches multiple sub-patterns, choose the best fit and note the ambiguity in root_cause_hint.
+- If a ticket genuinely does NOT match ANY existing sub-pattern, set is_novel = true and provide:
+  - A new sub_cluster label
+  - 3-5 key_phrases that distinguish it from existing sub-patterns
+  - A clear novel_justification explaining WHY this doesn't fit
+
+A novel classification requires JUSTIFICATION. Before marking is_novel = true, ask yourself: Would an operations manager create a separate playbook for this, or handle it with an existing one? If the existing playbooks cover it, it's not novel.
+
+QUALITY CONSTRAINT: In a typical batch we expect 0-3 genuinely novel sub-patterns. If you are finding more than 5, you are likely creating variations of existing sub-patterns rather than genuinely new issue types. Re-examine and consolidate. HARD CAP: at most 5 novel sub-patterns per batch. If you genuinely believe there are more, include a "batch_notes" field in your response explaining why.
+
+ANOMALY DETECTION:
+- "unusual" = unexpected for this TRC. Example: a payout dispute where the provider was paid MORE than expected.
+- "critical" = financial exposure, compliance risk, or widespread system failure.
+- If you see a pattern across multiple tickets (same payer, same dollar amount, same error), note it in anomaly_reason even if individual tickets seem minor.
+
+PHRASE EXTRACTION:
+- key_phrases must be DOMAIN-SPECIFIC. "paid more than contracted rate" is good. "issue with payment" is not.
+- No PII in any output field.

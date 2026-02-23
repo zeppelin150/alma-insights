@@ -6,9 +6,11 @@ Computes rolling baselines and flags day-over-day variance that exceeds
 1σ (watch) or 2σ (incident) thresholds.
 
 Metrics tracked per TRC per day:
-  - volume:    ticket count
   - sentiment: average VADER compound score
   - term_freq: TF-IDF score of each significant term
+
+Note: Ticket volume/rate monitoring handled by incident_engine.py
+(Poisson CDF + CUSUM) — the statistically correct model for count data.
 
 The engine maintains rolling statistics (mean + std) using an exponentially
 weighted moving average (EWMA) so recent days have more influence on "normal".
@@ -82,18 +84,6 @@ def run_theta_scan(conn, target_date=None, progress_callback=None):
 
     for trc_code, metrics in daily_metrics.items():
         trc_baselines = baselines.get(trc_code, {})
-
-        # Volume
-        baseline = trc_baselines.get("volume")
-        flag = _check_threshold(trc_code, "volume", "", metrics["volume"], baseline)
-        if flag:
-            flags.append(flag)
-
-        # Volume rate (tickets per hour)
-        baseline = trc_baselines.get("volume_per_hour")
-        flag = _check_threshold(trc_code, "volume_per_hour", "", metrics["volume_per_hour"], baseline)
-        if flag:
-            flags.append(flag)
 
         # Sentiment
         baseline = trc_baselines.get("sentiment")
@@ -296,8 +286,6 @@ def _compute_daily_metrics(conn, date):
                 pass
 
         metrics[trc] = {
-            "volume": volume,
-            "volume_per_hour": volume_per_hour,
             "active_hours": n_active_hours,
             "sentiment": avg_sentiment,
             "terms": terms,
@@ -340,17 +328,7 @@ def _check_threshold(trc_code, metric_type, metric_key, observed, baseline):
     direction = "above" if z_score > 0 else "below"
     display_key = metric_key.replace("_", " ") if metric_key else metric_type
 
-    if metric_type == "volume":
-        interpretation = (
-            f"{trc_code}: ticket volume is {abs(z_score):.1f}σ {direction} normal "
-            f"({int(observed)} vs avg {mean:.0f} ± {std:.1f})"
-        )
-    elif metric_type == "volume_per_hour":
-        interpretation = (
-            f"{trc_code}: ticket rate is {abs(z_score):.1f}σ {direction} normal "
-            f"({observed:.1f}/hr vs avg {mean:.1f} ± {std:.1f}/hr)"
-        )
-    elif metric_type == "sentiment":
+    if metric_type == "sentiment":
         interpretation = (
             f"{trc_code}: sentiment is {abs(z_score):.1f}σ {direction} normal "
             f"({observed:.2f} vs avg {mean:.2f} ± {std:.2f})"
@@ -382,16 +360,6 @@ def _check_threshold(trc_code, metric_type, metric_key, observed, baseline):
 def _persist_daily_baselines(conn, date, daily_metrics):
     """Write today's raw metric values to the baselines table."""
     for trc, metrics in daily_metrics.items():
-        conn.execute("""
-            INSERT OR REPLACE INTO daily_baselines (date, trc_code, metric_type, metric_key, value)
-            VALUES (?, ?, 'volume', '', ?)
-        """, (date, trc, metrics["volume"]))
-
-        conn.execute("""
-            INSERT OR REPLACE INTO daily_baselines (date, trc_code, metric_type, metric_key, value)
-            VALUES (?, ?, 'volume_per_hour', '', ?)
-        """, (date, trc, metrics["volume_per_hour"]))
-
         conn.execute("""
             INSERT OR REPLACE INTO daily_baselines (date, trc_code, metric_type, metric_key, value)
             VALUES (?, ?, 'sentiment', '', ?)
@@ -590,3 +558,155 @@ def mark_false_positive(conn, flag_id, notes=""):
         (notes, flag_id)
     )
     conn.commit()
+
+
+# ═══════════════════════════════════════════
+#  SUB-PATTERN SHARE TRACKING (Pass 4.0)
+# ═══════════════════════════════════════════
+
+def compute_sub_pattern_shares(conn, date):
+    """
+    For each active sub-pattern, compute daily share of parent TRC
+    and feed to θ-EWMA as metric_type='sub_pattern_share'.
+
+    share = (confirmed + provisional tickets for pattern on date)
+            / (total tickets for parent TRC on date)
+
+    Uses existing _check_threshold() and _persist_daily_baselines()
+    machinery — just with metric_type='sub_pattern_share' and
+    metric_key=pattern_id.
+    """
+    # Get all active sub-patterns
+    active_patterns = conn.execute("""
+        SELECT pattern_id, trc, label FROM sub_patterns
+        WHERE tier = 'active' AND merged_into IS NULL
+    """).fetchall()
+
+    if not active_patterns:
+        return []
+
+    shares = {}
+    flags = []
+
+    for pat in active_patterns:
+        pid = pat[0] if not hasattr(pat, 'keys') else pat["pattern_id"]
+        trc = pat[1] if not hasattr(pat, 'keys') else pat["trc"]
+        label = pat[2] if not hasattr(pat, 'keys') else pat["label"]
+
+        # Count tickets for this pattern on this date
+        # (from confirmed Gemini classifications + provisional n-gram matches)
+        pattern_count = 0
+
+        # Confirmed classifications
+        row = conn.execute("""
+            SELECT COUNT(*) FROM nlp_ticket_classifications tc
+            JOIN conversations c ON tc.ticket_id = c.ticket_id
+            WHERE tc.trc = ? AND tc.sub_cluster = ?
+              AND SUBSTR(c.created_at, 1, 10) = ?
+        """, (trc, label, date)).fetchone()
+        if row:
+            pattern_count += row[0]
+
+        # Provisional classifications
+        row = conn.execute("""
+            SELECT COUNT(*) FROM provisional_classifications pc
+            JOIN conversations c ON pc.ticket_id = c.ticket_id
+            WHERE pc.matched_pattern_id = ? AND pc.is_confirmed = 0
+              AND SUBSTR(c.created_at, 1, 10) = ?
+        """, (pid, date)).fetchone()
+        if row:
+            pattern_count += row[0]
+
+        # Total tickets for parent TRC on this date
+        total_row = conn.execute("""
+            SELECT COUNT(*) FROM conversations
+            WHERE trc_code = ? AND SUBSTR(created_at, 1, 10) = ?
+        """, (trc, date)).fetchone()
+        total_trc = total_row[0] if total_row else 0
+
+        if total_trc == 0:
+            continue
+
+        share = pattern_count / total_trc
+
+        # Persist daily baseline
+        conn.execute("""
+            INSERT OR REPLACE INTO daily_baselines
+                (date, trc_code, metric_type, metric_key, value)
+            VALUES (?, ?, 'sub_pattern_share', ?, ?)
+        """, (date, trc, pid, share))
+
+        shares[pid] = share
+
+    conn.commit()
+
+    # Check thresholds against rolling baselines
+    for pid, share in shares.items():
+        # Get the TRC for this pattern
+        pat_row = conn.execute(
+            "SELECT trc FROM sub_patterns WHERE pattern_id = ?", (pid,)
+        ).fetchone()
+        if not pat_row:
+            continue
+        trc = pat_row[0] if not hasattr(pat_row, 'keys') else pat_row["trc"]
+
+        # Load rolling baseline for this metric
+        cutoff = (
+            datetime.strptime(date, "%Y-%m-%d") - timedelta(days=ROLLING_WINDOW_DAYS)
+        ).strftime("%Y-%m-%d")
+
+        hist_rows = conn.execute("""
+            SELECT value FROM daily_baselines
+            WHERE trc_code = ? AND metric_type = 'sub_pattern_share'
+              AND metric_key = ? AND date >= ? AND date < ?
+            ORDER BY date ASC
+        """, (trc, pid, cutoff, date)).fetchall()
+
+        if len(hist_rows) < MIN_DAYS_FOR_BASELINE:
+            continue
+
+        vals = np.array([r[0] for r in hist_rows], dtype=float)
+
+        # EWMA computation
+        weights = np.array([(1 - EWMA_ALPHA) ** i for i in range(len(vals) - 1, -1, -1)])
+        weights /= weights.sum()
+        ewma_mean = np.dot(weights, vals)
+        ewma_std = max(np.sqrt(np.dot(weights, (vals - ewma_mean) ** 2)), 0.001)
+
+        z_score = (share - ewma_mean) / ewma_std
+
+        # Check thresholds
+        theta_level = 0
+        if abs(z_score) >= THETA_2:
+            theta_level = 2
+        elif abs(z_score) >= THETA_1:
+            theta_level = 1
+
+        if theta_level > 0:
+            flags.append({
+                "trc_code": trc,
+                "metric_type": "sub_pattern_share",
+                "metric_key": pid,
+                "observed": share,
+                "expected_mean": ewma_mean,
+                "expected_std": ewma_std,
+                "z_score": z_score,
+                "theta_level": theta_level,
+            })
+
+        # Update rolling stats
+        conn.execute("""
+            INSERT OR REPLACE INTO rolling_stats
+                (trc_code, metric_type, metric_key, rolling_mean,
+                 rolling_std, sample_count, last_updated)
+            VALUES (?, 'sub_pattern_share', ?, ?, ?, ?, ?)
+        """, (trc, pid, float(ewma_mean), float(ewma_std),
+              len(vals), datetime.now().isoformat()))
+
+    conn.commit()
+
+    # Persist flags
+    if flags:
+        _persist_flags(conn, date, flags)
+
+    return flags

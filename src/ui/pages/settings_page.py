@@ -3,12 +3,43 @@ Alma Insights — Settings Page
 Data source configuration: Lightdash PAT, API datasets, test data toggle.
 """
 
+import webbrowser
+
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QLineEdit, QFrame, QScrollArea, QSizePolicy, QMessageBox
+    QLineEdit, QFrame, QScrollArea, QSizePolicy, QMessageBox,
+    QComboBox, QFileDialog, QTextEdit,
 )
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QThread
 from src.ui.theme import *
+
+# Maps page → { human title: yaml_key } for behavior toggles
+SECTION_KEYS = {
+    "trc_analytics": {
+        "Volume & Resolution Charts": "volume_resolution_charts",
+        "CSAT Heatmap": "csat_heatmap",
+        "Metrics by TRC": "metrics_by_trc",
+    },
+    "incidents": {
+        "TRC Status Grid": "trc_status_grid",
+        "Control Chart": "control_chart",
+        "Open Incidents": "open_incidents",
+        "Theta Anomaly Scan": "theta_anomaly_scan",
+    },
+    "trending": {
+        "Sentiment Trend": "sentiment_trend",
+        "Cross-TRC Correlation": "cross_trc_correlation",
+        "Rising & Cooling Terms": "rising_cooling_terms",
+        "Topic Clusters": "topic_clusters",
+    },
+}
+
+# Human-friendly page names
+PAGE_TITLES = {
+    "trc_analytics": "TRC Analytics",
+    "incidents": "Incidents",
+    "trending": "Trending Topics",
+}
 
 
 class ToggleSwitch(QWidget):
@@ -60,10 +91,11 @@ class DatasetRow(QFrame):
         super().__init__(parent)
         self.setStyleSheet(f"""
             QFrame {{
-                background: {ALMA_WHITE}; border: 1px solid {ALMA_BORDER_LIGHT};
-                border-radius: 8px; padding: 4px;
+                background: {ALMA_BG_ELEVATED}; border: 1px solid rgba(214, 210, 202, 0.45);
+                border-radius: 10px; padding: 4px;
             }}
         """)
+        apply_card_shadow_soft(self)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 8, 8, 8)
         layout.setSpacing(10)
@@ -101,6 +133,83 @@ class DatasetRow(QFrame):
     def is_valid(self):
         return bool(self.title_input.text().strip())
 
+
+# ═══════════════════════════════════════════
+#  GEMINI SETUP WORKER
+# ═══════════════════════════════════════════
+
+class GeminiSetupWorker(QThread):
+    """Background worker for Gemini CLI detection, installation, and auth verification."""
+    log_line = Signal(str)        # live npm output lines
+    status   = Signal(str)        # short status message for the UI
+    finished = Signal(str, str)   # (new_state, detail_message)
+    error    = Signal(str)        # human-readable error
+
+    VALID_MODES = ("check", "install", "verify_auth")
+
+    def __init__(self, mode: str, gemini_path: str = "", npm_path: str = ""):
+        super().__init__()
+        assert mode in self.VALID_MODES, f"Unknown mode: {mode}"
+        self.mode = mode
+        self.gemini_path = gemini_path
+        self.npm_path = npm_path
+
+    def run(self):
+        from src.data import gemini_setup
+
+        try:
+            if self.mode == "check":
+                self._do_check(gemini_setup)
+            elif self.mode == "install":
+                self._do_install(gemini_setup)
+            elif self.mode == "verify_auth":
+                self._do_verify(gemini_setup)
+        except Exception as e:
+            self.error.emit(str(e))
+
+    def _do_check(self, gs):
+        self.status.emit("Checking system...")
+        cli = gs.find_gemini_cli()
+        if cli:
+            ok, version = gs.verify_gemini_auth(cli)
+            if ok:
+                self.finished.emit("READY", f"{cli}|{version}")
+            else:
+                self.finished.emit("AUTHENTICATING", cli)
+        else:
+            self.finished.emit("NOT_CONFIGURED", "")
+
+    def _do_install(self, gs):
+        self.status.emit("Starting npm install...")
+        success, err = gs.install_gemini_cli(
+            self.npm_path,
+            progress_callback=lambda line: self.log_line.emit(line),
+        )
+        if success:
+            cli = gs.find_gemini_cli()
+            self.finished.emit("AUTHENTICATING", cli or "")
+        else:
+            self.error.emit(f"Installation failed: {err}")
+
+    def _do_verify(self, gs):
+        self.status.emit("Verifying sign-in...")
+        path = self.gemini_path
+        if not path:
+            from src.data.gemini_setup import find_gemini_cli
+            path = find_gemini_cli() or ""
+        if not path:
+            self.error.emit("Gemini CLI not found. Try reinstalling.")
+            return
+        ok, detail = gs.verify_gemini_auth(path)
+        if ok:
+            self.finished.emit("READY", f"{path}|{detail}")
+        else:
+            self.error.emit(f"Sign-in not detected: {detail}\n\nComplete sign-in in the terminal, then try again.")
+
+
+# ═══════════════════════════════════════════
+#  SETTINGS PAGE
+# ═══════════════════════════════════════════
 
 class SettingsPage(QWidget):
     """Settings page with data source configuration."""
@@ -278,7 +387,21 @@ class SettingsPage(QWidget):
         self.layout_inner.addSpacing(24)
 
         # ════════════════════════════════════
-        #  SECTION 3: Dataset List
+        #  SECTION 3: Gemini Configuration
+        # ════════════════════════════════════
+        self.layout_inner.addWidget(self._section_label("GEMINI CONFIGURATION"))
+        self.layout_inner.addSpacing(8)
+
+        # State machine vars — set before _build_gemini_section() calls _render_gemini_state()
+        self._gemini_state = "NOT_CONFIGURED"
+        self._gemini_cli_path = ""
+        self._gemini_setup_worker = None
+        self._gemini_api_key_mode = False
+
+        self._build_gemini_section()
+
+        # ════════════════════════════════════
+        #  SECTION 4: Dataset List
         # ════════════════════════════════════
         self.layout_inner.addWidget(self._section_label("DATASETS"))
         self.layout_inner.addSpacing(8)
@@ -321,7 +444,231 @@ class SettingsPage(QWidget):
         self.layout_inner.addSpacing(24)
 
         # ════════════════════════════════════
-        #  SECTION 4: Disabled state overlay
+        #  SECTION 5: Google Drive Export
+        # ════════════════════════════════════
+        self.layout_inner.addWidget(self._section_label("GOOGLE DRIVE EXPORT"))
+        self.layout_inner.addSpacing(8)
+
+        gdrive_card = self._card()
+        gdrive_layout = QVBoxLayout(gdrive_card)
+        gdrive_layout.setContentsMargins(20, 18, 20, 18)
+        gdrive_layout.setSpacing(10)
+
+        gdrive_desc = QLabel(
+            "Export reports to Google Drive using a service account. "
+            "Share the target folder with the service account email."
+        )
+        gdrive_desc.setStyleSheet(f"font-size: 12px; color: {ALMA_TEXT_LIGHT};")
+        gdrive_desc.setWordWrap(True)
+        gdrive_layout.addWidget(gdrive_desc)
+
+        # Credentials path
+        cred_row = QHBoxLayout()
+        cred_lbl = QLabel("Credentials JSON")
+        cred_lbl.setStyleSheet(f"font-size: 12px; font-weight: 600; color: {ALMA_TEXT_MID};")
+        cred_row.addWidget(cred_lbl)
+        self._gdrive_cred_input = QLineEdit()
+        self._gdrive_cred_input.setPlaceholderText("Path to service-account.json")
+        self._gdrive_cred_input.setStyleSheet(f"""
+            QLineEdit {{
+                color: {ALMA_TEXT_DARK}; background: {ALMA_WHITE};
+                border: 1px solid {ALMA_BORDER}; border-radius: 8px;
+                padding: 6px 10px; font-size: 12px;
+            }}
+        """)
+        cred_row.addWidget(self._gdrive_cred_input, 1)
+        cred_browse = QPushButton("Browse")
+        cred_browse.setCursor(Qt.PointingHandCursor)
+        cred_browse.setStyleSheet(self._ghost_btn_style())
+        cred_browse.clicked.connect(self._browse_gdrive_credentials)
+        cred_row.addWidget(cred_browse)
+        gdrive_layout.addLayout(cred_row)
+
+        # Folder ID
+        folder_row = QHBoxLayout()
+        folder_lbl = QLabel("Folder ID")
+        folder_lbl.setStyleSheet(f"font-size: 12px; font-weight: 600; color: {ALMA_TEXT_MID};")
+        folder_row.addWidget(folder_lbl)
+        self._gdrive_folder_input = QLineEdit()
+        self._gdrive_folder_input.setPlaceholderText("Google Drive folder ID")
+        self._gdrive_folder_input.setStyleSheet(self._gdrive_cred_input.styleSheet())
+        folder_row.addWidget(self._gdrive_folder_input, 1)
+        gdrive_layout.addLayout(folder_row)
+
+        # Save + Test row
+        gdrive_btn_row = QHBoxLayout()
+        gdrive_save_btn = QPushButton("Save")
+        gdrive_save_btn.setCursor(Qt.PointingHandCursor)
+        gdrive_save_btn.setStyleSheet(self._primary_btn_style())
+        gdrive_save_btn.clicked.connect(self._save_gdrive_settings)
+        gdrive_btn_row.addWidget(gdrive_save_btn)
+
+        gdrive_test_btn = QPushButton("Test Connection")
+        gdrive_test_btn.setCursor(Qt.PointingHandCursor)
+        gdrive_test_btn.setStyleSheet(self._ghost_btn_style())
+        gdrive_test_btn.clicked.connect(self._test_gdrive_connection)
+        gdrive_btn_row.addWidget(gdrive_test_btn)
+
+        self._gdrive_status = QLabel("")
+        self._gdrive_status.setStyleSheet(f"font-size: 11px; color: {ALMA_TEXT_LIGHT};")
+        gdrive_btn_row.addWidget(self._gdrive_status)
+        gdrive_btn_row.addStretch()
+        gdrive_layout.addLayout(gdrive_btn_row)
+
+        self.layout_inner.addWidget(gdrive_card)
+        self.layout_inner.addSpacing(24)
+
+        # ════════════════════════════════════
+        #  SECTION 6: Intervention Manager
+        # ════════════════════════════════════
+        self.layout_inner.addWidget(self._section_label("INTERVENTION MANAGER"))
+        self.layout_inner.addSpacing(8)
+
+        iv_card = self._card()
+        iv_layout = QVBoxLayout(iv_card)
+        iv_layout.setContentsMargins(20, 18, 20, 18)
+        iv_layout.setSpacing(10)
+
+        iv_desc = QLabel(
+            "Track process changes, payer launches, and other events that may affect ticket patterns. "
+            "Interventions appear as markers on incident control charts."
+        )
+        iv_desc.setStyleSheet(f"font-size: 12px; color: {ALMA_TEXT_LIGHT};")
+        iv_desc.setWordWrap(True)
+        iv_layout.addWidget(iv_desc)
+
+        # Intervention list placeholder
+        self._iv_container = QVBoxLayout()
+        self._iv_container.setSpacing(6)
+        iv_layout.addLayout(self._iv_container)
+
+        self._iv_empty_label = QLabel("No interventions defined.")
+        self._iv_empty_label.setStyleSheet(f"font-size: 11px; color: {ALMA_TEXT_LIGHT}; padding: 8px;")
+        self._iv_empty_label.setAlignment(Qt.AlignCenter)
+        self._iv_container.addWidget(self._iv_empty_label)
+
+        # Add intervention button
+        iv_btn_row = QHBoxLayout()
+        self._add_iv_btn = QPushButton("+  Add Intervention")
+        self._add_iv_btn.setCursor(Qt.PointingHandCursor)
+        self._add_iv_btn.setStyleSheet(self._ghost_btn_style())
+        self._add_iv_btn.clicked.connect(self._add_intervention)
+        iv_btn_row.addWidget(self._add_iv_btn)
+        iv_btn_row.addStretch()
+        iv_layout.addLayout(iv_btn_row)
+
+        self.layout_inner.addWidget(iv_card)
+        self.layout_inner.addSpacing(24)
+
+        # ════════════════════════════════════
+        #  SECTION 7: AI Enhancements
+        # ════════════════════════════════════
+        self.layout_inner.addWidget(self._section_label("AI ENHANCEMENTS"))
+        self.layout_inner.addSpacing(8)
+
+        ai_card = self._card()
+        ai_layout = QVBoxLayout(ai_card)
+        ai_layout.setContentsMargins(20, 18, 20, 18)
+        ai_layout.setSpacing(10)
+
+        # AI Smoothing toggle
+        smooth_row = QHBoxLayout()
+        smooth_lbl_col = QVBoxLayout()
+        smooth_lbl_col.setSpacing(2)
+        smooth_title = QLabel("AI Cluster Smoothing")
+        smooth_title.setStyleSheet(f"font-size: 14px; font-weight: 600; color: {ALMA_TEXT_DARK};")
+        smooth_desc = QLabel(
+            "Use Gemini to refine NMF topic cluster labels. Requires configured Gemini."
+        )
+        smooth_desc.setStyleSheet(f"font-size: 12px; color: {ALMA_TEXT_LIGHT};")
+        smooth_desc.setWordWrap(True)
+        smooth_lbl_col.addWidget(smooth_title)
+        smooth_lbl_col.addWidget(smooth_desc)
+        smooth_row.addLayout(smooth_lbl_col, 1)
+        self.ai_smoothing_toggle = ToggleSwitch(checked=False)
+        self.ai_smoothing_toggle.toggled.connect(self._persist_ai_settings)
+        smooth_row.addWidget(self.ai_smoothing_toggle)
+        ai_layout.addLayout(smooth_row)
+
+        # AI Keywords toggle
+        kw_row = QHBoxLayout()
+        kw_lbl_col = QVBoxLayout()
+        kw_lbl_col.setSpacing(2)
+        kw_title = QLabel("AI Keyword Suggestions")
+        kw_title.setStyleSheet(f"font-size: 14px; font-weight: 600; color: {ALMA_TEXT_DARK};")
+        kw_desc = QLabel(
+            "Suggest noise terms to suppress and new concept map entries after trending analysis."
+        )
+        kw_desc.setStyleSheet(f"font-size: 12px; color: {ALMA_TEXT_LIGHT};")
+        kw_desc.setWordWrap(True)
+        kw_lbl_col.addWidget(kw_title)
+        kw_lbl_col.addWidget(kw_desc)
+        kw_row.addLayout(kw_lbl_col, 1)
+        self.ai_keywords_toggle = ToggleSwitch(checked=False)
+        self.ai_keywords_toggle.toggled.connect(self._persist_ai_settings)
+        kw_row.addWidget(self.ai_keywords_toggle)
+        ai_layout.addLayout(kw_row)
+
+        self.layout_inner.addWidget(ai_card)
+        self.layout_inner.addSpacing(24)
+
+        # ════════════════════════════════════
+        #  SECTION 8: Display Preferences
+        # ════════════════════════════════════
+        self.layout_inner.addWidget(self._section_label("DISPLAY PREFERENCES"))
+        self.layout_inner.addSpacing(8)
+
+        display_card = self._card()
+        display_layout = QVBoxLayout(display_card)
+        display_layout.setContentsMargins(20, 18, 20, 18)
+        display_layout.setSpacing(10)
+
+        # Layman Mode toggle
+        layman_row = QHBoxLayout()
+        layman_lbl_col = QVBoxLayout()
+        layman_lbl_col.setSpacing(2)
+        layman_title = QLabel("Simplified Language Mode")
+        layman_title.setStyleSheet(f"font-size: 14px; font-weight: 600; color: {ALMA_TEXT_DARK};")
+        layman_desc = QLabel(
+            'Replace technical metrics with plain-language equivalents.\n'
+            'Example: "VADER compound: -0.34" becomes "Customer Mood: Negative (34%)"'
+        )
+        layman_desc.setStyleSheet(f"font-size: 12px; color: {ALMA_TEXT_LIGHT};")
+        layman_desc.setWordWrap(True)
+        layman_lbl_col.addWidget(layman_title)
+        layman_lbl_col.addWidget(layman_desc)
+        layman_row.addLayout(layman_lbl_col, 1)
+
+        self.layman_mode_toggle = ToggleSwitch(checked=False)
+        self.layman_mode_toggle.toggled.connect(self._persist_display_settings)
+        layman_row.addWidget(self.layman_mode_toggle)
+        display_layout.addLayout(layman_row)
+
+        self.layout_inner.addWidget(display_card)
+        self.layout_inner.addSpacing(24)
+
+        # ════════════════════════════════════
+        #  SECTION 9: Auto-Analysis on Import
+        # ════════════════════════════════════
+        self._build_auto_analysis_section()
+
+        # ════════════════════════════════════
+        #  SECTION 10: Calendar Sync
+        # ════════════════════════════════════
+        self._build_calendar_sync_section()
+
+        # ════════════════════════════════════
+        #  SECTION 11: Source Sync
+        # ════════════════════════════════════
+        self._build_source_sync_section()
+
+        # ════════════════════════════════════
+        #  SECTION 12: Section Defaults
+        # ════════════════════════════════════
+        self._build_section_defaults_section()
+
+        # ════════════════════════════════════
+        #  Disabled state overlay
         # ════════════════════════════════════
         self._update_api_state(False)
 
@@ -358,11 +705,41 @@ class SettingsPage(QWidget):
         card = QFrame()
         card.setStyleSheet(f"""
             QFrame {{
-                background: {ALMA_WHITE}; border: 1px solid {ALMA_BORDER_LIGHT};
-                border-radius: 10px;
+                background: {ALMA_BG_ELEVATED}; border: 1px solid rgba(214, 210, 202, 0.45);
+                border-radius: 12px;
             }}
         """)
+        apply_card_shadow(card)
         return card
+
+    def _build_toggle_row(self, title, description, toggle, indent=0):
+        """Build a standard toggle row with title, description, and toggle switch.
+
+        Returns the QHBoxLayout so the caller can add it to a parent layout.
+        If indent > 0, adds left margin for visual nesting.
+        """
+        row = QHBoxLayout()
+        if indent:
+            row.setContentsMargins(indent, 0, 0, 0)
+        lbl_col = QVBoxLayout()
+        lbl_col.setSpacing(2)
+        t = QLabel(title)
+        t.setStyleSheet(f"font-size: 14px; font-weight: 600; color: {ALMA_TEXT_DARK};")
+        d = QLabel(description)
+        d.setStyleSheet(f"font-size: 12px; color: {ALMA_TEXT_LIGHT};")
+        d.setWordWrap(True)
+        lbl_col.addWidget(t)
+        lbl_col.addWidget(d)
+        row.addLayout(lbl_col, 1)
+        row.addWidget(toggle)
+        return row
+
+    def _divider_line(self):
+        """Return a 1px horizontal divider."""
+        div = QFrame()
+        div.setFixedHeight(1)
+        div.setStyleSheet(f"background: {ALMA_BORDER_LIGHT};")
+        return div
 
     # ── Dataset Row Management ──
 
@@ -493,6 +870,18 @@ class SettingsPage(QWidget):
             for _ in range(3):
                 self._add_dataset_row()
 
+        # Restore Gemini settings
+        self._load_gemini_settings()
+
+        # Restore Google Drive settings
+        self._load_gdrive_settings()
+
+        # Restore AI enhancement settings
+        self._load_ai_settings()
+
+        # Restore behavior settings (auto-analysis, calendar sync, etc.)
+        self._load_behavior_settings()
+
     def _persist_api_toggle(self, enabled):
         if self._loading:
             return
@@ -541,3 +930,1257 @@ class SettingsPage(QWidget):
         if hasattr(self, '_saved_pat') and self._saved_pat:
             return self._saved_pat
         return self.pat_input.text().strip()
+
+    # ═══════════════════════════════════════════
+    #  GEMINI CONFIGURATION — State Machine
+    # ═══════════════════════════════════════════
+
+    # Shared button style helpers
+    def _ghost_btn_style(self):
+        return f"""
+            QPushButton {{
+                background: {ALMA_WHITE}; color: {ALMA_TEXT_DARK};
+                border: 1px solid {ALMA_BORDER}; border-radius: 6px;
+                padding: 6px 14px; font-size: 12px; font-weight: 600;
+            }}
+            QPushButton:hover {{ background: {ALMA_CREAM}; }}
+            QPushButton:disabled {{ color: {ALMA_TEXT_LIGHT}; border-color: {ALMA_BORDER_LIGHT}; }}
+        """
+
+    def _primary_btn_style(self):
+        return f"""
+            QPushButton {{
+                background: {ALMA_GREEN_DARK}; color: {ALMA_TEXT_ON_DARK};
+                border: none; border-radius: 6px;
+                padding: 8px 18px; font-size: 12px; font-weight: 700;
+            }}
+            QPushButton:hover {{ background: {ALMA_GREEN_LIGHT}; }}
+            QPushButton:disabled {{ background: {ALMA_BORDER}; color: {ALMA_TEXT_LIGHT}; }}
+        """
+
+    def _build_gemini_section(self):
+        """Create the outer Gemini card container and render initial state."""
+        self._gemini_card = self._card()
+        self._gemini_inner = QVBoxLayout(self._gemini_card)
+        self._gemini_inner.setContentsMargins(20, 18, 20, 18)
+        self._gemini_inner.setSpacing(12)
+        self.layout_inner.addWidget(self._gemini_card)
+        self.layout_inner.addSpacing(24)
+        self._render_gemini_state(self._gemini_state)
+
+    def _render_gemini_state(self, state: str):
+        """Clear and redraw the Gemini card for the given state."""
+        self._gemini_state = state
+        self._clear_gemini_inner()
+
+        if state == "NOT_CONFIGURED":
+            self._render_not_configured()
+        elif state == "INSTALLING":
+            self._render_installing()
+        elif state == "AUTHENTICATING":
+            self._render_authenticating()
+        elif state == "READY":
+            self._render_ready(getattr(self, "_gemini_ready_version", ""))
+
+    def _clear_gemini_inner(self):
+        """Remove all widgets AND sub-layouts from the Gemini card interior."""
+        while self._gemini_inner.count():
+            item = self._gemini_inner.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+            elif item.layout():
+                # Recursively clear and discard nested layouts
+                self._clear_layout_recursive(item.layout())
+
+    @staticmethod
+    def _clear_layout_recursive(layout):
+        """Recursively delete all widgets inside a layout and the layout itself."""
+        while layout.count():
+            child = layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+            elif child.layout():
+                SettingsPage._clear_layout_recursive(child.layout())
+        layout.deleteLater()
+
+    # ─── State: NOT_CONFIGURED ────────────────────────────────────────────────
+
+    def _render_not_configured(self):
+        from src.data.gemini_setup import find_node, get_node_version, find_npm, find_gemini_cli, get_node_download_url
+
+        lbl_mid = f"font-size: 12px; font-weight: 600; color: {ALMA_TEXT_MID}; border: none;"
+        lbl_light = f"font-size: 11px; color: {ALMA_TEXT_LIGHT}; border: none;"
+        lbl_ok = f"font-size: 12px; color: {ALMA_SUCCESS}; border: none;"
+        lbl_err = f"font-size: 12px; color: {ALMA_ERROR}; border: none;"
+
+        # Header
+        title = QLabel("Set up Gemini AI")
+        title.setStyleSheet(f"font-size: 14px; font-weight: 700; color: {ALMA_TEXT_DARK}; border: none;")
+        self._gemini_inner.addWidget(title)
+
+        desc = QLabel("Enable AI Reports and Hypothesis Testing by connecting Gemini.")
+        desc.setStyleSheet(lbl_light)
+        desc.setWordWrap(True)
+        self._gemini_inner.addWidget(desc)
+
+        # ── Step 1: Node.js ──
+        node_path = find_node()
+        node_version = get_node_version(node_path) if node_path else None
+        self._detected_npm = find_npm(node_path) if node_path else None
+
+        step1_row = QHBoxLayout()
+        step1_lbl = QLabel("Step 1 — Node.js")
+        step1_lbl.setStyleSheet(lbl_mid)
+        step1_row.addWidget(step1_lbl)
+
+        if node_version:
+            step1_status = QLabel(f"✓  {node_version}")
+            step1_status.setStyleSheet(lbl_ok)
+        else:
+            step1_status = QLabel("✗  Not found")
+            step1_status.setStyleSheet(lbl_err)
+        step1_row.addWidget(step1_status)
+        step1_row.addStretch()
+
+        dl_btn = QPushButton("Download Node.js ↗")
+        dl_btn.setStyleSheet(self._ghost_btn_style())
+        dl_btn.setCursor(Qt.PointingHandCursor)
+        dl_btn.clicked.connect(lambda: webbrowser.open(get_node_download_url()))
+        step1_row.addWidget(dl_btn)
+        self._gemini_inner.addLayout(step1_row)
+
+        # ── Step 2: Gemini CLI ──
+        existing_cli = find_gemini_cli()
+
+        step2_row = QHBoxLayout()
+        step2_lbl = QLabel("Step 2 — Gemini CLI")
+        step2_lbl.setStyleSheet(lbl_mid)
+        step2_row.addWidget(step2_lbl)
+
+        if existing_cli:
+            step2_status = QLabel("✓  Installed")
+            step2_status.setStyleSheet(lbl_ok)
+            self._detected_cli = existing_cli
+        else:
+            step2_status = QLabel("✗  Not installed")
+            step2_status.setStyleSheet(lbl_err)
+            self._detected_cli = ""
+        step2_row.addWidget(step2_status)
+        step2_row.addStretch()
+
+        self._install_btn = QPushButton("Install via npm")
+        self._install_btn.setStyleSheet(self._primary_btn_style())
+        self._install_btn.setCursor(Qt.PointingHandCursor)
+        self._install_btn.setEnabled(bool(node_path) and not existing_cli)
+        self._install_btn.clicked.connect(self._on_install_clicked)
+        step2_row.addWidget(self._install_btn)
+        self._gemini_inner.addLayout(step2_row)
+
+        # ── Step 3: Sign in ──
+        step3_row = QHBoxLayout()
+        step3_lbl = QLabel("Step 3 — Sign in to Google")
+        step3_lbl.setStyleSheet(lbl_mid)
+        step3_row.addWidget(step3_lbl)
+        step3_row.addStretch()
+
+        self._signin_btn = QPushButton("Sign In with Google")
+        self._signin_btn.setStyleSheet(self._primary_btn_style())
+        self._signin_btn.setCursor(Qt.PointingHandCursor)
+        self._signin_btn.setEnabled(bool(existing_cli))
+        self._signin_btn.clicked.connect(self._on_signin_clicked)
+        step3_row.addWidget(self._signin_btn)
+        self._gemini_inner.addLayout(step3_row)
+
+        # ── Divider ──
+        div = QFrame()
+        div.setFrameShape(QFrame.HLine)
+        div.setStyleSheet(f"background: {ALMA_BORDER_LIGHT}; max-height: 1px; border: none;")
+        self._gemini_inner.addWidget(div)
+
+        # ── API key alternative ──
+        if not self._gemini_api_key_mode:
+            alt_row = QHBoxLayout()
+            alt_lbl = QLabel("or")
+            alt_lbl.setStyleSheet(lbl_light)
+            alt_row.addWidget(alt_lbl)
+            alt_btn = QPushButton("Use API key instead")
+            alt_btn.setFlat(True)
+            alt_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: transparent; color: {ALMA_GREEN_DARK};
+                    border: none; font-size: 12px; font-weight: 600;
+                    padding: 0; text-decoration: underline;
+                }}
+                QPushButton:hover {{ color: {ALMA_GREEN_LIGHT}; }}
+            """)
+            alt_btn.setCursor(Qt.PointingHandCursor)
+            alt_btn.clicked.connect(self._show_api_key_input)
+            alt_row.addWidget(alt_btn)
+            alt_row.addStretch()
+            self._gemini_inner.addLayout(alt_row)
+        else:
+            self._render_api_key_input()
+
+    def _show_api_key_input(self):
+        self._gemini_api_key_mode = True
+        self._render_gemini_state("NOT_CONFIGURED")
+
+    def _render_api_key_input(self):
+        """Show API key input within NOT_CONFIGURED state."""
+        from src.data.pat_store import load_setting
+        saved_key = load_setting("gemini_api_key", "")
+
+        key_lbl = QLabel("Gemini API Key")
+        key_lbl.setStyleSheet(f"font-size: 12px; font-weight: 600; color: {ALMA_TEXT_MID}; border: none;")
+        self._gemini_inner.addWidget(key_lbl)
+
+        key_row = QHBoxLayout()
+        self._api_key_input = QLineEdit()
+        self._api_key_input.setEchoMode(QLineEdit.Password)
+        self._api_key_input.setPlaceholderText("Paste API key from aistudio.google.com/apikey")
+        if saved_key:
+            self._api_key_input.setPlaceholderText("API key saved — paste new one to update")
+        self._api_key_input.setStyleSheet(f"""
+            QLineEdit {{
+                color: {ALMA_TEXT_DARK}; background: {ALMA_WHITE};
+                border: 1px solid {ALMA_BORDER}; border-radius: 8px;
+                padding: 8px 12px; font-size: 13px;
+            }}
+        """)
+        key_row.addWidget(self._api_key_input, 1)
+
+        save_key_btn = QPushButton("Save Key")
+        save_key_btn.setStyleSheet(self._primary_btn_style())
+        save_key_btn.setCursor(Qt.PointingHandCursor)
+        save_key_btn.clicked.connect(self._on_save_api_key)
+        key_row.addWidget(save_key_btn)
+        self._gemini_inner.addLayout(key_row)
+
+        hint = QLabel("Get a free API key at aistudio.google.com/apikey")
+        hint.setStyleSheet(f"font-size: 11px; color: {ALMA_TEXT_LIGHT}; border: none;")
+        self._gemini_inner.addWidget(hint)
+
+        if saved_key:
+            cancel_btn = QPushButton("← Back")
+            cancel_btn.setFlat(True)
+            cancel_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: transparent; color: {ALMA_TEXT_MID};
+                    border: none; font-size: 11px; padding: 0;
+                }}
+                QPushButton:hover {{ color: {ALMA_TEXT_DARK}; }}
+            """)
+            cancel_btn.setCursor(Qt.PointingHandCursor)
+            cancel_btn.clicked.connect(self._cancel_api_key_mode)
+            self._gemini_inner.addWidget(cancel_btn)
+
+    def _cancel_api_key_mode(self):
+        self._gemini_api_key_mode = False
+        self._render_gemini_state("NOT_CONFIGURED")
+
+    def _on_save_api_key(self):
+        key = self._api_key_input.text().strip()
+        if not key:
+            return
+        from src.data.pat_store import save_setting
+        save_setting("gemini_api_key", key)
+        self._gemini_api_key_mode = False
+        # With API key, we treat the path as "api_key_mode" sentinel
+        self._gemini_cli_path = ""
+        self._on_gemini_ready("", "API key configured")
+
+    # ─── State: INSTALLING ────────────────────────────────────────────────────
+
+    def _render_installing(self):
+        title = QLabel("Installing Gemini CLI...")
+        title.setStyleSheet(f"font-size: 14px; font-weight: 700; color: {ALMA_TEXT_DARK}; border: none;")
+        self._gemini_inner.addWidget(title)
+
+        hint = QLabel("This usually takes 15–60 seconds depending on your connection.")
+        hint.setStyleSheet(f"font-size: 11px; color: {ALMA_TEXT_LIGHT}; border: none;")
+        self._gemini_inner.addWidget(hint)
+
+        self._install_log = QTextEdit()
+        self._install_log.setReadOnly(True)
+        self._install_log.setMinimumHeight(140)
+        self._install_log.setMaximumHeight(200)
+        self._install_log.setStyleSheet(f"""
+            QTextEdit {{
+                background: #1e1e1e; color: #d4d4d4;
+                border: 1px solid {ALMA_BORDER}; border-radius: 6px;
+                padding: 8px; font-family: Consolas, monospace; font-size: 11px;
+            }}
+        """)
+        self._gemini_inner.addWidget(self._install_log)
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setStyleSheet(self._ghost_btn_style())
+        cancel_btn.setCursor(Qt.PointingHandCursor)
+        cancel_btn.clicked.connect(self._on_install_cancel)
+        self._gemini_inner.addWidget(cancel_btn)
+
+    def _on_install_cancel(self):
+        if self._gemini_setup_worker and self._gemini_setup_worker.isRunning():
+            self._gemini_setup_worker.terminate()
+        self._render_gemini_state("NOT_CONFIGURED")
+
+    # ─── State: AUTHENTICATING ────────────────────────────────────────────────
+
+    def _render_authenticating(self):
+        title = QLabel("Sign in to Google")
+        title.setStyleSheet(f"font-size: 14px; font-weight: 700; color: {ALMA_TEXT_DARK}; border: none;")
+        self._gemini_inner.addWidget(title)
+
+        installed_lbl = QLabel("✓  Gemini CLI is installed")
+        installed_lbl.setStyleSheet(f"font-size: 12px; color: {ALMA_SUCCESS}; border: none;")
+        self._gemini_inner.addWidget(installed_lbl)
+
+        msg = QLabel(
+            "A terminal window has opened — complete Google sign-in there,\n"
+            "then click Verify Sign-in below."
+        )
+        msg.setStyleSheet(f"font-size: 12px; color: {ALMA_TEXT_MID}; border: none;")
+        msg.setWordWrap(True)
+        self._gemini_inner.addWidget(msg)
+
+        tip = QLabel(
+            "Tip: If no terminal opened, run  gemini  manually in your terminal "
+            "and follow the sign-in prompts."
+        )
+        tip.setStyleSheet(f"font-size: 11px; color: {ALMA_TEXT_LIGHT}; border: none;")
+        tip.setWordWrap(True)
+        self._gemini_inner.addWidget(tip)
+
+        self._verify_status_lbl = QLabel("")
+        self._verify_status_lbl.setStyleSheet(f"font-size: 12px; color: {ALMA_ERROR}; border: none;")
+        self._verify_status_lbl.setVisible(False)
+        self._gemini_inner.addWidget(self._verify_status_lbl)
+
+        btn_row = QHBoxLayout()
+        verify_btn = QPushButton("✓  Verify Sign-in")
+        verify_btn.setStyleSheet(self._primary_btn_style())
+        verify_btn.setCursor(Qt.PointingHandCursor)
+        verify_btn.clicked.connect(self._on_verify_clicked)
+        btn_row.addWidget(verify_btn)
+
+        start_over_btn = QPushButton("Start Over")
+        start_over_btn.setStyleSheet(self._ghost_btn_style())
+        start_over_btn.setCursor(Qt.PointingHandCursor)
+        start_over_btn.clicked.connect(lambda: self._render_gemini_state("NOT_CONFIGURED"))
+        btn_row.addWidget(start_over_btn)
+        btn_row.addStretch()
+        self._gemini_inner.addLayout(btn_row)
+
+    # ─── State: READY ─────────────────────────────────────────────────────────
+
+    def _render_ready(self, version: str = ""):
+        lbl_mid = f"font-size: 12px; font-weight: 600; color: {ALMA_TEXT_MID}; border: none;"
+        lbl_light = f"font-size: 11px; color: {ALMA_TEXT_LIGHT}; border: none;"
+
+        # Status row
+        status_row = QHBoxLayout()
+        from src.data.pat_store import load_setting
+        api_key_mode = bool(load_setting("gemini_api_key", ""))
+
+        if api_key_mode and not self._gemini_cli_path:
+            status_text = "🟢  Gemini ready — API key configured"
+        else:
+            v = version or ""
+            status_text = f"🟢  Gemini ready  {('— ' + v) if v else ''}"
+
+        status_lbl = QLabel(status_text)
+        status_lbl.setStyleSheet(f"font-size: 13px; font-weight: 700; color: {ALMA_SUCCESS}; border: none;")
+        status_row.addWidget(status_lbl, 1)
+
+        reconfig_btn = QPushButton("Reconfigure")
+        reconfig_btn.setStyleSheet(self._ghost_btn_style())
+        reconfig_btn.setCursor(Qt.PointingHandCursor)
+        reconfig_btn.clicked.connect(self._on_reconfigure)
+        status_row.addWidget(reconfig_btn)
+        self._gemini_inner.addLayout(status_row)
+
+        # Divider
+        div = QFrame()
+        div.setFrameShape(QFrame.HLine)
+        div.setStyleSheet(f"background: {ALMA_BORDER_LIGHT}; max-height: 1px; border: none;")
+        self._gemini_inner.addWidget(div)
+
+        # Model selector
+        options_row = QHBoxLayout()
+        options_row.setSpacing(24)
+
+        model_col = QVBoxLayout()
+        model_col.setSpacing(4)
+        model_lbl = QLabel("Model")
+        model_lbl.setStyleSheet(lbl_mid)
+        model_col.addWidget(model_lbl)
+        self.gemini_model_combo = QComboBox()
+        self.gemini_model_combo.addItem("gemini-2.5-flash", "gemini-2.5-flash")
+        self.gemini_model_combo.addItem("gemini-2.5-pro", "gemini-2.5-pro")
+        self.gemini_model_combo.addItem("gemini-2.0-flash", "gemini-2.0-flash")
+        self.gemini_model_combo.setStyleSheet(f"""
+            QComboBox {{
+                color: {ALMA_TEXT_DARK}; background: {ALMA_WHITE};
+                border: 1px solid {ALMA_BORDER}; border-radius: 8px;
+                padding: 8px 12px; font-size: 13px; min-width: 180px;
+            }}
+        """)
+        self.gemini_model_combo.currentIndexChanged.connect(self._persist_gemini_settings)
+        model_col.addWidget(self.gemini_model_combo)
+        options_row.addLayout(model_col)
+
+        # PII toggle
+        pii_col = QVBoxLayout()
+        pii_col.setSpacing(6)
+        pii_title_row = QHBoxLayout()
+        pii_lbl = QLabel("PII Redaction")
+        pii_lbl.setStyleSheet(lbl_mid)
+        pii_title_row.addWidget(pii_lbl)
+        pii_title_row.addStretch()
+        self.pii_toggle = ToggleSwitch(checked=True)
+        self.pii_toggle.toggled.connect(self._persist_gemini_settings)
+        pii_title_row.addWidget(self.pii_toggle)
+        pii_col.addLayout(pii_title_row)
+        pii_desc = QLabel("Aggressive name redaction (base redaction always on)")
+        pii_desc.setStyleSheet(lbl_light)
+        pii_col.addWidget(pii_desc)
+        options_row.addLayout(pii_col, 1)
+
+        self._gemini_inner.addLayout(options_row)
+
+        # Restore saved model/PII from yaml
+        self._restore_model_pii()
+
+    def _restore_model_pii(self):
+        """Re-apply saved model + PII settings after READY renders."""
+        import yaml
+        from pathlib import Path
+        config_path = Path(__file__).parent.parent.parent.parent / "config" / "settings.yaml"
+        if not config_path.exists():
+            return
+        try:
+            with open(config_path, encoding="utf-8") as f:
+                cfg = yaml.safe_load(f) or {}
+            gemini_cfg = cfg.get("gemini", {})
+            model = gemini_cfg.get("model", "gemini-2.5-flash")
+            pii = gemini_cfg.get("pii_redaction", True)
+            idx = self.gemini_model_combo.findData(model)
+            if idx >= 0:
+                self.gemini_model_combo.setCurrentIndex(idx)
+            self.pii_toggle._checked = pii
+            self.pii_toggle.update()
+        except Exception:
+            pass
+
+    # ─── Actions ─────────────────────────────────────────────────────────────
+
+    def _on_install_clicked(self):
+        npm = getattr(self, "_detected_npm", None)
+        if not npm:
+            from src.data.gemini_setup import find_npm
+            npm = find_npm()
+        if not npm:
+            QMessageBox.warning(self, "npm not found",
+                "Could not find npm. Please install Node.js first, then restart Alma.")
+            return
+        self._render_gemini_state("INSTALLING")
+        self._gemini_setup_worker = GeminiSetupWorker(mode="install", npm_path=npm)
+        self._gemini_setup_worker.log_line.connect(self._on_install_log)
+        self._gemini_setup_worker.finished.connect(self._on_worker_finished)
+        self._gemini_setup_worker.error.connect(self._on_worker_error)
+        self._gemini_setup_worker.start()
+
+    def _on_install_log(self, line: str):
+        if hasattr(self, "_install_log"):
+            self._install_log.append(line)
+
+    def _on_signin_clicked(self):
+        from src.data.gemini_setup import launch_gemini_auth
+        cli = getattr(self, "_detected_cli", "") or ""
+        if not cli:
+            from src.data.gemini_setup import find_gemini_cli
+            cli = find_gemini_cli() or ""
+        self._gemini_cli_path = cli
+        if cli:
+            launch_gemini_auth(cli)
+        self._render_gemini_state("AUTHENTICATING")
+
+    def _on_verify_clicked(self):
+        if self._gemini_setup_worker and self._gemini_setup_worker.isRunning():
+            return
+        if hasattr(self, "_verify_status_lbl"):
+            self._verify_status_lbl.setText("Checking...")
+            self._verify_status_lbl.setStyleSheet(f"font-size: 12px; color: {ALMA_TEXT_MID}; border: none;")
+            self._verify_status_lbl.setVisible(True)
+
+        self._gemini_setup_worker = GeminiSetupWorker(
+            mode="verify_auth",
+            gemini_path=self._gemini_cli_path,
+        )
+        self._gemini_setup_worker.finished.connect(self._on_worker_finished)
+        self._gemini_setup_worker.error.connect(self._on_verify_error)
+        self._gemini_setup_worker.start()
+
+    def _on_verify_error(self, msg: str):
+        if hasattr(self, "_verify_status_lbl"):
+            self._verify_status_lbl.setText(f"✗  {msg}")
+            self._verify_status_lbl.setStyleSheet(f"font-size: 12px; color: {ALMA_ERROR}; border: none;")
+            self._verify_status_lbl.setVisible(True)
+
+    def _on_reconfigure(self):
+        # Clear saved API key if in api-key mode
+        self._gemini_api_key_mode = False
+        self._gemini_cli_path = ""
+        self._render_gemini_state("NOT_CONFIGURED")
+
+    def _on_worker_finished(self, new_state: str, detail: str):
+        if new_state == "READY":
+            # detail = "cli_path|version_string"
+            parts = detail.split("|", 1)
+            cli_path = parts[0] if parts else ""
+            version = parts[1] if len(parts) > 1 else ""
+            self._on_gemini_ready(cli_path, version)
+        elif new_state == "AUTHENTICATING":
+            self._gemini_cli_path = detail
+            if detail:
+                from src.data.gemini_setup import launch_gemini_auth
+                launch_gemini_auth(detail)
+            self._render_gemini_state("AUTHENTICATING")
+        else:
+            self._render_gemini_state(new_state)
+
+    def _on_worker_error(self, msg: str):
+        # Return to NOT_CONFIGURED and show the error
+        self._render_gemini_state("NOT_CONFIGURED")
+        QMessageBox.critical(self, "Setup Error", msg)
+
+    def _on_gemini_ready(self, cli_path: str, version: str):
+        """Transition to READY state and persist settings."""
+        self._gemini_cli_path = cli_path
+        self._gemini_ready_version = version  # stash for _render_ready()
+        self._render_gemini_state("READY")    # clears old widgets first
+        self._persist_gemini_settings()
+        self.settings_changed.emit({"gemini_updated": True})
+
+    # ─── Persistence ─────────────────────────────────────────────────────────
+
+    def _persist_gemini_settings(self, *args):
+        if self._loading:
+            return
+        import yaml
+        from pathlib import Path
+        config_path = Path(__file__).parent.parent.parent.parent / "config" / "settings.yaml"
+        try:
+            if config_path.exists():
+                with open(config_path, encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
+            else:
+                cfg = {}
+            cfg.setdefault("gemini", {})
+            cfg["gemini"]["cli_path"] = self._gemini_cli_path
+            if self._gemini_state == "READY" and hasattr(self, "gemini_model_combo"):
+                cfg["gemini"]["model"] = self.gemini_model_combo.currentData() or "gemini-2.5-flash"
+            if self._gemini_state == "READY" and hasattr(self, "pii_toggle"):
+                cfg["gemini"]["pii_redaction"] = self.pii_toggle.checked
+            with open(config_path, "w", encoding="utf-8") as f:
+                yaml.dump(cfg, f, default_flow_style=False)
+            self.settings_changed.emit({"gemini_updated": True})
+        except Exception:
+            pass
+
+    def _load_gemini_settings(self):
+        """Load Gemini settings and determine initial state."""
+        import yaml
+        from pathlib import Path
+        from src.data.gemini_setup import find_gemini_cli, verify_gemini_auth
+        from src.data.pat_store import load_setting
+
+        # Check API key first
+        api_key = load_setting("gemini_api_key", "")
+        if api_key:
+            self._gemini_cli_path = ""
+            self._render_gemini_state("READY")
+            if hasattr(self, "gemini_model_combo"):
+                self._restore_model_pii()
+            return
+
+        # Try saved CLI path from yaml
+        config_path = Path(__file__).parent.parent.parent.parent / "config" / "settings.yaml"
+        saved_cli = ""
+        saved_model = "gemini-2.5-flash"
+        saved_pii = True
+        if config_path.exists():
+            try:
+                with open(config_path, encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
+                g = cfg.get("gemini", {})
+                saved_cli = g.get("cli_path", "")
+                saved_model = g.get("model", "gemini-2.5-flash")
+                saved_pii = g.get("pii_redaction", True)
+            except Exception:
+                pass
+
+        # Auto-detect if saved path is empty
+        cli_path = saved_cli or find_gemini_cli() or ""
+        self._gemini_cli_path = cli_path
+
+        if cli_path:
+            ok, version = verify_gemini_auth(cli_path)
+            if ok:
+                self._gemini_ready_version = version
+                self._render_gemini_state("READY")  # clears + renders cleanly
+                return
+            else:
+                # CLI present but not yet authed
+                self._render_gemini_state("AUTHENTICATING")
+                return
+
+        # Nothing found — show setup flow
+        self._render_gemini_state("NOT_CONFIGURED")
+
+    # ═══════════════════════════════════════════
+    #  GOOGLE DRIVE SETTINGS
+    # ═══════════════════════════════════════════
+
+    def _browse_gdrive_credentials(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Service Account Credentials", "", "JSON Files (*.json)"
+        )
+        if path:
+            self._gdrive_cred_input.setText(path)
+
+    def _save_gdrive_settings(self):
+        import yaml
+        from pathlib import Path
+        config_path = Path(__file__).parent.parent.parent.parent / "config" / "settings.yaml"
+        try:
+            if config_path.exists():
+                with open(config_path, encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
+            else:
+                cfg = {}
+            cfg.setdefault("export", {}).setdefault("google_drive", {})
+            cfg["export"]["google_drive"]["credentials_path"] = self._gdrive_cred_input.text().strip()
+            cfg["export"]["google_drive"]["folder_id"] = self._gdrive_folder_input.text().strip()
+            cfg["export"]["google_drive"]["enabled"] = bool(
+                self._gdrive_cred_input.text().strip() and self._gdrive_folder_input.text().strip()
+            )
+            with open(config_path, "w", encoding="utf-8") as f:
+                yaml.dump(cfg, f, default_flow_style=False)
+            self._gdrive_status.setText("Saved")
+            self._gdrive_status.setStyleSheet(f"font-size: 11px; color: {ALMA_SUCCESS};")
+        except Exception as e:
+            self._gdrive_status.setText(f"Error: {e}")
+            self._gdrive_status.setStyleSheet(f"font-size: 11px; color: {ALMA_ERROR};")
+
+    def _test_gdrive_connection(self):
+        cred_path = self._gdrive_cred_input.text().strip()
+        folder_id = self._gdrive_folder_input.text().strip()
+        if not cred_path or not folder_id:
+            self._gdrive_status.setText("Enter credentials path and folder ID first")
+            self._gdrive_status.setStyleSheet(f"font-size: 11px; color: {ALMA_WARNING};")
+            return
+        try:
+            from src.export.gdrive_export import GoogleDriveExporter
+            exporter = GoogleDriveExporter(cred_path, folder_id)
+            ok, msg = exporter.test_connection()
+            if ok:
+                self._gdrive_status.setText(f"✓ {msg}")
+                self._gdrive_status.setStyleSheet(f"font-size: 11px; color: {ALMA_SUCCESS};")
+            else:
+                self._gdrive_status.setText(f"✗ {msg}")
+                self._gdrive_status.setStyleSheet(f"font-size: 11px; color: {ALMA_ERROR};")
+        except ImportError:
+            self._gdrive_status.setText("Missing: pip install google-api-python-client google-auth")
+            self._gdrive_status.setStyleSheet(f"font-size: 11px; color: {ALMA_ERROR};")
+        except Exception as e:
+            self._gdrive_status.setText(f"✗ {e}")
+            self._gdrive_status.setStyleSheet(f"font-size: 11px; color: {ALMA_ERROR};")
+
+    def _load_gdrive_settings(self):
+        """Restore Google Drive settings from yaml."""
+        import yaml
+        from pathlib import Path
+        config_path = Path(__file__).parent.parent.parent.parent / "config" / "settings.yaml"
+        if not config_path.exists():
+            return
+        try:
+            with open(config_path, encoding="utf-8") as f:
+                cfg = yaml.safe_load(f) or {}
+            gdrive = cfg.get("export", {}).get("google_drive", {})
+            self._gdrive_cred_input.setText(gdrive.get("credentials_path", ""))
+            self._gdrive_folder_input.setText(gdrive.get("folder_id", ""))
+        except Exception:
+            pass
+
+    # ═══════════════════════════════════════════
+    #  INTERVENTION MANAGER
+    # ═══════════════════════════════════════════
+
+    def set_db_manager(self, db):
+        """Set db reference for intervention management."""
+        self._db = db
+        self._refresh_interventions()
+
+    def _add_intervention(self):
+        from src.ui.dialogs.intervention_dialog import InterventionDialog
+        dlg = InterventionDialog(parent=self)
+        if dlg.exec():
+            data = dlg.get_intervention_data()
+            if hasattr(self, "_db") and self._db:
+                self._db.save_intervention(data)
+                self._refresh_interventions()
+                self.settings_changed.emit({"interventions_updated": True})
+
+    def _edit_intervention(self, iv_id):
+        if not hasattr(self, "_db") or not self._db:
+            return
+        from src.ui.dialogs.intervention_dialog import InterventionDialog
+        existing = None
+        try:
+            interventions = self._db.get_interventions()
+            for iv in interventions:
+                if iv.get("intervention_id") == iv_id:
+                    existing = iv
+                    break
+        except Exception:
+            return
+        if not existing:
+            return
+        dlg = InterventionDialog(intervention_data=existing, parent=self)
+        if dlg.exec():
+            data = dlg.get_intervention_data()
+            self._db.update_intervention(iv_id, data)
+            self._refresh_interventions()
+            self.settings_changed.emit({"interventions_updated": True})
+
+    def _delete_intervention(self, iv_id):
+        reply = QMessageBox.question(
+            self, "Delete Intervention",
+            "Are you sure you want to delete this intervention?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply == QMessageBox.Yes and hasattr(self, "_db") and self._db:
+            self._db.delete_intervention(iv_id)
+            self._refresh_interventions()
+            self.settings_changed.emit({"interventions_updated": True})
+
+    def _refresh_interventions(self):
+        """Reload interventions list from DB."""
+        # Clear container
+        while self._iv_container.count() > 0:
+            item = self._iv_container.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        if not hasattr(self, "_db") or not self._db:
+            return
+
+        try:
+            interventions = self._db.get_interventions()
+        except Exception:
+            interventions = []
+
+        if not interventions:
+            empty = QLabel("No interventions defined.")
+            empty.setStyleSheet(f"font-size: 11px; color: {ALMA_TEXT_LIGHT}; padding: 8px;")
+            empty.setAlignment(Qt.AlignCenter)
+            self._iv_container.addWidget(empty)
+            return
+
+        from src.ui.dialogs.intervention_dialog import CATEGORY_COLORS
+
+        for iv in interventions:
+            row = QFrame()
+            cat = iv.get("category", "other")
+            border_color = CATEGORY_COLORS.get(cat, "#6B7280")
+            row.setStyleSheet(f"""
+                QFrame {{
+                    background: {ALMA_WHITE}; border: 1px solid {ALMA_BORDER_LIGHT};
+                    border-left: 4px solid {border_color};
+                    border-radius: 6px; padding: 6px;
+                }}
+            """)
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(10, 6, 6, 6)
+            row_layout.setSpacing(8)
+
+            info_col = QVBoxLayout()
+            name_lbl = QLabel(f"{iv.get('name', '')}  —  {iv.get('event_date', '')}")
+            name_lbl.setStyleSheet(f"font-size: 12px; font-weight: 600; color: {ALMA_TEXT_DARK}; border: none;")
+            info_col.addWidget(name_lbl)
+
+            cat_lbl = QLabel(f"{cat.replace('_', ' ').title()}: {iv.get('description', '')[:80]}")
+            cat_lbl.setStyleSheet(f"font-size: 10px; color: {ALMA_TEXT_LIGHT}; border: none;")
+            cat_lbl.setWordWrap(True)
+            info_col.addWidget(cat_lbl)
+            row_layout.addLayout(info_col, 1)
+
+            edit_btn = QPushButton("Edit")
+            edit_btn.setCursor(Qt.PointingHandCursor)
+            edit_btn.setFixedWidth(50)
+            edit_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: transparent; color: {ALMA_INFO};
+                    border: 1px solid {ALMA_INFO}; border-radius: 4px;
+                    padding: 2px 8px; font-size: 10px;
+                }}
+            """)
+            iv_id = iv.get("intervention_id")
+            edit_btn.clicked.connect(lambda checked, iid=iv_id: self._edit_intervention(iid))
+            row_layout.addWidget(edit_btn)
+
+            del_btn = QPushButton("✕")
+            del_btn.setCursor(Qt.PointingHandCursor)
+            del_btn.setFixedSize(24, 24)
+            del_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: transparent; color: {ALMA_TEXT_LIGHT};
+                    font-size: 14px; border-radius: 4px; border: none;
+                }}
+                QPushButton:hover {{ color: {ALMA_ERROR}; }}
+            """)
+            del_btn.clicked.connect(lambda checked, iid=iv_id: self._delete_intervention(iid))
+            row_layout.addWidget(del_btn)
+
+            self._iv_container.addWidget(row)
+
+    # ═══════════════════════════════════════════
+    #  AI ENHANCEMENTS PERSISTENCE
+    # ═══════════════════════════════════════════
+
+    def _persist_ai_settings(self, *args):
+        if self._loading:
+            return
+        import yaml
+        from pathlib import Path
+        config_path = Path(__file__).parent.parent.parent.parent / "config" / "settings.yaml"
+        try:
+            if config_path.exists():
+                with open(config_path, encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
+            else:
+                cfg = {}
+            cfg.setdefault("ai_enhancements", {})
+            cfg["ai_enhancements"]["smoothing"] = self.ai_smoothing_toggle.checked
+            cfg["ai_enhancements"]["keywords"] = self.ai_keywords_toggle.checked
+            with open(config_path, "w", encoding="utf-8") as f:
+                yaml.dump(cfg, f, default_flow_style=False)
+            self.settings_changed.emit({"ai_enhancements_updated": True})
+        except Exception:
+            pass
+
+    def _load_ai_settings(self):
+        """Restore AI enhancement toggles from yaml."""
+        import yaml
+        from pathlib import Path
+        config_path = Path(__file__).parent.parent.parent.parent / "config" / "settings.yaml"
+        if not config_path.exists():
+            return
+        try:
+            with open(config_path, encoding="utf-8") as f:
+                cfg = yaml.safe_load(f) or {}
+            ai = cfg.get("ai_enhancements", {})
+            self.ai_smoothing_toggle._checked = ai.get("smoothing", False)
+            self.ai_smoothing_toggle.update()
+            self.ai_keywords_toggle._checked = ai.get("keywords", False)
+            self.ai_keywords_toggle.update()
+            # Restore display preferences
+            display = cfg.get("display", {})
+            self.layman_mode_toggle._checked = display.get("layman_mode", False)
+            self.layman_mode_toggle.update()
+        except Exception:
+            pass
+
+    # ═══════════════════════════════════════════
+    #  DISPLAY PREFERENCES PERSISTENCE
+    # ═══════════════════════════════════════════
+
+    def _persist_display_settings(self, *args):
+        if self._loading:
+            return
+        import yaml
+        from pathlib import Path
+        config_path = Path(__file__).parent.parent.parent.parent / "config" / "settings.yaml"
+        try:
+            if config_path.exists():
+                with open(config_path, encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
+            else:
+                cfg = {}
+            cfg.setdefault("display", {})
+            cfg["display"]["layman_mode"] = self.layman_mode_toggle.checked
+            with open(config_path, "w", encoding="utf-8") as f:
+                yaml.dump(cfg, f, default_flow_style=False)
+            self.settings_changed.emit({"layman_mode_updated": True})
+        except Exception:
+            pass
+
+    def is_layman_mode_enabled(self):
+        return self.layman_mode_toggle.checked
+
+    # ═══════════════════════════════════════════
+    #  SECTION 9: AUTO-ANALYSIS ON IMPORT
+    # ═══════════════════════════════════════════
+
+    def _build_auto_analysis_section(self):
+        self.layout_inner.addWidget(self._section_label("AUTO-ANALYSIS ON IMPORT"))
+        self.layout_inner.addSpacing(8)
+
+        card = self._card()
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(20, 18, 20, 18)
+        card_layout.setSpacing(10)
+
+        desc = QLabel(
+            "Control which analysis sections automatically run after data import. "
+            "Disable individual sections to speed up import or focus on specific analyses."
+        )
+        desc.setStyleSheet(f"font-size: 12px; color: {ALMA_TEXT_LIGHT};")
+        desc.setWordWrap(True)
+        card_layout.addWidget(desc)
+
+        # Store all auto-analysis toggles: { "page.key": ToggleSwitch }
+        self._aa_toggles = {}
+
+        first_group = True
+        for page_key, sections in SECTION_KEYS.items():
+            if not first_group:
+                card_layout.addWidget(self._divider_line())
+            first_group = False
+
+            # Master toggle for this page
+            master = ToggleSwitch(checked=True)
+            master_key = f"aa_master_{page_key}"
+            self._aa_toggles[master_key] = master
+            master_row = self._build_toggle_row(
+                PAGE_TITLES[page_key],
+                f"Run all {PAGE_TITLES[page_key]} analyses on import",
+                master,
+            )
+            card_layout.addLayout(master_row)
+
+            # Sub-toggles for each section
+            sub_toggles = []
+            for title, yaml_key in sections.items():
+                sub = ToggleSwitch(checked=True)
+                full_key = f"{page_key}.{yaml_key}"
+                self._aa_toggles[full_key] = sub
+                sub_row = self._build_toggle_row(title, "", sub, indent=28)
+                card_layout.addLayout(sub_row)
+                sub_toggles.append(sub)
+
+            # Wire master → disable/enable sub-toggles
+            def _make_master_handler(subs, m):
+                def handler(on):
+                    for s in subs:
+                        s.setEnabled(on)
+                        if not on:
+                            s._checked = False
+                            s.update()
+                    self._persist_behavior_settings()
+                return handler
+
+            master.toggled.connect(_make_master_handler(sub_toggles, master))
+
+            # Wire each sub-toggle to persist
+            for sub in sub_toggles:
+                sub.toggled.connect(self._persist_behavior_settings)
+
+        self.layout_inner.addWidget(card)
+        self.layout_inner.addSpacing(24)
+
+    # ═══════════════════════════════════════════
+    #  SECTION 10: CALENDAR SYNC
+    # ═══════════════════════════════════════════
+
+    def _build_calendar_sync_section(self):
+        self.layout_inner.addWidget(self._section_label("CALENDAR SYNC"))
+        self.layout_inner.addSpacing(8)
+
+        card = self._card()
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(20, 18, 20, 18)
+        card_layout.setSpacing(10)
+
+        self._cal_sync_analysis = ToggleSwitch(checked=False)
+        card_layout.addLayout(self._build_toggle_row(
+            "Sync Analysis Page Dates",
+            "When a date is changed on any analysis page (TRC Analytics, Incidents, "
+            "Trending Topics), automatically update all other analysis pages to match "
+            "and re-run their analyses.",
+            self._cal_sync_analysis,
+        ))
+
+        card_layout.addWidget(self._divider_line())
+
+        self._cal_sync_reports = ToggleSwitch(checked=False)
+        self._cal_sync_reports.setEnabled(False)  # Disabled until analysis sync is on
+        card_layout.addLayout(self._build_toggle_row(
+            "Include AI Reports",
+            "Also sync date changes to the AI Reports page. "
+            "Requires Analysis Page Sync to be enabled.",
+            self._cal_sync_reports,
+            indent=28,
+        ))
+
+        # Wire: analysis sync master enables reports sub-toggle
+        def _on_analysis_sync(on):
+            self._cal_sync_reports.setEnabled(on)
+            if not on:
+                self._cal_sync_reports._checked = False
+                self._cal_sync_reports.update()
+            self._persist_behavior_settings()
+
+        self._cal_sync_analysis.toggled.connect(_on_analysis_sync)
+        self._cal_sync_reports.toggled.connect(self._persist_behavior_settings)
+
+        self.layout_inner.addWidget(card)
+        self.layout_inner.addSpacing(24)
+
+    # ═══════════════════════════════════════════
+    #  SECTION 11: SOURCE SYNC
+    # ═══════════════════════════════════════════
+
+    def _build_source_sync_section(self):
+        self.layout_inner.addWidget(self._section_label("SOURCE SYNC"))
+        self.layout_inner.addSpacing(8)
+
+        card = self._card()
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(20, 18, 20, 18)
+        card_layout.setSpacing(10)
+
+        self._source_sync_toggle = ToggleSwitch(checked=False)
+        card_layout.addLayout(self._build_toggle_row(
+            "Sync Data Sources",
+            "When enabled, changing the data source on one analysis page "
+            "updates all other pages to use the same source. "
+            "Currently only Conversations is available.",
+            self._source_sync_toggle,
+        ))
+
+        self._source_sync_toggle.toggled.connect(self._persist_behavior_settings)
+
+        self.layout_inner.addWidget(card)
+        self.layout_inner.addSpacing(24)
+
+    # ═══════════════════════════════════════════
+    #  SECTION 12: SECTION DEFAULTS
+    # ═══════════════════════════════════════════
+
+    def _build_section_defaults_section(self):
+        self.layout_inner.addWidget(self._section_label("SECTION DEFAULTS"))
+        self.layout_inner.addSpacing(8)
+
+        card = self._card()
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(20, 18, 20, 18)
+        card_layout.setSpacing(10)
+
+        desc = QLabel(
+            "Control whether analysis chart sections start expanded or collapsed. "
+            "Choose a preset or customize per-section."
+        )
+        desc.setStyleSheet(f"font-size: 12px; color: {ALMA_TEXT_LIGHT};")
+        desc.setWordWrap(True)
+        card_layout.addWidget(desc)
+
+        # Preset combo
+        preset_row = QHBoxLayout()
+        preset_lbl = QLabel("Preset")
+        preset_lbl.setStyleSheet(f"font-size: 14px; font-weight: 600; color: {ALMA_TEXT_DARK};")
+        preset_row.addWidget(preset_lbl)
+
+        self._sd_preset_combo = QComboBox()
+        self._sd_preset_combo.addItem("All Open", "all_open")
+        self._sd_preset_combo.addItem("All Collapsed", "all_collapsed")
+        self._sd_preset_combo.addItem("Custom", "custom")
+        self._sd_preset_combo.setStyleSheet(f"""
+            QComboBox {{
+                color: {ALMA_TEXT_DARK}; background: {ALMA_WHITE};
+                border: 1px solid {ALMA_BORDER}; border-radius: 8px;
+                padding: 6px 12px; font-size: 13px; min-width: 160px;
+            }}
+        """)
+        preset_row.addWidget(self._sd_preset_combo)
+        preset_row.addStretch()
+        card_layout.addLayout(preset_row)
+
+        card_layout.addWidget(self._divider_line())
+
+        # Per-section toggles (shown only in Custom mode)
+        self._sd_custom_container = QWidget()
+        custom_layout = QVBoxLayout(self._sd_custom_container)
+        custom_layout.setContentsMargins(0, 0, 0, 0)
+        custom_layout.setSpacing(8)
+
+        custom_hint = QLabel("ON = expanded on open   ·   OFF = collapsed on open")
+        custom_hint.setStyleSheet(f"font-size: 11px; color: {ALMA_TEXT_LIGHT};")
+        custom_hint.setAlignment(Qt.AlignCenter)
+        custom_layout.addWidget(custom_hint)
+
+        self._sd_toggles = {}
+        first_page = True
+        for page_key, sections in SECTION_KEYS.items():
+            if not first_page:
+                custom_layout.addWidget(self._divider_line())
+            first_page = False
+
+            page_lbl = QLabel(PAGE_TITLES[page_key])
+            page_lbl.setStyleSheet(
+                f"font-size: 12px; font-weight: 700; color: {ALMA_TEXT_MID}; "
+                f"letter-spacing: 0.5px; padding-top: 4px;"
+            )
+            custom_layout.addWidget(page_lbl)
+
+            for title, yaml_key in sections.items():
+                toggle = ToggleSwitch(checked=True)
+                full_key = f"{page_key}.{yaml_key}"
+                self._sd_toggles[full_key] = toggle
+                row = self._build_toggle_row(title, "", toggle, indent=16)
+                custom_layout.addLayout(row)
+                toggle.toggled.connect(self._persist_behavior_settings)
+
+        card_layout.addWidget(self._sd_custom_container)
+        self._sd_custom_container.setVisible(False)  # Hidden until "Custom" selected
+
+        # Wire preset combo
+        def _on_preset_changed(idx):
+            preset = self._sd_preset_combo.currentData()
+            self._sd_custom_container.setVisible(preset == "custom")
+            self._persist_behavior_settings()
+
+        self._sd_preset_combo.currentIndexChanged.connect(_on_preset_changed)
+
+        self.layout_inner.addWidget(card)
+        self.layout_inner.addSpacing(24)
+
+    # ═══════════════════════════════════════════
+    #  BEHAVIOR SETTINGS PERSISTENCE
+    # ═══════════════════════════════════════════
+
+    def _persist_behavior_settings(self, *args):
+        """Write all behavior toggles to config/settings.yaml."""
+        if self._loading:
+            return
+        import yaml
+        from pathlib import Path
+        config_path = Path(__file__).parent.parent.parent.parent / "config" / "settings.yaml"
+        try:
+            if config_path.exists():
+                with open(config_path, encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
+            else:
+                cfg = {}
+
+            beh = cfg.setdefault("behavior", {})
+
+            # ── Auto-Analysis ──
+            aa = beh.setdefault("auto_analysis", {})
+            for page_key, sections in SECTION_KEYS.items():
+                page_aa = aa.setdefault(page_key, {})
+                master_key = f"aa_master_{page_key}"
+                master_toggle = self._aa_toggles.get(master_key)
+                if master_toggle:
+                    page_aa["enabled"] = master_toggle.checked
+                for title, yaml_key in sections.items():
+                    full_key = f"{page_key}.{yaml_key}"
+                    sub_toggle = self._aa_toggles.get(full_key)
+                    if sub_toggle:
+                        page_aa[yaml_key] = sub_toggle.checked
+
+            # ── Calendar Sync ──
+            cs = beh.setdefault("calendar_sync", {})
+            cs["analysis_pages"] = self._cal_sync_analysis.checked
+            cs["ai_reports"] = self._cal_sync_reports.checked
+
+            # ── Source Sync ──
+            ss = beh.setdefault("source_sync", {})
+            ss["enabled"] = self._source_sync_toggle.checked
+
+            # ── Section Defaults ──
+            sd = beh.setdefault("section_defaults", {})
+            sd["preset"] = self._sd_preset_combo.currentData() or "all_open"
+            custom = sd.setdefault("custom", {})
+            for page_key, sections in SECTION_KEYS.items():
+                page_custom = custom.setdefault(page_key, {})
+                for title, yaml_key in sections.items():
+                    full_key = f"{page_key}.{yaml_key}"
+                    toggle = self._sd_toggles.get(full_key)
+                    if toggle:
+                        page_custom[yaml_key] = toggle.checked
+
+            with open(config_path, "w", encoding="utf-8") as f:
+                yaml.dump(cfg, f, default_flow_style=False)
+
+            self.settings_changed.emit({"behavior_updated": True})
+        except Exception:
+            pass
+
+    def _load_behavior_settings(self):
+        """Restore behavior toggle states from config/settings.yaml."""
+        import yaml
+        from pathlib import Path
+        config_path = Path(__file__).parent.parent.parent.parent / "config" / "settings.yaml"
+        if not config_path.exists():
+            return
+        try:
+            with open(config_path, encoding="utf-8") as f:
+                cfg = yaml.safe_load(f) or {}
+            beh = cfg.get("behavior", {})
+
+            # ── Auto-Analysis ──
+            aa = beh.get("auto_analysis", {})
+            for page_key, sections in SECTION_KEYS.items():
+                page_aa = aa.get(page_key, {})
+                master_key = f"aa_master_{page_key}"
+                master_toggle = self._aa_toggles.get(master_key)
+                if master_toggle:
+                    enabled = page_aa.get("enabled", True)
+                    master_toggle._checked = enabled
+                    master_toggle.update()
+
+                for title, yaml_key in sections.items():
+                    full_key = f"{page_key}.{yaml_key}"
+                    sub_toggle = self._aa_toggles.get(full_key)
+                    if sub_toggle:
+                        val = page_aa.get(yaml_key, True)
+                        sub_toggle._checked = val
+                        sub_toggle.update()
+                        # Disable sub if master is off
+                        if master_toggle and not master_toggle.checked:
+                            sub_toggle.setEnabled(False)
+
+            # ── Calendar Sync ──
+            cs = beh.get("calendar_sync", {})
+            self._cal_sync_analysis._checked = cs.get("analysis_pages", False)
+            self._cal_sync_analysis.update()
+            self._cal_sync_reports._checked = cs.get("ai_reports", False)
+            self._cal_sync_reports.update()
+            self._cal_sync_reports.setEnabled(self._cal_sync_analysis.checked)
+
+            # ── Source Sync ──
+            ss = beh.get("source_sync", {})
+            self._source_sync_toggle._checked = ss.get("enabled", False)
+            self._source_sync_toggle.update()
+
+            # ── Section Defaults ──
+            sd = beh.get("section_defaults", {})
+            preset = sd.get("preset", "all_open")
+            idx = self._sd_preset_combo.findData(preset)
+            if idx >= 0:
+                self._sd_preset_combo.setCurrentIndex(idx)
+            self._sd_custom_container.setVisible(preset == "custom")
+
+            custom = sd.get("custom", {})
+            for page_key, sections in SECTION_KEYS.items():
+                page_custom = custom.get(page_key, {})
+                for title, yaml_key in sections.items():
+                    full_key = f"{page_key}.{yaml_key}"
+                    toggle = self._sd_toggles.get(full_key)
+                    if toggle:
+                        toggle._checked = page_custom.get(yaml_key, True)
+                        toggle.update()
+        except Exception:
+            pass

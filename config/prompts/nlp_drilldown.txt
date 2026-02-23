@@ -1,0 +1,23 @@
+You are doing a deep-dive analysis on one specific finding from an
+NLP scan of support tickets.
+
+FINDING: {finding_title}
+{finding_description}
+
+STATISTICAL CONTEXT:
+{statistical_validation}
+
+EXEMPLAR TICKETS ({n} tickets, full threads):
+{exemplar_tickets}
+
+USER QUESTION: {user_question}
+
+Analyze this finding using the DRILLDOWN framework:
+A) WHAT IT IS — describe the specific customer experience
+B) EVIDENCE — cite fragments from the tickets above
+C) WHO/WHERE — which payers, products, TRCs are involved
+D) WHY — root cause hypotheses grounded in evidence
+E) WHAT TO DO — specific, actionable recommendations
+
+If the user asked a specific question, prioritize answering it
+while still providing the full framework.

@@ -1,0 +1,10 @@
+{
+    "portal": ["portal", "client portal", "provider portal", "login", "dashboard", "web portal", "patient portal"],
+    "billing": ["invoice", "charge", "payment", "auto-pay", "autopay", "statement", "billing", "balance", "bill"],
+    "claims": ["claim", "denial", "eob", "era", "adjudication", "resubmit", "claims processing", "claim status"],
+    "scheduling": ["appointment", "calendar", "availability", "no-show", "reschedule", "scheduling", "book"],
+    "eligibility": ["eligibility", "coverage", "benefits", "verification", "inactive", "termination", "enrollment"],
+    "credentialing": ["credential", "credentialing", "contracting", "npi", "tin", "provider enrollment"],
+    "prior_authorization": ["prior auth", "prior authorization", "pre-auth", "preauthorization", "auth request"],
+    "refunds": ["refund", "overpayment", "credit", "adjustment", "refund request", "reimbursement"]
+}

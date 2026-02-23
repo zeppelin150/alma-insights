@@ -1,7 +1,11 @@
 """
 Alma Insights — Brand Theme & Stylesheet
 Colors extracted from official Alma logo.
+Lightdash-level polish: clean, modern, spacious, professional.
 """
+
+from PySide6.QtWidgets import QGraphicsDropShadowEffect
+from PySide6.QtGui import QColor
 
 # ═══ ALMA BRAND COLORS ═══
 ALMA_GREEN_DARK = "#03281B"
@@ -21,6 +25,40 @@ ALMA_SUCCESS = "#16763A"
 ALMA_WARNING = "#B45309"
 ALMA_ERROR = "#C41E1E"
 ALMA_INFO = "#1D6FA5"
+
+# ═══ LIGHTDASH-STYLE ADDITIONS ═══
+ALMA_SHADOW_LIGHT = "rgba(0, 0, 0, 0.04)"
+ALMA_SHADOW_MED = "rgba(0, 0, 0, 0.08)"
+ALMA_BG_ELEVATED = "#FFFFFF"
+ALMA_BG_INSET = "#F7F5F0"
+
+# ═══ CHART-SPECIFIC COLORS ═══
+ALMA_CHART_BG = "#F2F8F5"          # subtle sage-green inset background for chart areas
+ALMA_CHART_GRID = "#DCE8E2"        # sage-green dotted grid lines
+ALMA_CHART_AXIS = "#9A9590"        # axis label text
+ALMA_CHART_INSET = "#E2EDE8"       # sage-green inner border for depth/framing
+
+
+def apply_card_shadow(widget):
+    """Apply a calendar-quality 3D shadow to a card widget.
+
+    Stronger than the original subtle shadow — matches the CalendarPopup
+    depth look: blur=18, offset=(0,4), opacity ~25.
+    """
+    shadow = QGraphicsDropShadowEffect(widget)
+    shadow.setBlurRadius(18)
+    shadow.setOffset(0, 4)
+    shadow.setColor(QColor(0, 0, 0, 25))
+    widget.setGraphicsEffect(shadow)
+
+
+def apply_card_shadow_soft(widget):
+    """Lighter shadow for smaller inline cards (KPI cards, term rows, etc.)."""
+    shadow = QGraphicsDropShadowEffect(widget)
+    shadow.setBlurRadius(10)
+    shadow.setOffset(0, 2)
+    shadow.setColor(QColor(0, 0, 0, 18))
+    widget.setGraphicsEffect(shadow)
 
 
 def get_stylesheet():
@@ -58,7 +96,7 @@ def get_stylesheet():
     }}
     #SidebarSection {{
         color: rgba(243,241,236,0.4); font-size: 10px; font-weight: 700;
-        letter-spacing: 1.2px; padding: 16px 20px 6px 20px;
+        letter-spacing: 1.2px; padding: 20px 20px 6px 20px;
     }}
     #SidebarButton {{
         background: transparent; color: rgba(243,241,236,0.72);
@@ -72,7 +110,7 @@ def get_stylesheet():
         background: {ALMA_GREEN_LIGHT}; color: {ALMA_TEXT_ON_DARK}; font-weight: 600;
     }}
     #SidebarDivider {{
-        background: rgba(243,241,236,0.1); min-height: 1px; max-height: 1px; margin: 8px 20px;
+        background: rgba(243,241,236,0.1); min-height: 1px; max-height: 1px; margin: 10px 20px;
     }}
     #SidebarFooter {{
         color: rgba(243,241,236,0.3); font-size: 10px; padding: 10px 20px;
@@ -80,36 +118,60 @@ def get_stylesheet():
 
     /* ── CONTENT ── */
     #ContentArea {{ background-color: {ALMA_CREAM}; }}
-    #PageHeader {{ font-size: 22px; font-weight: 700; color: {ALMA_TEXT_DARK}; }}
-    #PageSubheader {{ font-size: 13px; color: {ALMA_TEXT_MID}; }}
+    #PageHeader {{
+        font-size: 24px; font-weight: 600; color: {ALMA_TEXT_DARK};
+        letter-spacing: -0.3px;
+    }}
+    #PageSubheader {{
+        font-size: 13px; color: {ALMA_TEXT_LIGHT}; margin-bottom: 4px;
+    }}
+
+    /* ── SECTION LABELS ── */
+    #SectionLabel {{
+        font-size: 11px; font-weight: 700; letter-spacing: 0.8px;
+        color: {ALMA_TEXT_LIGHT}; text-transform: uppercase;
+    }}
 
     /* ── CARDS ── */
     #Card {{
-        background-color: {ALMA_WHITE}; border: 1px solid {ALMA_BORDER_LIGHT};
-        border-radius: 10px;
+        background-color: {ALMA_BG_ELEVATED};
+        border: 1px solid rgba(214, 210, 202, 0.45);
+        border-radius: 12px;
     }}
     #CardTitle {{ font-size: 14px; font-weight: 700; color: {ALMA_TEXT_DARK}; }}
 
     /* ── INPUTS ── */
     QLineEdit {{
-        background: {ALMA_WHITE}; border: 1px solid {ALMA_BORDER}; border-radius: 8px;
-        padding: 8px 12px; font-size: 13px; color: {ALMA_TEXT_DARK};
+        background: {ALMA_WHITE};
+        border: 1px solid rgba(214, 210, 202, 0.7);
+        border-radius: 8px;
+        padding: 10px 14px; font-size: 13px; color: {ALMA_TEXT_DARK};
         selection-background-color: {ALMA_GREEN_LIGHT}; selection-color: white;
     }}
-    QLineEdit:focus {{ border-color: {ALMA_GREEN_LIGHT}; border-width: 2px; padding: 7px 11px; }}
+    QLineEdit:focus {{
+        border-color: {ALMA_GREEN_LIGHT}; border-width: 2px; padding: 9px 13px;
+    }}
 
     QTextEdit, QPlainTextEdit {{
-        background: {ALMA_WHITE}; border: 1px solid {ALMA_BORDER}; border-radius: 8px;
-        padding: 10px 12px; font-size: 13px; color: {ALMA_TEXT_DARK};
+        background: {ALMA_WHITE};
+        border: 1px solid rgba(214, 210, 202, 0.7);
+        border-radius: 8px;
+        padding: 10px 14px; font-size: 13px; color: {ALMA_TEXT_DARK};
     }}
     QTextEdit:focus {{ border-color: {ALMA_GREEN_LIGHT}; }}
 
     QComboBox {{
-        background: {ALMA_WHITE}; border: 1px solid {ALMA_BORDER}; border-radius: 8px;
-        padding: 8px 12px; font-size: 13px; color: {ALMA_TEXT_DARK}; min-width: 120px;
+        background: {ALMA_WHITE};
+        border: 1px solid rgba(214, 210, 202, 0.7);
+        border-radius: 8px;
+        padding: 10px 14px; font-size: 13px; color: {ALMA_TEXT_DARK}; min-width: 120px;
     }}
     QComboBox:hover {{ border-color: {ALMA_GREEN_LIGHT}; }}
-    QComboBox::drop-down {{ subcontrol-origin: padding; subcontrol-position: center right; width: 30px; border: none; }}
+    QComboBox:focus {{ border-color: {ALMA_GREEN_LIGHT}; border-width: 2px; }}
+    QComboBox::drop-down {{
+        subcontrol-origin: padding; subcontrol-position: center right;
+        width: 30px; border: none;
+    }}
     QComboBox QAbstractItemView {{
         background: {ALMA_WHITE}; border: 1px solid {ALMA_BORDER}; border-radius: 6px;
         padding: 4px; color: {ALMA_TEXT_DARK};
@@ -117,23 +179,40 @@ def get_stylesheet():
     }}
 
     QDateEdit {{
-        background: {ALMA_WHITE}; border: 1px solid {ALMA_BORDER}; border-radius: 8px;
-        padding: 8px 12px; font-size: 13px; color: {ALMA_TEXT_DARK};
+        background: {ALMA_WHITE};
+        border: 1px solid rgba(214, 210, 202, 0.7);
+        border-radius: 8px;
+        padding: 10px 14px; font-size: 13px; color: {ALMA_TEXT_DARK};
     }}
     QDateEdit:focus {{ border-color: {ALMA_GREEN_LIGHT}; }}
+
+    /* ── DATE PICKER BUTTON ── */
+    #DatePickerButton {{
+        background: {ALMA_WHITE};
+        border: 1px solid rgba(214, 210, 202, 0.7);
+        border-radius: 8px;
+        padding: 10px 14px; font-size: 13px; color: {ALMA_TEXT_DARK};
+        text-align: left;
+    }}
+    #DatePickerButton:hover {{ border-color: {ALMA_GREEN_LIGHT}; }}
+    #DatePickerButton:focus {{ border-color: {ALMA_GREEN_LIGHT}; border-width: 2px; }}
 
     /* ── BUTTONS ── */
     QPushButton {{
         background: {ALMA_GREEN_DARK}; color: {ALMA_TEXT_ON_DARK}; border: none;
-        border-radius: 8px; padding: 9px 20px; font-size: 13px; font-weight: 600;
+        border-radius: 8px; padding: 10px 22px; font-size: 13px; font-weight: 600;
     }}
     QPushButton:hover {{ background: {ALMA_GREEN_MID}; }}
     QPushButton:pressed {{ background: {ALMA_GREEN_LIGHT}; }}
     QPushButton:disabled {{ background: {ALMA_BORDER}; color: {ALMA_TEXT_LIGHT}; }}
+    QPushButton:focus {{
+        outline: none; border: 2px solid {ALMA_GREEN_LIGHT};
+    }}
 
     #SecondaryButton {{
         background: transparent; color: {ALMA_GREEN_DARK};
-        border: 1px solid {ALMA_BORDER}; border-radius: 8px; padding: 8px 18px; font-weight: 500;
+        border: 1px solid rgba(214, 210, 202, 0.7);
+        border-radius: 8px; padding: 10px 22px; font-weight: 500;
     }}
     #SecondaryButton:hover {{ background: {ALMA_HOVER_LIGHT}; border-color: {ALMA_GREEN_LIGHT}; }}
 
@@ -145,15 +224,24 @@ def get_stylesheet():
 
     /* ── TABLES ── */
     QTableWidget, QTableView {{
-        background: {ALMA_WHITE}; border: 1px solid {ALMA_BORDER_LIGHT};
-        border-radius: 8px; gridline-color: {ALMA_BORDER_LIGHT};
+        background: {ALMA_BG_ELEVATED};
+        border: 1px solid rgba(214, 210, 202, 0.45);
+        border-radius: 10px;
+        gridline-color: rgba(214, 210, 202, 0.35);
         selection-background-color: rgba(3,40,27,0.08);
     }}
-    QTableWidget::item {{ padding: 8px 12px; border-bottom: 1px solid {ALMA_BORDER_LIGHT}; }}
+    QTableWidget::item {{
+        padding: 10px 14px;
+        border-bottom: 1px solid rgba(214, 210, 202, 0.3);
+    }}
+    QTableWidget::item:hover {{
+        background: rgba(3, 40, 27, 0.04);
+    }}
     QHeaderView::section {{
-        background: {ALMA_CREAM}; color: {ALMA_TEXT_MID};
-        font-size: 11px; font-weight: 700; padding: 10px 12px;
-        border: none; border-bottom: 2px solid {ALMA_BORDER};
+        background: {ALMA_BG_INSET}; color: {ALMA_TEXT_MID};
+        font-size: 11px; font-weight: 600; padding: 10px 14px;
+        border: none; border-bottom: 2px solid rgba(214, 210, 202, 0.5);
+        text-transform: uppercase; letter-spacing: 0.5px;
     }}
 
     /* ── SCROLLBARS ── */
@@ -166,8 +254,8 @@ def get_stylesheet():
 
     /* ── TABS ── */
     QTabWidget::pane {{
-        border: 1px solid {ALMA_BORDER_LIGHT}; border-radius: 8px;
-        background: {ALMA_WHITE}; top: -1px;
+        border: 1px solid rgba(214, 210, 202, 0.45); border-radius: 12px;
+        background: {ALMA_BG_ELEVATED}; top: -1px;
     }}
     QTabBar::tab {{
         background: transparent; color: {ALMA_TEXT_MID}; padding: 10px 20px;

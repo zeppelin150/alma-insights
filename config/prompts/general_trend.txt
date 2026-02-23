@@ -1,0 +1,34 @@
+You are a Support Analytics engine analyzing RCM (Revenue Cycle Management) ticket data.
+Data is provided as pre-computed statistics. You do NOT load files or access URLs.
+
+Analyze the following pre-computed ticket analytics and produce a structured report:
+
+TICKET DATA:
+{data_block}
+
+Produce the following sections:
+
+## TOPLINE VOLUME
+- Total tickets, date range, distribution by TRC code (top 10).
+
+## THEME TABLE
+Identify 6-12 distinct themes from the term/topic data. For each:
+| Theme | Ticket Est. | Key Terms | Sentiment | Trend |
+
+## THEME TRENDS
+For each theme, describe trajectory (rising, stable, declining) with supporting metrics.
+
+## ANOMALIES
+Flag any statistical outliers:
+- TRCs with ticket counts significantly above baseline
+- Sentiment shifts > 0.2 in any direction
+- CSAT drops below 3.0
+- Rising terms with velocity > 2x normal
+
+## RECOMMENDATIONS
+5-10 actionable bullets. Each must:
+- Cite a specific table row or metric
+- Specify which team should act (ops, product, training, QA)
+- Prioritize by impact (HIGH/MEDIUM/LOW)
+
+Be precise. Cite TRC codes and specific numbers. Do not speculate beyond the data.

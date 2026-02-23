@@ -103,10 +103,12 @@ class TermManagerDialog(QDialog):
             "Term", "Action", "Weight", "Feedback", "Updated", ""
         ])
         self._active_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        for i in range(1, 6):
+        for i in range(1, 5):
             self._active_table.horizontalHeader().setSectionResizeMode(
                 i, QHeaderView.ResizeToContents
             )
+        self._active_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Fixed)
+        self._active_table.horizontalHeader().resizeSection(5, 80)
         self._active_table.verticalHeader().setVisible(False)
         self._active_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self._active_table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -199,11 +201,14 @@ class TermManagerDialog(QDialog):
             "Phrase", "PMI Score", "Frequency", "First Seen", "Last Seen", "Actions"
         ])
         self._candidates_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        for i in range(1, 6):
+        for i in range(1, 5):
             self._candidates_table.horizontalHeader().setSectionResizeMode(
                 i, QHeaderView.ResizeToContents
             )
+        self._candidates_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Fixed)
+        self._candidates_table.horizontalHeader().resizeSection(5, 180)
         self._candidates_table.verticalHeader().setVisible(False)
+        self._candidates_table.verticalHeader().setDefaultSectionSize(32)
         self._candidates_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         layout.addWidget(self._candidates_table, 1)
 
@@ -239,6 +244,8 @@ class TermManagerDialog(QDialog):
             btn_layout.setSpacing(4)
 
             approve_btn = QPushButton("Approve")
+            approve_btn.setMinimumWidth(70)
+            approve_btn.setFixedHeight(24)
             approve_btn.setStyleSheet(
                 f"background: transparent; color: {ALMA_SUCCESS}; font-size: 11px; "
                 f"border: 1px solid {ALMA_SUCCESS}; border-radius: 4px; padding: 2px 8px;"
@@ -249,6 +256,8 @@ class TermManagerDialog(QDialog):
             btn_layout.addWidget(approve_btn)
 
             reject_btn = QPushButton("Reject")
+            reject_btn.setMinimumWidth(60)
+            reject_btn.setFixedHeight(24)
             reject_btn.setStyleSheet(
                 f"background: transparent; color: {ALMA_ERROR}; font-size: 11px; "
                 f"border: 1px solid {ALMA_ERROR}; border-radius: 4px; padding: 2px 8px;"

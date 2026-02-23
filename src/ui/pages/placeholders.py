@@ -57,13 +57,3 @@ class PlaceholderPage(QWidget):
         layout.addStretch()
 
 
-class ReportsPage(PlaceholderPage):
-    def __init__(self, db_manager, parent=None):
-        super().__init__(
-            title="AI Reports",
-            subtitle="Generate theme summaries, sentiment analysis, and trend narratives via Gemini",
-            description="Select TRCs and date ranges, then generate natural-language reports from ticket data using Alma's secure Gemini CLI instance.",
-            icon="🤖",
-            parent=parent,
-        )
-        self.db = db_manager

@@ -209,7 +209,7 @@ def _clean_thread_text(text, compounds=None):
 
 
 def _tokenize_and_clean(text):
-    """Tokenize and remove stopwords."""
+    """Tokenize and remove stopwords, then apply concept normalization."""
     import nltk
     from nltk.corpus import stopwords
 
@@ -222,7 +222,21 @@ def _tokenize_and_clean(text):
                if len(t) >= 3
                and t not in all_stops
                and re.match(r'^[a-z][a-z_-]+$', t)]
+
+    # P2.1a: normalize synonyms to canonical concept IDs
+    cleaned = _apply_concept_normalization(cleaned)
+
     return cleaned
+
+
+# ── P2.1a: Concept normalization (built once at module level) ──
+from src.data.concept_map import build_concept_index, apply_concept_normalization as _concept_normalize
+_concept_index = build_concept_index()
+
+
+def _apply_concept_normalization(tokens: list) -> list:
+    """Replace synonym tokens with canonical concept IDs."""
+    return _concept_normalize(tokens, _concept_index)
 
 
 def _bucket_conversations(conversations, window_size):
@@ -846,7 +860,12 @@ def compute_topic_model(conn, date_start, date_end, trc_filter, window_size,
             except (ValueError, TypeError):
                 continue
 
-            if window_size == "Weekly":
+            if window_size == "Hourly":
+                hour = created[11:13] if len(created) >= 13 else "00"
+                wlabel = f"{created[:10]} {hour}:00"
+            elif window_size == "Daily":
+                wlabel = dt.strftime("%Y-%m-%d")
+            elif window_size == "Weekly":
                 iso = dt.isocalendar()
                 wlabel = f"{iso[0]}-W{iso[1]:02d}"
             elif window_size == "Biweekly":
@@ -1329,7 +1348,7 @@ def run_full_analysis(conn, date_start, date_end, trc_filter, window_size,
         conn: SQLite connection (created in worker thread)
         date_start, date_end: Date range strings
         trc_filter: TRC code or None
-        window_size: "Weekly" | "Biweekly" | "Monthly"
+        window_size: "Hourly" | "Daily" | "Weekly" | "Biweekly" | "Monthly"
         topic_method: "nmf" (default) or "kmeans"
         progress_callback: callable(step, total_steps, message)
         db: Optional DatabaseManager instance (enables Pass 1.5 features:
@@ -1407,6 +1426,18 @@ def run_full_analysis(conn, date_start, date_end, trc_filter, window_size,
         except ValueError:
             pass
 
+    # ── Step 5b: Embedding clusters (P2.1b, optional) ──
+    embedding_clusters = None
+    try:
+        from src.data.embedding_engine import is_available as _emb_available
+        if _emb_available() and texts:
+            from src.data.embedding_engine import embed_texts, compute_embedding_clusters
+            _progress(5, "Computing semantic embeddings...")
+            embeddings = embed_texts(texts)
+            embedding_clusters = compute_embedding_clusters(embeddings)
+    except Exception:
+        pass  # Graceful degradation — embeddings are optional
+
     # ── Step 6: Sentiment trends ──
     _progress(6, "Analyzing sentiment trends...")
     sentiment_result = compute_sentiment_trends(conn, date_start, date_end, trc_filter, window_size)
@@ -1480,4 +1511,504 @@ def run_full_analysis(conn, date_start, date_end, trc_filter, window_size,
         "topics": topics,
         "correlations": correlations,
         "discovery": discovery_result,
+        "embedding_clusters": embedding_clusters,
     }
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  P2.0 — HYPOTHESIS TESTING
+# ═══════════════════════════════════════════════════════════════════
+
+def _extract_concepts(hypothesis: str) -> list:
+    """Extract concept tokens from free-text hypothesis."""
+    import nltk
+    text = hypothesis.lower()
+    text = _apply_compound_terms(text)
+    tokens = nltk.word_tokenize(text)
+    english_stops = set()
+    try:
+        from nltk.corpus import stopwords
+        english_stops = set(stopwords.words('english'))
+    except Exception:
+        pass
+    all_stops = english_stops | DOMAIN_STOPWORDS
+
+    concepts = []
+    seen = set()
+    for token in tokens:
+        if len(token) < 3 or token in all_stops:
+            continue
+        concept = _concept_index.get(token, token)
+        if concept not in seen:
+            concepts.append(concept)
+            seen.add(concept)
+    return concepts
+
+
+def _find_matching_tickets(conn, concepts, date_start, date_end) -> set:
+    """Find ticket IDs matching the hypothesis concepts via keyword (+ semantic if available)."""
+    from src.data.concept_map import DOMAIN_CONCEPTS
+
+    keyword_matches = set()
+    for concept in concepts:
+        synonyms = DOMAIN_CONCEPTS.get(concept, {concept})
+        for syn in synonyms:
+            query = syn.replace("_", " ")
+            try:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT DISTINCT ticket_id FROM conversations
+                    WHERE (full_thread LIKE ? OR subject LIKE ?)
+                      AND created_at >= ? AND created_at <= ?
+                """, (f"%{query}%", f"%{query}%", date_start, date_end))
+                for row in cursor.fetchall():
+                    keyword_matches.add(row[0])
+            except Exception:
+                pass
+
+    try:
+        from src.data.embedding_engine import is_available as _emb_available
+        if _emb_available():
+            from src.data.embedding_engine import embed_texts, semantic_search
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT ticket_id, full_thread FROM conversations
+                WHERE created_at >= ? AND created_at <= ?
+                  AND full_thread IS NOT NULL AND full_thread != ''
+                LIMIT 5000
+            """, (date_start, date_end))
+            rows = cursor.fetchall()
+            if rows:
+                ids = [r[0] for r in rows]
+                texts = [r[1] for r in rows]
+                embeddings = embed_texts(texts)
+                query_text = " ".join(c.replace("_", " ") for c in concepts)
+                sem_results = semantic_search(query_text, embeddings, ids, top_k=50)
+                keyword_matches.update(tid for tid, score in sem_results if score > 0.3)
+    except Exception:
+        pass
+
+    return keyword_matches
+
+
+def _get_related_incidents(conn, matching_trcs: set, days: int = 90) -> dict:
+    """Find incident flags for TRCs involved in the hypothesis."""
+    try:
+        from src.data.incident_engine import get_flag_history
+        related = []
+        for trc in matching_trcs:
+            flags = get_flag_history(conn, trc_code=trc, days=days)
+            related.extend(flags)
+        if not related:
+            return {"related_flags": [], "description": "No incident flags found for related TRCs"}
+        return {
+            "related_flags": related[:10],
+            "description": (
+                f"{len(related)} incident flags found across "
+                f"{len(matching_trcs)} related TRCs in the last {days} days"
+            ),
+        }
+    except Exception:
+        return {"related_flags": [], "description": "Incident engine unavailable"}
+
+
+def _score_evidence(concept_groups: dict, temporal: dict, correlation: dict, incidents: dict) -> str:
+    score = 0
+    total_matches = sum(len(g.get("ticket_ids", [])) for g in concept_groups.values())
+    if total_matches >= 30:
+        score += 2
+    elif total_matches >= 10:
+        score += 1
+
+    if temporal and temporal.get("lead_lag"):
+        r = abs(temporal["lead_lag"].get("peak_correlation", 0))
+        if r > 0.7:
+            score += 3
+        elif r > 0.5:
+            score += 2
+
+    if correlation:
+        r = abs(correlation.get("pearson_r", 0))
+        if r > 0.7:
+            score += 2
+        elif r > 0.5:
+            score += 1
+
+    # Incident corroboration: independent statistical confirmation
+    if incidents and incidents.get("related_flags"):
+        theta_2_flags = [f for f in incidents["related_flags"] if f.get("theta_level") == 2]
+        if theta_2_flags:
+            score += 2
+        elif incidents["related_flags"]:
+            score += 1
+
+    for g in concept_groups.values():
+        if g.get("sentiment_avg", 0) < -0.2:
+            score += 1
+
+    if score >= 7:
+        return "strong"
+    if score >= 4:
+        return "moderate"
+    if score >= 2:
+        return "weak"
+    return "insufficient"
+
+
+def test_hypothesis(
+    conn,
+    hypothesis: str,
+    date_start: str,
+    date_end: str,
+    window_size: str = "weekly",
+    progress_callback=None,
+    gemini_client=None,
+) -> dict:
+    """
+    Test a user hypothesis against ticket data.
+
+    Args:
+        conn: SQLite connection (created in worker thread)
+        hypothesis: Free-text hypothesis string
+        date_start, date_end: Date range strings (YYYY-MM-DD)
+        window_size: Bucketing size for temporal analysis
+        progress_callback: callable(step, total, message)
+        gemini_client: Optional GeminiClient instance for AI synthesis
+
+    Returns a rich evidence dict with gemini_synthesis if Gemini is available.
+    """
+    _ensure_nltk_data()
+
+    def _prog(step, msg):
+        if progress_callback:
+            progress_callback(step, 8, msg)
+
+    # 1. Extract concepts
+    _prog(1, "Extracting concepts from hypothesis...")
+    concepts = _extract_concepts(hypothesis)
+
+    # 2. Find matching tickets
+    _prog(2, "Searching for matching tickets...")
+    matching_ids = _find_matching_tickets(conn, concepts, date_start, date_end)
+
+    if not matching_ids:
+        return {
+            "hypothesis": hypothesis,
+            "concepts_extracted": concepts,
+            "matching_tickets": [],
+            "concept_groups": {},
+            "temporal_pattern": {},
+            "correlation": {},
+            "incident_signals": {},
+            "sentiment_data": {},
+            "evidence_strength": "insufficient",
+            "gemini_synthesis": None,
+        }
+
+    # 3. Fetch matching conversations
+    _prog(3, "Analyzing matching conversations...")
+    placeholders = ",".join("?" * len(matching_ids))
+    cursor = conn.cursor()
+    cursor.execute(f"""
+        SELECT ticket_id, subject, trc_code, full_thread, csat_score, created_at
+        FROM conversations
+        WHERE ticket_id IN ({placeholders})
+    """, list(matching_ids))
+    matching_tickets = [
+        {
+            "ticket_id": r[0], "subject": r[1] or "", "trc_code": r[2] or "",
+            "full_thread": r[3] or "", "csat_score": r[4], "created_at": r[5] or "",
+        }
+        for r in cursor.fetchall()
+    ]
+
+    # 4. Build concept groups
+    _prog(4, "Building concept groups...")
+    from nltk.sentiment.vader import SentimentIntensityAnalyzer
+    sia = SentimentIntensityAnalyzer()
+    from src.data.concept_map import DOMAIN_CONCEPTS
+
+    concept_groups = {}
+    for concept in concepts:
+        synonyms = DOMAIN_CONCEPTS.get(concept, {concept})
+        group_tickets = []
+        for t in matching_tickets:
+            text = (t.get("full_thread", "") + " " + t.get("subject", "")).lower()
+            if any(syn.replace("_", " ") in text for syn in synonyms):
+                group_tickets.append(t)
+
+        if group_tickets:
+            sentiments = [sia.polarity_scores(t["full_thread"])["compound"]
+                          for t in group_tickets if t.get("full_thread")]
+            trc_counts = defaultdict(int)
+            volume_by_window = defaultdict(int)
+            for t in group_tickets:
+                trc_counts[t["trc_code"]] += 1
+                bucket = _bucket_single(t.get("created_at", ""), window_size)
+                if bucket:
+                    volume_by_window[bucket] += 1
+
+            concept_groups[concept] = {
+                "ticket_ids": [t["ticket_id"] for t in group_tickets],
+                "trcs": dict(trc_counts),
+                "sentiment_avg": float(np.mean(sentiments)) if sentiments else 0.0,
+                "volume_by_window": sorted(volume_by_window.items()),
+            }
+
+    # 5. Incident corroboration
+    _prog(5, "Checking incident flags...")
+    matching_trcs = {t["trc_code"] for t in matching_tickets if t.get("trc_code")}
+    incident_signals = _get_related_incidents(conn, matching_trcs)
+
+    # 6. Temporal / correlation (simple inline computation)
+    _prog(6, "Analyzing temporal patterns...")
+    temporal_pattern = {}
+    correlation = {}
+    if len(concept_groups) >= 2:
+        group_keys = list(concept_groups.keys())[:2]
+        s1 = dict(concept_groups[group_keys[0]]["volume_by_window"])
+        s2 = dict(concept_groups[group_keys[1]]["volume_by_window"])
+        common_keys = sorted(set(s1) & set(s2))
+        if len(common_keys) >= 4:
+            v1 = [s1[k] for k in common_keys]
+            v2 = [s2[k] for k in common_keys]
+            try:
+                from scipy.stats import pearsonr
+                r, p = pearsonr(v1, v2)
+                correlation = {
+                    "pearson_r": float(r),
+                    "p_value": float(p),
+                    "interpretation": (
+                        f"When '{group_keys[0].replace('_', ' ')}' rises, "
+                        f"'{group_keys[1].replace('_', ' ')}' "
+                        f"{'also rises' if r > 0 else 'falls'} "
+                        f"(r={r:.2f}, p={p:.3f})"
+                    ),
+                }
+            except Exception:
+                pass
+
+    # 7. Sentiment summary
+    _prog(7, "Summarizing sentiment...")
+    all_sentiments = []
+    for t in matching_tickets:
+        if t.get("full_thread"):
+            s = sia.polarity_scores(t["full_thread"])["compound"]
+            all_sentiments.append(s)
+    sentiment_data = {}
+    if all_sentiments:
+        avg = float(np.mean(all_sentiments))
+        sentiment_data = {
+            "avg_compound": avg,
+            "trend": "negative" if avg < -0.1 else "positive" if avg > 0.1 else "neutral",
+        }
+
+    # 8. Evidence strength + optional Gemini synthesis
+    _prog(8, "Scoring evidence...")
+    evidence_strength = _score_evidence(concept_groups, temporal_pattern, correlation, incident_signals)
+
+    gemini_synthesis = None
+    if gemini_client is not None:
+        try:
+            from src.gemini.prompts import build_hypothesis_prompt, SYSTEM_PROMPT
+            evidence_for_prompt = {
+                "matching_tickets": matching_tickets[:15],
+                "temporal_pattern": temporal_pattern,
+                "correlation": correlation,
+                "incident_signals": incident_signals,
+            }
+            prompt = build_hypothesis_prompt(hypothesis, evidence_for_prompt)
+            gemini_synthesis = gemini_client.generate(prompt, system_prompt=SYSTEM_PROMPT)
+        except Exception as e:
+            gemini_synthesis = f"[AI synthesis unavailable: {e}]"
+
+    return {
+        "hypothesis": hypothesis,
+        "concepts_extracted": concepts,
+        "matching_tickets": matching_tickets,
+        "concept_groups": concept_groups,
+        "temporal_pattern": temporal_pattern,
+        "correlation": correlation,
+        "incident_signals": incident_signals,
+        "sentiment_data": sentiment_data,
+        "evidence_strength": evidence_strength,
+        "gemini_synthesis": gemini_synthesis,
+    }
+
+
+def _bucket_single(created_at: str, window_size: str) -> str:
+    """Return the window bucket label for a single created_at timestamp."""
+    if not created_at:
+        return ""
+    try:
+        dt = datetime.strptime(created_at[:10], "%Y-%m-%d")
+    except (ValueError, TypeError):
+        return ""
+    ws = window_size.lower()
+    if ws == "hourly":
+        hour = created_at[11:13] if len(created_at) >= 13 else "00"
+        return f"{created_at[:10]} {hour}:00"
+    if ws == "daily":
+        return created_at[:10]
+    if ws == "weekly":
+        iso = dt.isocalendar()
+        return f"{iso[0]}-W{iso[1]:02d}"
+    if ws == "biweekly":
+        week_num = dt.isocalendar()[1]
+        biweek = (week_num - 1) // 2 * 2 + 1
+        return f"{dt.year}-BW{biweek:02d}"
+    if ws == "monthly":
+        return dt.strftime("%Y-%m")
+    return created_at[:10]
+
+
+# ═══════════════════════════════════════════
+#  P3.0 — AI CLUSTER SMOOTHING
+# ═══════════════════════════════════════════
+
+def smooth_clusters_with_ai(topics, gemini_client):
+    """Use Gemini to refine NMF topic cluster labels.
+
+    For each cluster, sends the top terms and asks Gemini to evaluate:
+    - coherent: bool (do the terms form a meaningful topic?)
+    - label: str (better human-readable label)
+    - merge_with: int | None (cluster index to merge with)
+    - split_into: list | None (proposed sub-clusters)
+    - confidence: float (0-1)
+
+    Returns dict: {cluster_index: {coherent, label, merge_with, split_into, confidence}}
+    """
+    if not topics or not gemini_client:
+        return {}
+
+    # Build the prompt
+    cluster_descriptions = []
+    for i, topic in enumerate(topics):
+        terms = topic.get("top_terms", [])
+        term_str = ", ".join(
+            t["term"] if isinstance(t, dict) else str(t)
+            for t in terms[:8]
+        )
+        count = topic.get("count", 0)
+        sentiment = topic.get("avg_sentiment", 0)
+        cluster_descriptions.append(
+            f"Cluster {i}: [{term_str}] ({count} tickets, sentiment={sentiment:+.2f})"
+        )
+
+    prompt = (
+        "You are an RCM support analytics expert.\n\n"
+        "Review these NMF topic clusters from healthcare support ticket analysis. "
+        "For each cluster, evaluate coherence and suggest improvements.\n\n"
+        "CLUSTERS:\n" + "\n".join(cluster_descriptions) + "\n\n"
+        "Return ONLY valid JSON (no markdown fences):\n"
+        "{\n"
+        '  "0": {"coherent": true, "label": "Billing Denials", "merge_with": null, '
+        '"split_into": null, "confidence": 0.85},\n'
+        '  "1": ...\n'
+        "}\n\n"
+        "Rules:\n"
+        "- Labels should be 2-4 word RCM-relevant phrases\n"
+        "- Set coherent=false for clusters mixing unrelated topics\n"
+        "- Only suggest merge_with if two clusters clearly overlap\n"
+        "- Only suggest split_into if a cluster has distinct sub-themes\n"
+        "- confidence 0-1 reflecting your certainty about the label"
+    )
+
+    try:
+        import json
+        response = gemini_client.generate(
+            prompt, system_prompt="You are an RCM analytics expert. Return only JSON."
+        )
+        # Clean potential markdown fences
+        text = response.strip()
+        if text.startswith("```"):
+            text = text.split("\n", 1)[-1]
+            if text.endswith("```"):
+                text = text[:-3]
+        result = json.loads(text.strip())
+        # Normalize keys to ints
+        return {int(k): v for k, v in result.items()}
+    except Exception:
+        return {}
+
+
+# ═══════════════════════════════════════════
+#  P3.0 — AI KEYWORD SUGGESTIONS
+# ═══════════════════════════════════════════
+
+def suggest_keyword_improvements(terms, gemini_client):
+    """Use Gemini to suggest keyword suppressions and concept map additions.
+
+    Args:
+        terms: dict with "all_terms" and "rising_terms" from run_full_analysis()
+        gemini_client: GeminiClient instance
+
+    Returns dict:
+        {
+            "suppress": [{"term": "...", "reason": "..."}, ...],
+            "add_to_map": [{"term": "...", "concept_group": "...", "reason": "..."}, ...]
+        }
+    """
+    if not terms or not gemini_client:
+        return {"suppress": [], "add_to_map": []}
+
+    all_terms = terms.get("all_terms", [])
+    rising = terms.get("rising_terms", [])
+
+    # Format terms for the prompt
+    all_lines = []
+    for t in all_terms[:40]:
+        if isinstance(t, dict):
+            all_lines.append(f"  {t.get('term', t.get('word', ''))}: "
+                           f"score={t.get('score', t.get('tfidf', ''))}")
+        elif isinstance(t, (list, tuple)) and len(t) >= 2:
+            all_lines.append(f"  {t[0]}: score={t[1]:.4f}")
+
+    rising_lines = []
+    for t in rising[:20]:
+        if isinstance(t, dict):
+            rising_lines.append(f"  {t.get('term', '')}: velocity={t.get('velocity', '')}")
+        elif isinstance(t, (list, tuple)) and len(t) >= 2:
+            rising_lines.append(f"  {t[0]}: velocity={t[1]:.4f}")
+
+    prompt = (
+        "You are an RCM support analytics expert reviewing TF-IDF keyword results.\n\n"
+        "TOP TERMS (TF-IDF):\n" + "\n".join(all_lines) + "\n\n"
+        "RISING TERMS (velocity):\n" + "\n".join(rising_lines) + "\n\n"
+        "Analyze these terms and return ONLY valid JSON (no markdown fences):\n"
+        "{\n"
+        '  "suppress": [\n'
+        '    {"term": "...", "reason": "agent boilerplate / not actionable"},\n'
+        "    ...\n"
+        "  ],\n"
+        '  "add_to_map": [\n'
+        '    {"term": "...", "concept_group": "billing_denials", "reason": "domain variant"},\n'
+        "    ...\n"
+        "  ]\n"
+        "}\n\n"
+        "Rules:\n"
+        "- Suppress: agent scripted phrases (\"happy to help\", \"appreciate your patience\"), "
+        "generic filler, non-RCM terms that add noise\n"
+        "- Add to map: RCM domain terms that should be grouped with existing concepts "
+        "(billing, claims, eligibility, credentialing, authorization, etc.)\n"
+        "- Be conservative — only flag terms you're confident about\n"
+        "- Max 10 suppress, max 5 add_to_map"
+    )
+
+    try:
+        import json
+        response = gemini_client.generate(
+            prompt, system_prompt="You are an RCM analytics expert. Return only JSON."
+        )
+        text = response.strip()
+        if text.startswith("```"):
+            text = text.split("\n", 1)[-1]
+            if text.endswith("```"):
+                text = text[:-3]
+        result = json.loads(text.strip())
+        return {
+            "suppress": result.get("suppress", [])[:10],
+            "add_to_map": result.get("add_to_map", [])[:5],
+        }
+    except Exception:
+        return {"suppress": [], "add_to_map": []}

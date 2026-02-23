@@ -1,6 +1,6 @@
 """
 Alma Insights — Incidents Page
-TRC ticket-rate anomaly detection with θ₁/θ₂ control bands.
+TRC ticket-rate anomaly detection with Poisson thresholds + CUSUM drift.
 """
 
 import json
@@ -10,8 +10,8 @@ from datetime import datetime
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QComboBox, QDateEdit, QFrame, QScrollArea, QTableWidget,
-    QTableWidgetItem, QHeaderView, QAbstractItemView, QProgressDialog,
+    QComboBox, QFrame, QScrollArea, QTableWidget,
+    QTableWidgetItem, QHeaderView, QAbstractItemView,
     QApplication, QSizePolicy,
 )
 from PySide6.QtCore import Qt, QDate, QThread, Signal
@@ -22,9 +22,16 @@ from src.ui.theme import (
     ALMA_WHITE, ALMA_CREAM, ALMA_TEXT_DARK, ALMA_TEXT_MID, ALMA_TEXT_LIGHT,
     ALMA_BORDER, ALMA_BORDER_LIGHT,
     ALMA_SUCCESS, ALMA_WARNING, ALMA_ERROR, ALMA_INFO,
+    ALMA_BG_ELEVATED, apply_card_shadow, apply_card_shadow_soft,
 )
+from src.ui.widgets.date_picker import ModernDatePicker
 from src.ui.widgets.control_chart import ControlChartWidget
-from src.ui.widgets.report_history import ReportHistoryWidget
+from src.ui.widgets.report_history_summary import ReportHistorySummary
+from src.ui.widgets.pagination_bar import PaginationBar
+from src.ui.layman_mode import (
+    is_layman_mode, translate_label, format_pvalue,
+    format_lambda, format_zscore, format_cusum, format_theta_level,
+)
 
 
 # ═══════════════════════════════════════════
@@ -36,10 +43,11 @@ class IncidentWorker(QThread):
     error = Signal(str)
     progress = Signal(str, int)  # message, percent
 
-    def __init__(self, db_path, target_date):
+    def __init__(self, db_path, target_date, date_from=None):
         super().__init__()
         self.db_path = db_path
         self.target_date = target_date
+        self.date_from = date_from
 
     def run(self):
         try:
@@ -51,6 +59,7 @@ class IncidentWorker(QThread):
             result = run_incident_scan(
                 db,
                 target_date=self.target_date,
+                date_from=self.date_from,
                 progress_callback=lambda msg, pct: self.progress.emit(msg, pct),
             )
             db.close()
@@ -99,13 +108,18 @@ class IncidentsPage(QWidget):
     def __init__(self, db_manager, parent=None):
         super().__init__(parent)
         self.db = db_manager
+        self._drilldown = None
         self._worker = None
         self._theta_worker = None
         self._progress = None
         self._scan_start_time = 0
         self._last_result = None
-        self._trc_statuses = []
+        self._trc_results = []
         self._build_ui()
+
+    def set_drilldown_panel(self, panel):
+        """Accept a reference to the shared DrilldownPanel from MainWindow."""
+        self._drilldown = panel
 
     def _build_ui(self):
         outer = QVBoxLayout(self)
@@ -142,7 +156,7 @@ class IncidentsPage(QWidget):
         header.setObjectName("PageHeader")
         self._layout.addWidget(header)
 
-        sub = QLabel("TRC ticket-rate anomaly detection with 1-theta/2-theta control bands")
+        sub = QLabel("Statistical anomaly detection: Poisson thresholds + CUSUM drift")
         sub.setObjectName("PageSubheader")
         self._layout.addWidget(sub)
         self._layout.addSpacing(20)
@@ -154,8 +168,8 @@ class IncidentsPage(QWidget):
         card.setObjectName("IncidentFilterCard")
         card.setStyleSheet(f"""
             #IncidentFilterCard {{
-                background: {ALMA_WHITE}; border: 1px solid {ALMA_BORDER_LIGHT};
-                border-radius: 10px;
+                background: {ALMA_BG_ELEVATED}; border: 1px solid rgba(214, 210, 202, 0.45);
+                border-radius: 12px;
             }}
             #IncidentFilterCard QLabel {{
                 color: {ALMA_TEXT_MID}; border: none; background: transparent;
@@ -171,23 +185,33 @@ class IncidentsPage(QWidget):
                 padding: 8px 12px; font-size: 13px;
             }}
         """)
+        apply_card_shadow(card)
         row = QHBoxLayout(card)
         row.setContentsMargins(16, 12, 16, 12)
         row.setSpacing(12)
 
         label_style = f"font-size: 11px; font-weight: 600; color: {ALMA_TEXT_MID}; letter-spacing: 0.5px;"
 
-        # Date picker
+        # Date range: From
         col = QVBoxLayout()
         col.setSpacing(4)
-        lbl = QLabel("Scan Date")
+        lbl = QLabel("From")
         lbl.setStyleSheet(label_style)
         col.addWidget(lbl)
-        self.date_picker = QDateEdit()
-        self.date_picker.setCalendarPopup(True)
-        self.date_picker.setDate(QDate.currentDate())
-        self.date_picker.setDisplayFormat("MMM d, yyyy")
-        col.addWidget(self.date_picker)
+        self.date_from = ModernDatePicker()
+        self.date_from.setDate(QDate.currentDate().addDays(-30))
+        col.addWidget(self.date_from)
+        row.addLayout(col, 1)
+
+        # Date range: To
+        col = QVBoxLayout()
+        col.setSpacing(4)
+        lbl = QLabel("To")
+        lbl.setStyleSheet(label_style)
+        col.addWidget(lbl)
+        self.date_to = ModernDatePicker()
+        self.date_to.setDate(QDate.currentDate())
+        col.addWidget(self.date_to)
         row.addLayout(col, 1)
 
         # TRC filter
@@ -226,28 +250,18 @@ class IncidentsPage(QWidget):
     # ── TRC STATUS GRID ──
 
     def _build_status_grid(self):
-        frame = QFrame()
-        frame.setObjectName("StatusGridPanel")
-        frame.setStyleSheet(f"""
-            #StatusGridPanel {{
-                background: {ALMA_WHITE}; border: 1px solid {ALMA_BORDER_LIGHT};
-                border-radius: 10px;
-            }}
-        """)
-        layout = QVBoxLayout(frame)
-        layout.setContentsMargins(16, 14, 16, 14)
-
-        title = QLabel("TRC Status Grid")
-        title.setStyleSheet(f"font-size: 14px; font-weight: 700; color: {ALMA_TEXT_DARK}; border: none;")
-        layout.addWidget(title)
+        from src.ui.widgets.collapsible_section import CollapsibleSection
+        section = CollapsibleSection("TRC Status Grid", section_key="incidents.trc_status_grid")
 
         self.status_table = QTableWidget()
-        headers = ["TRC", "Rate", "Mean", "1-theta", "2-theta", "Z-Score", "Status"]
+        headers = ["TRC", "Tier", "Today", "\u03bb", "\u03b8\u2081", "\u03b8\u2082", "p-value", "CUSUM", "Status"]
         self.status_table.setColumnCount(len(headers))
         self.status_table.setHorizontalHeaderLabels(headers)
         self.status_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.status_table.horizontalHeader().setSectionResizeMode(7, QHeaderView.Stretch)  # CUSUM col wider
         for i in range(1, len(headers)):
-            self.status_table.horizontalHeader().setSectionResizeMode(i, QHeaderView.ResizeToContents)
+            if i != 7:
+                self.status_table.horizontalHeader().setSectionResizeMode(i, QHeaderView.ResizeToContents)
         self.status_table.verticalHeader().setVisible(False)
         self.status_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.status_table.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -259,52 +273,37 @@ class IncidentsPage(QWidget):
         self.status_table.setMinimumHeight(200)
         self.status_table.setMaximumHeight(350)
         self.status_table.currentCellChanged.connect(self._on_trc_row_selected)
-        layout.addWidget(self.status_table)
+        self.status_table.doubleClicked.connect(self._on_trc_row_drilldown)
+        section.add_widget(self.status_table)
+        self._grid_pager = PaginationBar(page_size=15)
+        self._grid_pager.page_changed.connect(self._on_grid_page_changed)
+        section.add_widget(self._grid_pager)
+        self._grid_all_results = []  # full sorted trc_results for pagination
 
-        self._layout.addWidget(frame)
+        self._layout.addWidget(section)
         self._layout.addSpacing(16)
 
     # ── CONTROL CHART ──
 
     def _build_control_chart(self):
-        frame = QFrame()
-        frame.setObjectName("ChartPanel")
-        frame.setStyleSheet(f"""
-            #ChartPanel {{
-                background: {ALMA_WHITE}; border: 1px solid {ALMA_BORDER_LIGHT};
-                border-radius: 10px;
-            }}
-        """)
-        layout = QVBoxLayout(frame)
-        layout.setContentsMargins(16, 14, 16, 14)
-
-        title = QLabel("Control Chart — Last 7 Days Hourly Data")
-        title.setStyleSheet(f"font-size: 14px; font-weight: 700; color: {ALMA_TEXT_DARK}; border: none;")
-        layout.addWidget(title)
+        from src.ui.widgets.collapsible_section import CollapsibleSection
+        section = CollapsibleSection("Control Chart", section_key="incidents.control_chart")
 
         self.control_chart = ControlChartWidget()
-        layout.addWidget(self.control_chart)
+        section.add_widget(self.control_chart)
 
-        self._layout.addWidget(frame)
+        self._layout.addWidget(section)
         self._layout.addSpacing(16)
 
     # ── OPEN INCIDENTS ──
 
     def _build_open_incidents(self):
-        frame = QFrame()
-        frame.setObjectName("OpenIncidentsPanel")
-        frame.setStyleSheet(f"""
-            #OpenIncidentsPanel {{
-                background: {ALMA_WHITE}; border: 1px solid {ALMA_BORDER_LIGHT};
-                border-radius: 10px;
-            }}
-        """)
-        layout = QVBoxLayout(frame)
-        layout.setContentsMargins(16, 14, 16, 14)
+        from src.ui.widgets.collapsible_section import CollapsibleSection
+        section = CollapsibleSection("Open Incidents", section_key="incidents.open_incidents")
 
-        title = QLabel("Open Incidents")
-        title.setStyleSheet(f"font-size: 14px; font-weight: 700; color: {ALMA_TEXT_DARK}; border: none;")
-        layout.addWidget(title)
+        incident_inner = QWidget()
+        incident_layout = QVBoxLayout(incident_inner)
+        incident_layout.setContentsMargins(0, 0, 0, 0)
 
         self.incidents_container = QVBoxLayout()
         self.incidents_container.setSpacing(8)
@@ -312,33 +311,26 @@ class IncidentsPage(QWidget):
         self._no_incidents_label.setStyleSheet(f"color: {ALMA_TEXT_LIGHT}; font-size: 12px; border: none; padding: 12px;")
         self._no_incidents_label.setAlignment(Qt.AlignCenter)
         self.incidents_container.addWidget(self._no_incidents_label)
-        layout.addLayout(self.incidents_container)
+        incident_layout.addLayout(self.incidents_container)
+        section.add_widget(incident_inner)
 
-        self._layout.addWidget(frame)
+        self._layout.addWidget(section)
         self._layout.addSpacing(16)
 
     # ── θ EWMA ANOMALY SCAN PANEL ──
 
     def _build_theta_panel(self):
-        frame = QFrame()
-        frame.setObjectName("ThetaPanel")
-        frame.setStyleSheet(f"""
-            #ThetaPanel {{
-                background: {ALMA_WHITE}; border: 1px solid {ALMA_BORDER_LIGHT};
-                border-radius: 10px;
-            }}
-        """)
-        layout = QVBoxLayout(frame)
-        layout.setContentsMargins(16, 14, 16, 14)
+        from src.ui.widgets.collapsible_section import CollapsibleSection
+        section = CollapsibleSection("\u03b8 Anomaly Scan", section_key="incidents.theta_anomaly_scan")
 
-        # Header row
+        theta_inner = QWidget()
+        layout = QVBoxLayout(theta_inner)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        # Header row with action buttons
         header_row = QHBoxLayout()
-        title = QLabel("θ Anomaly Scan")
-        title.setStyleSheet(f"font-size: 14px; font-weight: 700; color: {ALMA_TEXT_DARK}; border: none;")
-        header_row.addWidget(title)
-        header_row.addStretch()
 
-        self._theta_scan_btn = QPushButton("Run θ Scan")
+        self._theta_scan_btn = QPushButton("Run \u03b8 Scan")
         self._theta_scan_btn.setCursor(Qt.PointingHandCursor)
         self._theta_scan_btn.setStyleSheet(f"""
             QPushButton {{
@@ -363,10 +355,11 @@ class IncidentsPage(QWidget):
         """)
         history_btn.clicked.connect(self._toggle_theta_history)
         header_row.addWidget(history_btn)
+        header_row.addStretch()
 
         layout.addLayout(header_row)
 
-        subtitle = QLabel("EWMA baseline anomaly detection — volume, sentiment, and term frequency per TRC per day")
+        subtitle = QLabel("EWMA baseline anomaly detection \u2014 volume, sentiment, and term frequency per TRC per day")
         subtitle.setStyleSheet(f"font-size: 11px; color: {ALMA_TEXT_LIGHT}; border: none;")
         layout.addWidget(subtitle)
         layout.addSpacing(6)
@@ -376,26 +369,26 @@ class IncidentsPage(QWidget):
         self._theta_container.setSpacing(8)
         layout.addLayout(self._theta_container)
 
-        self._theta_message = QLabel("Run θ scan to detect anomalies across your ticket data...")
+        self._theta_message = QLabel("Run \u03b8 scan to detect anomalies across your ticket data...")
         self._theta_message.setStyleSheet(f"color: {ALMA_TEXT_LIGHT}; font-size: 12px; border: none;")
         self._theta_message.setAlignment(Qt.AlignCenter)
         layout.addWidget(self._theta_message)
 
-        self._layout.addWidget(frame)
+        self._theta_pager = PaginationBar(page_size=10)
+        self._theta_pager.page_changed.connect(self._on_theta_page_changed)
+        layout.addWidget(self._theta_pager)
+        self._theta_all_flags = []  # full sorted flags for pagination
+
+        section.add_widget(theta_inner)
+        self._layout.addWidget(section)
         self._layout.addSpacing(16)
 
     # ── REPORT HISTORY ──
 
     def _build_report_history(self):
-        divider = QFrame()
-        divider.setObjectName("SectionDivider")
-        divider.setFixedHeight(1)
-        divider.setStyleSheet(f"background: {ALMA_BORDER_LIGHT};")
-        self._layout.addWidget(divider)
-
-        self.report_history = ReportHistoryWidget(self.db, "incidents")
-        self.report_history.report_selected.connect(self._load_past_report)
-        self._layout.addWidget(self.report_history)
+        self.report_summary = ReportHistorySummary(self.db, "incidents")
+        self.report_summary.view_all_clicked.connect(self._open_report_history)
+        self._layout.addWidget(self.report_summary)
 
     # ═══════════════════════════════════════════
     #  TRC FILTER POPULATION
@@ -415,14 +408,23 @@ class IncidentsPage(QWidget):
                 self.trc_combo.setCurrentIndex(idx)
 
     def sync_date_to_data(self):
-        """Adjust the date picker to match the data range in the DB."""
+        """Set the date pickers to the data range in the DB."""
         try:
             min_d, max_d = self.db.get_date_range()
-            if max_d:
-                d = max_d[:10]
-                parts = d.split("-")
+            if min_d:
+                parts = min_d[:10].split("-")
                 if len(parts) == 3:
-                    self.date_picker.setDate(QDate(int(parts[0]), int(parts[1]), int(parts[2])))
+                    qd_min = QDate(int(parts[0]), int(parts[1]), int(parts[2]))
+                    self.date_from.setMinimumDate(qd_min)
+                    self.date_to.setMinimumDate(qd_min)
+                    self.date_from.setDate(qd_min)
+            if max_d:
+                parts = max_d[:10].split("-")
+                if len(parts) == 3:
+                    qd_max = QDate(int(parts[0]), int(parts[1]), int(parts[2]))
+                    self.date_from.setMaximumDate(qd_max)
+                    self.date_to.setMaximumDate(qd_max)
+                    self.date_to.setDate(qd_max)
         except Exception:
             pass
 
@@ -431,104 +433,111 @@ class IncidentsPage(QWidget):
     # ═══════════════════════════════════════════
 
     def _on_run_scan(self):
-        """Run incident scan in background thread."""
+        """Run incident scan via the unified job queue."""
         if self._worker and self._worker.isRunning():
             return
 
-        self.populate_trc_filter()
-        self.sync_date_to_data()
-
-        # Ensure hourly counts are populated
+        # Ensure count tables are populated
         try:
+            self.db.populate_daily_counts()
             self.db.populate_hourly_counts()
         except Exception:
             pass
 
-        target_date = self.date_picker.date().toString("yyyy-MM-dd")
-
-        self._progress = QProgressDialog("Running incident scan...", None, 0, 100, self)
-        self._progress.setWindowTitle("Scanning")
-        self._progress.setWindowModality(Qt.WindowModal)
-        self._progress.setMinimumDuration(0)
-        self._progress.show()
-        QApplication.processEvents()
-
+        self.sync_date_to_data()
         self._scan_start_time = time.time()
-        self._worker = IncidentWorker(self.db.db_path, target_date)
+
+        main_win = self.window()
+        if hasattr(main_win, '_job_queue'):
+            job = main_win._make_incident_scan_job()
+            main_win._job_queue.submit(job)
+        else:
+            self._run_scan_directly()
+
+    def _run_scan_directly(self):
+        """Run incident scan without the job queue (fallback)."""
+        date_from = self.date_from.date().toString("yyyy-MM-dd")
+        date_to = self.date_to.date().toString("yyyy-MM-dd")
+        self._scan_start_time = time.time()
+        self._worker = IncidentWorker(self.db.db_path, date_to, date_from)
         self._worker.finished.connect(self._on_scan_results)
         self._worker.error.connect(self._on_scan_error)
-        self._worker.progress.connect(self._on_scan_progress)
         self._worker.start()
 
     def auto_run_scan(self):
         """Auto-scan triggered after data import. Uses latest data date."""
         self.sync_date_to_data()
-        target_date = self.date_picker.date().toString("yyyy-MM-dd")
+        date_from = self.date_from.date().toString("yyyy-MM-dd")
+        date_to = self.date_to.date().toString("yyyy-MM-dd")
 
         if self._worker and self._worker.isRunning():
             return
 
         self._scan_start_time = time.time()
-        self._worker = IncidentWorker(self.db.db_path, target_date)
+        self._worker = IncidentWorker(self.db.db_path, date_to, date_from)
         self._worker.finished.connect(self._on_scan_results)
         self._worker.error.connect(self._on_scan_error)
         self._worker.start()
 
     def _on_scan_progress(self, msg, pct):
-        if hasattr(self, "_progress"):
-            self._progress.setLabelText(msg)
-            self._progress.setValue(pct)
-            QApplication.processEvents()
+        """Progress callback — forwarded by job queue to overlay."""
+        pass  # Handled by unified overlay now
 
     def _on_scan_results(self, result):
         """Handle scan results."""
-        if hasattr(self, "_progress") and self._progress is not None:
-            self._progress.close()
-            self._progress = None
-
-        elapsed_ms = int((time.time() - self._scan_start_time) * 1000)
+        elapsed_ms = int((time.time() - getattr(self, '_scan_start_time', time.time())) * 1000)
         self._last_result = result
 
         # Apply TRC filter
         trc_filter = self.trc_combo.currentData() or None
-        statuses = result.get("trc_statuses", [])
+        trc_results = result.get("trc_results", [])
         if trc_filter:
-            statuses = [s for s in statuses if s["trc_code"] == trc_filter]
+            trc_results = [r for r in trc_results if r["trc_code"] == trc_filter]
 
         # Populate grid
-        self._populate_status_grid(statuses)
+        self._populate_status_grid(trc_results)
 
         # Populate open incidents
         self._populate_open_incidents()
 
         # Select first flagged TRC for chart, or first TRC
-        self._auto_select_chart(statuses)
+        self._auto_select_chart(trc_results)
 
         # Save report
-        theta_2_count = result.get("theta_2_count", 0)
-        theta_1_count = result.get("theta_1_count", 0)
+        theta_2_count = sum(1 for r in result.get("trc_results", []) if r["flag_level"] == 2)
+        theta_1_count = sum(1 for r in result.get("trc_results", []) if r["flag_level"] == 1)
         summary = {
             "theta_2_count": theta_2_count,
             "theta_1_count": theta_1_count,
             "trcs_scanned": result.get("trcs_scanned", 0),
+            "open_flags_total": result.get("open_flags_total", 0),
         }
         self.db.save_report(
             page="incidents",
-            parameters={"scan_date": result.get("scan_date", "")},
+            parameters={
+                "scan_date": result.get("scan_date", ""),
+                "date_from": result.get("date_from", ""),
+            },
             summary=summary,
             full_results=json.dumps(result, default=str),
             ticket_count=0,
             duration_ms=elapsed_ms,
         )
-        self.report_history.refresh()
+        self.report_summary.refresh()
 
         # Emit badge signal
         self.scan_complete.emit(theta_2_count)
 
     def _on_scan_error(self, error_text):
-        if hasattr(self, "_progress") and self._progress is not None:
-            self._progress.close()
-            self._progress = None
+        # Mark job as failed so queue advances immediately
+        main_win = self.window()
+        if hasattr(main_win, '_job_queue'):
+            main_win._job_queue.mark_job_failed("incident_scan", error_text)
+        # Defer error dialog so it doesn't block the job queue
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(0, lambda: self._show_scan_error(error_text))
+
+    def _show_scan_error(self, error_text):
         from PySide6.QtWidgets import QMessageBox
         QMessageBox.critical(self, "Scan Error", f"Incident scan failed:\n\n{error_text}")
 
@@ -536,121 +545,225 @@ class IncidentsPage(QWidget):
     #  STATUS GRID
     # ═══════════════════════════════════════════
 
-    def _populate_status_grid(self, statuses):
-        """Fill the TRC status grid table."""
-        # Sort: flagged TRCs first (2θ, then 1θ), then by |z_score| desc
-        statuses = sorted(
-            statuses,
-            key=lambda s: (-s["flag_level"], -abs(s["z_score"]))
+    def _populate_status_grid(self, trc_results):
+        """Fill the TRC status grid table with Poisson + CUSUM data."""
+        # Sort: flagged TRCs first (2θ, then 1θ), then by p_value ascending
+        trc_results = sorted(
+            trc_results,
+            key=lambda r: (-r["flag_level"], r.get("p_value_daily", 1.0))
         )
 
+        # Store full dataset for pagination & row-click mapping
+        self._grid_all_results = trc_results
+        self._grid_pager.set_total(len(trc_results))
+        self._show_grid_page(0)
+
+    def _on_grid_page_changed(self, page: int):
+        """Handle status grid pagination."""
+        self._show_grid_page(page)
+
+    def _show_grid_page(self, page: int):
+        """Render one page of TRC results into the status grid."""
+        ps = self._grid_pager.page_size
+        start = page * ps
+        end = min(start + ps, len(self._grid_all_results))
+        page_results = self._grid_all_results[start:end]
+
+        layman = is_layman_mode()
+
+        # Update headers if layman mode
+        if layman:
+            headers = ["TRC", "Tier", "Today", "Expected", "Warning", "Critical", "Confidence", "Drift", "Status"]
+        else:
+            headers = ["TRC", "Tier", "Today", "\u03bb", "\u03b8\u2081", "\u03b8\u2082", "p-value", "CUSUM", "Status"]
+        self.status_table.setHorizontalHeaderLabels(headers)
+
         self.status_table.setSortingEnabled(False)
-        self.status_table.setRowCount(len(statuses))
-        self._trc_statuses = statuses  # store for chart selection
+        self.status_table.setRowCount(len(page_results))
+        # _trc_results tracks what's visible for row-click → control chart
+        self._trc_results = page_results
 
-        for i, s in enumerate(statuses):
-            # TRC
-            self.status_table.setItem(i, 0, QTableWidgetItem(s["trc_code"]))
+        for i, r in enumerate(page_results):
+            # Col 0: TRC
+            trc_item = QTableWidgetItem(r["trc_code"])
+            if r["flag_level"] >= 1:
+                font = trc_item.font()
+                font.setBold(True)
+                trc_item.setFont(font)
+            self.status_table.setItem(i, 0, trc_item)
 
-            # Rate
-            item = QTableWidgetItem(f"{s['current_rate']:.0f}/hr")
-            item.setData(Qt.UserRole, s["current_rate"])
-            self.status_table.setItem(i, 1, item)
+            # Col 1: Tier
+            tier = r.get("tier", 1)
+            tier_item = QTableWidgetItem(f"T{tier}")
+            if tier == 2:
+                tier_item.setForeground(QColor(ALMA_INFO))
+            self.status_table.setItem(i, 1, tier_item)
 
-            # Mean
-            item = QTableWidgetItem(f"{s['hourly_mean']:.1f}")
-            item.setData(Qt.UserRole, s["hourly_mean"])
-            self.status_table.setItem(i, 2, item)
+            # Col 2: Today (observed)
+            obs = r.get("observed_today", 0)
+            today_item = QTableWidgetItem(str(obs))
+            today_item.setData(Qt.UserRole, obs)
+            if r["flag_level"] >= 2:
+                today_item.setForeground(QColor(ALMA_ERROR))
+                font = today_item.font()
+                font.setBold(True)
+                today_item.setFont(font)
+            elif r["flag_level"] >= 1:
+                today_item.setForeground(QColor(ALMA_WARNING))
+            self.status_table.setItem(i, 2, today_item)
 
-            # θ₁ Band
-            item = QTableWidgetItem(f"{s['theta_1_upper']:.1f}")
-            item.setData(Qt.UserRole, s["theta_1_upper"])
-            self.status_table.setItem(i, 3, item)
+            # Col 3: λ
+            lam = r.get("lambda_daily", 0)
+            lam_item = QTableWidgetItem(f"{lam:.1f}")
+            lam_item.setData(Qt.UserRole, lam)
+            lam_item.setForeground(QColor(ALMA_TEXT_LIGHT))
+            self.status_table.setItem(i, 3, lam_item)
 
-            # θ₂ Band
-            item = QTableWidgetItem(f"{s['theta_2_upper']:.1f}")
-            item.setData(Qt.UserRole, s["theta_2_upper"])
-            self.status_table.setItem(i, 4, item)
+            # Col 4: θ₁
+            t1 = r.get("theta_1_daily", 0)
+            t1_item = QTableWidgetItem(str(t1))
+            t1_item.setData(Qt.UserRole, t1)
+            t1_item.setForeground(QColor(ALMA_WARNING))
+            self.status_table.setItem(i, 4, t1_item)
 
-            # Z-Score
-            z = s["z_score"]
-            z_text = f"{z:+.1f}s"
-            item = QTableWidgetItem(z_text)
-            item.setData(Qt.UserRole, z)
-            if abs(z) >= 2.0:
-                item.setForeground(QColor(ALMA_ERROR))
-            elif abs(z) >= 1.0:
-                item.setForeground(QColor(ALMA_WARNING))
+            # Col 5: θ₂
+            t2 = r.get("theta_2_daily", 0)
+            t2_item = QTableWidgetItem(str(t2))
+            t2_item.setData(Qt.UserRole, t2)
+            t2_item.setForeground(QColor(ALMA_ERROR))
+            self.status_table.setItem(i, 5, t2_item)
+
+            # Col 6: p-value
+            p = r.get("p_value_daily", 1.0)
+            p_text = format_pvalue(p, layman) if layman else (f"{p:.3f}" if p < 0.1 else f"{p:.2f}")
+            p_item = QTableWidgetItem(p_text)
+            p_item.setData(Qt.UserRole, p)
+            if p < 0.025:
+                p_item.setForeground(QColor(ALMA_ERROR))
+            elif p < 0.10:
+                p_item.setForeground(QColor(ALMA_WARNING))
             else:
-                item.setForeground(QColor(ALMA_SUCCESS))
-            self.status_table.setItem(i, 5, item)
+                p_item.setForeground(QColor(ALMA_TEXT_LIGHT))
+            self.status_table.setItem(i, 6, p_item)
 
-            # Status
-            level = s["flag_level"]
+            # Col 7: CUSUM (value/threshold as text + visual hint)
+            cusum_v = r.get("cusum_value", 0.0)
+            cusum_h = r.get("cusum_threshold", 1.0)
+            cusum_text = format_cusum(cusum_v, cusum_h, layman) if layman else f"{cusum_v:.1f}/{cusum_h:.0f}"
+            cusum_item = QTableWidgetItem(cusum_text)
+            cusum_item.setData(Qt.UserRole, cusum_v)
+            ratio = cusum_v / cusum_h if cusum_h > 0 else 0
+            if ratio > 0.8:
+                cusum_item.setForeground(QColor(ALMA_ERROR))
+            elif ratio > 0.5:
+                cusum_item.setForeground(QColor(ALMA_WARNING))
+            else:
+                cusum_item.setForeground(QColor(ALMA_SUCCESS))
+            if r.get("cusum_alert"):
+                font = cusum_item.font()
+                font.setBold(True)
+                cusum_item.setFont(font)
+            self.status_table.setItem(i, 7, cusum_item)
+
+            # Col 8: Status
+            level = r["flag_level"]
             if level >= 2:
-                status_text = "2-theta"
-                item = QTableWidgetItem(status_text)
-                item.setForeground(QColor(ALMA_ERROR))
-                # Light red background for entire row
-                for col in range(7):
+                status_item = QTableWidgetItem(format_theta_level(2, layman) if layman else "2\u03b8")
+                status_item.setForeground(QColor(ALMA_ERROR))
+                for col in range(9):
                     cell = self.status_table.item(i, col)
                     if cell:
                         cell.setBackground(QColor(ALMA_ERROR).lighter(190))
             elif level >= 1:
-                status_text = "1-theta Watch"
-                item = QTableWidgetItem(status_text)
-                item.setForeground(QColor(ALMA_WARNING))
-                for col in range(7):
+                status_item = QTableWidgetItem(format_theta_level(1, layman) if layman else "1\u03b8 Watch")
+                status_item.setForeground(QColor(ALMA_WARNING))
+                for col in range(9):
                     cell = self.status_table.item(i, col)
                     if cell:
                         cell.setBackground(QColor(ALMA_WARNING).lighter(190))
             else:
-                if s.get("insufficient_data"):
-                    status_text = "No Data"
-                    item = QTableWidgetItem(status_text)
-                    item.setForeground(QColor(ALMA_TEXT_LIGHT))
+                if r.get("insufficient_data"):
+                    status_item = QTableWidgetItem("No Data")
+                    status_item.setForeground(QColor(ALMA_TEXT_LIGHT))
                 else:
-                    status_text = "OK"
-                    item = QTableWidgetItem(status_text)
-                    item.setForeground(QColor(ALMA_SUCCESS))
+                    status_item = QTableWidgetItem("OK")
+                    status_item.setForeground(QColor(ALMA_SUCCESS))
 
-            self.status_table.setItem(i, 6, item)
+            self.status_table.setItem(i, 8, status_item)
 
         self.status_table.setSortingEnabled(True)
 
     def _on_trc_row_selected(self, current_row, current_col, prev_row, prev_col):
         """When a TRC row is clicked, update the control chart."""
-        if current_row < 0 or current_row >= len(self._trc_statuses):
+        if current_row < 0 or current_row >= len(self._trc_results):
             return
-        status = self._trc_statuses[current_row]
-        self.control_chart.set_data(status)
+        result = self._trc_results[current_row]
+        self.control_chart.set_data(result)
 
-    def _auto_select_chart(self, statuses):
+    def _on_trc_row_drilldown(self, index):
+        """Double-click a TRC row to drill into its tickets."""
+        if not self._drilldown:
+            return
+        row = index.row()
+        if row < 0 or row >= len(self._trc_results):
+            return
+        result = self._trc_results[row]
+        trc_code = result.get("trc_code", "")
+        date_from = self.date_from.date().toString("yyyy-MM-dd")
+        date_to = self.date_to.date().toString("yyyy-MM-dd") + "T23:59:59"
+
+        tickets = self.db.search_conversations(
+            trc_code=trc_code, date_from=date_from, date_to=date_to,
+        )
+        total = len(tickets)
+        self._drilldown.show_tickets(
+            f"TRC: {trc_code}",
+            f"{total} ticket{'s' if total != 1 else ''}",
+            tickets,
+        )
+
+    def _drilldown_incident(self, trc_code, target_date):
+        """Drill into tickets for an incident flag's TRC and date."""
+        if not self._drilldown or not trc_code:
+            return
+        # Use the incident date as a tight date filter
+        date_from = target_date or self.date_from.date().toString("yyyy-MM-dd")
+        date_to = target_date + "T23:59:59" if target_date else self.date_to.date().toString("yyyy-MM-dd") + "T23:59:59"
+
+        tickets = self.db.search_conversations(
+            trc_code=trc_code, date_from=date_from, date_to=date_to,
+        )
+        total = len(tickets)
+        self._drilldown.show_tickets(
+            f"Incident: {trc_code}",
+            f"{target_date} — {total} ticket{'s' if total != 1 else ''}",
+            tickets,
+        )
+
+    def _auto_select_chart(self, trc_results):
         """Select the first flagged TRC for the chart, or the first TRC."""
-        if not statuses:
+        if not trc_results:
             self.control_chart.clear_data()
             return
 
-        # Find first 2θ, then first 1θ, then first TRC
+        # Find first 2θ, then first 1θ, then highest volume
         target = None
-        for s in statuses:
-            if s["flag_level"] == 2:
-                target = s
+        for r in trc_results:
+            if r["flag_level"] == 2:
+                target = r
                 break
         if target is None:
-            for s in statuses:
-                if s["flag_level"] == 1:
-                    target = s
+            for r in trc_results:
+                if r["flag_level"] == 1:
+                    target = r
                     break
         if target is None:
-            # Highest volume
-            target = max(statuses, key=lambda s: s["current_rate"])
+            target = max(trc_results, key=lambda r: r.get("observed_today", 0))
 
         self.control_chart.set_data(target)
 
-        # Select the corresponding row in the table
-        for i, s in enumerate(statuses):
-            if s["trc_code"] == target["trc_code"]:
+        for i, r in enumerate(trc_results):
+            if r["trc_code"] == target["trc_code"]:
                 self.status_table.selectRow(i)
                 break
 
@@ -690,12 +803,13 @@ class IncidentsPage(QWidget):
         card.setStyleSheet(f"""
             QFrame {{
                 background: {bg_tint};
-                border: 1px solid {ALMA_BORDER_LIGHT};
+                border: 1px solid rgba(214, 210, 202, 0.45);
                 border-left: 4px solid {border_color};
-                border-radius: 8px;
+                border-radius: 10px;
                 padding: 12px 16px;
             }}
         """)
+        apply_card_shadow_soft(card)
 
         layout = QVBoxLayout(card)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -703,18 +817,46 @@ class IncidentsPage(QWidget):
 
         # Description
         severity = "Incident" if level >= 2 else "Watch"
-        direction = flag.get("direction", "above")
-        z = flag.get("z_score", 0)
-        rate = flag.get("observed_rate", 0)
-        mean = flag.get("expected_mean", 0)
-        desc = (
-            f"{severity}: {flag['trc_code']} — {abs(z):.1f}s {direction} normal "
-            f"({rate:.0f}/hr vs {mean:.1f} avg)"
-        )
+        flag_type = flag.get("flag_type", "poisson_daily")
+        observed = flag.get("observed_value", 0)
+        lam = flag.get("expected_lambda", 0)
+        p_val = flag.get("p_value")
+
+        if flag_type == "cusum":
+            cusum_v = flag.get("cusum_value", 0)
+            desc = (
+                f"{severity}: {flag['trc_code']} — CUSUM drift detected "
+                f"({observed:.0f} tickets, expected ~{lam:.1f})"
+            )
+        elif flag_type == "poisson_hourly":
+            hour = flag.get("triggered_hour", "?")
+            desc = (
+                f"{severity}: {flag['trc_code']} — Hour {hour}: "
+                f"{observed:.0f} tickets (expected ~{lam:.1f})"
+            )
+        else:
+            desc = (
+                f"{severity}: {flag['trc_code']} — {observed:.0f} tickets today "
+                f"(expected ~{lam:.1f})"
+            )
+
         desc_label = QLabel(desc)
         desc_label.setStyleSheet(f"font-size: 13px; font-weight: 600; color: {ALMA_TEXT_DARK}; border: none; background: transparent;")
         desc_label.setWordWrap(True)
         layout.addWidget(desc_label)
+
+        # p-value interpretation
+        if p_val is not None and flag_type != "cusum":
+            p_text = f"p={p_val:.3f} — this count or higher occurs ~{p_val*100:.1f}% of days"
+            p_label = QLabel(p_text)
+            p_label.setStyleSheet(f"font-size: 11px; color: {ALMA_TEXT_MID}; border: none; background: transparent;")
+            layout.addWidget(p_label)
+        elif flag_type == "cusum":
+            cusum_v = flag.get("cusum_value", 0)
+            cusum_text = f"Sustained elevation over recent days (CUSUM accumulator: {cusum_v:.1f})"
+            cusum_label = QLabel(cusum_text)
+            cusum_label.setStyleSheet(f"font-size: 11px; color: {ALMA_TEXT_MID}; border: none; background: transparent;")
+            layout.addWidget(cusum_label)
 
         # Trigger time + status
         triggered = flag.get("triggered_at", "")
@@ -724,7 +866,7 @@ class IncidentsPage(QWidget):
         except (ValueError, TypeError):
             time_str = triggered
         status = flag.get("status", "open")
-        meta_text = f"Triggered: {time_str}  |  Status: {status}"
+        meta_text = f"Triggered: {time_str}  |  Type: {flag_type}  |  Status: {status}"
         meta_label = QLabel(meta_text)
         meta_label.setStyleSheet(f"font-size: 11px; color: {ALMA_TEXT_LIGHT}; border: none; background: transparent;")
         layout.addWidget(meta_label)
@@ -777,6 +919,24 @@ class IncidentsPage(QWidget):
         fp_btn.clicked.connect(lambda checked, fid=flag_id: self._action_false_positive(fid))
         btn_row.addWidget(fp_btn)
 
+        # View Tickets (drill-down)
+        tickets_btn = QPushButton("View Tickets")
+        tickets_btn.setCursor(Qt.PointingHandCursor)
+        tickets_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {ALMA_GREEN_DARK};
+                border: 1px solid {ALMA_GREEN_LIGHT}; border-radius: 6px;
+                padding: 4px 12px; font-size: 11px; font-weight: 500;
+            }}
+            QPushButton:hover {{ background: rgba(20,87,63,0.08); }}
+        """)
+        trc_code = flag.get("trc_code", "")
+        flag_date = flag.get("target_date", "")
+        tickets_btn.clicked.connect(
+            lambda checked, trc=trc_code, dt=flag_date: self._drilldown_incident(trc, dt)
+        )
+        btn_row.addWidget(tickets_btn)
+
         layout.addLayout(btn_row)
         return card
 
@@ -810,7 +970,7 @@ class IncidentsPage(QWidget):
     # ═══════════════════════════════════════════
 
     def _run_theta_scan(self):
-        """Launch θ EWMA anomaly detection scan in background thread."""
+        """Launch θ EWMA anomaly detection scan via job queue."""
         if self._theta_worker and self._theta_worker.isRunning():
             return
 
@@ -819,6 +979,15 @@ class IncidentsPage(QWidget):
         self._theta_message.setText("Running θ anomaly scan...")
         self._theta_message.show()
 
+        main_win = self.window()
+        if hasattr(main_win, '_job_queue'):
+            job = main_win._make_theta_scan_job()
+            main_win._job_queue.submit(job)
+        else:
+            self._run_theta_directly()
+
+    def _run_theta_directly(self):
+        """Run theta scan without the job queue (fallback)."""
         self._theta_worker = ThetaWorker(self.db.db_path)
         self._theta_worker.progress.connect(self._on_theta_progress)
         self._theta_worker.finished.connect(self._on_theta_results)
@@ -856,7 +1025,7 @@ class IncidentsPage(QWidget):
         self._theta_message.show()
 
     def _populate_theta_flags(self, flags):
-        """Display EWMA anomaly flags as colored cards."""
+        """Display EWMA anomaly flags as colored cards with pagination."""
         self._clear_layout(self._theta_container)
 
         if not flags:
@@ -867,25 +1036,42 @@ class IncidentsPage(QWidget):
                 f"No anomalies detected — all metrics within normal range{range_info}"
             )
             self._theta_message.show()
+            self._theta_pager.set_total(0)
             return
 
         self._theta_message.hide()
 
         # Sort: 2θ first, then 1θ, then by abs(z_score)
-        flags_sorted = sorted(flags, key=lambda f: (-f["theta_level"], -abs(f["z_score"])))
+        self._theta_all_flags = sorted(flags, key=lambda f: (-f["theta_level"], -abs(f["z_score"])))
+        self._theta_pager.set_total(len(self._theta_all_flags))
+        self._show_theta_page(0)
 
-        for flag in flags_sorted[:20]:
+    def _on_theta_page_changed(self, page: int):
+        """Handle theta flag card pagination."""
+        self._show_theta_page(page)
+
+    def _show_theta_page(self, page: int):
+        """Render one page of theta flag cards."""
+        self._clear_layout(self._theta_container)
+
+        ps = self._theta_pager.page_size
+        start = page * ps
+        end = min(start + ps, len(self._theta_all_flags))
+        page_flags = self._theta_all_flags[start:end]
+
+        for flag in page_flags:
             card = self._make_theta_card(flag)
             self._theta_container.addWidget(card)
 
-        # Footer summary
-        theta_2_count = sum(1 for f in flags if f["theta_level"] == 2)
-        theta_1_count = sum(1 for f in flags if f["theta_level"] == 1)
+        # Footer summary (always shows totals across all pages)
+        all_flags = self._theta_all_flags
+        theta_2_count = sum(1 for f in all_flags if f["theta_level"] == 2)
+        theta_1_count = sum(1 for f in all_flags if f["theta_level"] == 1)
         date_range = getattr(self, "_theta_date_range", "")
         days_scanned = getattr(self, "_theta_days_scanned", 0)
         range_info = f"  |  {date_range} ({days_scanned} days)" if date_range else ""
         footer = QLabel(
-            f"Total: {theta_2_count} critical (2θ) + {theta_1_count} watch (1θ) anomalies{range_info}"
+            f"Total: {theta_2_count} critical (2\u03b8) + {theta_1_count} watch (1\u03b8) anomalies{range_info}"
         )
         footer.setStyleSheet(f"font-size: 10px; color: {ALMA_TEXT_LIGHT}; border: none; margin-top: 4px;")
         footer.setAlignment(Qt.AlignCenter)
@@ -895,17 +1081,19 @@ class IncidentsPage(QWidget):
         """Create a single EWMA anomaly flag card."""
         card = QFrame()
         theta = flag["theta_level"]
+        layman = is_layman_mode()
         border_color = ALMA_ERROR if theta == 2 else ALMA_WARNING
 
         card.setStyleSheet(f"""
             QFrame {{
-                background: {ALMA_WHITE};
-                border: 1px solid {ALMA_BORDER_LIGHT};
+                background: {ALMA_BG_ELEVATED};
+                border: 1px solid rgba(214, 210, 202, 0.45);
                 border-left: 4px solid {border_color};
-                border-radius: 6px;
+                border-radius: 10px;
                 padding: 8px;
             }}
         """)
+        apply_card_shadow_soft(card)
 
         outer = QHBoxLayout(card)
         outer.setContentsMargins(12, 8, 12, 8)
@@ -914,7 +1102,8 @@ class IncidentsPage(QWidget):
         # θ badge
         badge_bg = "rgba(196,30,30,0.15)" if theta == 2 else "rgba(180,83,9,0.15)"
         badge_color = ALMA_ERROR if theta == 2 else ALMA_WARNING
-        badge = QLabel(f"{theta}θ")
+        badge_text = format_theta_level(theta, layman) if layman else f"{theta}\u03b8"
+        badge = QLabel(badge_text)
         badge.setStyleSheet(
             f"background: {badge_bg}; color: {badge_color}; "
             f"border-radius: 12px; padding: 4px 10px; "
@@ -950,26 +1139,38 @@ class IncidentsPage(QWidget):
         expected = flag.get("expected_mean", 0)
         std = flag.get("expected_std", 0)
         z = flag.get("z_score", 0)
-        if metric == "volume":
-            detail_text = (
-                f"Volume: {int(observed)} tickets  |  "
-                f"Normal: {expected:.0f} \u00b1 {std:.1f}  |  z = {z:+.2f}"
-            )
-        elif metric == "volume_per_hour":
-            detail_text = (
-                f"Rate: {observed:.1f}/hr  |  "
-                f"Normal: {expected:.1f} \u00b1 {std:.1f}/hr  |  z = {z:+.2f}"
-            )
-        elif metric == "sentiment":
-            detail_text = (
-                f"Score: {observed:+.2f}  |  "
-                f"Normal: {expected:+.2f} \u00b1 {std:.2f}  |  z = {z:+.2f}"
-            )
+        if layman:
+            z_text = format_zscore(z, True)
+            if metric == "volume":
+                detail_text = f"{int(observed)} tickets (normally ~{expected:.0f})  |  {z_text}"
+            elif metric == "volume_per_hour":
+                detail_text = f"{observed:.1f}/hr (normally ~{expected:.1f}/hr)  |  {z_text}"
+            elif metric == "sentiment":
+                from src.ui.layman_mode import format_sentiment as fmt_sent
+                detail_text = f"Mood: {fmt_sent(observed, True)} (normally {fmt_sent(expected, True)})  |  {z_text}"
+            else:
+                detail_text = f"Observed: {observed:.3f} (normally {expected:.3f})  |  {z_text}"
         else:
-            detail_text = (
-                f"Observed: {observed:.3f}  |  "
-                f"Expected: {expected:.3f} \u00b1 {std:.3f}  |  z = {z:+.2f}"
-            )
+            if metric == "volume":
+                detail_text = (
+                    f"Volume: {int(observed)} tickets  |  "
+                    f"Normal: {expected:.0f} \u00b1 {std:.1f}  |  z = {z:+.2f}"
+                )
+            elif metric == "volume_per_hour":
+                detail_text = (
+                    f"Rate: {observed:.1f}/hr  |  "
+                    f"Normal: {expected:.1f} \u00b1 {std:.1f}/hr  |  z = {z:+.2f}"
+                )
+            elif metric == "sentiment":
+                detail_text = (
+                    f"Score: {observed:+.2f}  |  "
+                    f"Normal: {expected:+.2f} \u00b1 {std:.2f}  |  z = {z:+.2f}"
+                )
+            else:
+                detail_text = (
+                    f"Observed: {observed:.3f}  |  "
+                    f"Expected: {expected:.3f} \u00b1 {std:.3f}  |  z = {z:+.2f}"
+                )
         detail = QLabel(detail_text)
         detail.setStyleSheet(f"font-size: 10px; color: {ALMA_TEXT_MID}; border: none;")
         text_col.addWidget(detail)
@@ -1003,6 +1204,20 @@ class IncidentsPage(QWidget):
         fp_btn.setCursor(Qt.PointingHandCursor)
         fp_btn.clicked.connect(lambda _, f=flag_data: self._false_positive_theta_flag(f))
         btn_col.addWidget(fp_btn)
+
+        # View Tickets (drill-down)
+        tickets_btn = QPushButton("View Tickets")
+        tickets_btn.setStyleSheet(
+            f"background: transparent; font-size: 10px; color: {ALMA_GREEN_DARK}; "
+            f"border: 1px solid {ALMA_GREEN_LIGHT}; border-radius: 4px; padding: 2px 8px;"
+        )
+        tickets_btn.setCursor(Qt.PointingHandCursor)
+        trc_code = flag.get("trc_code", "")
+        flag_date = flag.get("date", "")
+        tickets_btn.clicked.connect(
+            lambda _, trc=trc_code, dt=flag_date: self._drilldown_incident(trc, dt)
+        )
+        btn_col.addWidget(tickets_btn)
 
         outer.addLayout(btn_col)
 
@@ -1127,8 +1342,83 @@ class IncidentsPage(QWidget):
     #  REPORT HISTORY — RELOAD PAST REPORT
     # ═══════════════════════════════════════════
 
+    def _open_report_history(self):
+        """Open the DrilldownPanel with the full report history list."""
+        if not hasattr(self, "_drilldown") or not self._drilldown:
+            return
+        reports = self.report_summary.get_reports_for_drilldown()
+        count = len(reports)
+        self._drilldown.show_reports(
+            "Incident Reports",
+            f"{count} report{'s' if count != 1 else ''}",
+            reports,
+            detail_callback=self._render_report_detail_html,
+            load_callback=self._load_past_report,
+        )
+
+    def _render_report_detail_html(self, report_id):
+        """Render an incident report as HTML for the DrilldownPanel."""
+        report = self.db.get_full_report(report_id)
+        if not report:
+            return "<p>Report not found.</p>"
+
+        raw = report.get("full_results", "")
+        try:
+            result = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return "<p>Could not parse report data.</p>"
+
+        html = ['<div style="font-family: Segoe UI, sans-serif; font-size: 13px;">']
+
+        # ── Overview ──
+        flags = result.get("flags", [])
+        theta_2 = [f for f in flags if f.get("flag_level") == 2]
+        theta_1 = [f for f in flags if f.get("flag_level") == 1]
+        html.append("<h3 style='margin: 12px 0 6px;'>Scan Summary</h3>")
+        html.append(f"<p>Incidents (θ₂): <b>{len(theta_2)}</b> &nbsp;|&nbsp; "
+                     f"Watches (θ₁): <b>{len(theta_1)}</b></p>")
+
+        # ── TRC Breakdown ──
+        trc_results = result.get("trc_results", [])
+        flagged = [r for r in trc_results if r.get("flag_level", 0) > 0]
+        if flagged:
+            html.append(f"<h3 style='margin: 12px 0 6px;'>Flagged TRCs ({len(flagged)})</h3>")
+            html.append("<table cellpadding='3' style='border-collapse: collapse; width: 100%;'>")
+            html.append("<tr style='border-bottom: 1px solid #E8E5DE;'>"
+                        "<th align='left'>TRC</th><th align='right'>Observed</th>"
+                        "<th align='right'>Expected</th><th align='right'>Level</th></tr>")
+            for r in flagged[:25]:
+                trc = r.get("trc_code", "")
+                obs = r.get("observed", 0)
+                exp = r.get("lambda_hat", r.get("expected", 0))
+                lvl = r.get("flag_level", 0)
+                lvl_str = "θ₂ Incident" if lvl == 2 else "θ₁ Watch"
+                html.append(
+                    f"<tr style='border-bottom: 1px solid #F0F0F0;'>"
+                    f"<td>{trc}</td><td align='right'>{obs}</td>"
+                    f"<td align='right'>{exp:.1f}</td><td align='right'>{lvl_str}</td></tr>"
+                )
+            html.append("</table>")
+
+        # ── Theta flags ──
+        if flags:
+            html.append(f"<h3 style='margin: 12px 0 6px;'>θ EWMA Flags ({len(flags)})</h3>")
+            for f in flags[:15]:
+                trc = f.get("trc_code", "")
+                metric = f.get("metric", "")
+                z = f.get("z_score", 0)
+                lvl = f.get("flag_level", 0)
+                html.append(
+                    f"<p style='margin: 3px 0;'>"
+                    f"<b>{trc}</b> — {metric}, z={z:.2f} "
+                    f"({'θ₂' if lvl == 2 else 'θ₁'})</p>"
+                )
+
+        html.append("</div>")
+        return "".join(html)
+
     def _load_past_report(self, report_id):
-        """Reload a past scan's results."""
+        """Reload a past scan's results into the main view."""
         report = self.db.get_full_report(report_id)
         if not report or not report.get("full_results"):
             return
@@ -1138,13 +1428,13 @@ class IncidentsPage(QWidget):
             return
 
         self._last_result = result
-        statuses = result.get("trc_statuses", [])
+        trc_results = result.get("trc_results", [])
 
         # Apply TRC filter
         trc_filter = self.trc_combo.currentData() or None
         if trc_filter:
-            statuses = [s for s in statuses if s["trc_code"] == trc_filter]
+            trc_results = [r for r in trc_results if r["trc_code"] == trc_filter]
 
-        self._populate_status_grid(statuses)
-        self._auto_select_chart(statuses)
+        self._populate_status_grid(trc_results)
+        self._auto_select_chart(trc_results)
         # Don't reload open incidents — those are live state

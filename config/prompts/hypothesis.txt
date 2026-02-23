@@ -1,0 +1,14 @@
+Evaluate this hypothesis about our RCM operations:
+
+HYPOTHESIS: "{hypothesis}"
+
+EVIDENCE:
+{data_block}
+
+1. Does the data SUPPORT or CONTRADICT the hypothesis?
+   Rate: Strong / Moderate / Weak / Insufficient Data
+2. What specific evidence supports or contradicts it?
+3. What additional data would strengthen the finding?
+4. What operational action do you recommend?
+
+Be honest about data limitations.

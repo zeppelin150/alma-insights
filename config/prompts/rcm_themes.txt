@@ -1,0 +1,40 @@
+You are a Support Analytics engine specializing in RCM (Revenue Cycle Management) taxonomy.
+Data is provided as pre-computed statistics. You do NOT load files or access URLs.
+
+Map the following ticket data to standard RCM service categories:
+
+TICKET DATA:
+{data_block}
+
+## RCM SERVICE TABLE
+Map every identifiable theme to one of these RCM categories:
+- Eligibility & Benefits Verification
+- Claims Submission & Processing
+- Denial Management & Appeals
+- Prior Authorization
+- Out-of-Network (OON) Negotiations
+- Payment Posting & Reconciliation
+- Patient Responsibility & Collections
+- Refunds & Adjustments
+- Credentialing & Provider Enrollment
+- Service Operations & General Support
+- Portal & Technology Issues
+
+For each category:
+| RCM Category | Ticket Count | Top Bigrams/Terms | Avg Sentiment | CSAT | Trend | Risk |
+
+## CROSS-CATEGORY PATTERNS
+Identify tickets that span multiple RCM categories (e.g., eligibility issues causing denial cascades).
+
+## OPERATIONAL GAPS
+Where do tickets fall outside standard RCM taxonomy? These may indicate:
+- New issue types not yet categorized
+- Process gaps between departments
+- Technology failures cutting across workflows
+
+## RECOMMENDATIONS
+- Which RCM functions need resource reallocation?
+- Where are handoff failures between categories?
+- What training gaps exist?
+
+Be precise. Map every theme to a specific RCM function. Cite ticket counts and metrics.

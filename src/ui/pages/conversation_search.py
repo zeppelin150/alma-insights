@@ -5,13 +5,14 @@ Search, filter, and read rebuilt ticket conversation threads.
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QLineEdit, QComboBox, QDateEdit, QTableWidget, QTableWidgetItem,
-    QTextBrowser, QSplitter, QHeaderView, QFrame, QAbstractItemView,
+    QLineEdit, QComboBox, QTableWidget, QTableWidgetItem,
+    QHeaderView, QFrame, QAbstractItemView,
     QFileDialog, QMessageBox, QProgressDialog, QApplication
 )
 from PySide6.QtCore import Qt, QDate, Signal
 from PySide6.QtGui import QFont
 from src.ui.theme import *
+from src.ui.widgets.date_picker import ModernDatePicker
 
 
 # Sentinel values for dataset combo
@@ -102,13 +103,14 @@ class ConversationSearchPage(QWidget):
 
         # ── Filter Bar ──
         filter_card = QFrame()
-        filter_card.setObjectName("Card")
+        filter_card.setObjectName("ConvFilterCard")
         filter_card.setStyleSheet(f"""
-            #Card {{
-                background: {ALMA_WHITE}; border: 1px solid {ALMA_BORDER_LIGHT};
-                border-radius: 10px; padding: 16px;
+            #ConvFilterCard {{
+                background: {ALMA_BG_ELEVATED}; border: 1px solid rgba(214, 210, 202, 0.45);
+                border-radius: 12px;
             }}
         """)
+        apply_card_shadow(filter_card)
         filter_layout = QVBoxLayout(filter_card)
         filter_layout.setContentsMargins(16, 16, 16, 16)
         filter_layout.setSpacing(12)
@@ -152,10 +154,8 @@ class ConversationSearchPage(QWidget):
         # Date from
         df_label = QLabel("From")
         df_label.setStyleSheet(f"font-size: 11px; font-weight: 600; color: {ALMA_TEXT_MID}; letter-spacing: 0.5px;")
-        self.date_from = QDateEdit()
-        self.date_from.setCalendarPopup(True)
+        self.date_from = ModernDatePicker()
         self.date_from.setDate(QDate(2020, 1, 1))
-        self.date_from.setDisplayFormat("MMM d, yyyy")
 
         df_col = QVBoxLayout()
         df_col.setSpacing(4)
@@ -166,10 +166,8 @@ class ConversationSearchPage(QWidget):
         # Date to
         dt_label = QLabel("To")
         dt_label.setStyleSheet(f"font-size: 11px; font-weight: 600; color: {ALMA_TEXT_MID}; letter-spacing: 0.5px;")
-        self.date_to = QDateEdit()
-        self.date_to.setCalendarPopup(True)
+        self.date_to = ModernDatePicker()
         self.date_to.setDate(QDate.currentDate())
-        self.date_to.setDisplayFormat("MMM d, yyyy")
 
         dt_col = QVBoxLayout()
         dt_col.setSpacing(4)
@@ -223,10 +221,7 @@ class ConversationSearchPage(QWidget):
         layout.addWidget(self.results_label)
         layout.addSpacing(8)
 
-        # ── Splitter: Results Table | Conversation Viewer ──
-        splitter = QSplitter(Qt.Horizontal)
-
-        # Left: Results Table
+        # ── Results Table (full width) ──
         self.results_table = QTableWidget()
         self.results_table.setColumnCount(6)
         self.results_table.setHorizontalHeaderLabels([
@@ -244,50 +239,15 @@ class ConversationSearchPage(QWidget):
         self.results_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.results_table.setAlternatingRowColors(True)
         self.results_table.setStyleSheet(f"""
-            QTableWidget {{ alternate-background-color: rgba(3,40,27,0.02); }}
-        """)
-        splitter.addWidget(self.results_table)
-
-        # Right: Conversation Viewer
-        viewer_frame = QFrame()
-        viewer_layout = QVBoxLayout(viewer_frame)
-        viewer_layout.setContentsMargins(0, 0, 0, 0)
-        viewer_layout.setSpacing(8)
-
-        self.viewer_header = QLabel("Select a conversation")
-        self.viewer_header.setStyleSheet(f"""
-            font-size: 14px; font-weight: 600; color: {ALMA_TEXT_MID};
-            padding: 12px 16px; background: {ALMA_WHITE};
-            border: 1px solid {ALMA_BORDER_LIGHT}; border-radius: 8px 8px 0 0;
-        """)
-        viewer_layout.addWidget(self.viewer_header)
-
-        self.viewer_meta = QLabel("")
-        self.viewer_meta.setStyleSheet(f"""
-            font-size: 11px; color: {ALMA_TEXT_LIGHT};
-            padding: 4px 16px; background: {ALMA_WHITE};
-            border-left: 1px solid {ALMA_BORDER_LIGHT};
-            border-right: 1px solid {ALMA_BORDER_LIGHT};
-        """)
-        self.viewer_meta.setWordWrap(True)
-        viewer_layout.addWidget(self.viewer_meta)
-
-        self.conversation_viewer = QTextBrowser()
-        self.conversation_viewer.setStyleSheet(f"""
-            QTextBrowser {{
-                background: {ALMA_WHITE}; border: 1px solid {ALMA_BORDER_LIGHT};
-                border-radius: 0 0 8px 8px; padding: 12px 16px;
-                font-size: 13px; line-height: 1.6;
+            QTableWidget {{
+                alternate-background-color: rgba(3,40,27,0.02);
+            }}
+            QTableWidget::item:selected {{
+                background: rgba(20, 87, 63, 0.10);
+                color: {ALMA_TEXT_DARK};
             }}
         """)
-        self.conversation_viewer.setOpenExternalLinks(False)
-        viewer_layout.addWidget(self.conversation_viewer)
-        splitter.addWidget(viewer_frame)
-
-        splitter.setSizes([500, 500])
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 1)
-        layout.addWidget(splitter, 1)
+        layout.addWidget(self.results_table, 1)
 
     def _connect_signals(self):
         self.search_btn.clicked.connect(self.run_search)
@@ -295,6 +255,12 @@ class ConversationSearchPage(QWidget):
         self.keyword_input.returnPressed.connect(self.run_search)
         self.results_table.currentCellChanged.connect(self._on_row_selected)
         self.pull_btn.clicked.connect(self._on_pull_clicked)
+
+    # ── Drill-down Panel ──
+
+    def set_drilldown_panel(self, panel):
+        """Accept a reference to the shared DrilldownPanel from MainWindow."""
+        self._drilldown = panel
 
     # ── Dataset Selector Management ──
 
@@ -361,6 +327,26 @@ class ConversationSearchPage(QWidget):
                 font-size: 12px; font-weight: 600;
             """)
         self.data_source_badge.setText(text)
+
+    def filter_by_ticket_ids(self, ticket_ids):
+        """Filter conversation list to show only specific ticket IDs.
+        Called from NLP Scanner 'View Tickets' button."""
+        if not ticket_ids:
+            return
+        # Clear existing search and show these tickets
+        try:
+            self.search_box.clear()
+            # Build a results list for these specific tickets
+            results = []
+            for tid in ticket_ids[:200]:  # Cap at 200
+                conv = self.db.get_conversation(tid)
+                if conv:
+                    results.append(dict(conv))
+            if results:
+                self._display_results(results)
+                self.set_data_source_label(f"NLP Finding ({len(results)} tickets)")
+        except Exception:
+            pass
 
     def _on_pull_clicked(self):
         """Handle Pull button click based on selected dataset."""
@@ -448,7 +434,102 @@ class ConversationSearchPage(QWidget):
         if not file_path:
             return
 
-        # Progress dialog
+        fname = file_path.split("/")[-1].split("\\")[-1]
+        self._pending_csv_fname = fname
+
+        main_win = self.window()
+        if hasattr(main_win, '_job_queue'):
+            self._import_csv_via_queue(file_path, main_win)
+        else:
+            self._import_csv_legacy(file_path)
+
+    def _import_csv_via_queue(self, file_path, main_win):
+        """Route CSV import through the unified job queue."""
+        from src.data.job_queue import JobDescriptor, CallableWorker
+        db_path = self.db.db_path
+        queue = main_win._job_queue
+
+        def create_worker():
+            def do_import():
+                from src.data.db_manager import DatabaseManager
+                from src.data.csv_ingestion import ingest_csv
+                db = DatabaseManager(db_path)
+                db.initialize()
+                try:
+                    return ingest_csv(
+                        file_path, db,
+                        progress_callback=lambda msg, pct:
+                            queue.job_progress.emit("csv_import", msg, pct or -1)
+                    )
+                finally:
+                    db.close()
+
+            worker = CallableWorker(do_import)
+            worker.finished_result.connect(self._on_csv_import_done)
+            worker.error.connect(self._on_csv_import_error)
+            return worker
+
+        job = JobDescriptor(
+            job_id="csv_import",
+            name="CSV Import",
+            description=f"Importing {self._pending_csv_fname}",
+            create_worker=create_worker,
+        )
+        main_win._job_queue.submit(job)
+
+    def _on_csv_import_done(self, stats):
+        """Handle CSV import completion from the job queue."""
+        # Reinitialize DB since the import ran on a separate connection
+        self.db.initialize()
+
+        # Update UI
+        self.populate_trc_filter()
+        self._sync_date_filters_to_data()
+        self.run_search()
+
+        fname = getattr(self, '_pending_csv_fname', 'CSV')
+        self.set_data_source_label(f"CSV: {fname}")
+
+        # Store stats for deferred summary (shown after all jobs complete)
+        self._last_import_stats = stats
+
+        # Notify parent → triggers auto-analysis queue
+        self.data_loaded.emit(stats)
+
+    def _on_csv_import_error(self, error_text):
+        """Handle CSV import failure — deferred to avoid blocking job queue."""
+        self._pending_import_error = error_text
+
+    def show_deferred_import_summary(self):
+        """Show import summary after all queued jobs have completed.
+
+        Called by MainWindow when the job queue empties, so it doesn't
+        block the overlay or subsequent jobs.
+        """
+        # Show error if import failed
+        if hasattr(self, '_pending_import_error') and self._pending_import_error:
+            err = self._pending_import_error
+            self._pending_import_error = None
+            QMessageBox.critical(
+                self, "Import Error",
+                f"Failed to import CSV:\n\n{err}"
+            )
+            return
+
+        # Show success summary
+        stats = getattr(self, '_last_import_stats', None)
+        if stats:
+            self._last_import_stats = None
+            QMessageBox.information(
+                self, "Import Complete",
+                f"Successfully imported data from CSV.\n\n"
+                f"Rows: {stats['total_csv_rows']:,}  |  "
+                f"Conversations: {stats['tickets_created']:,}  |  "
+                f"Comments: {stats['comments_stored']:,}"
+            )
+
+    def _import_csv_legacy(self, file_path):
+        """Legacy synchronous CSV import (fallback if no job queue)."""
         progress = QProgressDialog("Importing CSV...", "Cancel", 0, 100, self)
         progress.setWindowTitle("Importing Data")
         progress.setMinimumDuration(0)
@@ -469,19 +550,14 @@ class ConversationSearchPage(QWidget):
             progress.setValue(100)
             progress.close()
 
-            # Update UI — adjust date filters to match imported data
             self.populate_trc_filter()
             self._sync_date_filters_to_data()
             self.run_search()
 
-            # Update badge
             fname = file_path.split("/")[-1].split("\\")[-1]
             self.set_data_source_label(f"CSV: {fname}")
-
-            # Notify parent
             self.data_loaded.emit(stats)
 
-            # Show summary
             QMessageBox.information(
                 self, "Import Complete",
                 f"Successfully imported data from CSV.\n\n"
@@ -563,10 +639,9 @@ class ConversationSearchPage(QWidget):
         self.csat_combo.setCurrentIndex(0)
         self.results_table.setRowCount(0)
         self.results_label.setText("")
-        self.conversation_viewer.clear()
-        self.viewer_header.setText("Select a conversation")
-        self.viewer_meta.setText("")
         self._current_results = []
+        if hasattr(self, '_drilldown') and self._drilldown.is_open():
+            self._drilldown.close_panel()
 
     def _populate_table(self, results):
         self.results_table.setRowCount(0)
@@ -607,128 +682,9 @@ class ConversationSearchPage(QWidget):
     def _on_row_selected(self, row, col, prev_row, prev_col):
         if row < 0 or row >= len(self._current_results):
             return
+        if not hasattr(self, '_drilldown'):
+            return
 
         conv = self._current_results[row]
-        ticket_id = conv["ticket_id"]
-
-        # Update header
-        self.viewer_header.setText(f"{ticket_id} — {conv.get('subject', 'No subject')}")
-        self.viewer_header.setStyleSheet(f"""
-            font-size: 14px; font-weight: 600; color: {ALMA_TEXT_DARK};
-            padding: 12px 16px; background: {ALMA_WHITE};
-            border: 1px solid {ALMA_BORDER_LIGHT}; border-radius: 8px 8px 0 0;
-        """)
-
-        # Update meta
-        meta_parts = []
-        if conv.get("trc_code"):
-            meta_parts.append(f"TRC: {conv['trc_code']} — {conv.get('trc_label', '')}")
-        if conv.get("status"):
-            meta_parts.append(f"Status: {conv['status'].title()}")
-        if conv.get("csat_score"):
-            meta_parts.append(f"CSAT: {int(conv['csat_score'])}/5")
-        if conv.get("message_count"):
-            customer_n = conv.get('client_messages', 0)
-            agent_n = conv.get('agent_messages', 0)
-            total_n = conv.get('message_count', 0)
-            bot_n = max(0, total_n - customer_n - agent_n)
-            parts = []
-            if customer_n:
-                parts.append(f"{customer_n} customer")
-            if agent_n:
-                parts.append(f"{agent_n} agent")
-            if bot_n:
-                parts.append(f"{bot_n} bot")
-            meta_parts.append(f"Messages: {total_n} ({', '.join(parts)})" if parts else f"Messages: {total_n}")
-        if conv.get("created_at"):
-            meta_parts.append(f"Created: {conv['created_at'][:10]}")
-        if conv.get("solved_at"):
-            meta_parts.append(f"Solved: {conv['solved_at'][:10]}")
-
-        self.viewer_meta.setText("  •  ".join(meta_parts))
-
-        # Render conversation thread
-        thread = conv.get("full_thread", "No conversation data available.")
-        html = self._render_thread_html(thread)
-        self.conversation_viewer.setHtml(html)
-
-    def _render_thread_html(self, thread_text):
-        """Convert raw thread text into styled HTML for the viewer."""
-        messages = thread_text.split("\n\n---\n\n")
-        html_parts = []
-
-        # Role styling: CUSTOMER (amber), AGENT (green), BOT (grey)
-        ROLE_STYLES = {
-            "CUSTOMER": {
-                "bg": "#FEF9F3",
-                "border": ALMA_WARNING,
-                "color": ALMA_WARNING,
-                "label": "CUSTOMER",
-            },
-            "AGENT": {
-                "bg": ALMA_WHITE,
-                "border": ALMA_GREEN_LIGHT,
-                "color": ALMA_GREEN_DARK,
-                "label": "AGENT",
-            },
-            "BOT": {
-                "bg": "#F5F5F5",
-                "border": ALMA_TEXT_LIGHT,
-                "color": ALMA_TEXT_LIGHT,
-                "label": "BOT",
-            },
-        }
-
-        for msg in messages:
-            lines = msg.strip().split("\n", 1)
-            if len(lines) < 2:
-                continue
-
-            header = lines[0]
-            body = lines[1] if len(lines) > 1 else ""
-
-            # Detect role from header text
-            header_upper = header.upper()
-            if "CUSTOMER" in header_upper or "CLIENT" in header_upper or "END-USER" in header_upper:
-                style = ROLE_STYLES["CUSTOMER"]
-            elif "BOT" in header_upper:
-                style = ROLE_STYLES["BOT"]
-            else:
-                style = ROLE_STYLES["AGENT"]
-
-            # Extract timestamp and name from header
-            # Format: [2025-01-15 14:30] CUSTOMER (Sarah M.):
-            #     or: [2025-01-15] AGENT:
-            timestamp = ""
-            name = ""
-            if "]" in header:
-                timestamp = header.split("]")[0].replace("[", "").strip()
-            if "(" in header and ")" in header:
-                name = header.split("(")[1].split(")")[0]
-
-            html_parts.append(f"""
-                <div style="margin-bottom: 16px; padding: 12px 16px;
-                            background: {style['bg']}; border-left: 3px solid {style['border']};
-                            border-radius: 0 8px 8px 0;">
-                    <div style="margin-bottom: 6px;">
-                        <span style="font-size: 11px; font-weight: 700; color: {style['color']};
-                                     letter-spacing: 0.5px;">{style['label']}</span>
-                        <span style="font-size: 11px; color: {ALMA_TEXT_LIGHT};
-                                     margin-left: 8px;">{name}</span>
-                        <span style="font-size: 11px; color: {ALMA_TEXT_LIGHT};
-                                     float: right;">{timestamp}</span>
-                    </div>
-                    <div style="font-size: 13px; color: {ALMA_TEXT_DARK}; line-height: 1.65;">
-                        {body.replace(chr(10), '<br/>')}
-                    </div>
-                </div>
-            """)
-
-        if not html_parts:
-            return f"<p style='color: {ALMA_TEXT_LIGHT};'>No conversation data available.</p>"
-
-        return f"""
-        <div style="font-family: 'Segoe UI', Arial, sans-serif; padding: 4px;">
-            {''.join(html_parts)}
-        </div>
-        """
+        # Open directly to thread view (Level 2) with prev/next across results
+        self._drilldown.show_conversation(conv, self._current_results, row)

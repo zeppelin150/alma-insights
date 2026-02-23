@@ -78,6 +78,12 @@ COLUMN_MAP = {
     "assignment to resolution time in hours (calendar)": "assignment_to_resolution_hours",
 
     "zendesk ticket total resolution time in hours (calendar)": "total_resolution_hours",
+
+    # Requester email (for repeat contact hashing)
+    "zendesk user (requester) [pii field] user email [pii]": "requester_email",
+    "user (requester) user email [pii]": "requester_email",
+    "requester email": "requester_email",
+    "requester_email": "requester_email",
     "total resolution time in hours (calendar)": "total_resolution_hours",
 
     "zendesk ticket first reply time in hours (calendar)": "first_reply_hours",
@@ -113,7 +119,7 @@ def _parse_row(row, col_mapping):
     return record
 
 
-def ingest_csv(file_path, db, progress_callback=None):
+def ingest_csv(file_path, db, progress_callback=None, dataset_id=None):
     """
     Ingest a Lightdash CSV export into the database.
 
@@ -121,6 +127,7 @@ def ingest_csv(file_path, db, progress_callback=None):
         file_path: Path to the CSV file
         db: DatabaseManager instance
         progress_callback: Optional callable(message, percent) for UI updates
+        dataset_id: Optional dataset ID for A/B testing (tags all ingested conversations)
 
     Returns:
         dict with ingestion stats
@@ -177,6 +184,7 @@ def ingest_csv(file_path, db, progress_callback=None):
         "status": "",
         "csat_score": None,
         "created_at": "",
+        "requester_email": "",
         "assignment_to_resolution_hours": None,
         "total_resolution_hours": None,
         "first_reply_hours": None,
@@ -206,6 +214,8 @@ def ingest_csv(file_path, db, progress_callback=None):
                 pass
         if not t["created_at"] and record.get("created_at"):
             t["created_at"] = record["created_at"]
+        if not t["requester_email"] and record.get("requester_email"):
+            t["requester_email"] = record["requester_email"]
 
         # Resolution time fields
         for time_field in ("assignment_to_resolution_hours", "total_resolution_hours", "first_reply_hours"):
@@ -247,8 +257,15 @@ def ingest_csv(file_path, db, progress_callback=None):
         trc_code = t["trc_code"]
         trc_label = trc_code  # Same until we have a TRC lookup table
 
+        # Hash requester email for repeat contact detection
+        requester_hash = ""
+        requester_email = t.get("requester_email", "")
+        if requester_email:
+            from src.data.entity_extractor import hash_email
+            requester_hash = hash_email(requester_email)
+
         # Insert ticket record
-        db.upsert_ticket({
+        ticket_data = {
             "ticket_id": tid,
             "subject": t["subject"],
             "trc_code": trc_code,
@@ -269,7 +286,17 @@ def ingest_csv(file_path, db, progress_callback=None):
             "assignment_to_resolution_hours": t["assignment_to_resolution_hours"],
             "total_resolution_hours": t["total_resolution_hours"],
             "first_reply_hours": t["first_reply_hours"],
-        })
+        }
+        db.upsert_ticket(ticket_data)
+        # Set requester_hash separately (column added in P3.0 migration)
+        if requester_hash:
+            try:
+                db.conn.execute(
+                    "UPDATE tickets SET requester_hash = ? WHERE ticket_id = ?",
+                    (requester_hash, tid)
+                )
+            except Exception:
+                pass
 
         # Build thread from comments — sorted chronologically with NULL handling
         comments = t["comments"]
@@ -319,7 +346,7 @@ def ingest_csv(file_path, db, progress_callback=None):
         full_thread = "\n\n---\n\n".join(thread_lines)
         preview = (thread_lines[0][:200] + "...") if thread_lines and len(thread_lines[0]) > 200 else (thread_lines[0] if thread_lines else "")
 
-        db.upsert_conversation({
+        conv_data = {
             "ticket_id": tid,
             "subject": t["subject"],
             "trc_code": trc_code,
@@ -333,7 +360,17 @@ def ingest_csv(file_path, db, progress_callback=None):
             "agent_messages": agent_count,
             "full_thread": full_thread,
             "thread_preview": preview,
-        })
+        }
+        db.upsert_conversation(conv_data)
+        # Tag with dataset_id if provided (P3.0 A/B testing)
+        if dataset_id is not None:
+            try:
+                db.conn.execute(
+                    "UPDATE conversations SET dataset_id = ? WHERE ticket_id = ?",
+                    (dataset_id, tid)
+                )
+            except Exception:
+                pass
 
         inserted += 1
         if inserted % 1000 == 0:
@@ -343,8 +380,51 @@ def ingest_csv(file_path, db, progress_callback=None):
     _progress("Finalizing...", 96)
     db.commit()
 
-    _progress("Building search index...", 98)
+    _progress("Building search index...", 97)
     db.rebuild_fts_index()
+
+    # ── Entity extraction (P3.0) ──
+    _progress("Extracting entities...", 98)
+    try:
+        from src.data.entity_extractor import load_entity_dictionaries, extract_entities
+        payer_dict, product_dict = load_entity_dictionaries()
+        for tid, t in tickets.items():
+            text = t["subject"] + " " + " ".join(
+                c["body"] for c in t["comments"][:3]  # First 3 comments only for speed
+            )
+            entities = extract_entities(text, payer_dict, product_dict)
+            if entities.get("payers") or entities.get("product_areas"):
+                entity_records = []
+                for p in entities.get("payers", []):
+                    entity_records.append({
+                        "entity_type": "payer",
+                        "entity_value": p,
+                        "confidence": 0.8,
+                    })
+                for pa in entities.get("product_areas", []):
+                    entity_records.append({
+                        "entity_type": "product_area",
+                        "entity_value": pa,
+                        "confidence": 0.8,
+                    })
+                db.save_ticket_entities(tid, entity_records)
+    except Exception:
+        pass  # Entity extraction is non-critical
+
+    # ── Post-ingestion: N-gram provisional classification ──
+    try:
+        from src.data.ngram_matcher import NgramMatcher
+        matcher = NgramMatcher(db)
+        # Only runs if sub_patterns table has active entries
+        has_patterns = db.conn.execute(
+            "SELECT 1 FROM sub_patterns WHERE tier IN ('active','probationary') LIMIT 1"
+        ).fetchone()
+        if has_patterns:
+            new_ticket_ids = list(tickets.keys())
+            matcher.classify_batch(new_ticket_ids)
+            _progress("Provisional sub-pattern classification complete", 98)
+    except Exception:
+        pass  # N-gram matching is non-critical
 
     stats = {
         "total_csv_rows": total_rows,

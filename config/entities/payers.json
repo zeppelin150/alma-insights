@@ -1,0 +1,14 @@
+{
+    "United Healthcare": ["united healthcare", "uhc", "unitedhealthcare", "optum", "united health"],
+    "Blue Cross Blue Shield": ["bcbs", "blue cross", "blue shield", "anthem", "carefirst", "premera", "highmark", "horizon bcbs"],
+    "Aetna": ["aetna", "cvs health", "aetna better health"],
+    "Cigna": ["cigna", "evernorth", "cigna healthcare"],
+    "Humana": ["humana", "humana military", "humana gold"],
+    "Kaiser Permanente": ["kaiser", "kaiser permanente", "kp"],
+    "Centene": ["centene", "wellcare", "ambetter", "fidelis"],
+    "Molina Healthcare": ["molina", "molina healthcare"],
+    "Medicare": ["medicare", "cms", "centers for medicare"],
+    "Medicaid": ["medicaid", "state medicaid", "medi-cal", "masshealth"],
+    "Tricare": ["tricare", "military insurance", "champus"],
+    "Pegasus PPO": ["pegasus", "pegasus ppo"]
+}
