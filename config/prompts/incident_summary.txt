@@ -6,6 +6,10 @@ Analyze the following incident monitoring data:
 TICKET DATA:
 {data_block}
 
+{temporal_context}
+
+Use the temporal progression to contextualize when incidents emerged, how they evolved week-over-week, and whether any correlate with the volume or sentiment shifts above.
+
 ## ACTIVE INCIDENT FLAGS
 For each open flag:
 | TRC | Flag Type | Observed | Expected (lambda) | p-value | Status | Days Active |

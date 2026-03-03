@@ -28,6 +28,7 @@ from src.ui.widgets.date_picker import ModernDatePicker
 from src.ui.widgets.report_history_summary import ReportHistorySummary
 from src.ui.widgets.generation_animation import GenerationAnimationWidget
 from src.ui.widgets.chat_widget import ReportChatWidget
+from src.ui.widgets.empty_state import EmptyState
 
 
 # ═══════════════════════════════════════════
@@ -138,9 +139,9 @@ class ReportWorker(QThread):
             self.progress.emit("Formatting prompt...")
             data_block_text = format_data_block_for_prompt(block)
 
-            # Replace variables in prompt
+            # Replace variables in prompt (Build 7.0: pass db for temporal context)
             prompt_text = self.prompt_data.get("prompt_text", "")
-            prompt = replace_prompt_variables(prompt_text, block)
+            prompt = replace_prompt_variables(prompt_text, block, db=db)
 
             # Validate
             try:
@@ -162,19 +163,165 @@ class ReportWorker(QThread):
 
 
 # ═══════════════════════════════════════════
+#  VOC REPORT WORKER THREAD
+# ═══════════════════════════════════════════
+
+class VOCReportWorker(QThread):
+    """Background thread for VOC Root Cause Analysis report generation.
+
+    Build 7.0: Boots a ReportOrchestrator (3 bridge pool) for parallel
+    Phase 1 TRC analysis.  Falls back to sequential if boot fails.
+    """
+    progress = Signal(str, int)    # (message, percent)
+    finished = Signal(dict)        # full results dict
+    error = Signal(str)            # traceback
+
+    def __init__(self, db_path, date_start, date_end,
+                 trc_filter, gemini_client):
+        super().__init__()
+        self.db_path = db_path
+        self.date_start = date_start
+        self.date_end = date_end
+        self.trc_filter = trc_filter
+        self.gemini_client = gemini_client
+        self._builder = None
+        self._orchestrator = None
+
+    def run(self):
+        try:
+            from src.data.db_manager import DatabaseManager
+            from src.data.voc_builder import VOCBuilder
+
+            db = DatabaseManager(self.db_path)
+            db.initialize()
+
+            # Build 7.0: Boot parallel bridge pool for Phase 1
+            orchestrator = self._boot_orchestrator()
+
+            self._builder = VOCBuilder(
+                db, self.gemini_client,
+                progress_callback=lambda msg, pct: self.progress.emit(msg, pct),
+                orchestrator=orchestrator,
+            )
+
+            result = self._builder.run(
+                self.date_start, self.date_end,
+                trc_filter=self.trc_filter or None,
+            )
+
+            db.close()
+
+            # Shutdown bridge pool
+            if orchestrator:
+                orchestrator.shutdown()
+
+            self.finished.emit(result)
+        except Exception:
+            import traceback as tb
+            # Ensure cleanup on error
+            if self._orchestrator:
+                try:
+                    self._orchestrator.shutdown()
+                except Exception:
+                    pass
+            self.error.emit(tb.format_exc())
+
+    def _boot_orchestrator(self):
+        """Boot a ReportOrchestrator for parallel Phase 1.  Returns None on failure."""
+        try:
+            from src.agents.report_orchestrator import ReportOrchestrator
+            import yaml
+
+            # Read settings for model + worker count
+            config_path = Path(__file__).parent.parent.parent.parent / "config" / "settings.yaml"
+            model = "gemini-2.5-flash"
+            num_bridges = 3
+            if config_path.exists():
+                with open(config_path, encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
+                model = cfg.get("gemini", {}).get("model", model)
+                num_bridges = cfg.get("agents", {}).get("num_workers", num_bridges)
+
+            self._orchestrator = ReportOrchestrator(
+                db_path=self.db_path,
+                model=model,
+                num_bridges=num_bridges,
+            )
+            self._orchestrator.boot()
+            return self._orchestrator
+        except Exception as e:
+            import logging
+            logging.getLogger("alma.voc").warning(
+                "VOCReportWorker: orchestrator boot failed (%s), "
+                "falling back to sequential", e
+            )
+            return None
+
+    def cancel(self):
+        """Signal cancellation to the builder and orchestrator."""
+        if self._builder:
+            self._builder.cancel()
+        if self._orchestrator:
+            self._orchestrator.cancel()
+
+
+class NLPSynthesisWorker(QThread):
+    """Background thread for NLP synthesis / deep dive (avoids freezing UI)."""
+    progress = Signal(str)
+    finished = Signal(str, dict)  # (result_text, scan_dict)
+    error = Signal(str)
+
+    def __init__(self, db_path, gemini_client, scan_id, finding_id=None):
+        super().__init__()
+        self.db_path = db_path
+        self.gemini_client = gemini_client
+        self.scan_id = scan_id
+        self.finding_id = finding_id
+
+    def run(self):
+        try:
+            from src.data.db_manager import DatabaseManager
+            from src.data.nlp_synthesis import NLPSynthesizer
+
+            db = DatabaseManager(self.db_path)
+            db.initialize()
+
+            synth = NLPSynthesizer(db, self.gemini_client)
+
+            if self.finding_id:
+                self.progress.emit("Running deep dive analysis...")
+                result = synth.synthesize_single_finding(self.finding_id)
+            else:
+                self.progress.emit("Synthesizing NLP scan findings...")
+                result = synth.synthesize_findings(self.scan_id)
+
+            scan = db.get_latest_completed_scan() or {}
+            db.close()
+            self.finished.emit(result, scan)
+        except Exception:
+            import traceback
+            self.error.emit(traceback.format_exc())
+
+
+# ═══════════════════════════════════════════
 #  HELPER: Build Gemini Client from config
 # ═══════════════════════════════════════════
 
 def _build_gemini_client():
-    """Create GeminiClient from settings.yaml."""
-    from src.gemini.gemini_client import GeminiClient
+    """Create bridge-backed Gemini client from settings.yaml (Build 7.0).
+
+    Returns a ReportBridgeClient that is interface-compatible with
+    GeminiClient but routes all calls through a persistent GeminiBridge
+    subprocess, eliminating the ~17-20s cold-start per CLI fork.
+    """
+    from src.agents.report_bridge_client import ReportBridgeClient
     config_path = Path(__file__).parent.parent.parent.parent / "config" / "settings.yaml"
     gemini_cfg = {}
     if config_path.exists():
         with open(config_path, encoding="utf-8") as f:
             cfg = yaml.safe_load(f) or {}
         gemini_cfg = cfg.get("gemini", {})
-    return GeminiClient(
+    return ReportBridgeClient(
         cli_path=gemini_cfg.get("cli_path", ""),
         model=gemini_cfg.get("model", "gemini-2.5-flash"),
         temperature=gemini_cfg.get("temperature", 0.2),
@@ -192,9 +339,15 @@ class AIReportsPage(QWidget):
         super().__init__(parent)
         self.db = db_manager
         self._worker = None
+        self._voc_worker = None
+        self._nlp_worker = None
         self._current_report_text = ""
         self._current_data_block = ""
         self._drilldown = None
+        self._scan_blocked = False
+
+        # Build 7.0: Shared bridge-backed Gemini client (lazy boot)
+        self._shared_gemini_client = None
 
         # Seed canned prompts
         try:
@@ -203,6 +356,44 @@ class AIReportsPage(QWidget):
             pass
 
         self._build_ui()
+
+    # ─── Build 7.0: Lifecycle Management ─────────────────
+
+    def _get_gemini_client(self):
+        """Return a shared ReportBridgeClient, creating lazily on first use.
+
+        The bridge subprocess persists across report generations within the
+        same page session, eliminating repeated cold starts (~17-20s each).
+        """
+        if self._shared_gemini_client is not None:
+            return self._shared_gemini_client
+        self._shared_gemini_client = _build_gemini_client()
+        return self._shared_gemini_client
+
+    def cleanup(self):
+        """Shutdown bridge subprocess and release resources.
+
+        Called when the page is destroyed or the application is closing.
+        """
+        # Cancel any running workers
+        if self._voc_worker and self._voc_worker.isRunning():
+            try:
+                self._voc_worker.cancel()
+            except Exception:
+                pass
+
+        # Shutdown shared bridge client
+        if self._shared_gemini_client is not None:
+            try:
+                self._shared_gemini_client.shutdown()
+            except Exception:
+                pass
+            self._shared_gemini_client = None
+
+    def closeEvent(self, event):
+        """Ensure bridge cleanup on widget close."""
+        self.cleanup()
+        super().closeEvent(event)
 
     def _build_ui(self):
         outer = QVBoxLayout(self)
@@ -332,7 +523,7 @@ class AIReportsPage(QWidget):
         self._generate_btn = QPushButton("  Generate Report  ")
         self._generate_btn.setMinimumHeight(36)
         self._generate_btn.setCursor(Qt.PointingHandCursor)
-        self._generate_btn.setEnabled(self._gemini_available)
+        self._generate_btn.setEnabled(self._gemini_available and not self._scan_blocked)
         self._generate_btn.setStyleSheet(f"""
             QPushButton {{
                 background: {ALMA_GREEN_DARK}; color: {ALMA_CREAM};
@@ -451,7 +642,17 @@ class AIReportsPage(QWidget):
             border: 1px solid {ALMA_BORDER_LIGHT}; border-radius: 8px;
         """)
         self._output_stack.addWidget(self._gen_animation)
-        self._output_stack.setCurrentIndex(0)
+
+        # Enhanced empty state shown before first report is generated
+        self._empty_state = EmptyState(
+            icon="data",
+            heading="No reports yet",
+            description="Generate your first report to get started",
+            action_label="Generate Report",
+        )
+        self._empty_state.action_clicked.connect(self._on_generate)
+        self._output_stack.addWidget(self._empty_state)
+        self._output_stack.setCurrentIndex(2)  # Show empty state initially
 
         ol.addWidget(self._output_stack, 1)
         layout.addWidget(output_card, 1)
@@ -481,6 +682,18 @@ class AIReportsPage(QWidget):
             return GeminiClient().is_available()
         except Exception:
             return False
+
+    def set_scan_blocking(self, blocked: bool):
+        """Disable/enable report generation based on active NLP scan."""
+        self._scan_blocked = blocked
+        can_generate = self._gemini_available and not blocked
+        self._generate_btn.setEnabled(can_generate)
+        if blocked:
+            self._generate_btn.setToolTip(
+                "NLP scan in progress \u2014 report generation disabled"
+            )
+        else:
+            self._generate_btn.setToolTip("")
 
     def _build_setup_guide(self, layout):
         guide = QFrame()
@@ -521,6 +734,8 @@ class AIReportsPage(QWidget):
                 self._prompt_combo.addItem(f"{prefix}{p['name']}", p["prompt_id"])
             # Add NLP Scan synthesis option
             self._prompt_combo.addItem("[NLP] From NLP Scan", "nlp_scan")
+            # Add VOC Root Cause Analysis option
+            self._prompt_combo.addItem("[VOC] Root Cause Analysis", "voc_rca")
         except Exception:
             # Fallback if prompts not seeded yet
             self._prompt_combo.addItem("General Trend Analysis", -1)
@@ -541,12 +756,19 @@ class AIReportsPage(QWidget):
     # ═══════════════════════════════════════
 
     def _on_generate(self):
+        if self._scan_blocked:
+            return
         if self._worker and self._worker.isRunning():
             return
 
         # Check if NLP Scan synthesis is selected
         if self._prompt_combo.currentData() == "nlp_scan":
             self._generate_nlp_synthesis()
+            return
+
+        # Check if VOC Root Cause Analysis is selected
+        if self._prompt_combo.currentData() == "voc_rca":
+            self._generate_voc_report()
             return
 
         self._generate_btn.setEnabled(False)
@@ -563,7 +785,7 @@ class AIReportsPage(QWidget):
         self._gen_animation.start_animation()
 
         try:
-            gc = _build_gemini_client()
+            gc = self._get_gemini_client()
         except Exception as e:
             self._gen_animation.stop_animation()
             self._output_stack.setCurrentIndex(0)
@@ -604,7 +826,7 @@ class AIReportsPage(QWidget):
     def _on_error(self, trace):
         self._gen_animation.stop_animation()
         self._output_stack.setCurrentIndex(0)
-        self._generate_btn.setEnabled(self._gemini_available)
+        self._generate_btn.setEnabled(self._gemini_available and not self._scan_blocked)
         self._generate_btn.setText("  Generate Report  ")
         self._progress_lbl.setVisible(False)
         self._output_area.setPlainText(f"Error:\n\n{trace}")
@@ -612,7 +834,7 @@ class AIReportsPage(QWidget):
     def _on_finished(self, text, data_block_text):
         self._gen_animation.stop_animation()
         self._output_stack.setCurrentIndex(0)
-        self._generate_btn.setEnabled(self._gemini_available)
+        self._generate_btn.setEnabled(self._gemini_available and not self._scan_blocked)
         self._generate_btn.setText("  Generate Report  ")
         self._progress_lbl.setVisible(False)
         self._output_area.setPlainText(text)
@@ -626,6 +848,18 @@ class AIReportsPage(QWidget):
 
         # Set chat context
         self._chat_widget.set_report_context(data_block_text, text)
+
+        # Build 7.0: Provide live DB access for data-grounded drilldown
+        try:
+            date_start = self._date_from.date().toString("yyyy-MM-dd")
+            date_end = self._date_to.date().toString("yyyy-MM-dd")
+            scan = self.db.get_latest_completed_scan()
+            scan_id = scan["scan_id"] if scan else None
+            self._chat_widget.set_db_context(
+                self.db.db_path, date_start, date_end, scan_id=scan_id,
+            )
+        except Exception:
+            pass  # Drilldown enrichment is best-effort
 
     def _copy_report(self):
         text = self._output_area.toPlainText()
@@ -795,6 +1029,7 @@ class AIReportsPage(QWidget):
             text = data.get("report_text", raw)
         except (json.JSONDecodeError, TypeError):
             text = raw
+        self._output_stack.setCurrentIndex(0)
         self._output_area.setPlainText(text)
         self._current_report_text = text
         self._copy_btn.setEnabled(True)
@@ -805,7 +1040,7 @@ class AIReportsPage(QWidget):
         chat_hist = report.get("chat_history", "")
         if chat_hist:
             try:
-                gc = _build_gemini_client()
+                gc = self._get_gemini_client()
                 self._chat_widget.set_gemini_client(gc)
             except Exception:
                 pass
@@ -817,7 +1052,7 @@ class AIReportsPage(QWidget):
 
     def refresh_gemini_status(self):
         self._gemini_available = self._check_gemini()
-        self._generate_btn.setEnabled(self._gemini_available)
+        self._generate_btn.setEnabled(self._gemini_available and not self._scan_blocked)
 
     def populate_trc_filter(self):
         """Called by main_window when data changes."""
@@ -846,7 +1081,8 @@ class AIReportsPage(QWidget):
     # ═══════════════════════════════════════
 
     def _generate_nlp_synthesis(self):
-        """Generate synthesis report from latest NLP scan."""
+        """Generate synthesis report from latest NLP scan (background thread)."""
+        self._output_stack.setCurrentIndex(0)
         scan = self.db.get_latest_completed_scan()
         if not scan:
             self._output_area.setPlainText(
@@ -858,66 +1094,288 @@ class AIReportsPage(QWidget):
         self._generate_btn.setEnabled(False)
         self._generate_btn.setText("  Synthesizing...  ")
         self._output_area.clear()
+        self._output_stack.setCurrentIndex(1)
+        self._gen_animation.start_animation()
+        self._gen_animation.update_status("Synthesizing NLP findings...")
 
         try:
-            gc = _build_gemini_client()
+            gc = self._get_gemini_client()
             self._chat_widget.set_gemini_client(gc)
-
-            from src.data.nlp_synthesis import NLPSynthesizer
-            synth = NLPSynthesizer(self.db, gc)
-            result = synth.synthesize_findings(scan["scan_id"])
-
-            self._output_area.setPlainText(result)
-            self._current_report_text = result
-            self._copy_btn.setEnabled(True)
-            self._save_md_btn.setEnabled(True)
-            self._save_history_btn.setEnabled(True)
-            self._export_drive_btn.setEnabled(True)
-            self._chat_btn.setEnabled(True)
-
-            # Set context for follow-up chat
-            self._chat_widget.set_report_context(
-                f"NLP Scan synthesis for {scan['date_range_start']} to {scan['date_range_end']}",
-                result,
-            )
-
         except Exception as e:
-            self._output_area.setPlainText(f"Synthesis failed: {e}")
-        finally:
+            self._gen_animation.stop_animation()
+            self._output_stack.setCurrentIndex(0)
+            self._output_area.setPlainText(f"Gemini client error: {e}")
             self._generate_btn.setEnabled(True)
             self._generate_btn.setText("  Generate Report  ")
+            return
+
+        self._nlp_worker = NLPSynthesisWorker(
+            self.db.db_path, gc, scan["scan_id"],
+        )
+        self._nlp_worker.progress.connect(lambda msg: self._gen_animation.update_status(msg))
+        self._nlp_worker.finished.connect(self._on_nlp_synthesis_finished)
+        self._nlp_worker.error.connect(self._on_nlp_synthesis_error)
+        self._nlp_worker.start()
+
+    def _on_nlp_synthesis_finished(self, result, scan):
+        """Handle NLP synthesis completion."""
+        self._gen_animation.stop_animation()
+        self._output_stack.setCurrentIndex(0)
+        self._generate_btn.setEnabled(True)
+        self._generate_btn.setText("  Generate Report  ")
+
+        self._output_area.setPlainText(result)
+        self._current_report_text = result
+        self._copy_btn.setEnabled(True)
+        self._save_md_btn.setEnabled(True)
+        self._save_history_btn.setEnabled(True)
+        self._export_drive_btn.setEnabled(True)
+        self._chat_btn.setEnabled(True)
+
+        # Set context for follow-up chat
+        date_range = f"{scan.get('date_range_start', '')} to {scan.get('date_range_end', '')}"
+        self._chat_widget.set_report_context(
+            f"NLP Scan synthesis for {date_range}", result,
+        )
+
+        # Build 7.0: Live DB access for data-grounded drilldown
+        try:
+            self._chat_widget.set_db_context(
+                self.db.db_path,
+                scan.get("date_range_start", ""),
+                scan.get("date_range_end", ""),
+                scan_id=scan.get("scan_id"),
+            )
+        except Exception:
+            pass
+
+    def _on_nlp_synthesis_error(self, trace):
+        """Handle NLP synthesis error."""
+        self._gen_animation.stop_animation()
+        self._output_stack.setCurrentIndex(0)
+        self._generate_btn.setEnabled(True)
+        self._generate_btn.setText("  Generate Report  ")
+        self._output_area.setPlainText(f"Synthesis failed:\n\n{trace}")
 
     def load_nlp_finding(self, finding_id, finding_title):
-        """
-        Called from NLP Scanner 'Deep Dive' -- triggers per-finding
-        drilldown via Gemini.
-        """
+        """Called from NLP Scanner 'Deep Dive' -- triggers per-finding
+        drilldown via Gemini (background thread)."""
+        self._output_stack.setCurrentIndex(1)
+        self._gen_animation.start_animation()
+        self._gen_animation.update_status(f"Loading deep dive for: {finding_title}...")
+        self._generate_btn.setEnabled(False)
+        self._generate_btn.setText("  Deep Diving...  ")
         self._output_area.clear()
-        self._output_area.setPlainText(f"Loading deep dive for: {finding_title}...")
 
         try:
-            gc = _build_gemini_client()
+            gc = self._get_gemini_client()
             self._chat_widget.set_gemini_client(gc)
+        except Exception as e:
+            self._gen_animation.stop_animation()
+            self._output_stack.setCurrentIndex(0)
+            self._output_area.setPlainText(f"Gemini client error: {e}")
+            self._generate_btn.setEnabled(True)
+            self._generate_btn.setText("  Generate Report  ")
+            return
 
-            from src.data.nlp_synthesis import NLPSynthesizer
-            synth = NLPSynthesizer(self.db, gc)
-            result = synth.synthesize_single_finding(finding_id)
+        scan = self.db.get_latest_completed_scan()
+        scan_id = scan["scan_id"] if scan else ""
 
-            self._output_area.setPlainText(result)
-            self._current_report_text = result
-            self._copy_btn.setEnabled(True)
-            self._save_md_btn.setEnabled(True)
-            self._save_history_btn.setEnabled(True)
-            self._export_drive_btn.setEnabled(True)
-            self._chat_btn.setEnabled(True)
+        self._nlp_finding_title = finding_title
+        self._nlp_finding_id = finding_id
+        self._nlp_worker = NLPSynthesisWorker(
+            self.db.db_path, gc, scan_id, finding_id=finding_id,
+        )
+        self._nlp_worker.progress.connect(lambda msg: self._gen_animation.update_status(msg))
+        self._nlp_worker.finished.connect(self._on_nlp_finding_finished)
+        self._nlp_worker.error.connect(self._on_nlp_synthesis_error)
+        self._nlp_worker.start()
 
-            # Set up chat for follow-up questions
-            self._chat_widget.set_report_context(
-                f"Deep dive on finding: {finding_title}",
-                result,
-            )
-            # Store finding_id for finding-aware chat
+    def _on_nlp_finding_finished(self, result, scan):
+        """Handle deep dive finding completion."""
+        self._gen_animation.stop_animation()
+        self._output_stack.setCurrentIndex(0)
+        self._generate_btn.setEnabled(True)
+        self._generate_btn.setText("  Generate Report  ")
+
+        self._output_area.setPlainText(result)
+        self._current_report_text = result
+        self._copy_btn.setEnabled(True)
+        self._save_md_btn.setEnabled(True)
+        self._save_history_btn.setEnabled(True)
+        self._export_drive_btn.setEnabled(True)
+        self._chat_btn.setEnabled(True)
+
+        finding_title = getattr(self, '_nlp_finding_title', '')
+        finding_id = getattr(self, '_nlp_finding_id', None)
+
+        # Set up chat for follow-up questions
+        self._chat_widget.set_report_context(
+            f"Deep dive on finding: {finding_title}", result,
+        )
+        # Store finding_id for finding-aware chat
+        if finding_id:
             self._chat_widget._nlp_finding_id = finding_id
 
+        # Build 7.0: Live DB access for drilldown
+        try:
+            if scan:
+                self._chat_widget.set_db_context(
+                    self.db.db_path,
+                    scan.get("date_range_start", ""),
+                    scan.get("date_range_end", ""),
+                    scan_id=scan.get("scan_id"),
+                )
+        except Exception:
+            pass
+
+    # ═══════════════════════════════════════
+    #  VOC ROOT CAUSE ANALYSIS (Build 6.0)
+    # ═══════════════════════════════════════
+
+    def _generate_voc_report(self):
+        """Build plan → show preview → launch VOC worker if confirmed."""
+        from src.data.voc_builder import VOCBuilder
+
+        try:
+            gc = self._get_gemini_client()
         except Exception as e:
-            self._output_area.setPlainText(f"Deep dive failed: {e}")
+            self._output_area.setPlainText(f"Gemini client error: {e}")
+            return
+
+        builder = VOCBuilder(self.db, gc)
+
+        date_start = self._date_from.date().toString("yyyy-MM-dd")
+        date_end = self._date_to.date().toString("yyyy-MM-dd")
+        trc_filter = self._trc_combo.currentData() or None
+
+        # Run plan (fast, no Gemini calls)
+        plan = builder.plan(date_start, date_end, trc_filter)
+
+        if not plan["trc_plans"]:
+            self._output_stack.setCurrentIndex(0)
+            self._output_area.setPlainText(
+                "No tickets found in the specified date range.\n\n"
+                "Adjust date range or TRC filter and try again."
+            )
+            return
+
+        # Show plan preview dialog
+        if not self._show_voc_plan_preview(plan):
+            return  # User cancelled
+
+        # Launch worker
+        self._generate_btn.setEnabled(False)
+        self._generate_btn.setText("  Generating VOC Report...  ")
+        self._copy_btn.setEnabled(False)
+        self._save_md_btn.setEnabled(False)
+        self._save_history_btn.setEnabled(False)
+        self._export_drive_btn.setEnabled(False)
+        self._chat_btn.setEnabled(False)
+        self._output_area.clear()
+        self._chat_widget.clear()
+
+        self._output_stack.setCurrentIndex(1)
+        self._gen_animation.start_animation()
+        self._gen_animation.update_status("Planning VOC analysis...")
+
+        self._chat_widget.set_gemini_client(gc)
+
+        self._voc_worker = VOCReportWorker(
+            self.db.db_path, date_start, date_end, trc_filter, gc,
+        )
+        self._voc_worker.progress.connect(self._on_voc_progress)
+        self._voc_worker.finished.connect(self._on_voc_finished)
+        self._voc_worker.error.connect(self._on_voc_error)
+        self._voc_worker.start()
+
+    def _show_voc_plan_preview(self, plan):
+        """QMessageBox with TRC count, tickets, est cost/time. Returns True if confirmed."""
+        nlp_status = "Yes" if plan["has_nlp_data"] else "No"
+        trc_count = len(plan["trc_plans"])
+
+        details = (
+            f"<b>VOC Root Cause Analysis Plan</b><br><br>"
+            f"<b>TRC Categories:</b> {trc_count}<br>"
+            f"<b>Total Tickets:</b> {plan['total_tickets']:,}<br>"
+            f"<b>Sampled Tickets:</b> {plan['total_sampled']:,}<br>"
+            f"<b>Gemini Calls:</b> {plan['total_gemini_calls']}<br>"
+            f"<b>Model:</b> {plan['model']}<br>"
+            f"<b>NLP Enrichment:</b> {nlp_status}<br>"
+            f"<b>Est. Cost:</b> ${plan['est_cost_usd']:.2f}<br>"
+            f"<b>Est. Time:</b> ~{plan['est_time_min']} min<br><br>"
+        )
+
+        # Top TRCs summary
+        top_trcs = plan["trc_plans"][:10]
+        if top_trcs:
+            details += "<b>Top TRCs:</b><br>"
+            for tp in top_trcs:
+                nlp_tag = " [NLP]" if tp["has_nlp"] else ""
+                details += (
+                    f"&nbsp;&nbsp;{tp['trc']}: {tp['total_tickets']:,} tickets "
+                    f"({tp['sampled']:,} sampled){nlp_tag}<br>"
+                )
+            if trc_count > 10:
+                details += f"&nbsp;&nbsp;... and {trc_count - 10} more TRCs<br>"
+
+        reply = QMessageBox.question(
+            self,
+            "VOC Report Plan",
+            details,
+            QMessageBox.Ok | QMessageBox.Cancel,
+            QMessageBox.Ok,
+        )
+        return reply == QMessageBox.Ok
+
+    def _on_voc_progress(self, message, percent):
+        """Update animation widget with VOC progress."""
+        if hasattr(self, '_gen_animation'):
+            self._gen_animation.update_status(message)
+
+    def _on_voc_finished(self, result):
+        """Display report, enable buttons, store in history."""
+        self._gen_animation.stop_animation()
+        self._output_stack.setCurrentIndex(0)
+        self._generate_btn.setEnabled(self._gemini_available and not self._scan_blocked)
+        self._generate_btn.setText("  Generate Report  ")
+
+        report_text = result.get("report_text", "")
+        self._output_area.setPlainText(report_text)
+        self._current_report_text = report_text
+        self._current_data_block = ""
+
+        self._copy_btn.setEnabled(True)
+        self._save_md_btn.setEnabled(True)
+        self._save_history_btn.setEnabled(True)
+        self._export_drive_btn.setEnabled(True)
+        self._chat_btn.setEnabled(True)
+
+        # Set chat context (report text serves as context)
+        stats = result.get("stats", {})
+        context_str = (
+            f"VOC Root Cause Analysis | "
+            f"{stats.get('total_tickets', 0)} tickets, "
+            f"{len(stats.get('trc_plans', []))} TRCs"
+        )
+        self._chat_widget.set_report_context(context_str, report_text)
+
+        # Build 7.0: Live DB access for data-grounded drilldown
+        try:
+            date_start = self._date_from.date().toString("yyyy-MM-dd")
+            date_end = self._date_to.date().toString("yyyy-MM-dd")
+            scan = self.db.get_latest_completed_scan()
+            scan_id = scan["scan_id"] if scan else None
+            self._chat_widget.set_db_context(
+                self.db.db_path, date_start, date_end, scan_id=scan_id,
+            )
+        except Exception:
+            pass
+
+    def _on_voc_error(self, trace):
+        """Display error, re-enable buttons."""
+        self._gen_animation.stop_animation()
+        self._output_stack.setCurrentIndex(0)
+        self._generate_btn.setEnabled(self._gemini_available and not self._scan_blocked)
+        self._generate_btn.setText("  Generate Report  ")
+        self._output_area.setPlainText(f"VOC Report Error:\n\n{trace}")

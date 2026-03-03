@@ -21,7 +21,7 @@ from src.ui.theme import (
     ALMA_WHITE, ALMA_CREAM, ALMA_TEXT_DARK, ALMA_TEXT_MID, ALMA_TEXT_LIGHT,
     ALMA_TEXT_ON_DARK, ALMA_BORDER, ALMA_BORDER_LIGHT,
     ALMA_SUCCESS, ALMA_WARNING, ALMA_ERROR, ALMA_INFO,
-    ALMA_BG_ELEVATED, apply_card_shadow,
+    ALMA_BG_ELEVATED, apply_card_shadow, configure_table,
 )
 from src.ui.widgets.collapsible_section import CollapsibleSection
 from src.ui.widgets.empty_state import EmptyState
@@ -45,6 +45,8 @@ class NLPScannerPage(QWidget):
     deep_dive_requested = Signal(str, str)  # (finding_id, finding_title)
     # Emitted when user clicks "View Tickets" on a finding
     view_tickets_requested = Signal(list)  # ticket_ids
+    # Emitted when scan starts (True) or ends (False) — blocks Gemini-dependent features
+    scan_active_changed = Signal(bool)
 
     def __init__(self, db_manager, parent=None):
         super().__init__(parent)
@@ -53,8 +55,13 @@ class NLPScannerPage(QWidget):
         self._poll_timer = None
         self._active_scan_id = None
         self._drilldown = None
+        self._debug_mode = True  # default to debug until settings propagate
         self._build_ui()
         self._refresh_all()
+
+    def is_scan_active(self):
+        """Return True if an NLP scan is currently running."""
+        return self._active_scan_id is not None
 
     def set_drilldown_panel(self, panel):
         """Called from main_window.py to wire the drilldown side panel."""
@@ -142,29 +149,38 @@ class NLPScannerPage(QWidget):
         layout.setContentsMargins(28, 16, 28, 24)
         layout.setSpacing(16)
 
-        # Info panel: "What is NLP Scanning?"
-        layout.addWidget(self._build_info_panel())
+        # ── Debug-only: info panel ──
+        self._info_panel = self._build_info_panel()
+        layout.addWidget(self._info_panel)
 
-        # Scan config card
-        layout.addWidget(self._build_scan_config_card())
+        # ── Debug-only: full scan config card ──
+        self._scan_config_card = self._build_scan_config_card()
+        layout.addWidget(self._scan_config_card)
 
-        # Scan status panel (idle estimates / running 3-column)
+        # ── Debug-only: scan status panel (idle estimates / running 3-column) ──
         self._status_panel = ScanStatusPanel()
         layout.addWidget(self._status_panel)
 
-        # Control buttons row
-        layout.addWidget(self._build_control_buttons())
+        # ── Debug-only: control buttons row ──
+        self._control_buttons_frame = self._build_control_buttons()
+        layout.addWidget(self._control_buttons_frame)
 
-        # Live scan monitor (hidden until scan starts)
+        # ── Debug-only: live scan monitor (hidden until scan starts) ──
         self._scan_monitor = ScanMonitorWidget(self.db)
         self._scan_monitor.scan_completed.connect(self._on_scan_completed)
         layout.addWidget(self._scan_monitor)
 
-        # Scan history table
+        # ── Production: simple scan card (shown when debug OFF) ──
+        self._simple_scan_card = self._build_simple_scan_card()
+        self._simple_scan_card.setVisible(False)  # default hidden; update_debug_mode toggles
+        layout.addWidget(self._simple_scan_card)
+
+        # ── Always visible: scan history table ──
         layout.addWidget(self._build_history_section())
 
-        # Docs panel
-        layout.addWidget(self._build_docs_panel())
+        # ── Debug-only: docs panel ──
+        self._docs_section = self._build_docs_panel()
+        layout.addWidget(self._docs_section)
 
         layout.addStretch()
 
@@ -379,7 +395,7 @@ class NLPScannerPage(QWidget):
         col.addWidget(lbl)
         self._workers_spin = QSpinBox()
         self._workers_spin.setRange(1, 3)
-        self._workers_spin.setValue(1)
+        self._workers_spin.setValue(3)
         self._workers_spin.setToolTip(
             "Parallel worker subprocesses (1-3). Each worker claims "
             "and processes batches independently."
@@ -497,6 +513,21 @@ class NLPScannerPage(QWidget):
         self._cancel_btn.setVisible(False)
         btn_layout.addWidget(self._cancel_btn)
 
+        # Retry Failed Batches
+        self._retry_failed_btn = QPushButton("Retry Failed Batches")
+        self._retry_failed_btn.setCursor(Qt.PointingHandCursor)
+        self._retry_failed_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {ALMA_WARNING}; color: white; border: none;
+                border-radius: 8px; padding: 10px 20px; font-weight: 600;
+                font-size: 13px;
+            }}
+            QPushButton:hover {{ background: #E67E00; }}
+        """)
+        self._retry_failed_btn.clicked.connect(self._retry_failed_batches)
+        self._retry_failed_btn.setVisible(False)
+        btn_layout.addWidget(self._retry_failed_btn)
+
         btn_layout.addStretch()
         return container
 
@@ -522,7 +553,7 @@ class NLPScannerPage(QWidget):
         self._history_table.horizontalHeader().setStretchLastSection(True)
         self._history_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self._history_table.verticalHeader().setVisible(False)
-        self._history_table.setSelectionBehavior(QTableWidget.SelectRows)
+        configure_table(self._history_table)
         self._history_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self._history_table.setAlternatingRowColors(True)
         self._history_table.setMaximumHeight(250)
@@ -542,10 +573,6 @@ class NLPScannerPage(QWidget):
             }}
             QTableWidget::item:alternate {{
                 background: rgba(20, 87, 63, 0.02);
-            }}
-            QTableWidget::item:selected {{
-                background: {ALMA_GREEN_SUBTLE};
-                color: {ALMA_TEXT_DARK};
             }}
             QScrollBar:vertical {{
                 width: 6px; background: transparent;
@@ -597,6 +624,7 @@ class NLPScannerPage(QWidget):
                 status_display = {
                     'scan_complete': 'completed',
                     'analysis_complete': 'completed',
+                    'completed_with_errors': 'partial',
                     'quota_exhausted': 'quota limit',
                     'budget_exceeded': 'budget limit',
                 }.get(status, status)
@@ -604,6 +632,9 @@ class NLPScannerPage(QWidget):
                 status_item = QTableWidgetItem(status_display)
                 if status in ("completed", "scan_complete", "analysis_complete"):
                     status_item.setForeground(Qt.darkGreen)
+                elif status == "completed_with_errors":
+                    from PySide6.QtGui import QColor
+                    status_item.setForeground(QColor(ALMA_WARNING))
                 elif status in ("failed", "cancelled", "budget_exceeded",
                                 "quota_exhausted"):
                     status_item.setForeground(Qt.red)
@@ -611,6 +642,435 @@ class NLPScannerPage(QWidget):
                     from PySide6.QtGui import QColor
                     status_item.setForeground(QColor(ALMA_WARNING))
                 self._history_table.setItem(i, 5, status_item)
+        except Exception:
+            pass
+
+    # ==============================================
+    #  SIMPLE SCAN CARD (Production Mode)
+    # ==============================================
+
+    def _build_simple_scan_card(self):
+        """Production scan UI — date range, TRC filter, start/cancel, progress."""
+        card = self._card_frame()
+        cl = QVBoxLayout(card)
+        cl.setContentsMargins(20, 16, 20, 16)
+        cl.setSpacing(12)
+
+        # Title
+        title = QLabel("NLP Scan")
+        title.setStyleSheet(f"font-size: 14px; font-weight: 700; color: {ALMA_TEXT_DARK};")
+        cl.addWidget(title)
+
+        desc = QLabel(
+            "Classify tickets in the selected range using Gemini. "
+            "Results power SubTaxonomy, Findings, and AI Reports."
+        )
+        desc.setWordWrap(True)
+        desc.setStyleSheet(f"font-size: 11px; color: {ALMA_TEXT_MID}; line-height: 1.4;")
+        cl.addWidget(desc)
+
+        # ── Date range row ──
+        date_row = QHBoxLayout()
+        date_row.setSpacing(8)
+
+        col = QVBoxLayout()
+        col.setSpacing(4)
+        lbl = QLabel("DATE RANGE")
+        lbl.setStyleSheet(self._LBL_STYLE)
+        col.addWidget(lbl)
+        dr = QHBoxLayout()
+        self._simple_date_start = ModernDatePicker()
+        self._simple_date_end = ModernDatePicker()
+        self._simple_date_start.setStyleSheet(self._FIELD_STYLE)
+        self._simple_date_end.setStyleSheet(self._FIELD_STYLE)
+        dr.addWidget(self._simple_date_start)
+        to_lbl = QLabel("to")
+        to_lbl.setStyleSheet(f"font-size: 12px; color: {ALMA_TEXT_MID};")
+        dr.addWidget(to_lbl)
+        dr.addWidget(self._simple_date_end)
+        col.addLayout(dr)
+        date_row.addLayout(col, 3)
+
+        # ── TRC filter ──
+        col2 = QVBoxLayout()
+        col2.setSpacing(4)
+        trc_lbl = QLabel("TRC FILTER")
+        trc_lbl.setStyleSheet(self._LBL_STYLE)
+        col2.addWidget(trc_lbl)
+        self._simple_trc_combo = QComboBox()
+        self._simple_trc_combo.setStyleSheet(self._FIELD_STYLE)
+        self._simple_trc_combo.addItem("All TRCs", None)
+        col2.addWidget(self._simple_trc_combo)
+        date_row.addLayout(col2, 2)
+
+        cl.addLayout(date_row)
+
+        # Last scan info
+        self._simple_last_scan_lbl = QLabel("")
+        self._simple_last_scan_lbl.setStyleSheet(
+            f"font-size: 11px; color: {ALMA_TEXT_LIGHT}; padding: 2px 0;"
+        )
+        cl.addWidget(self._simple_last_scan_lbl)
+
+        # ── Start + Cancel buttons ──
+        row = QHBoxLayout()
+        self._simple_start_btn = QPushButton("Start Scan")
+        self._simple_start_btn.setCursor(Qt.PointingHandCursor)
+        self._simple_start_btn.setMinimumHeight(38)
+        self._simple_start_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {ALMA_GREEN_DARK}; color: {ALMA_TEXT_ON_DARK};
+                border: none; border-radius: 8px; font-weight: 700;
+                font-size: 13px; padding: 8px 24px;
+            }}
+            QPushButton:hover {{ background: {ALMA_GREEN_MID}; }}
+            QPushButton:disabled {{ background: {ALMA_BORDER}; color: {ALMA_TEXT_LIGHT}; }}
+        """)
+        self._simple_start_btn.clicked.connect(self._start_simple_scan)
+        row.addWidget(self._simple_start_btn)
+
+        self._simple_cancel_btn = QPushButton("Cancel")
+        self._simple_cancel_btn.setCursor(Qt.PointingHandCursor)
+        self._simple_cancel_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {ALMA_ERROR}; color: white; border: none;
+                border-radius: 8px; padding: 8px 16px; font-weight: 600;
+                font-size: 12px;
+            }}
+            QPushButton:hover {{ background: #B71C1C; }}
+        """)
+        self._simple_cancel_btn.clicked.connect(self._cancel_scan)
+        self._simple_cancel_btn.setVisible(False)
+        row.addWidget(self._simple_cancel_btn)
+
+        row.addStretch()
+        cl.addLayout(row)
+
+        # ── Progress bar + label (hidden until scan starts) ──
+        self._simple_progress_bar = QProgressBar()
+        self._simple_progress_bar.setRange(0, 100)
+        self._simple_progress_bar.setValue(0)
+        self._simple_progress_bar.setFixedHeight(14)
+        self._simple_progress_bar.setStyleSheet(f"""
+            QProgressBar {{
+                background: {ALMA_CREAM}; border: 1px solid {ALMA_BORDER_LIGHT};
+                border-radius: 7px; text-align: center; font-size: 9px;
+                color: {ALMA_TEXT_MID};
+            }}
+            QProgressBar::chunk {{
+                background: {ALMA_GREEN_DARK}; border-radius: 6px;
+            }}
+        """)
+        self._simple_progress_bar.setVisible(False)
+        cl.addWidget(self._simple_progress_bar)
+
+        self._simple_progress_lbl = QLabel("")
+        self._simple_progress_lbl.setStyleSheet(
+            f"font-size: 11px; color: {ALMA_TEXT_MID};"
+        )
+        self._simple_progress_lbl.setVisible(False)
+        cl.addWidget(self._simple_progress_lbl)
+
+        return card
+
+    def _refresh_simple_last_scan(self):
+        """Update the 'last scan' label and sync date/TRC pickers in simple card."""
+        try:
+            scans = self.db.get_scan_history(limit=1)
+            if scans:
+                s = scans[0]
+                date_str = s.get("created_at", "")[:10]
+                tickets = s.get("total_tickets", 0)
+                status = s.get("status", "unknown")
+                status_display = {
+                    'scan_complete': 'completed',
+                    'analysis_complete': 'completed',
+                }.get(status, status)
+                self._simple_last_scan_lbl.setText(
+                    f"Last scan: {date_str}  \u2022  "
+                    f"{tickets:,} tickets  \u2022  {status_display}"
+                )
+            else:
+                self._simple_last_scan_lbl.setText("No scans yet")
+        except Exception:
+            self._simple_last_scan_lbl.setText("")
+
+        # Sync date pickers to data range
+        self._sync_simple_date_range()
+        # Populate TRC combo
+        self._populate_simple_trc_combo()
+
+    def _sync_simple_date_range(self):
+        """Sync simple card date pickers to actual data range."""
+        try:
+            from PySide6.QtCore import QDate
+            row = self.db.conn.execute(
+                "SELECT MIN(created_at) AS mn, MAX(created_at) AS mx FROM conversations"
+            ).fetchone()
+            if row and row["mn"] and row["mx"]:
+                mn = row["mn"][:10].split("-")
+                mx = row["mx"][:10].split("-")
+                if len(mn) == 3 and len(mx) == 3:
+                    self._simple_date_start.set_date(
+                        QDate(int(mn[0]), int(mn[1]), int(mn[2]))
+                    )
+                    self._simple_date_end.set_date(
+                        QDate(int(mx[0]), int(mx[1]), int(mx[2]))
+                    )
+        except Exception:
+            pass
+
+    def _populate_simple_trc_combo(self):
+        """Populate simple card TRC filter dropdown."""
+        current = self._simple_trc_combo.currentData()
+        self._simple_trc_combo.clear()
+        self._simple_trc_combo.addItem("All TRCs", None)
+        try:
+            trcs = self.db.get_trc_list()
+            for trc in trcs:
+                self._simple_trc_combo.addItem(trc, trc)
+        except Exception:
+            pass
+
+    # ==============================================
+    #  DEBUG MODE GATING
+    # ==============================================
+
+    def update_debug_mode(self, enabled: bool):
+        """Show/hide debug-only scan controls based on settings toggle."""
+        self._debug_mode = enabled
+
+        # Debug-only sections
+        self._info_panel.setVisible(enabled)
+        self._scan_config_card.setVisible(enabled)
+        self._status_panel.setVisible(enabled)
+        self._control_buttons_frame.setVisible(enabled)
+        self._scan_monitor.setVisible(enabled and self._active_scan_id is not None)
+        self._docs_section.setVisible(enabled)
+
+        # Production simple card — shown when debug OFF
+        self._simple_scan_card.setVisible(not enabled)
+        if not enabled:
+            self._refresh_simple_last_scan()
+
+    # ==============================================
+    #  SIMPLE SCAN (Production Mode — via JobQueue)
+    # ==============================================
+
+    def _start_simple_scan(self):
+        """Start scan via job queue (production mode).
+
+        Reads date range + TRC from simple card pickers on the main thread,
+        then passes them through the job factory closure to avoid cross-thread
+        DB access in the worker.
+        """
+        try:
+            # Read values from UI (main thread — safe)
+            ds = self._simple_date_start.get_date_string()
+            de = self._simple_date_end.get_date_string()
+            if not ds or not de:
+                self._simple_progress_lbl.setVisible(True)
+                self._simple_progress_lbl.setText("Select a date range first")
+                return
+
+            trc_data = self._simple_trc_combo.currentData()
+            trc_filter = [trc_data] if trc_data else None
+
+            # Store scan params for _run_scan_blocking (read on worker thread)
+            self._pending_scan_params = {
+                "date_start": ds,
+                "date_end": de,
+                "trc_filter": trc_filter,
+            }
+
+            main_win = self.window()
+            if hasattr(main_win, '_job_queue') and hasattr(main_win, '_make_nlp_scan_job'):
+                self._ensure_scan_manager()
+                job = main_win._make_nlp_scan_job()
+                main_win._job_queue.submit(job)
+                self.scan_active_changed.emit(True)
+
+                # Update simple card UI
+                self._simple_start_btn.setEnabled(False)
+                self._simple_cancel_btn.setVisible(True)
+                self._simple_progress_bar.setVisible(True)
+                self._simple_progress_bar.setValue(0)
+                self._simple_progress_lbl.setVisible(True)
+                self._simple_progress_lbl.setText("Queued...")
+
+                # Start polling for progress updates
+                self._poll_wait_count = 0
+                self._overlay_model_name = None  # re-read on next poll
+                self._start_polling()
+            else:
+                # Fallback: direct launch (same as debug mode)
+                self._start_scan()
+        except Exception as e:
+            logger.error(f"Simple scan failed: {e}")
+            self._simple_progress_lbl.setVisible(True)
+            self._simple_progress_lbl.setText(f"Error: {e}")
+
+    def _run_scan_blocking(self):
+        """Synchronous scan wrapper for JobQueue execution.
+
+        Called by CallableWorker on a background thread.
+        Reads scan parameters from self._pending_scan_params (set on main
+        thread by _start_simple_scan) to avoid cross-thread DB access.
+        Returns the terminal status string.
+        """
+        import time
+        import yaml
+        from pathlib import Path
+
+        self._ensure_scan_manager()
+
+        # Read settings (yaml is thread-safe file I/O)
+        with open(Path("config/settings.yaml")) as f:
+            cfg = yaml.safe_load(f) or {}
+        nlp_cfg = cfg.get("nlp_scan", {})
+
+        # Get params set by _start_simple_scan on the main thread
+        params = getattr(self, '_pending_scan_params', {})
+        ds = params.get("date_start", "")
+        de = params.get("date_end", "")
+        trc_filter = params.get("trc_filter", None)
+
+        if not ds or not de:
+            return "failed"
+
+        result = self._scan_mgr.start_scan(
+            date_start=ds,
+            date_end=de,
+            trc_filter=trc_filter,
+            budget_cap=nlp_cfg.get("budget_cap", 50.0),
+            parallel_workers=nlp_cfg.get("parallel_workers", 3),
+        )
+
+        if "error" in result:
+            return "failed"
+
+        self._active_scan_id = result.get("scan_id")
+
+        # Poll until terminal
+        terminal = ("completed", "analysis_complete", "scan_complete",
+                     "failed", "cancelled", "budget_exceeded", "quota_exhausted")
+        while True:
+            try:
+                status = self._scan_mgr.get_status(self._active_scan_id)
+                scan_status = status.get("status", "") if isinstance(status, dict) else ""
+                if scan_status in terminal:
+                    return scan_status
+            except Exception:
+                pass
+            time.sleep(5)
+
+    def _on_job_scan_complete(self, result):
+        """Handle scan completion from JobQueue worker (main thread)."""
+        self._active_scan_id = None
+        self._cost_dashboard.set_active_scan(None)
+        self.scan_active_changed.emit(False)
+        self._stop_polling()
+
+        # Reset simple card
+        self._simple_start_btn.setEnabled(True)
+        self._simple_cancel_btn.setVisible(False)
+        self._simple_progress_bar.setValue(100)
+        self._simple_progress_lbl.setText("Scan complete")
+
+        # Run post-scan analysis and refresh
+        self._run_post_scan_analysis()
+        self._refresh_simple_last_scan()
+        self._refresh_history()
+
+    def _on_job_scan_error(self, error_msg):
+        """Handle scan error from JobQueue worker (main thread)."""
+        self._active_scan_id = None
+        self.scan_active_changed.emit(False)
+        self._stop_polling()
+
+        # Reset simple card
+        self._simple_start_btn.setEnabled(True)
+        self._simple_cancel_btn.setVisible(False)
+        self._simple_progress_bar.setVisible(False)
+        self._simple_progress_lbl.setText(f"Scan failed: {error_msg[:100]}")
+        self._simple_progress_lbl.setStyleSheet(
+            f"font-size: 11px; color: {ALMA_ERROR};"
+        )
+        logger.error(f"Job scan error: {error_msg}")
+
+    def _update_simple_progress(self):
+        """Update simple scan card progress display AND job overlay (called from poll timer)."""
+        if not self._active_scan_id:
+            return
+
+        try:
+            status = self._scan_mgr.get_status(self._active_scan_id)
+            if not isinstance(status, dict) or "error" in status:
+                return
+
+            completed = status.get("completed_batches", 0) or 0
+            total = status.get("total_batches", 1) or 1
+            pct = int(completed / total * 100) if total > 0 else 0
+            classified = status.get("classified_tickets", 0) or 0
+            total_tix = status.get("total_tickets", 0) or 0
+
+            # ── Time estimate ──
+            time_str = ""
+            try:
+                created_at = status.get("created_at", "")
+                if created_at and completed > 0:
+                    from datetime import datetime
+                    start_dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                    elapsed = (datetime.now(start_dt.tzinfo)
+                               if start_dt.tzinfo
+                               else datetime.now()) - start_dt
+                    elapsed_secs = max(elapsed.total_seconds(), 1)
+                    est_total_secs = elapsed_secs * total / completed
+                    remaining_secs = max(est_total_secs - elapsed_secs, 0)
+                    remaining_min = int(remaining_secs / 60)
+                    if remaining_min >= 1:
+                        time_str = f"  \u2022  ~{remaining_min} min remaining"
+                    else:
+                        time_str = "  \u2022  finishing up"
+                elif completed == 0:
+                    time_str = "  \u2022  starting"
+            except Exception:
+                pass
+
+            progress_text = (
+                f"{classified:,}/{total_tix:,} tickets  \u2022  "
+                f"{completed}/{total} batches  \u2022  {pct}%{time_str}"
+            )
+
+            # ── Update simple scan card (if visible) ──
+            if hasattr(self, '_simple_progress_bar') and self._simple_scan_card.isVisible():
+                self._simple_progress_bar.setValue(pct)
+                self._simple_progress_lbl.setText(progress_text)
+
+            # ── Update job overlay with live progress ──
+            main_win = self.window()
+            if hasattr(main_win, '_job_overlay') and main_win._job_overlay.isVisible():
+                # Read model for display
+                model = getattr(self, '_overlay_model_name', None)
+                if model is None:
+                    try:
+                        import yaml
+                        from pathlib import Path
+                        cfg_path = Path("config/settings.yaml")
+                        with open(cfg_path) as f:
+                            cfg = yaml.safe_load(f) or {}
+                        model = cfg.get("gemini", {}).get("model", "gemini")
+                        self._overlay_model_name = model
+                    except Exception:
+                        model = "gemini"
+                        self._overlay_model_name = model
+
+                overlay_text = (
+                    f"Classifying tickets with {model}  \u2022  "
+                    f"{pct}%{time_str}"
+                )
+                main_win._job_overlay.update_status(overlay_text)
+
         except Exception:
             pass
 
@@ -709,6 +1169,8 @@ class NLPScannerPage(QWidget):
                 return
 
             self._active_scan_id = result.get("scan_id")
+            self._cost_dashboard.set_active_scan(self._active_scan_id)
+            self.scan_active_changed.emit(True)
 
             # Show running state
             self._start_btn.setEnabled(False)
@@ -768,15 +1230,41 @@ class NLPScannerPage(QWidget):
             self._stop_polling()
             self._scan_monitor.stop_monitoring()
             self._active_scan_id = None
+            self.scan_active_changed.emit(False)
 
             # Reset button visibility
             self._start_btn.setEnabled(True)
             self._pause_btn.setVisible(False)
             self._resume_btn.setVisible(False)
             self._cancel_btn.setVisible(False)
+            self._retry_failed_btn.setVisible(False)
             self._status_panel.show_idle()
         except Exception as e:
             logger.error(f"Cancel failed: {e}")
+
+    def _retry_failed_batches(self):
+        """Retry only the failed batches from the last scan."""
+        if not self._active_scan_id or not self._scan_mgr:
+            return
+        try:
+            self._retry_failed_btn.setVisible(False)
+            self._start_btn.setEnabled(False)
+            self._cancel_btn.setVisible(True)
+            self.scan_active_changed.emit(True)
+
+            import threading
+            t = threading.Thread(
+                target=self._scan_mgr.retry_failed_batches,
+                args=(self._active_scan_id,),
+                daemon=True,
+            )
+            t.start()
+            self._start_polling()
+        except Exception as e:
+            logger.error(f"Retry failed batches: {e}")
+            self._retry_failed_btn.setVisible(True)
+            self._start_btn.setEnabled(True)
+            self._cancel_btn.setVisible(False)
 
     # ==============================================
     #  POLLING
@@ -796,9 +1284,26 @@ class NLPScannerPage(QWidget):
 
     def _poll_status(self):
         """Poll SQLite for active scan status (CLI mode — no server)."""
-        if not self._active_scan_id or not self._scan_mgr:
+        if not self._scan_mgr:
             self._stop_polling()
             return
+
+        # Worker thread may not have set _active_scan_id yet — wait
+        # up to 60 seconds before giving up (12 polls × 5s interval).
+        if not self._active_scan_id:
+            self._poll_wait_count = getattr(self, '_poll_wait_count', 0) + 1
+            if self._poll_wait_count > 12:
+                self._stop_polling()
+            return
+
+        self._poll_wait_count = 0  # reset — scan_id is set
+
+        # Update simple progress card if in production mode
+        self._update_simple_progress()
+
+        # Refresh cost dashboard if on that tab (live cost tracking)
+        if self._tabs.currentIndex() == 1:
+            self._cost_dashboard.refresh()
 
         try:
             status = self._scan_mgr.get_status(self._active_scan_id)
@@ -813,7 +1318,8 @@ class NLPScannerPage(QWidget):
 
             # CLI statuses: running → scan_complete → analyzing → analysis_complete
             terminal = ("scan_complete", "analysis_complete",
-                        "completed", "failed", "cancelled",
+                        "completed", "completed_with_errors",
+                        "failed", "cancelled",
                         "budget_exceeded", "quota_exhausted")
 
             if scan_status == "paused":
@@ -824,15 +1330,42 @@ class NLPScannerPage(QWidget):
                 self._stop_polling()
                 self._scan_monitor.stop_monitoring()
                 self._active_scan_id = None
+                self._cost_dashboard.set_active_scan(None)
+                self._cost_dashboard.refresh()
+                self.scan_active_changed.emit(False)
 
                 # Reset buttons
                 self._start_btn.setEnabled(True)
                 self._pause_btn.setVisible(False)
                 self._resume_btn.setVisible(False)
                 self._cancel_btn.setVisible(False)
+                self._retry_failed_btn.setVisible(False)
                 self._status_panel.show_idle()
 
-                if scan_status in ("scan_complete", "completed"):
+                if scan_status == "completed_with_errors":
+                    # Some batches failed — show retry button
+                    try:
+                        failed = self.db.get_failed_batches_for_scan(
+                            status.get("scan_id", ""))
+                        n_failed = len(failed)
+                        if n_failed > 0:
+                            self._retry_failed_btn.setText(
+                                f"Retry {n_failed} Failed Batch(es)")
+                            self._retry_failed_btn.setVisible(True)
+                            self._active_scan_id = status.get("scan_id")
+                    except Exception:
+                        pass
+                    self._est_label.setText(
+                        f"Scan completed with errors | "
+                        f"{completed}/{total} batches succeeded"
+                    )
+                    self._est_label.setStyleSheet(
+                        f"font-size: 12px; color: {ALMA_WARNING}; "
+                        f"font-weight: 600;"
+                    )
+                    QApplication.processEvents()
+                    self._run_post_scan_analysis()
+                elif scan_status in ("scan_complete", "completed"):
                     QApplication.processEvents()
                     self._run_post_scan_analysis()
                 elif scan_status == "analysis_complete":
@@ -899,6 +1432,7 @@ class NLPScannerPage(QWidget):
         self._stop_polling()
         self._scan_monitor.stop_monitoring()
         self._active_scan_id = None
+        self.scan_active_changed.emit(False)
 
         # Reset buttons
         self._start_btn.setEnabled(True)
@@ -944,6 +1478,7 @@ class NLPScannerPage(QWidget):
         self._refresh_history()
         self._update_cost_estimate()
         self._sync_date_range()
+        self._refresh_simple_last_scan()
 
         # Refresh active tab
         current_tab = self._tabs.currentIndex()

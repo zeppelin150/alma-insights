@@ -4,15 +4,16 @@ QPainter-based charts: BarChart, BoxPlot, Heatmap, LineChart, Sparkline.
 No external charting libraries required.
 
 Visual polish:
-  - Inset background with subtle warm fill and inner border
-  - Dotted grid lines for spatial reference
-  - Gradient bar fills and area fills under lines
+  - Metabase-style rendering: smooth curves, solid grids, gradient fills
+  - Crosshair hover with snap-to-point indicators
+  - Chart mode switching: Line, Area, Bar, Stepped
   - Hover tooltips with exact values
   - Pagination support (set_page / page_size) on bar, box, heatmap
 """
 
 import math
-from PySide6.QtWidgets import QWidget, QToolTip
+from enum import Enum, auto
+from PySide6.QtWidgets import QWidget, QToolTip, QHBoxLayout, QPushButton
 from PySide6.QtCore import Qt, QRectF, QPointF, Signal, QSize
 from PySide6.QtGui import (
     QPainter, QPen, QColor, QFont, QFontMetrics, QBrush, QPainterPath,
@@ -22,9 +23,10 @@ from PySide6.QtGui import (
 from src.ui.theme import (
     ALMA_GREEN_DARK, ALMA_GREEN_MID, ALMA_GREEN_LIGHT, ALMA_GREEN_SUBTLE,
     ALMA_CREAM, ALMA_WHITE, ALMA_TEXT_DARK, ALMA_TEXT_MID, ALMA_TEXT_LIGHT,
-    ALMA_BORDER, ALMA_BORDER_LIGHT, ALMA_SUCCESS, ALMA_WARNING, ALMA_ERROR,
-    ALMA_INFO, ALMA_BG_ELEVATED,
+    ALMA_TEXT_ON_DARK, ALMA_BORDER, ALMA_BORDER_LIGHT, ALMA_HOVER_LIGHT,
+    ALMA_SUCCESS, ALMA_WARNING, ALMA_ERROR, ALMA_INFO, ALMA_BG_ELEVATED,
     ALMA_CHART_BG, ALMA_CHART_GRID, ALMA_CHART_AXIS, ALMA_CHART_INSET,
+    ALMA_CHART_PALETTE,
 )
 
 
@@ -119,7 +121,7 @@ class BarChartWidget(QWidget):
 
     def _calc_height(self):
         n = len(self._data)
-        h = 16 + n * (self._bar_height + self._bar_spacing) + 8
+        h = 4 + n * (self._bar_height + self._bar_spacing) + 4
         return max(h, 60)
 
     def sizeHint(self):
@@ -145,7 +147,7 @@ class BarChartWidget(QWidget):
         if max_val == 0:
             max_val = 1
 
-        y = 10
+        y = 4
         label_font = QFont("Segoe UI", 11)
         value_font = QFont("Segoe UI", 10, QFont.Bold)
         fm = QFontMetrics(label_font)
@@ -157,7 +159,7 @@ class BarChartWidget(QWidget):
         for frac in (0.25, 0.50, 0.75, 1.0):
             gx = bar_area_left + frac * bar_area_width
             painter.setPen(_dotted_pen(ALMA_CHART_GRID))
-            painter.drawLine(QPointF(gx, 6), QPointF(gx, h - 6))
+            painter.drawLine(QPointF(gx, 2), QPointF(gx, h - 2))
 
         for i, (label, value) in enumerate(self._data):
             bar_y = y + i * (self._bar_height + self._bar_spacing)
@@ -199,7 +201,7 @@ class BarChartWidget(QWidget):
         painter.end()
 
     def mouseMoveEvent(self, event):
-        y = 10
+        y = 4
         idx = -1
         for i in range(len(self._data)):
             bar_y = y + i * (self._bar_height + self._bar_spacing)
@@ -303,7 +305,7 @@ class BoxPlotWidget(QWidget):
 
     def _calc_height(self):
         n = len(self._sorted_labels)
-        return max(60, 20 + n * (self._box_height + self._box_spacing) + 36)
+        return max(60, 4 + n * (self._box_height + self._box_spacing) + 28)
 
     def sizeHint(self):
         return QSize(400, self._calc_height())
@@ -344,7 +346,7 @@ class BoxPlotWidget(QWidget):
 
         plot_left = self._label_width + 16
         plot_width = w - plot_left - 20
-        y_start = 10
+        y_start = 4
 
         label_font = QFont("Segoe UI", 10)
         small_font = QFont("Segoe UI", 9)
@@ -357,7 +359,7 @@ class BoxPlotWidget(QWidget):
         for frac in (0.0, 0.25, 0.50, 0.75, 1.0):
             gx = plot_left + frac * plot_width
             painter.setPen(_dotted_pen(ALMA_CHART_GRID))
-            painter.drawLine(QPointF(gx, 6), QPointF(gx, h - 28))
+            painter.drawLine(QPointF(gx, 2), QPointF(gx, h - 28))
 
         for i, label in enumerate(self._sorted_labels):
             vals = np.array(self._data[label])
@@ -439,7 +441,7 @@ class BoxPlotWidget(QWidget):
         except ImportError:
             return
 
-        y_start = 10
+        y_start = 4
         pos_y = event.position().y()
         for i, label in enumerate(self._sorted_labels):
             cy = y_start + i * (self._box_height + self._box_spacing) + self._box_height / 2
@@ -685,18 +687,31 @@ class HeatmapWidget(QWidget):
 
 
 # ═══════════════════════════════════════════
-#  LINE CHART WIDGET
+#  CHART MODE ENUM
+# ═══════════════════════════════════════════
+
+class ChartMode(Enum):
+    LINE = auto()      # Smooth line + subtle gradient area
+    AREA = auto()      # Smooth line + opaque gradient area
+    BAR = auto()       # Vertical bars at data points
+    STEPPED = auto()   # Horizontal-then-vertical step function
+
+
+# ═══════════════════════════════════════════
+#  LINE CHART WIDGET  (Metabase-style)
 # ═══════════════════════════════════════════
 
 class LineChartWidget(QWidget):
     """
-    Multi-series line chart with area fills, dotted grid, and hover tooltips.
+    Multi-series line chart — Metabase-style rendering.
+    Smooth Catmull-Rom curves, solid grids, gradient area fills,
+    crosshair hover with snap-to-point indicators.
+    Supports LINE / AREA / BAR / STEPPED modes via set_chart_mode().
     Accepts {series_label: [(x_label, y_value), ...]} dict.
     """
 
-    SERIES_COLORS = [
-        ALMA_GREEN_DARK, ALMA_INFO, ALMA_WARNING, ALMA_ERROR, ALMA_GREEN_SUBTLE,
-        "#7B61FF", "#E06666", "#6AA84F", "#674EA7", "#CC4125",
+    SERIES_COLORS = ALMA_CHART_PALETTE + [
+        "#7B61FF", "#E06666", "#6AA84F", "#CC4125",
     ]
 
     def __init__(self, parent=None):
@@ -707,13 +722,20 @@ class LineChartWidget(QWidget):
         self._y_max = 1.0
         self._show_zero_line = True
         self._show_bg_tint = True
+        self._chart_mode = ChartMode.LINE
+        self._hover_x_idx = -1          # crosshair: nearest x index
         self._margin_left = 50
-        self._margin_right = 20
+        self._margin_right = 40
         self._margin_top = 20
         self._margin_bottom = 50
-        self._legend_height = 50
+        self._legend_height = 0         # Legend now lives in ChartLegendSection
         self.setMinimumHeight(200)
         self.setMouseTracking(True)
+
+    def set_chart_mode(self, mode: ChartMode):
+        """Switch between LINE / AREA / BAR / STEPPED rendering."""
+        self._chart_mode = mode
+        self.update()
 
     def set_data(self, data, y_min=None, y_max=None, show_zero_line=True, show_bg_tint=False):
         """
@@ -729,6 +751,9 @@ class LineChartWidget(QWidget):
         if data:
             first_series = next(iter(data.values()))
             self._x_labels = [pt[0] for pt in first_series]
+
+        # Legend height always 0 — legend now lives in standalone ChartLegendSection
+        self._legend_height = 0
 
         # Determine Y range
         all_y = []
@@ -754,6 +779,128 @@ class LineChartWidget(QWidget):
 
         self.update()
 
+    # ── Catmull-Rom spline helpers ──────────────────────────
+
+    @staticmethod
+    def _catmull_rom_path(points, tension=0.3):
+        """Convert QPointF list → smooth QPainterPath using Catmull-Rom → cubic Bézier."""
+        path = QPainterPath()
+        n = len(points)
+        if n == 0:
+            return path
+        path.moveTo(points[0])
+        if n == 1:
+            return path
+        if n == 2:
+            path.lineTo(points[1])
+            return path
+
+        for i in range(n - 1):
+            p0 = points[max(i - 1, 0)]
+            p1 = points[i]
+            p2 = points[min(i + 1, n - 1)]
+            p3 = points[min(i + 2, n - 1)]
+
+            cp1x = p1.x() + (p2.x() - p0.x()) * tension / 3.0
+            cp1y = p1.y() + (p2.y() - p0.y()) * tension / 3.0
+            cp2x = p2.x() - (p3.x() - p1.x()) * tension / 3.0
+            cp2y = p2.y() - (p3.y() - p1.y()) * tension / 3.0
+
+            path.cubicTo(cp1x, cp1y, cp2x, cp2y, p2.x(), p2.y())
+
+        return path
+
+    # ── Smart Y-axis label formatting ────────────────────
+
+    @staticmethod
+    def _fmt_y(val):
+        """Format Y-axis value: omit '.0' on integers, keep 1 decimal otherwise."""
+        if val == int(val):
+            return str(int(val))
+        return f"{val:.1f}"
+
+    # ── Mode-specific series drawing ─────────────────────
+
+    def _draw_smooth_line(self, painter, pts, color, plot_bottom, opaque_area=False):
+        """LINE / AREA mode: smooth curve + gradient fill."""
+        if len(pts) < 2:
+            return
+        # Gradient area fill
+        curve = self._catmull_rom_path(pts)
+        fill_path = QPainterPath(curve)
+        fill_path.lineTo(pts[-1].x(), plot_bottom)
+        fill_path.lineTo(pts[0].x(), plot_bottom)
+        fill_path.closeSubpath()
+
+        grad = QLinearGradient(0, pts[0].y(), 0, plot_bottom)
+        alpha_top = 100 if opaque_area else 40
+        alpha_bot = 10 if opaque_area else 3
+        c_top = QColor(color)
+        c_top.setAlpha(alpha_top)
+        c_bot = QColor(color)
+        c_bot.setAlpha(alpha_bot)
+        grad.setColorAt(0.0, c_top)
+        grad.setColorAt(1.0, c_bot)
+        painter.setBrush(QBrush(grad))
+        painter.setPen(Qt.NoPen)
+        painter.drawPath(fill_path)
+
+        # Smooth line on top
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QPen(color, 2.0))
+        painter.drawPath(curve)
+
+    def _draw_vertical_bars(self, painter, pts, color, plot_bottom, bar_width):
+        """BAR mode: vertical bars centered on each data point."""
+        half = bar_width / 2.0
+        for pt in pts:
+            bar_h = plot_bottom - pt.y()
+            rect = QRectF(pt.x() - half, pt.y(), bar_width, bar_h)
+            grad = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+            c_top = QColor(color)
+            c_top.setAlpha(180)
+            c_bot = QColor(color)
+            c_bot.setAlpha(80)
+            grad.setColorAt(0.0, c_top)
+            grad.setColorAt(1.0, c_bot)
+            painter.setBrush(QBrush(grad))
+            painter.setPen(Qt.NoPen)
+            painter.drawRoundedRect(rect, 3, 3)
+
+    def _draw_stepped_line(self, painter, pts, color, plot_bottom):
+        """STEPPED mode: horizontal-then-vertical step function + gradient fill."""
+        if len(pts) < 2:
+            return
+        # Build stepped path
+        step_path = QPainterPath()
+        step_path.moveTo(pts[0])
+        for i in range(1, len(pts)):
+            step_path.lineTo(pts[i].x(), pts[i - 1].y())  # horizontal
+            step_path.lineTo(pts[i].x(), pts[i].y())       # vertical
+
+        # Fill
+        fill_path = QPainterPath(step_path)
+        fill_path.lineTo(pts[-1].x(), plot_bottom)
+        fill_path.lineTo(pts[0].x(), plot_bottom)
+        fill_path.closeSubpath()
+        grad = QLinearGradient(0, pts[0].y(), 0, plot_bottom)
+        c_top = QColor(color)
+        c_top.setAlpha(35)
+        c_bot = QColor(color)
+        c_bot.setAlpha(3)
+        grad.setColorAt(0.0, c_top)
+        grad.setColorAt(1.0, c_bot)
+        painter.setBrush(QBrush(grad))
+        painter.setPen(Qt.NoPen)
+        painter.drawPath(fill_path)
+
+        # Stepped line
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QPen(color, 2.0))
+        painter.drawPath(step_path)
+
+    # ── Main paint ───────────────────────────────────────
+
     def paintEvent(self, event):
         if not self._data or not self._x_labels:
             return self._paint_empty(event)
@@ -764,7 +911,6 @@ class LineChartWidget(QWidget):
         w = self.width()
         h = self.height() - self._legend_height
 
-        # Inset background
         _paint_chart_bg(painter, QRectF(0, 0, w, self.height()))
 
         plot_left = self._margin_left
@@ -778,25 +924,35 @@ class LineChartWidget(QWidget):
             painter.end()
             return
 
+        n_pts = len(self._x_labels)
+
         def x_pos(i):
-            if len(self._x_labels) <= 1:
+            if n_pts <= 1:
                 return plot_left + plot_w / 2
-            return plot_left + (i / (len(self._x_labels) - 1)) * plot_w
+            return plot_left + (i / (n_pts - 1)) * plot_w
 
         def y_pos(val):
             ratio = (val - self._y_min) / (self._y_max - self._y_min)
             return plot_bottom - ratio * plot_h
 
-        # Background tint (green above 0, red below 0)
-        if self._show_bg_tint and self._y_min < 0 < self._y_max:
+        # Background tint (green above 0, red below 0) — AREA mode only
+        # For LINE / BAR / STEPPED the tint is suppressed so lines stay visible.
+        if (self._show_bg_tint
+                and self._chart_mode == ChartMode.AREA
+                and self._y_min < 0 < self._y_max):
             zero_y = y_pos(0)
-            painter.setBrush(QBrush(QColor(ALMA_SUCCESS).lighter(192)))
+            green = QColor(ALMA_SUCCESS)
+            green.setAlpha(22)
+            red = QColor(ALMA_ERROR)
+            red.setAlpha(22)
+            painter.setBrush(QBrush(green))
             painter.setPen(Qt.NoPen)
             painter.drawRect(QRectF(plot_left, plot_top, plot_w, zero_y - plot_top))
-            painter.setBrush(QBrush(QColor(ALMA_ERROR).lighter(192)))
+            painter.setBrush(QBrush(red))
             painter.drawRect(QRectF(plot_left, zero_y, plot_w, plot_bottom - zero_y))
 
-        # Grid lines and Y-axis labels
+        # ── Solid grid lines (Metabase-style) ──
+        grid_pen = QPen(QColor(ALMA_CHART_GRID), 0.5)
         painter.setFont(QFont("Segoe UI", 9))
         n_grid = 5
         for gi in range(n_grid + 1):
@@ -804,14 +960,14 @@ class LineChartWidget(QWidget):
             val = self._y_min + frac * (self._y_max - self._y_min)
             py = y_pos(val)
 
-            painter.setPen(_dotted_pen(ALMA_CHART_GRID))
+            painter.setPen(grid_pen)
             painter.drawLine(QPointF(plot_left, py), QPointF(plot_right, py))
 
             painter.setPen(QColor(ALMA_CHART_AXIS))
             painter.drawText(
                 QRectF(0, py - 8, plot_left - 6, 16),
                 Qt.AlignVCenter | Qt.AlignRight,
-                f"{val:.1f}"
+                self._fmt_y(val),
             )
 
         # Zero reference line
@@ -823,86 +979,72 @@ class LineChartWidget(QWidget):
         # X-axis labels
         painter.setFont(QFont("Segoe UI", 8))
         painter.setPen(QColor(ALMA_CHART_AXIS))
-        max_labels = max(1, plot_w // 60)
-        step = max(1, len(self._x_labels) // max_labels)
+        max_labels = max(1, int(plot_w) // 60)
+        step = max(1, n_pts // max_labels)
         for i, xl in enumerate(self._x_labels):
-            if i % step == 0 or i == len(self._x_labels) - 1:
+            if i % step == 0 or i == n_pts - 1:
                 px = x_pos(i)
                 painter.drawText(
                     QRectF(px - 30, plot_bottom + 6, 60, 20),
-                    Qt.AlignCenter, xl
+                    Qt.AlignCenter, xl,
                 )
 
-        # Draw series
+        # ── Draw series (mode-branched) ──
         series_list = list(self._data.items())
+        n_series = len(series_list)
+        bar_width = max(4, (plot_w / max(n_pts, 1)) * 0.6 / max(n_series, 1))
+
         for si, (series_label, points) in enumerate(series_list):
             color = QColor(self.SERIES_COLORS[si % len(self.SERIES_COLORS)])
 
-            # Area fill under line
-            if len(points) >= 2:
-                fill_path = QPainterPath()
-                fill_path.moveTo(x_pos(0), plot_bottom)
-                for pi, (xl, yv) in enumerate(points):
-                    fill_path.lineTo(x_pos(pi), y_pos(yv))
-                fill_path.lineTo(x_pos(len(points) - 1), plot_bottom)
-                fill_path.closeSubpath()
-                fill_color = QColor(color)
-                fill_color.setAlpha(18)
-                painter.setBrush(QBrush(fill_color))
-                painter.setPen(Qt.NoPen)
-                painter.drawPath(fill_path)
-
-            # Line
-            pen = QPen(color, 2.5)
-            painter.setPen(pen)
-            path = QPainterPath()
+            # Build QPointF list
+            pts = []
             for pi, (xl, yv) in enumerate(points):
                 px = x_pos(pi)
                 py = y_pos(yv)
-                if pi == 0:
-                    path.moveTo(px, py)
-                else:
-                    path.lineTo(px, py)
-            painter.setBrush(Qt.NoBrush)
-            painter.drawPath(path)
+                # For BAR mode with multiple series, offset x
+                if self._chart_mode == ChartMode.BAR and n_series > 1:
+                    offset = (si - (n_series - 1) / 2.0) * bar_width
+                    px += offset
+                pts.append(QPointF(px, py))
 
-            # Data points
-            painter.setBrush(QBrush(color))
-            painter.setPen(QPen(QColor(ALMA_BG_ELEVATED), 1.5))
-            for pi, (xl, yv) in enumerate(points):
-                px = x_pos(pi)
+            if self._chart_mode == ChartMode.LINE:
+                self._draw_smooth_line(painter, pts, color, plot_bottom, opaque_area=False)
+            elif self._chart_mode == ChartMode.AREA:
+                self._draw_smooth_line(painter, pts, color, plot_bottom, opaque_area=True)
+            elif self._chart_mode == ChartMode.BAR:
+                self._draw_vertical_bars(painter, pts, color, plot_bottom, bar_width)
+            elif self._chart_mode == ChartMode.STEPPED:
+                self._draw_stepped_line(painter, pts, color, plot_bottom)
+
+        # ── Crosshair overlay on hover ──
+        if 0 <= self._hover_x_idx < n_pts:
+            hx = x_pos(self._hover_x_idx)
+            # Vertical crosshair line
+            ch_pen = QPen(QColor(ALMA_TEXT_LIGHT), 1.0, Qt.DashLine)
+            painter.setPen(ch_pen)
+            painter.drawLine(QPointF(hx, plot_top), QPointF(hx, plot_bottom))
+
+            # Snap-to-point circles for each series
+            for si, (series_label, points) in enumerate(series_list):
+                if self._hover_x_idx >= len(points):
+                    continue
+                color = QColor(self.SERIES_COLORS[si % len(self.SERIES_COLORS)])
+                yv = points[self._hover_x_idx][1]
                 py = y_pos(yv)
-                painter.drawEllipse(QPointF(px, py), 3.5, 3.5)
+                # White-filled circle with colored border
+                painter.setBrush(QBrush(QColor(ALMA_BG_ELEVATED)))
+                painter.setPen(QPen(color, 2.0))
+                painter.drawEllipse(QPointF(hx, py), 4.5, 4.5)
 
-        # Legend (below chart)
-        legend_y = h
-        legend_x = plot_left
-        legend_font = QFont("Segoe UI", 9)
-        painter.setFont(legend_font)
-        legend_fm = QFontMetrics(legend_font)
-        available_w = w - plot_left - 10
-
-        for si, (series_label, _) in enumerate(series_list):
-            label_w = legend_fm.horizontalAdvance(series_label)
-            item_w = 16 + label_w + 12
-
-            if legend_x + item_w > plot_left + available_w and legend_x > plot_left:
-                legend_x = plot_left
-                legend_y += 20
-
-            color = QColor(self.SERIES_COLORS[si % len(self.SERIES_COLORS)])
-            painter.setBrush(QBrush(color))
-            painter.setPen(Qt.NoPen)
-            painter.drawRoundedRect(QRectF(legend_x, legend_y + 4, 12, 12), 2, 2)
-            painter.setPen(QColor(ALMA_TEXT_MID))
-            text_rect = QRectF(legend_x + 16, legend_y, label_w + 4, 20)
-            painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, series_label)
-            legend_x += item_w
+        # Legend now lives in standalone ChartLegendSection (chart_builders.py)
 
         painter.end()
 
+    # ── Crosshair hover interaction ──────────────────────
+
     def mouseMoveEvent(self, event):
-        """Show tooltip with nearest data point info."""
+        """Update crosshair position + show tooltip."""
         if not self._data or not self._x_labels:
             return
 
@@ -914,26 +1056,115 @@ class LineChartWidget(QWidget):
         mx = event.position().x()
 
         if mx < plot_left or mx > plot_right or len(self._x_labels) <= 1:
+            if self._hover_x_idx != -1:
+                self._hover_x_idx = -1
+                self.update()
             return
 
-        # Find nearest x index
         ratio = (mx - plot_left) / plot_w
         idx = round(ratio * (len(self._x_labels) - 1))
         idx = max(0, min(idx, len(self._x_labels) - 1))
 
+        if idx != self._hover_x_idx:
+            self._hover_x_idx = idx
+            self.update()
+
+        # Tooltip
         lines = [self._x_labels[idx]]
         for si, (label, points) in enumerate(self._data.items()):
             if idx < len(points):
                 val = points[idx][1]
                 lines.append(f"{label}: {val:+.3f}")
-
         QToolTip.showText(event.globalPosition().toPoint(), "\n".join(lines))
+
+    def leaveEvent(self, event):
+        """Clear crosshair when mouse leaves chart."""
+        if self._hover_x_idx != -1:
+            self._hover_x_idx = -1
+            self.update()
 
     def _paint_empty(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         _paint_empty_state(painter, QRectF(self.rect()), "\U0001f4c8", "No data for line chart")
         painter.end()
+
+
+# ═══════════════════════════════════════════
+#  CHART MODE SWITCHER (pill-toggle bar)
+# ═══════════════════════════════════════════
+
+class ChartModeSwitcher(QWidget):
+    """Small horizontal pill-toggle bar for switching chart rendering mode.
+
+    Emits ``mode_changed(ChartMode)`` when the user clicks a mode button.
+    ~200px × 28px, suitable for placement above or beside a chart.
+    """
+
+    mode_changed = Signal(object)  # emits ChartMode value
+
+    _MODE_LABELS = [
+        (ChartMode.LINE, "Line"),
+        (ChartMode.AREA, "Area"),
+        (ChartMode.BAR, "Bar"),
+        (ChartMode.STEPPED, "Step"),
+    ]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._buttons = {}
+        self._current = ChartMode.LINE
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        for mode, label in self._MODE_LABELS:
+            btn = QPushButton(label, self)
+            btn.setCheckable(True)
+            btn.setChecked(mode == ChartMode.LINE)
+            btn.setFixedHeight(26)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.clicked.connect(lambda checked, m=mode: self._on_click(m))
+            self._buttons[mode] = btn
+            layout.addWidget(btn)
+
+        layout.addStretch()
+        self.setFixedHeight(28)
+        self._apply_styles()
+
+    def _on_click(self, mode):
+        self._current = mode
+        for m, btn in self._buttons.items():
+            btn.setChecked(m == mode)
+        self._apply_styles()
+        self.mode_changed.emit(mode)
+
+    def _apply_styles(self):
+        for mode, btn in self._buttons.items():
+            if mode == self._current:
+                btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background: {ALMA_GREEN_DARK};
+                        color: {ALMA_TEXT_ON_DARK};
+                        border: none; border-radius: 4px;
+                        padding: 4px 14px; font-size: 11px; font-weight: 600;
+                    }}
+                """)
+            else:
+                btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background: transparent;
+                        color: {ALMA_TEXT_MID};
+                        border: 1px solid {ALMA_BORDER_LIGHT};
+                        border-radius: 4px;
+                        padding: 4px 14px; font-size: 11px; font-weight: 500;
+                    }}
+                    QPushButton:hover {{
+                        background: {ALMA_HOVER_LIGHT};
+                        color: {ALMA_TEXT_DARK};
+                    }}
+                """)
 
 
 # ═══════════════════════════════════════════

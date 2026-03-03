@@ -474,8 +474,14 @@ class ToolRegistry:
         if not ticket_id:
             return {"error": "Missing ticket_id"}
 
-        # Resolve per-ticket TRC from context or args
-        trc = args.get("trc", self._context.get("trc", ""))
+        # Resolve per-ticket TRC: prefer explicit arg, then per-ticket
+        # lookup (mixed batch), then batch-level fallback (5.3 fix)
+        ticket_trc_map = self._context.get("ticket_trc_map", {})
+        trc = (
+            args.get("trc")
+            or ticket_trc_map.get(ticket_id)
+            or self._context.get("trc", "")
+        )
         scan_id = self._context.get("scan_id", "")
         batch_id = self._context.get("batch_id", "")
 

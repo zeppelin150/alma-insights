@@ -365,7 +365,7 @@ const activeCalls = new Map(); // id → { abortController, timers: [] }
 // ═══════════════════════════════════════════════════════════════════════════
 
 const HEARTBEAT_MS = 5000;
-const STALL_MS = 45000;
+const STALL_MS = 90000;  // 90s — large synthesis prompts need extended think time
 
 async function callGeminiStreaming(requestId, prompt) {
   const geminiClient = config.getGeminiClient();

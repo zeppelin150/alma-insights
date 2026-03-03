@@ -1,14 +1,19 @@
 """
 Alma Insights — Main Application Window
 Top bar, sidebar navigation, stacked content pages.
+
+Build 10.0: T10 (collapsible sidebar), T16 (page transitions), T17 (toast wiring)
 """
 
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QFrame, QStackedWidget, QStatusBar, QSizePolicy,
-    QSpacerItem, QApplication
+    QSpacerItem, QApplication, QGraphicsOpacityEffect,
 )
-from PySide6.QtCore import Qt, QSize, QTimer
+from PySide6.QtCore import (
+    Qt, QSize, QTimer, QPropertyAnimation, QEasingCurve,
+    QAbstractAnimation,
+)
 from PySide6.QtGui import QIcon, QFont
 
 from src.ui.theme import *
@@ -20,12 +25,12 @@ from src.ui.pages.ai_reports import AIReportsPage
 from src.ui.pages.ab_compare import ABComparePage
 from src.ui.pages.smart_reporting import SmartReportingPage
 from src.ui.pages.settings_page import SettingsPage
-from src.ui.pages.nlp_scanner_page import NLPScannerPage
 from src.ui.dialogs.help_dialog import HelpDialog
 from src.data.db_manager import DatabaseManager
 from src.data.job_queue import JobQueue, JobDescriptor
 from src.ui.widgets.job_overlay import JobOverlay
 from src.ui.widgets.drilldown_panel import DrilldownPanel
+from src.ui.widgets.toast import ToastManager
 
 
 class MainWindow(QMainWindow):
@@ -34,11 +39,10 @@ class MainWindow(QMainWindow):
     PAGE_DASHBOARD = 1
     PAGE_TRENDING = 2
     PAGE_INCIDENTS = 3
-    PAGE_NLP_SCANNER = 4
-    PAGE_REPORTS = 5
-    PAGE_AB_COMPARE = 6
-    PAGE_SMART_REPORTING = 7
-    PAGE_SETTINGS = 8
+    PAGE_REPORTS = 4
+    PAGE_AB_COMPARE = 5
+    PAGE_SMART_REPORTING = 6
+    PAGE_SETTINGS = 7
 
     def __init__(self):
         super().__init__()
@@ -53,6 +57,9 @@ class MainWindow(QMainWindow):
         # Track sidebar buttons
         self._sidebar_buttons = []
         self._active_page = 0
+        self._sidebar_collapsed = False   # Build 10.0: T10
+        self._sidebar_text_widgets = []   # labels/sections hidden when collapsed
+        self._page_anim = None            # Build 10.0: T16 — page fade ref
 
         self._build_ui()
 
@@ -62,13 +69,15 @@ class MainWindow(QMainWindow):
         self.content_stack.installEventFilter(self._job_overlay)
         self._wire_job_queue()
 
+        # Toast notification manager (Build 10.0: T9/T17)
+        self._toasts = ToastManager(self)
+
         # Universal drill-down panel (overlay drawer)
         self._drilldown = DrilldownPanel(self.content_stack)
         self.conversations_page.set_drilldown_panel(self._drilldown)
         self.dashboard_page.set_drilldown_panel(self._drilldown)
         self.trending_page.set_drilldown_panel(self._drilldown)
         self.incidents_page.set_drilldown_panel(self._drilldown)
-        self.nlp_scanner_page.set_drilldown_panel(self._drilldown)
         self.reports_page.set_drilldown_panel(self._drilldown)
         self.ab_compare_page.set_drilldown_panel(self._drilldown)
 
@@ -117,6 +126,13 @@ class MainWindow(QMainWindow):
         self.ticket_count_label = QLabel("")
         self.status_bar.addPermanentWidget(self.ticket_count_label)
 
+        # Qt error guard indicator (hidden until errors occur, click to view)
+        self.qt_error_label = QLabel("")
+        self.qt_error_label.setStyleSheet("font-size: 11px; padding: 0 8px;")
+        self.qt_error_label.setCursor(Qt.PointingHandCursor)
+        self.qt_error_label.mousePressEvent = self._show_qt_errors
+        self.status_bar.addPermanentWidget(self.qt_error_label)
+
     # ═══════════════════════════════════════════
     #  TOP BAR
     # ═══════════════════════════════════════════
@@ -162,18 +178,21 @@ class MainWindow(QMainWindow):
     # ═══════════════════════════════════════════
 
     def _build_sidebar(self):
-        sidebar = QFrame()
-        sidebar.setObjectName("Sidebar")
-        layout = QVBoxLayout(sidebar)
+        self._sidebar = QFrame()
+        self._sidebar.setObjectName("Sidebar")
+        layout = QVBoxLayout(self._sidebar)
         layout.setContentsMargins(0, 12, 0, 12)
         layout.setSpacing(0)
+
+        self._sidebar_text_widgets = []
 
         # ── SOURCES section ──
         section0 = QLabel("SOURCES")
         section0.setObjectName("SidebarSection")
         layout.addWidget(section0)
+        self._sidebar_text_widgets.append(section0)
 
-        layout.addWidget(self._sidebar_btn("\U0001F4AC  Conversations", self.PAGE_CONVERSATIONS))
+        layout.addWidget(self._sidebar_btn("\U0001F4AC  Conversations", self.PAGE_CONVERSATIONS, "\U0001F4AC"))
 
         # Divider
         div0 = QFrame()
@@ -184,11 +203,11 @@ class MainWindow(QMainWindow):
         section1 = QLabel("ANALYSIS")
         section1.setObjectName("SidebarSection")
         layout.addWidget(section1)
+        self._sidebar_text_widgets.append(section1)
 
-        layout.addWidget(self._sidebar_btn("\U0001F4CA  TRC Analytics", self.PAGE_DASHBOARD))
-        layout.addWidget(self._sidebar_btn("\U0001F4C8  Trending Topics", self.PAGE_TRENDING))
-        layout.addWidget(self._sidebar_btn("\U0001F6A8  Incidents", self.PAGE_INCIDENTS))
-        layout.addWidget(self._sidebar_btn("\U0001F9E0  NLP Scanner", self.PAGE_NLP_SCANNER))
+        layout.addWidget(self._sidebar_btn("\U0001F4CA  TRC Analytics", self.PAGE_DASHBOARD, "\U0001F4CA"))
+        layout.addWidget(self._sidebar_btn("\U0001F4C8  Trending Topics", self.PAGE_TRENDING, "\U0001F4C8"))
+        layout.addWidget(self._sidebar_btn("\U0001F6A8  Incidents", self.PAGE_INCIDENTS, "\U0001F6A8"))
 
         # Divider
         div1 = QFrame()
@@ -199,10 +218,11 @@ class MainWindow(QMainWindow):
         section2 = QLabel("REPORTS")
         section2.setObjectName("SidebarSection")
         layout.addWidget(section2)
+        self._sidebar_text_widgets.append(section2)
 
-        layout.addWidget(self._sidebar_btn("\U0001F916  AI Reports", self.PAGE_REPORTS))
-        layout.addWidget(self._sidebar_btn("\U0001F504  A/B Compare", self.PAGE_AB_COMPARE))
-        layout.addWidget(self._sidebar_btn("\u26A1  Smart Reporting", self.PAGE_SMART_REPORTING))
+        layout.addWidget(self._sidebar_btn("\U0001F916  AI Reports", self.PAGE_REPORTS, "\U0001F916"))
+        layout.addWidget(self._sidebar_btn("\U0001F504  A/B Compare", self.PAGE_AB_COMPARE, "\U0001F504"))
+        layout.addWidget(self._sidebar_btn("\u26A1  Smart Reporting", self.PAGE_SMART_REPORTING, "\u26A1"))
 
         # Divider
         div2 = QFrame()
@@ -213,26 +233,38 @@ class MainWindow(QMainWindow):
         section3 = QLabel("SYSTEM")
         section3.setObjectName("SidebarSection")
         layout.addWidget(section3)
+        self._sidebar_text_widgets.append(section3)
 
-        layout.addWidget(self._sidebar_btn("\u2699\ufe0f  Settings", self.PAGE_SETTINGS))
+        layout.addWidget(self._sidebar_btn("\u2699\ufe0f  Settings", self.PAGE_SETTINGS, "\u2699\ufe0f"))
 
         layout.addStretch()
 
+        # ── Collapse toggle (Build 10.0: T10) ──
+        self._collapse_btn = QPushButton("◀  Collapse")
+        self._collapse_btn.setObjectName("SidebarCollapseBtn")
+        self._collapse_btn.setCursor(Qt.PointingHandCursor)
+        self._collapse_btn.clicked.connect(self._toggle_sidebar)
+        layout.addWidget(self._collapse_btn)
+
         # Footer
-        footer = QLabel("v1.0.0 — RCM Operations")
-        footer.setObjectName("SidebarFooter")
-        layout.addWidget(footer)
+        self._sidebar_footer = QLabel("v1.0.0 — RCM Operations")
+        self._sidebar_footer.setObjectName("SidebarFooter")
+        layout.addWidget(self._sidebar_footer)
+        self._sidebar_text_widgets.append(self._sidebar_footer)
 
         # Set initial active
         self._set_active_page(self.PAGE_CONVERSATIONS)
 
-        return sidebar
+        return self._sidebar
 
-    def _sidebar_btn(self, text, page_index):
+    def _sidebar_btn(self, text, page_index, icon_char=None):
         btn = QPushButton(text)
         btn.setObjectName("SidebarButton")
         btn.setCursor(Qt.PointingHandCursor)
         btn.clicked.connect(lambda: self._set_active_page(page_index))
+        # Store icon and full text for collapse/expand (Build 10.0: T10)
+        btn.setProperty("full_text", text)
+        btn.setProperty("icon_char", icon_char or "")
         self._sidebar_buttons.append((btn, page_index))
         return btn
 
@@ -240,15 +272,88 @@ class MainWindow(QMainWindow):
         self._active_page = index
         self.content_stack.setCurrentIndex(index)
 
+        # Re-raise job overlay after page switch (QStackedWidget repaints
+        # the new page on top, which can obscure the overlay)
+        if hasattr(self, '_job_overlay') and self._job_overlay.isVisible():
+            self._job_overlay.raise_()
+
         # Close drill-down panel on page navigation
         if hasattr(self, '_drilldown') and self._drilldown.is_open():
             self._drilldown.close_panel()
 
-        # Update button states
+        # Update button states — force full stylesheet re-evaluation
+        # PySide6 unpolish/polish can miss dynamic property changes, so we
+        # also poke setStyleSheet("") to clear any stale inline cache.
         for btn, page_idx in self._sidebar_buttons:
             btn.setProperty("active", "true" if page_idx == index else "false")
+            btn.setStyleSheet("")          # clear any inline overrides
             btn.style().unpolish(btn)
             btn.style().polish(btn)
+            btn.update()
+
+        # ── Page transition fade-in (Build 10.0: T16) ──
+        page = self.content_stack.widget(index)
+        if page:
+            effect = QGraphicsOpacityEffect(page)
+            page.setGraphicsEffect(effect)
+            self._page_anim = QPropertyAnimation(effect, b"opacity")
+            self._page_anim.setDuration(200)
+            self._page_anim.setStartValue(0.0)
+            self._page_anim.setEndValue(1.0)
+            self._page_anim.setEasingCurve(QEasingCurve.OutCubic)
+            self._page_anim.finished.connect(lambda p=page: p.setGraphicsEffect(None))
+            self._page_anim.start(QAbstractAnimation.KeepWhenStopped)
+
+    # ── Sidebar Collapse / Expand (Build 10.0: T10) ──────────
+
+    def _toggle_sidebar(self):
+        """Animate sidebar between expanded (220px) and collapsed (56px)."""
+        self._sidebar_collapsed = not self._sidebar_collapsed
+        target_width = 56 if self._sidebar_collapsed else 220
+
+        anim = QPropertyAnimation(self._sidebar, b"maximumWidth")
+        anim.setDuration(250)
+        anim.setStartValue(self._sidebar.maximumWidth())
+        anim.setEndValue(target_width)
+        anim.setEasingCurve(QEasingCurve.OutCubic)
+
+        # Also animate minimumWidth to keep them in sync
+        anim2 = QPropertyAnimation(self._sidebar, b"minimumWidth")
+        anim2.setDuration(250)
+        anim2.setStartValue(self._sidebar.minimumWidth())
+        anim2.setEndValue(target_width)
+        anim2.setEasingCurve(QEasingCurve.OutCubic)
+
+        # Store refs to prevent GC
+        self._sidebar_anim = anim
+        self._sidebar_anim2 = anim2
+
+        if self._sidebar_collapsed:
+            # Collapse: immediately switch to icon-only text
+            for btn, _ in self._sidebar_buttons:
+                icon = btn.property("icon_char") or ""
+                btn.setText(icon)
+                btn.setStyleSheet(
+                    btn.styleSheet()  # keep existing
+                )
+            for w in self._sidebar_text_widgets:
+                w.setVisible(False)
+            self._collapse_btn.setText("▶")
+        else:
+            # Expand: restore full text after animation finishes
+            anim.finished.connect(self._restore_sidebar_text)
+            self._collapse_btn.setText("◀  Collapse")
+
+        anim.start(QAbstractAnimation.KeepWhenStopped)
+        anim2.start(QAbstractAnimation.KeepWhenStopped)
+
+    def _restore_sidebar_text(self):
+        """Restore full sidebar button text after expand animation."""
+        for btn, _ in self._sidebar_buttons:
+            full = btn.property("full_text") or ""
+            btn.setText(full)
+        for w in self._sidebar_text_widgets:
+            w.setVisible(True)
 
     # ═══════════════════════════════════════════
     #  CONTENT AREA
@@ -281,25 +386,24 @@ class MainWindow(QMainWindow):
         self.incidents_page.scan_complete.connect(self._update_incident_badge)
         self.content_stack.addWidget(self.incidents_page)
 
-        # Page 4: NLP Scanner
-        self.nlp_scanner_page = NLPScannerPage(self.db)
-        self.nlp_scanner_page.deep_dive_requested.connect(self._on_nlp_deep_dive)
-        self.nlp_scanner_page.view_tickets_requested.connect(self._on_nlp_view_tickets)
-        self.content_stack.addWidget(self.nlp_scanner_page)
+        # NLP Scanner signals now wired through TRC Analytics (NLP Scanner absorbed)
+        self.dashboard_page.deep_dive_requested.connect(self._on_nlp_deep_dive)
+        self.dashboard_page.view_tickets_requested.connect(self._on_nlp_view_tickets)
+        self.dashboard_page.scan_active_changed.connect(self._on_scan_active_changed)
 
-        # Page 5: AI Reports
+        # Page 4: AI Reports
         self.reports_page = AIReportsPage(self.db)
         self.content_stack.addWidget(self.reports_page)
 
-        # Page 6: A/B Compare
+        # Page 5: A/B Compare
         self.ab_compare_page = ABComparePage(self.db)
         self.content_stack.addWidget(self.ab_compare_page)
 
-        # Page 7: Smart Reporting
+        # Page 6: Smart Reporting
         self.smart_reporting_page = SmartReportingPage(self.db)
         self.content_stack.addWidget(self.smart_reporting_page)
 
-        # Page 8: Settings
+        # Page 7: Settings
         self.settings_page = SettingsPage()
         self.settings_page.set_db_manager(self.db)
         self.settings_page.datasets_changed.connect(self._on_datasets_changed)
@@ -322,7 +426,8 @@ class MainWindow(QMainWindow):
         self.conversations_page.update_api_state(api_enabled)
         self.conversations_page.update_pat(self.settings_page.get_pat())
         self.conversations_page.update_test_mode(self.settings_page.is_test_data_enabled())
-        self.conversations_page.update_debug_mode(self.settings_page.is_debug_mode_enabled())
+        debug_on = self.settings_page.is_debug_mode_enabled()
+        self.conversations_page.update_debug_mode(debug_on)
         if api_enabled:
             self.conversations_page.update_datasets(self.settings_page.get_datasets())
 
@@ -451,6 +556,11 @@ class MainWindow(QMainWindow):
         """Settings: debug canary toggle changed."""
         self.conversations_page.update_debug_mode(enabled)
 
+    def _on_scan_active_changed(self, active: bool):
+        """Block/unblock Gemini-dependent features during NLP scans."""
+        self.reports_page.set_scan_blocking(active)
+        self.trending_page.set_scan_blocking(active)
+
     def _on_settings_changed(self, changes: dict):
         """Settings: generic change notification (e.g. Gemini config updated)."""
         if changes.get("gemini_updated"):
@@ -498,16 +608,44 @@ class MainWindow(QMainWindow):
         # Deferred import summary (after all jobs complete, so it doesn't block)
         q.queue_empty.connect(self._show_deferred_import_summary)
 
-        # Status bar
+        # Status bar (persistent state) + Toast notifications (Build 10.0: T17)
         q.job_started.connect(lambda jid, desc: self.status_label.setText(desc))
         q.job_finished.connect(lambda jid, name: self.status_label.setText(f"✓ {name} complete"))
+        q.job_finished.connect(
+            lambda jid, name: self._toasts.show_toast(f"{name} complete", toast_type="success")
+        )
         q.job_failed.connect(lambda jid, name, err: self.status_label.setText(f"✗ {name} failed"))
+        q.job_failed.connect(
+            lambda jid, name, err: self._toasts.show_toast(f"{name} failed", toast_type="error")
+        )
         q.queue_empty.connect(lambda: self.status_label.setText("Ready"))
 
     def _show_deferred_import_summary(self):
         """Show CSV import summary after all jobs have finished."""
         try:
             self.conversations_page.show_deferred_import_summary()
+        except Exception:
+            pass
+
+    def _show_qt_errors(self, event=None):
+        """Show Qt error details in a dialog (clicked from status bar label)."""
+        try:
+            guard = self.qt_error_label.property("_guard")
+            if guard is None:
+                # Find guard from app
+                app = QApplication.instance()
+                for child in app.children():
+                    if hasattr(child, 'get_error_summary'):
+                        guard = child
+                        break
+            if guard and guard.get_error_count() > 0:
+                from PySide6.QtWidgets import QMessageBox
+                msg = QMessageBox(self)
+                msg.setWindowTitle("Qt Error Report")
+                msg.setIcon(QMessageBox.Warning)
+                msg.setText(f"{guard.get_error_count()} Qt errors detected")
+                msg.setDetailedText(guard.get_error_summary())
+                msg.exec()
         except Exception:
             pass
 
@@ -669,6 +807,41 @@ class MainWindow(QMainWindow):
             job_id="trending_analysis",
             name="Trending Topics",
             description="Analyzing trending topics",
+            create_worker=create_worker,
+        )
+
+    def _make_voc_report_job(self, date_start, date_end, trc_filter=None):
+        """Create a JobDescriptor for VOC report (via JobQueue)."""
+        import yaml
+        from pathlib import Path
+        from src.data.job_queue import JobDescriptor, CallableWorker
+
+        # Read model name for overlay display
+        model = "gemini-2.5-flash"
+        try:
+            cfg_path = Path(__file__).resolve().parent.parent.parent / "config" / "settings.yaml"
+            with open(cfg_path) as f:
+                cfg = yaml.safe_load(f) or {}
+            model = cfg.get("gemini", {}).get("model", model)
+        except Exception:
+            pass
+
+        def create_worker():
+            from src.ui.pages.ai_reports import VOCReportWorker
+            gc = self.reports_page._get_gemini_client()
+            worker = VOCReportWorker(
+                self.db.db_path, date_start, date_end, trc_filter, gc,
+            )
+            worker.finished.connect(self.ai_reports_page._on_voc_finished)
+            worker.error.connect(self.ai_reports_page._on_voc_error)
+            worker.progress.connect(self.ai_reports_page._on_voc_progress)
+            return worker
+
+        trc_str = f" ({trc_filter})" if trc_filter else ""
+        return JobDescriptor(
+            job_id="voc_report",
+            name="VOC Report",
+            description=f"Generating VOC root cause analysis with {model}{trc_str}",
             create_worker=create_worker,
         )
 
@@ -924,6 +1097,13 @@ class MainWindow(QMainWindow):
             if w and w.isRunning():
                 w.quit()
                 w.wait(2000)
+
+        # Build 7.0: Shutdown bridge-backed report client
+        if hasattr(self, 'reports_page'):
+            try:
+                self.reports_page.cleanup()
+            except Exception:
+                pass
 
     def _clear_all_data(self):
         """Delete imported ticket data and derived analytics, but preserve

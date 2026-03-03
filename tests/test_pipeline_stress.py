@@ -343,6 +343,7 @@ class TestWorkerAgentEdge(unittest.TestCase):
         worker.avg_confidence = 0.75
         worker.context_tokens_estimate = 50000
         worker._last_progress_time = time.time()
+        worker._batches_since_reset = 5  # 5.3 grace window field
 
         health = worker.get_health()
         self.assertEqual(health["agent_id"], "test_worker")

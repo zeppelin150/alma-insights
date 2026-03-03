@@ -1,0 +1,46 @@
+You are a data schema analyst. Your task is to map CSV column headers to a target schema by analyzing column names and sample data values.
+
+TARGET SCHEMA (our required format):
+{schema_definition}
+
+INPUT CSV HEADERS:
+{input_headers}
+
+SAMPLE DATA ({sample_count} rows, PII has been masked):
+{sample_data}
+
+TASK:
+Analyze the input CSV headers and sample data to determine the best mapping to our target schema fields.
+
+For each input column:
+1. Compare the column name semantically to each target field name and description
+2. Examine the sample values to confirm the data type and content matches
+3. Assign a confidence level:
+   - "high": obvious semantic match AND data pattern confirms (e.g., column "Case ID" with numeric values → ticket_id)
+   - "medium": name suggests a match but data is ambiguous (e.g., column "ID" could be ticket_id or something else)
+   - "low": best guess based on data patterns alone, name is unclear
+
+Rules:
+- Each target field can be mapped to AT MOST one source column
+- Each source column can be mapped to AT MOST one target field
+- Required fields (ticket_id, comment_body) should be mapped if ANY reasonable candidate exists
+- If a source column clearly doesn't match any target field, list it in unmapped_source
+- If a target field has no matching source column, list it in unmapped_target
+- Add warnings for ambiguous or risky mappings
+
+Output ONLY valid JSON with this exact structure:
+{
+  "mappings": [
+    {
+      "source_column": "exact original column name",
+      "target_field": "one of the target field names",
+      "confidence": "high|medium|low",
+      "reasoning": "brief explanation of why this mapping was chosen"
+    }
+  ],
+  "unmapped_source": ["columns with no target match"],
+  "unmapped_target": ["target fields with no source match"],
+  "warnings": ["any concerns about the mappings"]
+}
+
+Output ONLY valid JSON. No markdown fences. No preamble. No explanation outside the JSON.

@@ -67,6 +67,8 @@ class Supervisor:
         self._completed_batches = 0
         self._total_tickets = 0
         self._classified_tickets = 0
+        self._total_tokens_in = 0
+        self._total_tokens_out = 0
         self._restarts = 0
         self._errors = []
 
@@ -87,6 +89,8 @@ class Supervisor:
         self._total_tickets = total_tickets
         self._completed_batches = 0
         self._classified_tickets = 0
+        self._total_tokens_in = 0
+        self._total_tokens_out = 0
         self._restarts = 0
         self._errors = []
 
@@ -141,6 +145,8 @@ class Supervisor:
         with self._lock:
             self._completed_batches += 1
             self._classified_tickets += result.get("classified", 0)
+            self._total_tokens_in += result.get("input_tokens", 0)
+            self._total_tokens_out += result.get("output_tokens", 0)
 
             if result.get("error"):
                 self._errors.append(
@@ -155,6 +161,16 @@ class Supervisor:
         """One health check cycle."""
         for worker in self.workers:
             health = worker.get_health()
+            logger.debug(
+                "[HEALTH] poll | agent=%s status=%s bridge_alive=%s "
+                "stalls=%s deaths=%s parse=%.2f",
+                health.get("agent_id", "?"),
+                health.get("status", "?"),
+                health.get("bridge_alive", "?"),
+                health.get("bridge_consecutive_stalls", 0),
+                health.get("bridge_deaths", 0),
+                health.get("parse_rate", 0),
+            )
             self._check_health(worker, health)
             self._write_agent_health(health)
 
@@ -165,6 +181,8 @@ class Supervisor:
         Check a single worker's health and take action if degraded.
 
         Threshold checks (all deterministic):
+          - Bridge dead -> restart (6.2)
+          - Bridge stall escalation -> restart bridge (6.2)
           - Parse rate < 70% -> restart
           - Avg confidence < 30% -> restart (only after 3+ batches)
           - Stall > 300s -> restart
@@ -176,6 +194,27 @@ class Supervisor:
 
         agent_id = health.get("agent_id", "?")
         batches_done = health.get("batches_done", 0)
+
+        # ── 6.2: Bridge-dead check (highest priority) ──
+        bridge_alive = health.get("bridge_alive", True)
+        if not bridge_alive:
+            logger.warning(
+                "[HEALTH] Supervisor: %s bridge DEAD — restarting worker",
+                agent_id,
+            )
+            self._restart_worker(worker, "bridge_dead")
+            return
+
+        # ── 6.2: Bridge stall escalation check ──
+        consecutive_stalls = health.get("bridge_consecutive_stalls", 0)
+        if consecutive_stalls >= 3:
+            logger.warning(
+                "[HEALTH] Supervisor: %s has %d consecutive bridge stalls "
+                "— restarting worker to clear stalled bridge",
+                agent_id, consecutive_stalls,
+            )
+            self._restart_worker(worker, "stall_escalation")
+            return
 
         # Parse rate check (only after 5+ batches for stable signal)
         parse_rate = health.get("parse_rate", 1.0)
@@ -225,6 +264,10 @@ class Supervisor:
     def _restart_worker(self, worker, reason):
         """Restart a degraded worker."""
         self._restarts += 1
+        logger.debug(
+            "[HEALTH] Supervisor restart | agent=%s reason=%s restarts=%d",
+            worker.agent_id, reason, self._restarts,
+        )
         try:
             worker.reset()
             logger.info(
@@ -291,8 +334,9 @@ class Supervisor:
                 INSERT INTO scan_progress
                     (scan_id, classified, total, tool_calls,
                      batches_complete, est_remaining_seconds,
-                     est_confidence, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                     est_confidence, updated_at,
+                     tokens_in, tokens_out)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(scan_id) DO UPDATE SET
                     classified = excluded.classified,
                     total = excluded.total,
@@ -300,7 +344,9 @@ class Supervisor:
                     batches_complete = excluded.batches_complete,
                     est_remaining_seconds = excluded.est_remaining_seconds,
                     est_confidence = excluded.est_confidence,
-                    updated_at = excluded.updated_at
+                    updated_at = excluded.updated_at,
+                    tokens_in = excluded.tokens_in,
+                    tokens_out = excluded.tokens_out
             """, (
                 self.scan_id,
                 self._classified_tickets,
@@ -310,6 +356,8 @@ class Supervisor:
                 estimate.get("seconds", 0),
                 estimate.get("confidence", "low"),
                 datetime.utcnow().isoformat(),
+                self._total_tokens_in,
+                self._total_tokens_out,
             ))
             self.conn.commit()
         except Exception as e:

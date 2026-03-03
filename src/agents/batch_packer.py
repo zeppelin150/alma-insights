@@ -1,9 +1,8 @@
 """
-Alma Insights -- Dynamic Batch Packer (Pass 5.2)
+Alma Insights -- Dynamic Batch Packer (Pass 5.4)
 
-Sizes batches to maximize payload per bridge call.
-Model-adaptive: auto-adjusts output budget and max batch size
-based on the selected Gemini model's output token limit.
+Dual-constraint batch sizing: output budget AND input budget.
+Model-adaptive: auto-adjusts based on the selected Gemini model.
 
 Learns optimal batch size per TRC from measured output characteristics.
 Persists learned profiles to trc_batch_profiles table.
@@ -16,16 +15,38 @@ logger = logging.getLogger("alma.batch_packer")
 
 # ── Model-specific output limits (Build Spec 5.2) ──
 MODEL_OUTPUT_LIMITS = {
-    "gemini-2.0-flash":  20_000,    # ~8K output tokens ≈ 27K chars
-    "gemini-2.5-flash": 200_000,    # ~65K output tokens ≈ 260K chars
-    "gemini-2.5-pro":   200_000,    # ~65K output tokens ≈ 260K chars
+    "gemini-2.0-flash":       20_000,    # ~8K output tokens ≈ 27K chars
+    "gemini-2.5-flash":      200_000,    # ~65K output tokens ≈ 260K chars
+    "gemini-2.5-flash-lite": 200_000,    # ~65K output tokens (same as 2.5-flash)
+    "gemini-2.5-pro":        200_000,    # ~65K output tokens ≈ 260K chars
 }
 MODEL_MAX_BATCH = {
-    "gemini-2.0-flash":  25,
-    "gemini-2.5-flash": 100,
-    "gemini-2.5-pro":   100,
+    "gemini-2.0-flash":       25,
+    "gemini-2.5-flash":       75,    # was 100 — reduced to prevent stalls (5.4)
+    "gemini-2.5-flash-lite":  75,    # conservative — faster but less capable
+    "gemini-2.5-pro":        100,
 }
 DEFAULT_OUTPUT_BUDGET = 20_000      # fallback for unknown models
+
+# ── Model-specific input limits (Build Spec 5.4) ──
+# Max chars for the ticket-content portion of the prompt.
+# Conservative vs full context windows — prevents stalls on long threads.
+MODEL_INPUT_LIMITS = {
+    "gemini-2.0-flash":      100_000,   # 1M context, but output is real constraint
+    "gemini-2.5-flash":      300_000,   # 1M context, generous budget
+    "gemini-2.5-flash-lite": 250_000,   # slightly conservative
+    "gemini-2.5-pro":        400_000,   # largest effective budget
+}
+DEFAULT_INPUT_BUDGET = 100_000
+
+# Per-ticket overhead in the JSONL section (JSON wrapper, ticket_id field, etc.)
+JSON_OVERHEAD_PER_TICKET = 120
+
+# Thread truncation limit (MUST match worker_agent._build_prompt line 572)
+THREAD_TRUNCATION_LIMIT = 3000
+
+# Fixed prompt overhead: template (~2K) + stats (~2K) + taxonomy (~15K) + instructions
+PROMPT_OVERHEAD_CHARS = 20_000
 
 # ── Default estimates (before real data) ──
 DEFAULT_CHARS_PER_TICKET = 800   # measured: ~700 chars per classification JSON
@@ -56,40 +77,67 @@ class BatchPacker:
             self._model, DEFAULT_OUTPUT_BUDGET
         )
         self._max_batch = MODEL_MAX_BATCH.get(self._model, 25)
+        self._input_budget = MODEL_INPUT_LIMITS.get(
+            self._model, DEFAULT_INPUT_BUDGET
+        )
         logger.info(
             f"BatchPacker: model={self._model}, "
-            f"budget={self._output_budget}, max_batch={self._max_batch}"
+            f"output_budget={self._output_budget}, "
+            f"input_budget={self._input_budget}, max_batch={self._max_batch}"
         )
         self._trc_profiles = {}   # trc -> measured chars_per_ticket
         self._load_profiles()
 
-    def compute_batch_size(self, trc, ticket_count):
+    def compute_batch_size(self, trc, ticket_count, avg_thread_chars=0):
         """
-        How many tickets should go in one API call for this TRC?
+        Dual-constraint batch sizing: output budget AND input budget.
 
-        Uses measured output size from previous scans.
-        Falls back to conservative default for unknown TRCs.
+        Uses measured output size from previous scans + per-TRC average
+        thread length to compute the tighter of the two limits.
 
         Args:
             trc: TRC code (or comma-joined for mixed batches)
             ticket_count: total tickets available for this TRC
+            avg_thread_chars: AVG(LENGTH(full_thread)) for this TRC
+                (0 = unknown, uses worst-case THREAD_TRUNCATION_LIMIT)
 
         Returns:
             Optimal batch size (int), clamped to [MIN, MAX]
         """
+        # ── Output constraint (existing) ──
         chars_per_ticket = self._trc_profiles.get(trc, DEFAULT_CHARS_PER_TICKET)
-
-        # How many tickets fit in the output budget?
         if chars_per_ticket > 0:
-            optimal = int(self._output_budget / chars_per_ticket)
+            output_limit = int(self._output_budget / chars_per_ticket)
         else:
-            optimal = self._max_batch
+            output_limit = self._max_batch
 
-        # Clamp to bounds (model-adaptive max)
+        # ── Input constraint (5.4) ──
+        if avg_thread_chars > 0:
+            effective_thread = min(avg_thread_chars, THREAD_TRUNCATION_LIMIT)
+        else:
+            # Unknown thread length: assume worst case
+            effective_thread = THREAD_TRUNCATION_LIMIT
+
+        chars_per_ticket_input = effective_thread + JSON_OVERHEAD_PER_TICKET
+        input_limit = int(
+            self._input_budget / chars_per_ticket_input
+        ) if chars_per_ticket_input > 0 else self._max_batch
+
+        # Take the tighter constraint, clamp to bounds
+        optimal = min(output_limit, input_limit)
         optimal = max(MIN_BATCH_SIZE, min(self._max_batch, optimal))
 
-        # Don't exceed actual ticket count
+        logger.debug(
+            f"BatchPacker: {trc[:40]} size={min(optimal, ticket_count)} "
+            f"(out={output_limit}, in={input_limit}, cap={self._max_batch}, "
+            f"avg_thread={avg_thread_chars:.0f})"
+        )
+
         return min(optimal, ticket_count)
+
+    def get_input_budget(self):
+        """Return input char budget (for mixed-batch packing)."""
+        return self._input_budget
 
     def record_result(self, trc, ticket_count, output_chars):
         """

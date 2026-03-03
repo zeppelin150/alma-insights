@@ -11,3 +11,9 @@ sentence-transformers>=2.2.0
 # Optional — Google Drive export
 # google-api-python-client>=2.100.0
 # google-auth>=2.23.0
+
+# Optional — OCR Debug tool (AI assistant visual inspection)
+# mss>=9.0.0
+# pytesseract>=0.3.10
+# Pillow>=10.0.0
+# System: Tesseract OCR (winget install UB-Mannheim.TesseractOCR)

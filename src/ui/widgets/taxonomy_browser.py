@@ -16,19 +16,20 @@ import logging
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame,
     QScrollArea, QTreeWidget, QTreeWidgetItem, QPushButton,
-    QHeaderView, QSizePolicy,
+    QHeaderView,
 )
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFont
 
 from src.ui.theme import (
-    ALMA_GREEN_DARK, ALMA_GREEN_LIGHT, ALMA_GREEN_MID, ALMA_GREEN_SUBTLE,
-    ALMA_WHITE, ALMA_CREAM, ALMA_TEXT_DARK, ALMA_TEXT_MID,
+    ALMA_GREEN_DARK, ALMA_GREEN_MID, ALMA_GREEN_SUBTLE,
+    ALMA_WHITE, ALMA_TEXT_DARK, ALMA_TEXT_MID,
     ALMA_TEXT_LIGHT, ALMA_TEXT_ON_DARK, ALMA_BORDER, ALMA_BORDER_LIGHT,
     ALMA_BG_ELEVATED, ALMA_SUCCESS, ALMA_WARNING, ALMA_ERROR, ALMA_INFO,
-    apply_card_shadow_soft,
+    apply_card_shadow_soft, configure_tree,
 )
-from src.ui.widgets.charts import LineChartWidget
+from src.ui.widgets.charts import LineChartWidget, ChartModeSwitcher
+from src.ui.widgets.chart_builders import ChartLegendSection
+from src.ui.widgets.collapsible_section import CollapsibleSection
 from src.ui.widgets.empty_state import EmptyState
 
 logger = logging.getLogger("alma.taxonomy_browser")
@@ -62,19 +63,22 @@ class TaxonomyBrowser(QWidget):
 
         content = QWidget()
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(0, 4, 0, 4)
-        layout.setSpacing(16)
+        layout.setContentsMargins(28, 16, 28, 24)
+        layout.setSpacing(0)
 
         # ── Health Stats Row ──
         self._build_health_stats(layout)
+        layout.addSpacing(16)
 
-        # ── Pattern Growth Chart ──
+        # ── Pattern Growth Chart (collapsible) ──
         self._build_growth_chart(layout)
+        layout.addSpacing(16)
 
-        # ── Taxonomy Table ──
+        # ── Taxonomy Table (collapsible) ──
         self._build_taxonomy_table(layout)
+        layout.addSpacing(16)
 
-        # ── Latest Findings ──
+        # ── Latest Findings (collapsible) ──
         self._build_findings_section(layout)
 
         layout.addStretch()
@@ -103,28 +107,19 @@ class TaxonomyBrowser(QWidget):
         parent_layout.addWidget(row_widget)
 
     def _build_growth_chart(self, parent_layout):
-        """Build pattern growth line chart."""
-        card = QFrame()
-        card.setStyleSheet(f"""
-            QFrame {{
-                background: {ALMA_BG_ELEVATED};
-                border: 1px solid rgba(214, 210, 202, 0.45);
-                border-radius: 12px;
-            }}
-        """)
-        apply_card_shadow_soft(card)
-        card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(16, 14, 16, 14)
-        card_layout.setSpacing(8)
-
-        # Title row with filter buttons
-        title_row = QHBoxLayout()
-        title = QLabel("Pattern Growth")
-        title.setStyleSheet(
-            f"font-size: 14px; font-weight: 700; color: {ALMA_TEXT_DARK}; border: none;"
+        """Build pattern growth line chart inside a CollapsibleSection."""
+        section = CollapsibleSection(
+            "Pattern Growth", section_key="taxonomy.pattern_growth"
         )
-        title_row.addWidget(title)
-        title_row.addStretch()
+
+        container = QWidget()
+        cl = QVBoxLayout(container)
+        cl.setContentsMargins(0, 8, 0, 0)
+        cl.setSpacing(8)
+
+        # Filter buttons row
+        filter_row = QHBoxLayout()
+        filter_row.addStretch()
 
         self._filter_all = QPushButton("All")
         self._filter_active = QPushButton("Active")
@@ -137,52 +132,51 @@ class TaxonomyBrowser(QWidget):
                     border: 1px solid {ALMA_BORDER}; border-radius: 4px;
                     padding: 3px 10px; font-size: 10px; font-weight: 600;
                 }}
-                QPushButton:hover {{ background: {ALMA_GREEN_SUBTLE}; }}
+                QPushButton:hover {{ background: {ALMA_GREEN_SUBTLE}; color: white; }}
                 QPushButton:checked {{ background: {ALMA_GREEN_DARK}; color: white; border: none; }}
             """)
             btn.setCheckable(True)
-            title_row.addWidget(btn)
+            filter_row.addWidget(btn)
 
         self._filter_all.setChecked(True)
         self._growth_tier_filter = "all"
         self._filter_all.clicked.connect(lambda: self._set_growth_filter("all"))
         self._filter_active.clicked.connect(lambda: self._set_growth_filter("active"))
         self._filter_prob.clicked.connect(lambda: self._set_growth_filter("probationary"))
-        card_layout.addLayout(title_row)
+
+        # Chart mode switcher (Line / Area / Bar / Step)
+        self._growth_mode_switcher = ChartModeSwitcher()
+        filter_row.addWidget(self._growth_mode_switcher)
+
+        cl.addLayout(filter_row)
 
         self._growth_chart = LineChartWidget()
         self._growth_chart.setMinimumHeight(250)
-        card_layout.addWidget(self._growth_chart)
+        self._growth_mode_switcher.mode_changed.connect(self._growth_chart.set_chart_mode)
+        cl.addWidget(self._growth_chart)
 
         subtitle = QLabel("Top 10 patterns by cumulative ticket count")
         subtitle.setStyleSheet(
             f"font-size: 10px; color: {ALMA_TEXT_LIGHT}; border: none;"
         )
         subtitle.setAlignment(Qt.AlignCenter)
-        card_layout.addWidget(subtitle)
+        cl.addWidget(subtitle)
 
-        parent_layout.addWidget(card)
+        section.add_widget(container)
+        parent_layout.addWidget(section)
+
+        # Standalone legend section below the chart
+        self._growth_legend = ChartLegendSection(
+            chart_title="Pattern Growth",
+            section_key="taxonomy.pattern_growth.legend",
+        )
+        parent_layout.addWidget(self._growth_legend)
 
     def _build_taxonomy_table(self, parent_layout):
-        """Build embedded QTreeWidget taxonomy table."""
-        card = QFrame()
-        card.setStyleSheet(f"""
-            QFrame {{
-                background: {ALMA_BG_ELEVATED};
-                border: 1px solid rgba(214, 210, 202, 0.45);
-                border-radius: 12px;
-            }}
-        """)
-        apply_card_shadow_soft(card)
-        card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(16, 14, 16, 14)
-        card_layout.setSpacing(8)
-
-        title = QLabel("Sub-Pattern Taxonomy")
-        title.setStyleSheet(
-            f"font-size: 14px; font-weight: 700; color: {ALMA_TEXT_DARK}; border: none;"
+        """Build embedded QTreeWidget taxonomy table inside a CollapsibleSection."""
+        section = CollapsibleSection(
+            "Sub-Pattern Taxonomy", section_key="taxonomy.sub_pattern"
         )
-        card_layout.addWidget(title)
 
         self._taxonomy_tree = QTreeWidget()
         self._taxonomy_tree.setHeaderLabels([
@@ -194,57 +188,34 @@ class TaxonomyBrowser(QWidget):
         self._taxonomy_tree.setColumnWidth(3, 70)
         self._taxonomy_tree.setAlternatingRowColors(True)
         self._taxonomy_tree.setMinimumHeight(300)
+        configure_tree(self._taxonomy_tree)
         self._taxonomy_tree.setStyleSheet(f"""
             QTreeWidget {{
-                background: {ALMA_WHITE}; border: 1px solid {ALMA_BORDER_LIGHT};
-                border-radius: 6px; font-size: 12px;
+                background: {ALMA_WHITE}; border: none;
+                font-size: 12px;
             }}
             QTreeWidget::item {{
                 padding: 4px 2px;
             }}
-            QTreeWidget::item:selected {{
-                background: {ALMA_GREEN_SUBTLE};
-                color: {ALMA_TEXT_DARK};
-            }}
-            QHeaderView::section {{
-                background: {ALMA_CREAM}; border: none;
-                padding: 4px 8px; font-weight: 600; font-size: 11px;
-                color: {ALMA_TEXT_DARK};
-            }}
         """)
         self._taxonomy_tree.itemClicked.connect(self._on_taxonomy_row_clicked)
-        card_layout.addWidget(self._taxonomy_tree)
+        section.add_widget(self._taxonomy_tree)
 
-        parent_layout.addWidget(card)
+        parent_layout.addWidget(section)
 
     def _build_findings_section(self, parent_layout):
-        """Build latest findings section (moved from scanner tab)."""
-        card = QFrame()
-        card.setStyleSheet(f"""
-            QFrame {{
-                background: {ALMA_BG_ELEVATED};
-                border: 1px solid rgba(214, 210, 202, 0.45);
-                border-radius: 12px;
-            }}
-        """)
-        apply_card_shadow_soft(card)
-        self._findings_card_layout = QVBoxLayout(card)
-        self._findings_card_layout.setContentsMargins(16, 14, 16, 14)
-        self._findings_card_layout.setSpacing(8)
-
-        title = QLabel("Latest Findings")
-        title.setStyleSheet(
-            f"font-size: 14px; font-weight: 700; color: {ALMA_TEXT_DARK}; border: none;"
+        """Build latest findings section inside a CollapsibleSection."""
+        section = CollapsibleSection(
+            "Latest Findings", section_key="taxonomy.findings"
         )
-        self._findings_card_layout.addWidget(title)
 
         self._findings_container = QWidget()
         self._findings_layout = QVBoxLayout(self._findings_container)
-        self._findings_layout.setContentsMargins(0, 0, 0, 0)
+        self._findings_layout.setContentsMargins(0, 4, 0, 0)
         self._findings_layout.setSpacing(8)
-        self._findings_card_layout.addWidget(self._findings_container)
+        section.add_widget(self._findings_container)
 
-        parent_layout.addWidget(card)
+        parent_layout.addWidget(section)
 
     # ── Refresh ──
 
@@ -313,7 +284,8 @@ class TaxonomyBrowser(QWidget):
             """).fetchall()
 
             if not rows:
-                self._growth_chart.set_data([], [])
+                self._growth_chart.set_data({})
+                self._growth_legend.update_legend([])
                 return
 
             # Get snapshot data for these patterns
@@ -321,38 +293,48 @@ class TaxonomyBrowser(QWidget):
             pattern_labels = {r["pattern_id"]: r["label"][:25] for r in rows}
 
             # Build line data: one series per pattern
+            # Join to nlp_scan_runs for the scan timestamp (x-axis)
             all_dates = set()
             series_data = {}
             for pid in pattern_ids:
                 snapshots = self.db.conn.execute("""
-                    SELECT created_at, ticket_count
-                    FROM sub_pattern_snapshots
-                    WHERE pattern_id = ?
-                    ORDER BY created_at
+                    SELECT sr.created_at as scan_date, sps.ticket_count
+                    FROM sub_pattern_snapshots sps
+                    JOIN nlp_scan_runs sr ON sr.scan_id = sps.scan_id
+                    WHERE sps.pattern_id = ?
+                    ORDER BY sr.created_at
                 """, (pid,)).fetchall()
 
                 if snapshots:
                     dates = []
                     values = []
                     for snap in snapshots:
-                        date_str = snap["created_at"][:10]
+                        date_str = snap["scan_date"][:10]
                         dates.append(date_str)
                         values.append(snap["ticket_count"] or 0)
                         all_dates.add(date_str)
                     series_data[pid] = (dates, values)
 
             if not series_data:
-                self._growth_chart.set_data([], [])
+                self._growth_chart.set_data({})
+                self._growth_legend.update_legend([])
                 return
 
-            # For simplicity, use the first pattern's data as the chart
-            # LineChartWidget expects a single series
+            # Build multi-series dict for LineChartWidget
             sorted_dates = sorted(all_dates)
-            # Show the top pattern's growth
-            first_pid = pattern_ids[0]
-            if first_pid in series_data:
-                dates, values = series_data[first_pid]
-                self._growth_chart.set_data(values, dates)
+            chart_data = {}
+            for pid in pattern_ids:
+                if pid not in series_data:
+                    continue
+                dates, values = series_data[pid]
+                label = pattern_labels.get(pid, str(pid))
+                # Align to sorted_dates so all series share the same x-axis
+                date_val = dict(zip(dates, values))
+                chart_data[label] = [
+                    (d, date_val.get(d, 0)) for d in sorted_dates
+                ]
+            self._growth_chart.set_data(chart_data, y_min=0)
+            self._growth_legend.update_legend(list(chart_data.keys()))
 
         except Exception as e:
             logger.debug(f"Growth chart refresh: {e}")

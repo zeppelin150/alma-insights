@@ -14,17 +14,17 @@ from datetime import datetime
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame,
     QDoubleSpinBox, QComboBox, QProgressBar, QScrollArea,
-    QSizePolicy,
 )
 from PySide6.QtCore import Qt, Signal
 
 from src.ui.theme import (
-    ALMA_GREEN_DARK, ALMA_GREEN_LIGHT, ALMA_GREEN_SUBTLE,
+    ALMA_GREEN_DARK,
     ALMA_WHITE, ALMA_CREAM, ALMA_TEXT_DARK, ALMA_TEXT_MID,
     ALMA_TEXT_LIGHT, ALMA_BORDER, ALMA_BORDER_LIGHT,
     ALMA_BG_ELEVATED, apply_card_shadow_soft,
 )
 from src.ui.widgets.charts import BarChartWidget
+from src.ui.widgets.collapsible_section import CollapsibleSection
 from src.data.usage_tracker import UsageTracker, GEMINI_PLANS
 
 logger = logging.getLogger("alma.cost_dashboard")
@@ -39,8 +39,13 @@ class CostDashboard(QWidget):
         super().__init__(parent)
         self.db = db_manager
         self._tracker = UsageTracker(db_manager)
+        self._active_scan_id = None
         self._build_ui()
         self.refresh()
+
+    def set_active_scan(self, scan_id):
+        """Set the active scan ID so 'This Scan' cost can be queried."""
+        self._active_scan_id = scan_id
 
     def _build_ui(self):
         outer = QVBoxLayout(self)
@@ -54,17 +59,20 @@ class CostDashboard(QWidget):
 
         content = QWidget()
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(0, 4, 0, 4)
-        layout.setSpacing(16)
+        layout.setContentsMargins(28, 16, 28, 24)
+        layout.setSpacing(0)
 
         # ── Cost Limits Section ──
         self._build_cost_limits(layout)
+        layout.addSpacing(16)
 
         # ── Token Usage Cards ──
         self._build_token_usage(layout)
+        layout.addSpacing(16)
 
         # ── Cost History Chart ──
         self._build_cost_history(layout)
+        layout.addSpacing(16)
 
         # ── Plan Reference ──
         self._build_plan_reference(layout)
@@ -75,8 +83,11 @@ class CostDashboard(QWidget):
 
     def _build_cost_limits(self, parent_layout):
         """Build cost limits configuration section."""
-        card = self._make_section_card("Cost Limits")
-        card_layout = card.layout()
+        section = CollapsibleSection("Cost Limits", section_key="cost.limits")
+        container = QWidget()
+        cl = QVBoxLayout(container)
+        cl.setContentsMargins(0, 4, 0, 0)
+        cl.setSpacing(12)
 
         # Spinboxes row
         spin_row = QHBoxLayout()
@@ -100,7 +111,7 @@ class CostDashboard(QWidget):
         )
         spin_row.addLayout(period_col, 1)
 
-        card_layout.addLayout(spin_row)
+        cl.addLayout(spin_row)
 
         # Period type selector
         period_row = QHBoxLayout()
@@ -119,7 +130,7 @@ class CostDashboard(QWidget):
         """)
         self._period_type.currentTextChanged.connect(self._on_limits_changed)
         period_row.addWidget(self._period_type)
-        card_layout.addLayout(period_row)
+        cl.addLayout(period_row)
 
         # Usage vs limit progress bars
         usage_row = QHBoxLayout()
@@ -134,13 +145,17 @@ class CostDashboard(QWidget):
         self._period_usage_card = self._make_usage_vs_limit_card("This Quarter", "$0.00", "$2,000.00", 0)
         usage_row.addWidget(self._period_usage_card["frame"], 1)
 
-        card_layout.addLayout(usage_row)
-        parent_layout.addWidget(card)
+        cl.addLayout(usage_row)
+        section.add_widget(container)
+        parent_layout.addWidget(section)
 
     def _build_token_usage(self, parent_layout):
         """Build token usage KPI cards section."""
-        card = self._make_section_card("Gemini Token Usage")
-        card_layout = card.layout()
+        section = CollapsibleSection("Gemini Token Usage", section_key="cost.token_usage")
+        container = QWidget()
+        cl = QVBoxLayout(container)
+        cl.setContentsMargins(0, 4, 0, 0)
+        cl.setSpacing(12)
 
         cards_row = QHBoxLayout()
         cards_row.setSpacing(12)
@@ -157,17 +172,21 @@ class CostDashboard(QWidget):
         self._plan_card = self._make_kpi_card("Plan Utilization", "--", "")
         cards_row.addWidget(self._plan_card["frame"], 1)
 
-        card_layout.addLayout(cards_row)
-        parent_layout.addWidget(card)
+        cl.addLayout(cards_row)
+        section.add_widget(container)
+        parent_layout.addWidget(section)
 
     def _build_cost_history(self, parent_layout):
         """Build cost history bar chart section."""
-        card = self._make_section_card("Cost History")
-        card_layout = card.layout()
+        section = CollapsibleSection("Cost History", section_key="cost.history")
+        container = QWidget()
+        cl = QVBoxLayout(container)
+        cl.setContentsMargins(0, 4, 0, 0)
+        cl.setSpacing(8)
 
         self._cost_chart = BarChartWidget()
         self._cost_chart.setMinimumHeight(250)
-        card_layout.addWidget(self._cost_chart)
+        cl.addWidget(self._cost_chart)
 
         # Summary row
         self._cost_summary = QLabel("Total scans: 0  |  Total cost: $0.00  |  Avg: $0.00/scan")
@@ -175,14 +194,21 @@ class CostDashboard(QWidget):
             f"font-size: 11px; color: {ALMA_TEXT_MID}; border: none;"
         )
         self._cost_summary.setAlignment(Qt.AlignCenter)
-        card_layout.addWidget(self._cost_summary)
+        cl.addWidget(self._cost_summary)
 
-        parent_layout.addWidget(card)
+        section.add_widget(container)
+        parent_layout.addWidget(section)
 
     def _build_plan_reference(self, parent_layout):
         """Build Gemini plan reference panel."""
-        card = self._make_section_card("Gemini Plan Reference")
-        card_layout = card.layout()
+        section = CollapsibleSection(
+            "Gemini Plan Reference", initially_collapsed=True,
+            section_key="cost.plan_reference"
+        )
+        container = QWidget()
+        cl = QVBoxLayout(container)
+        cl.setContentsMargins(0, 4, 0, 0)
+        cl.setSpacing(8)
 
         # Plan selector
         plan_row = QHBoxLayout()
@@ -203,16 +229,17 @@ class CostDashboard(QWidget):
         self._plan_combo.currentIndexChanged.connect(self._update_plan_display)
         plan_row.addWidget(self._plan_combo)
         plan_row.addStretch()
-        card_layout.addLayout(plan_row)
+        cl.addLayout(plan_row)
 
         self._plan_details = QLabel("")
         self._plan_details.setStyleSheet(
             f"font-size: 11px; color: {ALMA_TEXT_MID}; border: none; padding: 8px;"
         )
         self._plan_details.setWordWrap(True)
-        card_layout.addWidget(self._plan_details)
+        cl.addWidget(self._plan_details)
 
-        parent_layout.addWidget(card)
+        section.add_widget(container)
+        parent_layout.addWidget(section)
 
     # ── Refresh ──
 
@@ -324,8 +351,11 @@ class CostDashboard(QWidget):
             monthly = self._monthly_spin.value()
             period = self._period_spin.value()
 
-            # Current scan cost (if there's an active scan)
-            scan_cost = 0.0  # Will be set by parent page if needed
+            # Current scan cost from gemini_usage table
+            scan_cost = 0.0
+            if self._active_scan_id:
+                scan_totals = self._tracker.get_scan_cost(self._active_scan_id)
+                scan_cost = scan_totals.get("cost_usd", 0.0) if scan_totals else 0.0
             self._update_usage_card(
                 self._scan_usage_card, scan_cost, per_scan, "This Scan"
             )
@@ -374,27 +404,6 @@ class CostDashboard(QWidget):
 
     # ── Widget Factories ──
 
-    def _make_section_card(self, title_text):
-        """Create a section card with title."""
-        card = QFrame()
-        card.setStyleSheet(f"""
-            QFrame {{
-                background: {ALMA_BG_ELEVATED};
-                border: 1px solid rgba(214, 210, 202, 0.45);
-                border-radius: 12px;
-            }}
-        """)
-        apply_card_shadow_soft(card)
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(12)
-
-        title = QLabel(title_text)
-        title.setStyleSheet(
-            f"font-size: 14px; font-weight: 700; color: {ALMA_TEXT_DARK}; border: none;"
-        )
-        layout.addWidget(title)
-        return card
 
     def _make_limit_column(self, label, default, min_val, max_val):
         """Create a cost limit column with label + spinbox."""

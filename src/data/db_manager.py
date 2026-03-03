@@ -440,7 +440,8 @@ class DatabaseManager:
                 raw_classification TEXT,
                 created_at      TEXT NOT NULL,
                 FOREIGN KEY (batch_id) REFERENCES nlp_batches(batch_id),
-                FOREIGN KEY (scan_id) REFERENCES nlp_scan_runs(scan_id)
+                FOREIGN KEY (scan_id) REFERENCES nlp_scan_runs(scan_id),
+                UNIQUE(scan_id, ticket_id)
             );
 
             CREATE TABLE IF NOT EXISTS sub_patterns (
@@ -620,6 +621,22 @@ class DatabaseManager:
                 metadata_json TEXT DEFAULT NULL
             );
 
+            -- ═══ CANARY PROBE HISTORY (Build 6.3) ═══
+
+            CREATE TABLE IF NOT EXISTS probe_history (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                scan_id         TEXT,
+                bridge_index    INTEGER NOT NULL,
+                probe_type      TEXT NOT NULL,
+                timestamp       TEXT NOT NULL,
+                status          TEXT NOT NULL,
+                latency_ms      INTEGER,
+                error_message   TEXT,
+                created_at      TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_probe_scan ON probe_history(scan_id);
+            CREATE INDEX IF NOT EXISTS idx_probe_ts   ON probe_history(timestamp);
+
             -- ═══ CHART LAYOUTS (Pass 3.1 UI Polish) ═══
 
             CREATE TABLE IF NOT EXISTS chart_layouts (
@@ -661,6 +678,7 @@ class DatabaseManager:
             CREATE INDEX IF NOT EXISTS idx_nlp_tc_anomaly ON nlp_ticket_classifications(anomaly_flag);
             CREATE INDEX IF NOT EXISTS idx_nlp_tc_friction ON nlp_ticket_classifications(friction_type);
             CREATE INDEX IF NOT EXISTS idx_nlp_tc_novel ON nlp_ticket_classifications(is_novel);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_nlp_tc_scan_ticket ON nlp_ticket_classifications(scan_id, ticket_id);
             CREATE INDEX IF NOT EXISTS idx_sp_trc ON sub_patterns(trc);
             CREATE INDEX IF NOT EXISTS idx_sp_tier ON sub_patterns(tier);
             CREATE INDEX IF NOT EXISTS idx_sp_merged ON sub_patterns(merged_into);
@@ -957,6 +975,13 @@ class DatabaseManager:
 
     # ─── Query Operations ───
 
+    # Search results: metadata only. full_thread is lazy-loaded by drilldown on click.
+    # Including full_thread here caused 7 GB memory bloat (29K rows × 244 KB each).
+    _SEARCH_COLUMNS = """c.ticket_id, c.subject, c.trc_code, c.trc_label, c.status,
+                         c.csat_score, c.created_at, c.solved_at,
+                         c.message_count, c.client_messages, c.agent_messages,
+                         c.thread_preview"""
+
     def get_trc_codes(self):
         """Return distinct TRC codes with labels."""
         rows = self.conn.execute(
@@ -1007,10 +1032,7 @@ class DatabaseManager:
         where_clause = " AND ".join(conditions) if conditions else "1=1"
 
         query = f"""
-            SELECT c.ticket_id, c.subject, c.trc_code, c.trc_label, c.status,
-                   c.csat_score, c.created_at, c.solved_at,
-                   c.message_count, c.client_messages, c.agent_messages,
-                   c.thread_preview, c.full_thread
+            SELECT {self._SEARCH_COLUMNS}
             FROM conversations c
             WHERE {where_clause}
             ORDER BY c.created_at DESC
@@ -1830,11 +1852,104 @@ class DatabaseManager:
         """Return the most recent completed scan run."""
         row = self.conn.execute("""
             SELECT * FROM nlp_scan_runs
-            WHERE status IN ('completed', 'scan_complete', 'analysis_complete')
+            WHERE status IN ('completed', 'completed_with_errors',
+                            'scan_complete', 'analysis_complete')
             ORDER BY created_at DESC
             LIMIT 1
         """).fetchone()
         return dict(row) if row else None
+
+    def get_failed_batches_for_scan(self, scan_id):
+        """Return failed batch records for a scan (for retry)."""
+        rows = self.conn.execute("""
+            SELECT batch_id, batch_number, trc, trc_chunk, trc_chunk_total,
+                   ticket_count, error_message, retry_count
+            FROM nlp_batches
+            WHERE scan_id = ? AND status = 'failed'
+            ORDER BY batch_number
+        """, (scan_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+    # ── Build 6.3: Canary probe helpers ──────────────────────────────
+
+    def store_probe(self, scan_id, bridge_index, probe_type, status,
+                    latency_ms, error_message=None):
+        """Insert a single canary probe result."""
+        from datetime import datetime
+        now = datetime.utcnow().isoformat()
+        self.conn.execute("""
+            INSERT INTO probe_history
+                (scan_id, bridge_index, probe_type, timestamp,
+                 status, latency_ms, error_message, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (scan_id, bridge_index, probe_type, now,
+              status, latency_ms, error_message, now))
+        self.conn.commit()
+
+    def get_probe_percentile(self, percentile=95, days=7):
+        """Return P{percentile} latency (ms) from successful probes in last N days.
+
+        Returns int (ms) or None if no data.
+        """
+        from datetime import datetime, timedelta
+        cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+        rows = self.conn.execute("""
+            SELECT latency_ms FROM probe_history
+            WHERE status = 'success' AND timestamp > ?
+            ORDER BY latency_ms
+        """, (cutoff,)).fetchall()
+        if not rows:
+            return None
+        latencies = [r["latency_ms"] for r in rows]
+        idx = min(int(len(latencies) * percentile / 100), len(latencies) - 1)
+        return latencies[idx]
+
+    def get_probe_summary(self, scan_id=None, days=7):
+        """Return probe stats for VOC report context.
+
+        Returns dict with current_p50, current_p95, historical_p50,
+        historical_p95, success_rate, total_probes.
+        """
+        from datetime import datetime, timedelta
+        cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+
+        result = {
+            "current_p50": None, "current_p95": None,
+            "historical_p50": None, "historical_p95": None,
+            "success_rate": None, "total_probes": 0,
+            "scan_probes": 0,
+        }
+
+        # Historical (last N days)
+        rows = self.conn.execute("""
+            SELECT latency_ms, status FROM probe_history
+            WHERE timestamp > ?
+            ORDER BY latency_ms
+        """, (cutoff,)).fetchall()
+        if rows:
+            result["total_probes"] = len(rows)
+            successes = [r["latency_ms"] for r in rows if r["status"] == "success"]
+            if successes:
+                result["success_rate"] = round(len(successes) / len(rows) * 100, 1)
+                result["historical_p50"] = successes[len(successes) // 2]
+                idx95 = min(int(len(successes) * 0.95), len(successes) - 1)
+                result["historical_p95"] = successes[idx95]
+
+        # Current scan
+        if scan_id:
+            scan_rows = self.conn.execute("""
+                SELECT latency_ms FROM probe_history
+                WHERE scan_id = ? AND status = 'success'
+                ORDER BY latency_ms
+            """, (scan_id,)).fetchall()
+            if scan_rows:
+                lats = [r["latency_ms"] for r in scan_rows]
+                result["scan_probes"] = len(lats)
+                result["current_p50"] = lats[len(lats) // 2]
+                idx95 = min(int(len(lats) * 0.95), len(lats) - 1)
+                result["current_p95"] = lats[idx95]
+
+        return result
 
     def get_trc_list(self):
         """Return distinct TRC codes from conversations."""
@@ -1852,6 +1967,97 @@ class DatabaseManager:
             WHERE created_at >= ? AND created_at <= ?
         """, (date_start, date_end + " 23:59:59")).fetchone()
         return row["n"] if row else 0
+
+    def get_nlp_aggregate_for_trc(self, trc, scan_id=None):
+        """Aggregate NLP classifications for a TRC from most recent scan.
+
+        Returns dict with friction_distribution, sentiment_distribution,
+        anomaly_counts, top_sub_clusters, top_root_cause_hints, etc.
+        Returns None if no NLP scan data exists.
+        """
+        # Determine scan_id — use latest completed if not provided
+        if not scan_id:
+            scan = self.get_latest_completed_scan()
+            if not scan:
+                return None
+            scan_id = scan["scan_id"]
+
+        # Count total classified for this TRC in this scan
+        row = self.conn.execute("""
+            SELECT COUNT(*) AS n FROM nlp_ticket_classifications
+            WHERE scan_id = ? AND trc = ?
+        """, (scan_id, trc)).fetchone()
+        total = row["n"] if row else 0
+        if total == 0:
+            return None
+
+        # Friction type distribution
+        friction_rows = self.conn.execute("""
+            SELECT friction_type, COUNT(*) AS cnt
+            FROM nlp_ticket_classifications
+            WHERE scan_id = ? AND trc = ? AND friction_type IS NOT NULL
+            GROUP BY friction_type ORDER BY cnt DESC
+        """, (scan_id, trc)).fetchall()
+        friction_dist = {r["friction_type"]: r["cnt"] for r in friction_rows}
+
+        # Sentiment polarity distribution
+        sentiment_rows = self.conn.execute("""
+            SELECT sentiment_polarity, COUNT(*) AS cnt
+            FROM nlp_ticket_classifications
+            WHERE scan_id = ? AND trc = ? AND sentiment_polarity IS NOT NULL
+            GROUP BY sentiment_polarity ORDER BY cnt DESC
+        """, (scan_id, trc)).fetchall()
+        sentiment_dist = {r["sentiment_polarity"]: r["cnt"] for r in sentiment_rows}
+
+        # Average sentiment intensity
+        intensity_row = self.conn.execute("""
+            SELECT AVG(sentiment_intensity) AS avg_intensity
+            FROM nlp_ticket_classifications
+            WHERE scan_id = ? AND trc = ? AND sentiment_intensity IS NOT NULL
+        """, (scan_id, trc)).fetchone()
+        avg_intensity = round(intensity_row["avg_intensity"], 2) if intensity_row and intensity_row["avg_intensity"] else None
+
+        # Anomaly counts
+        anomaly_rows = self.conn.execute("""
+            SELECT anomaly_flag, COUNT(*) AS cnt
+            FROM nlp_ticket_classifications
+            WHERE scan_id = ? AND trc = ? AND anomaly_flag IS NOT NULL
+                  AND anomaly_flag != 'none'
+            GROUP BY anomaly_flag ORDER BY cnt DESC
+        """, (scan_id, trc)).fetchall()
+        anomaly_counts = {r["anomaly_flag"]: r["cnt"] for r in anomaly_rows}
+
+        # Top sub-clusters
+        sub_rows = self.conn.execute("""
+            SELECT sub_cluster, COUNT(*) AS cnt
+            FROM nlp_ticket_classifications
+            WHERE scan_id = ? AND trc = ? AND sub_cluster IS NOT NULL
+            GROUP BY sub_cluster ORDER BY cnt DESC
+            LIMIT 10
+        """, (scan_id, trc)).fetchall()
+        top_sub_clusters = [(r["sub_cluster"], r["cnt"]) for r in sub_rows]
+
+        # Top root cause hints
+        hint_rows = self.conn.execute("""
+            SELECT root_cause_hint, COUNT(*) AS cnt
+            FROM nlp_ticket_classifications
+            WHERE scan_id = ? AND trc = ? AND root_cause_hint IS NOT NULL
+                  AND root_cause_hint != ''
+            GROUP BY root_cause_hint ORDER BY cnt DESC
+            LIMIT 10
+        """, (scan_id, trc)).fetchall()
+        top_root_cause_hints = [(r["root_cause_hint"], r["cnt"]) for r in hint_rows]
+
+        return {
+            "total_classified": total,
+            "scan_id": scan_id,
+            "friction_distribution": friction_dist,
+            "sentiment_distribution": sentiment_dist,
+            "avg_sentiment_intensity": avg_intensity,
+            "anomaly_counts": anomaly_counts,
+            "top_sub_clusters": top_sub_clusters,
+            "top_root_cause_hints": top_root_cause_hints,
+        }
 
     def get_finding_ticket_ids(self, finding_id):
         """Return ticket IDs for a finding's exemplar + classified tickets."""

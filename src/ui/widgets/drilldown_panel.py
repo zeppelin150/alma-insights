@@ -324,7 +324,11 @@ class DrilldownPanel(QFrame):
         self._detach_hosted_widget()
         self._detail_stack.setCurrentIndex(0)
         self._tickets = tickets or []
+        self._reports = []
         self._current_index = -1
+        self._thread_fetcher = None
+        self._report_detail_cb = None
+        self._report_load_cb = None
         self._level = 1
         self._saved_title = title
 
@@ -341,13 +345,26 @@ class DrilldownPanel(QFrame):
         self._restore_nav_buttons()
         self._slide_open()
 
-    def show_conversation(self, conv: dict, ticket_list: list = None, index: int = 0):
+    def show_conversation(self, conv: dict, ticket_list: list = None, index: int = 0,
+                          thread_fetcher=None):
         """Open the panel directly at Level 2 (thread view).
-        If ticket_list is provided, enables prev/next navigation."""
+        If ticket_list is provided, enables prev/next navigation.
+
+        Args:
+            thread_fetcher: Optional callable(ticket_id) -> dict with full_thread.
+                When provided, full_thread is lazy-loaded on demand instead of
+                requiring it pre-loaded in every conv dict.  This avoids
+                materializing the full text of all conversations in memory.
+        """
         self._mode = "tickets"
+        self._detach_hosted_widget()
         self._tickets = ticket_list or [conv]
+        self._reports = []
         self._current_index = index
         self._level = 2
+        self._thread_fetcher = thread_fetcher
+        self._report_detail_cb = None
+        self._report_load_cb = None
 
         self._render_thread(conv)
 
@@ -375,9 +392,11 @@ class DrilldownPanel(QFrame):
         self._mode = "reports"
         self._detach_hosted_widget()
         self._detail_stack.setCurrentIndex(0)
+        self._tickets = []
         self._reports = reports or []
         self._report_detail_cb = detail_callback
         self._report_load_cb = load_callback
+        self._thread_fetcher = None
         self._current_index = -1
         self._level = 1
         self._saved_title = title
@@ -885,7 +904,17 @@ class DrilldownPanel(QFrame):
         self._thread_header.setText(f"{ticket_id} \u2014 {subject}")
         self._thread_meta.setText(build_meta_text(conv))
 
-        thread = conv.get("full_thread", "No conversation data available.")
+        # Lazy-load full_thread on demand (avoids 7 GB bulk materialization)
+        thread = conv.get("full_thread")
+        if not thread and hasattr(self, "_thread_fetcher") and self._thread_fetcher:
+            try:
+                full_conv = self._thread_fetcher(ticket_id)
+                if full_conv:
+                    thread = full_conv.get("full_thread", "")
+                    conv["full_thread"] = thread  # Cache for re-renders
+            except Exception:
+                thread = None
+        thread = thread or "No conversation data available."
         self._thread_browser.setHtml(render_thread_html(thread))
 
         # Update nav
@@ -951,17 +980,19 @@ class DrilldownPanel(QFrame):
         if self._current_index > 0:
             self._current_index -= 1
             if self._mode == "reports":
-                self._render_report_detail(self._reports[self._current_index])
+                if self._current_index < len(self._reports):
+                    self._render_report_detail(self._reports[self._current_index])
             else:
-                self._render_thread(self._tickets[self._current_index])
+                if self._current_index < len(self._tickets):
+                    self._render_thread(self._tickets[self._current_index])
 
     def _go_next(self):
         if self._mode == "reports":
-            if self._current_index < len(self._reports) - 1:
+            if 0 <= self._current_index < len(self._reports) - 1:
                 self._current_index += 1
                 self._render_report_detail(self._reports[self._current_index])
         else:
-            if self._current_index < len(self._tickets) - 1:
+            if 0 <= self._current_index < len(self._tickets) - 1:
                 self._current_index += 1
                 self._render_thread(self._tickets[self._current_index])
 
@@ -1045,6 +1076,10 @@ class DrilldownPanel(QFrame):
         self._mode = "tickets"
         self._report_detail_cb = None
         self._report_load_cb = None
+        self._thread_fetcher = None
+        self._tickets = []
+        self._reports = []
+        self._current_index = -1
         self.hide()
         self.panel_closed.emit()
 

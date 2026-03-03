@@ -4,11 +4,12 @@ A section with a clickable header that collapses/expands its content.
 """
 
 from PySide6.QtWidgets import (
-    QFrame, QVBoxLayout, QHBoxLayout, QLabel, QWidget,
+    QFrame, QVBoxLayout, QHBoxLayout, QLabel, QWidget, QPushButton,
 )
 from PySide6.QtCore import Qt
 from src.ui.theme import (
     ALMA_WHITE, ALMA_BORDER_LIGHT, ALMA_TEXT_DARK, ALMA_TEXT_LIGHT,
+    ALMA_GREEN_DARK, ALMA_HOVER_LIGHT,
     apply_card_shadow,
 )
 
@@ -31,11 +32,13 @@ class CollapsibleSection(QFrame):
     """
 
     def __init__(self, title: str, initially_collapsed=False,
-                 section_key: str = "", parent=None):
+                 section_key: str = "", show_expand_button=True,
+                 parent=None):
         super().__init__(parent)
         self.setObjectName("Card")
         self._section_key = section_key
         self._title = title
+        self._show_expand_button = show_expand_button
 
         # Resolve initial state: explicit section_key overrides the flag
         if section_key:
@@ -115,6 +118,30 @@ class CollapsibleSection(QFrame):
         header_layout.addWidget(self._title_label)
         header_layout.addStretch()
 
+        # Expand-to-fullscreen button (right edge of header)
+        if self._show_expand_button:
+            self._expand_btn = QPushButton("\u2922")  # ⤢
+            self._expand_btn.setFixedSize(28, 28)
+            self._expand_btn.setCursor(Qt.PointingHandCursor)
+            self._expand_btn.setToolTip("Expand to full window")
+            self._expand_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: transparent;
+                    color: {ALMA_TEXT_LIGHT};
+                    border: 1px solid transparent;
+                    border-radius: 6px;
+                    font-size: 16px;
+                    padding: 0px;
+                }}
+                QPushButton:hover {{
+                    color: {ALMA_GREEN_DARK};
+                    background: {ALMA_HOVER_LIGHT};
+                    border: 1px solid {ALMA_BORDER_LIGHT};
+                }}
+            """)
+            self._expand_btn.clicked.connect(self._on_expand_clicked)
+            header_layout.addWidget(self._expand_btn)
+
         self._header.mousePressEvent = lambda e: self.toggle()
         self._outer_layout.addWidget(self._header)
 
@@ -166,3 +193,26 @@ class CollapsibleSection(QFrame):
 
     def is_collapsed(self) -> bool:
         return self._collapsed
+
+    # ── Expand to fullscreen ──
+
+    def _on_expand_clicked(self):
+        """Open the section's content in a near-fullscreen dialog."""
+        from src.ui.dialogs.expanded_section_dialog import ExpandedSectionDialog
+
+        # Ensure section is expanded so content is visible
+        if self._collapsed:
+            self.toggle()
+
+        # Remove content from this section's layout
+        self._outer_layout.removeWidget(self._content)
+
+        # Open modal dialog with the content widget
+        dlg = ExpandedSectionDialog(self._title, self._content,
+                                     parent=self.window())
+        dlg.exec()
+
+        # Re-parent content back into this section
+        # (addWidget appends after header + divider = correct position)
+        self._outer_layout.addWidget(self._content)
+        self._content.setVisible(not self._collapsed)

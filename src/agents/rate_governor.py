@@ -30,6 +30,8 @@ class RateGovernor:
         self.last_call_time = 0.0
         self.consecutive_successes = 0
         self.call_log = []                 # (timestamp, duration, success)
+        self._probe_floor = 15.0           # 6.3: minimum from canary probes
+        self._last_rate_limit_time = 0.0   # 8.5: tracks time since last 429
 
     def acquire(self, timeout=120):
         """
@@ -58,27 +60,59 @@ class RateGovernor:
         return False
 
     def report_success(self, duration_seconds):
-        """Call after a successful API response."""
+        """Call after a successful API response.
+
+        8.5: Two-tier recovery —
+          - At 5 successes: 10% tightening (counter keeps counting)
+          - At 10 successes: 20-30% aggressive tightening (counter resets)
+          - >120s since last rate limit: 30% aggressive at tier 2
+          All clamped to probe-derived floor.
+        """
         with self.lock:
             self.consecutive_successes += 1
             self.call_log.append((time.time(), duration_seconds, True))
             self._trim_log()
 
-            # After 5 consecutive successes, tighten interval slightly
-            if self.consecutive_successes >= 5:
+            now = time.time()
+            time_since_rate_limit = now - self._last_rate_limit_time
+
+            if self.consecutive_successes == 10:
+                # 8.5 Tier 2: Aggressive recovery after sustained success
+                if time_since_rate_limit > 120:
+                    factor = 0.7   # 30% tightening — safe, no recent 429s
+                else:
+                    factor = 0.8   # 20% tightening
                 old = self.min_interval
-                self.min_interval = max(15.0, self.min_interval * 0.9)
-                self.consecutive_successes = 0
+                self.min_interval = max(
+                    self._probe_floor, self.min_interval * factor
+                )
+                self.consecutive_successes = 0  # Reset only at tier 2
+                if old != self.min_interval:
+                    logger.info(
+                        f"RateGovernor: aggressive tightening "
+                        f"{old:.1f}s -> {self.min_interval:.1f}s "
+                        f"(factor={factor}, floor={self._probe_floor:.1f}s, "
+                        f"since_429={time_since_rate_limit:.0f}s)"
+                    )
+            elif self.consecutive_successes == 5:
+                # Tier 1: Standard 10% tightening — counter NOT reset
+                old = self.min_interval
+                self.min_interval = max(
+                    self._probe_floor, self.min_interval * 0.9
+                )
+                # Note: don't reset consecutive_successes — let it count to 10
                 if old != self.min_interval:
                     logger.info(
                         f"RateGovernor: tightened interval "
-                        f"{old:.1f}s -> {self.min_interval:.1f}s"
+                        f"{old:.1f}s -> {self.min_interval:.1f}s "
+                        f"(floor={self._probe_floor:.1f}s)"
                     )
 
     def report_rate_limit(self):
         """Call when a 429 or quota error is detected."""
         with self.lock:
             self.consecutive_successes = 0
+            self._last_rate_limit_time = time.time()  # 8.5: track for recovery
             self.call_log.append((time.time(), 0, False))
             self._trim_log()
 
@@ -88,6 +122,18 @@ class RateGovernor:
                 f"RateGovernor: rate limit hit, backed off "
                 f"{old:.1f}s -> {self.min_interval:.1f}s"
             )
+
+    def set_probe_floor(self, floor_seconds):
+        """Set minimum interval floor from canary probe data (6.3).
+
+        Prevents tightening below what probes measured as baseline latency.
+        """
+        with self.lock:
+            self._probe_floor = max(15.0, floor_seconds)
+        logger.info(
+            "[HEALTH] rate governor probe floor set: %.1fs",
+            self._probe_floor,
+        )
 
     def report_error(self):
         """Call on non-rate-limit errors (don't change interval)."""

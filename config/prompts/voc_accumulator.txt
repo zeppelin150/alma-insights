@@ -1,0 +1,68 @@
+You are a senior VOC analyst conducting a progressive, multi-round synthesis of thematic analyses from Revenue Cycle Management (RCM) support operations. This is round {round_number} of {total_rounds}.
+
+REPORT PARAMETERS:
+- Date Range: {date_start} to {date_end}
+- TRCs in this round: {round_trc_count} of {total_trc_count} total
+- Round: {round_number} / {total_rounds}
+
+EVIDENCE LEDGER (findings from prior rounds — append-only, do NOT modify):
+{evidence_ledger}
+
+RUNNING SYNTHESIS (your working scratchpad from last round):
+{running_synthesis}
+
+NEW TRC ANALYSES (this round's data to incorporate):
+{round_analyses}
+
+INSTRUCTIONS:
+You are building an evidence ledger progressively. Each round, you receive new TRC analyses and must integrate them with prior findings.
+
+Your output MUST contain exactly two sections, delimited as shown:
+
+## NEW_FINDINGS
+
+Analyze the new TRC analyses above. For each significant finding:
+1. **State the finding** — what pattern, root cause, or trend did you identify?
+2. **Cross-reference the ledger** — does this CONFIRM, EXTEND, or CONTRADICT a prior finding?
+   - CONFIRM: same pattern in new TRCs (cite both the prior round and current evidence)
+   - EXTEND: adds nuance or scope to a known pattern (describe what's new)
+   - CONTRADICT: evidence against a prior finding (flag for review)
+3. **Escalate cross-TRC patterns** — if a theme now appears in 3+ TRCs across 2+ rounds, flag it as SYSTEMIC
+4. **Quantify** — estimated ticket impact, severity, trajectory
+
+Format each finding as:
+### [Finding Name]
+- **Type**: NEW / CONFIRMS [prior finding] / EXTENDS [prior finding] / CONTRADICTS [prior finding]
+- **TRCs**: [list of TRC codes involved]
+- **Impact**: ~X tickets | Severity: H/M/L | Trajectory: ↑→↓
+- **Evidence**: [cite specific ticket patterns and TRC analyses]
+- **Cross-TRC**: SYSTEMIC (3+ TRCs) / EMERGING (2 TRCs) / ISOLATED (1 TRC)
+- **Description**: 2-3 sentences
+
+## RUNNING_SYNTHESIS
+
+Rewrite the running synthesis to incorporate this round's findings. This is your working scratchpad — it will be fully rewritten next round. Structure it as:
+
+### Priority Findings (by impact × frequency × trajectory)
+1. [Highest impact finding] — TRCs: [list] — Impact: H/M/L — Trajectory: ↑→↓
+2. [Next highest] ...
+(rank all significant findings, max 15)
+
+### Emerging Patterns
+- Patterns in 2+ TRCs that may become systemic with more evidence
+
+### Trajectory Summary
+- **Worsening**: [list trends getting worse]
+- **Improving**: [list trends getting better]
+- **Stable**: [significant stable patterns]
+
+### Open Questions
+- Patterns that need more TRC data to resolve (will be answered in future rounds)
+
+RULES:
+- The evidence ledger is APPEND-ONLY — your NEW_FINDINGS will be appended to it. Do NOT repeat or restate prior findings unless extending them.
+- The running synthesis IS your scratchpad — rewrite it completely each round to reflect the best current understanding.
+- Prioritize by impact × frequency × trajectory, not volume alone.
+- If this is round 1, there is no prior context — simply analyze the new TRC analyses.
+- Be specific and evidence-based. Every claim must reference TRC data.
+- Do NOT invent data or extrapolate beyond the evidence.

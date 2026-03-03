@@ -69,7 +69,7 @@ def build_data_block(db, date_start, date_end, trc_filter=None, dataset_id=None)
                AVG(t.first_reply_hours) as avg_first_reply
         FROM tickets t
         JOIN conversations c ON t.ticket_id = c.ticket_id
-        WHERE {where.replace('created_at', 'c.created_at')}
+        WHERE {where.replace('created_at', 'c.created_at').replace('trc_code', 'c.trc_code').replace('dataset_id', 'c.dataset_id')}
     """, params).fetchone()
     block["resolution_times"] = {
         "avg_assignment_to_resolution": round(res_row["avg_assign_res"], 1) if res_row["avg_assign_res"] else None,
@@ -331,9 +331,25 @@ def format_data_block_for_prompt(block):
     return "\n\n".join(sections)
 
 
-def replace_prompt_variables(prompt_text, block):
-    """Replace {variable} tokens in prompt text with formatted data block values."""
+def replace_prompt_variables(prompt_text, block, db=None):
+    """Replace {variable} tokens in prompt text with formatted data block values.
+
+    Build 7.0: If db is provided and prompt contains {temporal_context},
+    builds windowed data blocks for chronological narrative.
+    """
     formatted = format_data_block_for_prompt(block)
+
+    # Build 7.0: Temporal context (only if token present and db available)
+    temporal_ctx = "(No temporal data available)"
+    if "{temporal_context}" in prompt_text and db:
+        try:
+            date_range = block.get("date_range", "")
+            if " to " in date_range:
+                d_start, d_end = date_range.split(" to ")
+                windowed = build_windowed_data_blocks(db, d_start, d_end)
+                temporal_ctx = format_temporal_context(windowed)
+        except Exception:
+            pass
 
     replacements = {
         "{ticket_count}": str(block.get("ticket_count", 0)),
@@ -354,6 +370,7 @@ def replace_prompt_variables(prompt_text, block):
         "{payer_distribution}": _format_entity_dist(block.get("payer_distribution", [])),
         "{product_area_distribution}": _format_entity_dist(block.get("product_area_distribution", [])),
         "{product_gap_flags}": _format_gaps(block.get("product_gap_flags", [])),
+        "{temporal_context}": temporal_ctx,
     }
 
     result = prompt_text
@@ -475,4 +492,153 @@ def _format_gaps(gaps):
             f"sentiment_delta={g.get('sentiment_delta', 0):+.3f}, "
             f"score={g.get('gap_score', 0):.1f} {flagged}"
         )
+    return "\n".join(lines)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  WINDOWED TEMPORAL CONTEXT (Build 7.0)
+# ═══════════════════════════════════════════════════════════════
+
+def _generate_windows(date_start, date_end, window="weekly"):
+    """Generate (start, end, label) tuples for the given date range.
+
+    Supports 'weekly' and 'biweekly' window sizes.
+    """
+    from datetime import datetime, timedelta
+
+    d_start = datetime.strptime(date_start, "%Y-%m-%d")
+    d_end = datetime.strptime(date_end, "%Y-%m-%d")
+
+    step_days = 7 if window == "weekly" else 14
+    windows = []
+    idx = 1
+    cursor = d_start
+
+    while cursor < d_end:
+        w_end = min(cursor + timedelta(days=step_days - 1), d_end)
+        label = f"Week {idx}" if window == "weekly" else f"Period {idx}"
+        label += f" ({cursor.strftime('%b %d')}-{w_end.strftime('%b %d')})"
+        windows.append((
+            cursor.strftime("%Y-%m-%d"),
+            w_end.strftime("%Y-%m-%d"),
+            label,
+        ))
+        cursor = w_end + timedelta(days=1)
+        idx += 1
+
+    return windows
+
+
+def build_windowed_data_blocks(db, date_start, date_end,
+                                trc_filter=None, window="weekly"):
+    """Build lightweight per-window stats for temporal narrative (Build 7.0).
+
+    Returns list of dicts with per-window metrics.  Each dict contains:
+      window, ticket_count, top_3_terms, sentiment_avg,
+      rising_terms, incident_flag_count, delta_pct (volume change vs. prior window)
+    """
+    windows = _generate_windows(date_start, date_end, window)
+    blocks = []
+    prev_count = None
+
+    for w_start, w_end, label in windows:
+        try:
+            mini = build_data_block(db, w_start, w_end, trc_filter)
+        except Exception:
+            blocks.append({
+                "window": label,
+                "ticket_count": 0,
+                "top_3_terms": [],
+                "sentiment_avg": None,
+                "rising_terms": [],
+                "incident_flag_count": 0,
+                "delta_pct": None,
+            })
+            continue
+
+        ticket_count = mini.get("ticket_count", 0)
+
+        # Extract top 3 terms
+        top_terms_raw = mini.get("top_terms", [])
+        top_3 = []
+        for t in top_terms_raw[:3]:
+            if isinstance(t, dict):
+                top_3.append(t.get("term", t.get("word", "")))
+            elif isinstance(t, (list, tuple)) and len(t) >= 1:
+                top_3.append(str(t[0]))
+
+        # Sentiment average
+        csat = mini.get("csat_summary", {})
+        sentiment_avg = csat.get("average")
+
+        # Rising terms (top 3)
+        rising_raw = mini.get("rising_terms", [])
+        rising = []
+        for t in rising_raw[:3]:
+            if isinstance(t, dict):
+                rising.append(t.get("term", ""))
+            elif isinstance(t, (list, tuple)) and len(t) >= 1:
+                rising.append(str(t[0]))
+
+        # Incident flags count
+        flag_count = len(mini.get("incident_flags", []))
+
+        # Volume delta vs prior window
+        delta_pct = None
+        if prev_count is not None and prev_count > 0:
+            delta_pct = round((ticket_count - prev_count) / prev_count * 100, 1)
+        prev_count = ticket_count
+
+        blocks.append({
+            "window": label,
+            "ticket_count": ticket_count,
+            "top_3_terms": top_3,
+            "sentiment_avg": sentiment_avg,
+            "rising_terms": rising,
+            "incident_flag_count": flag_count,
+            "delta_pct": delta_pct,
+        })
+
+    return blocks
+
+
+def format_temporal_context(windowed_blocks):
+    """Format windowed blocks as a chronological narrative for prompt injection.
+
+    Returns structured text showing week-over-week progression with
+    volume deltas, sentiment shifts, emerging terms, and incident flags.
+    """
+    if not windowed_blocks:
+        return "(No temporal data available)"
+
+    lines = ["TEMPORAL PROGRESSION (week-over-week):"]
+
+    for wb in windowed_blocks:
+        parts = [f"  {wb['window']}: {wb['ticket_count']} tickets"]
+
+        # Volume delta
+        if wb.get("delta_pct") is not None:
+            sign = "+" if wb["delta_pct"] >= 0 else ""
+            parts[0] += f" ({sign}{wb['delta_pct']}%)"
+
+        # Sentiment
+        if wb.get("sentiment_avg") is not None:
+            parts.append(f"    CSAT avg: {wb['sentiment_avg']:.2f}")
+
+        # Top terms
+        if wb.get("top_3_terms"):
+            terms_str = ", ".join(f'"{t}"' for t in wb["top_3_terms"])
+            parts.append(f"    Top terms: {terms_str}")
+
+        # Rising terms
+        if wb.get("rising_terms"):
+            rising_str = ", ".join(f'"{t}"' for t in wb["rising_terms"])
+            parts.append(f"    Rising: {rising_str}")
+
+        # Incident flags
+        if wb.get("incident_flag_count", 0) > 0:
+            parts.append(f"    Incident flags: {wb['incident_flag_count']}")
+
+        lines.append("\n".join(parts))
+
     return "\n".join(lines)

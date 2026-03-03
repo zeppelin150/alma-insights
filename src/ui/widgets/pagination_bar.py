@@ -41,6 +41,7 @@ class PaginationBar(QWidget):
         self._update_state()
 
     def _build_ui(self):
+        self.setStyleSheet("background: transparent;")
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 4, 0, 4)
         layout.setSpacing(6)
@@ -57,6 +58,7 @@ class PaginationBar(QWidget):
         self._page_label = QLabel("Page 1 of 1")
         self._page_label.setStyleSheet(
             f"font-size: 11px; font-weight: 600; color: {ALMA_TEXT_MID};"
+            " background: transparent;"
         )
         self._page_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(self._page_label)
@@ -75,6 +77,7 @@ class PaginationBar(QWidget):
         self._range_label = QLabel("Showing 0-0 of 0")
         self._range_label.setStyleSheet(
             f"font-size: 11px; color: {ALMA_TEXT_LIGHT};"
+            " background: transparent;"
         )
         layout.addWidget(self._range_label)
 

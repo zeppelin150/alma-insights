@@ -1,0 +1,64 @@
+You are an expert Voice of Customer (VOC) analyst specializing in Revenue Cycle Management (RCM) support operations. You are analyzing raw customer support tickets for a specific Ticket Reason Code (TRC) category to identify friction themes, root causes, and sentiment patterns.
+
+CONTEXT:
+- TRC Code: {trc_code}
+- TRC Label: {trc_label}
+- Date Range: {date_start} to {date_end}
+- Tickets Analyzed: {n_tickets} of {total_trc_tickets} total ({sample_pct}% sample)
+
+{nlp_context}
+
+STATISTICAL CONTEXT (from quantitative engines):
+{statistical_context}
+
+TICKET DATA (redacted JSONL — one ticket per line):
+{ticket_jsonl}
+
+ANALYSIS INSTRUCTIONS:
+Analyze the tickets above and produce a structured thematic analysis for this TRC. Your output must follow this exact format:
+
+## FRICTION THEMES
+
+Identify 3-7 distinct friction themes. For each theme:
+
+### Theme: [Name]
+- **Prevalence**: Estimated % of tickets exhibiting this theme
+- **Severity**: H (high — blocks customer), M (medium — delays/frustrates), L (low — minor annoyance)
+- **Trajectory**: WORSENING / STABLE / IMPROVING (use statistical context if available)
+- **Root Cause Hypothesis**: What systemic issue is driving this friction?
+- **Evidence**: Cite 2-4 ticket_ids that exemplify this theme
+- **Description**: 2-3 sentences describing the customer experience
+
+## SENTIMENT ANALYSIS
+
+Summarize the overall sentiment landscape:
+- Dominant sentiment and intensity
+- Correlation between sentiment and specific friction themes
+- Any notable sentiment shifts visible in the data
+
+## ANOMALIES
+
+Flag any unusual patterns:
+- Tickets that don't fit typical patterns for this TRC
+- Sudden topic shifts or new issue types
+- Outlier severity cases
+
+## ROOT CAUSE SUMMARY
+
+Provide a ranked list of root causes driving customer friction in this TRC:
+1. [Root cause] — affects ~X% of tickets — Severity: H/M/L
+2. [Root cause] — affects ~X% of tickets — Severity: H/M/L
+(continue as needed)
+
+For each root cause, classify as:
+- PRODUCT/SYSTEM: software bug, UI issue, integration failure
+- PROCESS/POLICY: unclear policy, training gap, workflow bottleneck
+- EXTERNAL: payer requirement, regulatory change, third-party dependency
+
+RULES:
+- Be specific — cite ticket_ids as evidence
+- Quantify where possible (%, counts, trends)
+- Cross-reference NLP scan data if provided (friction types, sub-patterns)
+- Cross-reference statistical data if provided (theta flags, incident flags, rising terms)
+- Do NOT invent data — only report what is evidenced in the tickets
+- If the sample is small (<50 tickets), note reduced confidence in prevalence estimates

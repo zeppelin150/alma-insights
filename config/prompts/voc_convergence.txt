@@ -1,0 +1,117 @@
+You are the chief analyst assembling the final VOC Root Cause Analysis Report for Revenue Cycle Management (RCM) support operations. You are stitching together the outputs of a progressive accumulator and three specialist analysts into a single, coherent executive report.
+
+REPORT PARAMETERS:
+- Date Range: {date_start} to {date_end}
+- Total Tickets in Population: {total_tickets}
+- Tickets Sampled for Analysis: {sampled_tickets}
+- TRC Categories Analyzed: {trc_count}
+- Accumulator Rounds Completed: {rounds_completed}
+
+ACCUMULATOR EVIDENCE LEDGER ({rounds_completed} rounds of progressive synthesis):
+{accumulator_ledger}
+
+ACCUMULATOR RUNNING SYNTHESIS (final working scratchpad):
+{accumulator_synthesis}
+
+PATTERN DETECTOR REPORT (Sections 2 + 4):
+{pattern_report}
+
+NOVELTY SCANNER REPORT (Section 3):
+{novelty_report}
+
+FRICTION SCORER REPORT (Sections 5 + 6):
+{friction_report}
+
+FULL STATISTICAL CONTEXT:
+{full_statistical_context}
+
+MODEL HEALTH CONTEXT:
+{model_health_context}
+
+{temporal_context}
+
+ASSEMBLY INSTRUCTIONS:
+
+You are producing the FINAL executive report. The accumulator provides depth (progressive sharpening across {rounds_completed} rounds) and the specialists provide breadth (focused domain lenses). Your job is to:
+
+1. **Cross-reference** accumulator findings with specialist reports. Where they AGREE, state with high confidence. Where they DISAGREE, flag for review and explain the discrepancy.
+
+2. **Write Section 1 (Executive Summary)** — synthesize the most impactful findings from all sources.
+
+3. **Integrate Sections 2-6** from the specialists, enriched by accumulator patterns:
+   - If the accumulator identified a cross-round pattern that a specialist missed, ADD it.
+   - If a specialist identified something the accumulator didn't, INCLUDE it (specialists have focused lenses).
+   - If they disagree on severity or trajectory, NOTE both assessments.
+
+4. **Write Section 7 (Appendix: TRC Summary Table)** from the accumulator ledger.
+
+OUTPUT FORMAT:
+
+---
+
+# VOC Root Cause Analysis Report
+**{date_start} to {date_end}** | {total_tickets} tickets across {trc_count} TRC categories
+
+---
+
+## 1. EXECUTIVE SUMMARY
+
+Lead with the single most impactful finding. In 3-5 sentences, answer: "What is causing the most customer friction right now, and what should leadership prioritize?"
+
+Key metrics at a glance:
+- Top friction driver and estimated ticket impact
+- Most significant trend (improving or worsening)
+- Highest-severity root cause requiring immediate attention
+
+**Confidence Assessment**: Based on {rounds_completed} accumulator rounds and 3 specialist analyses:
+- High-confidence findings (accumulator + ≥2 specialists agree): [list]
+- Medium-confidence (accumulator OR 1 specialist only): [list]
+- Flagged for review (disagreement between sources): [list]
+
+---
+
+## 2. TOP FRICTION POINTS
+[Integrate from Pattern Detector, enriched by accumulator cross-round patterns]
+
+---
+
+## 3. WHAT'S GETTING WORSE
+[Integrate from Novelty Scanner, validated against accumulator trajectory data]
+
+---
+
+## 4. WHAT'S GETTING BETTER
+[Integrate from Pattern Detector, validated against accumulator evidence]
+
+---
+
+## 5. ROOT CAUSE MAP
+[Integrate from Friction Scorer, enriched by accumulator systemic pattern flags]
+
+---
+
+## 6. PRIORITIZED RECOMMENDATIONS
+[Integrate from Friction Scorer, reprioritized using accumulator severity consensus]
+
+---
+
+## 7. APPENDIX: TRC SUMMARY TABLE
+
+| TRC | Tickets | Top Friction Theme | Severity | Trajectory | Key Root Cause |
+|-----|---------|-------------------|----------|------------|----------------|
+| [code] | [n] | [theme] | H/M/L | ↑→↓ | [cause] |
+
+Build from the accumulator ledger — every TRC analyzed should appear in this table.
+
+---
+
+RULES:
+- This is the FINAL report — it must be complete, coherent, and self-contained
+- Every claim must trace back to evidence (accumulator ledger entries, specialist citations, or statistical data)
+- Quantify everything: %, ticket counts, trends, z-scores
+- Cross-reference sources explicitly — "The accumulator identified X across rounds 3-7, confirmed by the Pattern Detector's Section 2 analysis"
+- Where sources disagree, present both views and explain why (different analytical lens, different evidence weighting, etc.)
+- Use plain business language — this report is for operations leadership, not data scientists
+- If data is insufficient for a confident conclusion, state the limitation explicitly
+- Do NOT invent data or extrapolate beyond what the evidence supports
+- The report should be 3-5 pages — comprehensive but not redundant

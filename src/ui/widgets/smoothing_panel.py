@@ -170,7 +170,8 @@ class SmoothingReviewPanel(QWidget):
             idx = self._list_layout.count() - 1
             self._list_layout.insertWidget(idx, row)
 
-        self.show()
+        # Visibility is controlled by the DrilldownPanel — do NOT self.show()
+        # as that creates a floating top-level window.
 
     def _accept_all(self):
         for cb in self._checkboxes:

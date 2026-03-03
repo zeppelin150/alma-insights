@@ -408,14 +408,15 @@ class TestBatchPacker(unittest.TestCase):
     # ── 5.2 Model-Adaptive Tests ──
 
     def test_model_25_flash_larger_batches(self):
-        """gemini-2.5-flash gets budget=200K, max=100."""
+        """gemini-2.5-flash gets budget=200K, max=75 (5.4 cap)."""
         from src.agents.batch_packer import BatchPacker
         packer = BatchPacker(self.conn, model="gemini-2.5-flash")
         self.assertEqual(packer._output_budget, 200_000)
-        self.assertEqual(packer._max_batch, 100)
-        # 200K / 800 = 250, clamped to 100
+        self.assertEqual(packer._max_batch, 75)
+        self.assertEqual(packer._input_budget, 300_000)
+        # 200K / 800 = 250 output, 300K / 3120 = 96 input, clamped to 75
         size = packer.compute_batch_size("UNKNOWN", 500)
-        self.assertEqual(size, 100)
+        self.assertEqual(size, 75)
 
     def test_model_25_pro_larger_batches(self):
         """gemini-2.5-pro gets budget=200K, max=100."""

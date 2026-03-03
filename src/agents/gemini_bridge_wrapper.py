@@ -112,6 +112,9 @@ class GeminiBridge:
         self._queues = {}
         self._queues_lock = threading.Lock()
 
+        # 9.0 T1: Serialize stdin writes to prevent JSON protocol corruption
+        self._send_lock = threading.Lock()
+
         # Bridge-level fatal event callback
         self._on_bridge_fatal = None
 
@@ -126,6 +129,19 @@ class GeminiBridge:
         self._boot_count = 0
         self._total_calls = 0
         self._last_error = None
+
+        # ── Build 6.2: Bridge health monitor ──
+        self._watchdog_thread = None
+        self._bridge_healthy = False          # True once ensure_running succeeds
+        self._death_count = 0                 # total unexpected deaths detected
+        self._stall_count = 0                 # total stall_timeout errors observed
+        self._consecutive_stalls = 0          # resets on any non-stall event
+        self._last_death_time = None          # ISO timestamp of last death
+        self._boot_time = None                # ISO timestamp of last successful boot
+        self._on_death = None                 # callback(bridge) on unexpected death
+        self._watchdog_stop = threading.Event()
+        self._WATCHDOG_INTERVAL = 3.0         # seconds between is_alive polls
+        self._STALL_ESCALATION_THRESHOLD = 3  # consecutive stalls → auto-restart
 
     # ──────────────────────────────────────────────────────────────────────
     # Lifecycle
@@ -238,12 +254,116 @@ class GeminiBridge:
                         "proceeding anyway (bridge may still be booting)"
                     )
 
+            # ── 6.2: Mark healthy + start watchdog ──
+            self._bridge_healthy = True
+            self._boot_time = time.strftime("%Y-%m-%dT%H:%M:%S")
+            self._consecutive_stalls = 0
+            logger.debug(
+                "[HEALTH] bridge alive | boot=#%d pid=%s",
+                self._boot_count,
+                self._process.pid if self._process else "?",
+            )
+            self._start_watchdog()
+
+    # ── Build 6.2: Watchdog ─────────────────────────────────────────────
+
+    def _start_watchdog(self):
+        """Start the background watchdog thread (idempotent)."""
+        if self._watchdog_thread and self._watchdog_thread.is_alive():
+            return  # already running
+        self._watchdog_stop.clear()
+        self._watchdog_thread = threading.Thread(
+            target=self._watchdog_loop,
+            name=f"bridge-watchdog-{self._boot_count}",
+            daemon=True,
+        )
+        self._watchdog_thread.start()
+        logger.debug("[HEALTH] watchdog started | interval=%.1fs", self._WATCHDOG_INTERVAL)
+
+    def _watchdog_loop(self):
+        """Periodic is_alive check. Fires _notify_death on unexpected exit."""
+        while not self._watchdog_stop.is_set():
+            self._watchdog_stop.wait(timeout=self._WATCHDOG_INTERVAL)
+            if self._watchdog_stop.is_set():
+                break
+            # Only check if we believe the bridge should be alive
+            if self._bridge_healthy and not self.is_alive():
+                self._notify_death()
+                break  # one notification per death; next boot starts a new watchdog
+
+    def _notify_death(self):
+        """Handle unexpected bridge death: update stats, notify queues, fire callback."""
+        self._bridge_healthy = False
+        self._death_count += 1
+        self._last_death_time = time.strftime("%Y-%m-%dT%H:%M:%S")
+        exit_code = self._process.returncode if self._process else "?"
+        logger.error(
+            "[HEALTH] bridge DIED unexpectedly | deaths=%d exit_code=%s pid=%s",
+            self._death_count, exit_code,
+            self._process.pid if self._process else "?",
+        )
+        # Poison all waiting request queues so callers unblock immediately
+        with self._queues_lock:
+            for q in self._queues.values():
+                q.put(BridgeEvent(
+                    id="__watchdog__",
+                    type="error",
+                    data={
+                        "error": "bridge_dead",
+                        "message": f"Bridge process died (exit {exit_code})",
+                        "recoverable": True,
+                        "bridge_healthy": False,
+                    },
+                ))
+        # Fire external callback (used by orchestrator for scan events)
+        if self._on_death:
+            try:
+                self._on_death(self)
+            except Exception as e:
+                logger.debug("[HEALTH] on_death callback error: %s", e)
+
+    def set_on_death(self, callback):
+        """Register a callback(bridge) invoked when watchdog detects death."""
+        self._on_death = callback
+
+    def record_stall(self):
+        """Record a stall_timeout event. Returns True if escalation triggered."""
+        self._stall_count += 1
+        self._consecutive_stalls += 1
+        logger.debug(
+            "[HEALTH] stall recorded | consecutive=%d total=%d threshold=%d",
+            self._consecutive_stalls, self._stall_count,
+            self._STALL_ESCALATION_THRESHOLD,
+        )
+        if self._consecutive_stalls >= self._STALL_ESCALATION_THRESHOLD:
+            logger.warning(
+                "[HEALTH] stall escalation triggered — %d consecutive stalls, "
+                "auto-restarting bridge",
+                self._consecutive_stalls,
+            )
+            self._consecutive_stalls = 0
+            return True  # caller should restart
+        return False
+
+    def record_success(self):
+        """Record a successful (non-stall) call — resets consecutive stall counter."""
+        if self._consecutive_stalls > 0:
+            logger.debug(
+                "[HEALTH] stall streak broken after %d consecutive stalls",
+                self._consecutive_stalls,
+            )
+        self._consecutive_stalls = 0
+
     def is_alive(self):
         """Check if the bridge process is running."""
         return self._process is not None and self._process.poll() is None
 
     def shutdown(self, timeout=10):
         """Gracefully shutdown the bridge."""
+        # Stop watchdog first so it doesn't fire death during intentional shutdown
+        self._bridge_healthy = False
+        self._watchdog_stop.set()
+        logger.debug("[HEALTH] shutdown initiated | boot=#%d", self._boot_count)
         with self._lock:
             if not self._process:
                 return
@@ -293,8 +413,10 @@ class GeminiBridge:
 
     def restart(self):
         """Shutdown and reboot."""
+        logger.debug("[HEALTH] bridge restart requested | boot=#%d", self._boot_count)
         self.shutdown()
         self.ensure_running()
+        logger.debug("[HEALTH] bridge restart complete | boot=#%d", self._boot_count)
 
     # ──────────────────────────────────────────────────────────────────────
     # Call interfaces
@@ -500,6 +622,52 @@ class GeminiBridge:
         finally:
             self._unregister_queue(ping_id)
 
+    def probe(self, timeout=30):
+        """API-level canary: send a minimal prompt through the full Gemini
+        round-trip and measure latency.
+
+        Unlike ping() which only tests the local stdin/stdout pipe, probe()
+        exercises the full path: Python → Node.js → HTTPS → Google → back.
+
+        Token cost: ~10 in, ~2 out (negligible).
+
+        Returns:
+            dict with {latency_ms, status, error} or None if bridge not alive.
+        """
+        if not self.is_alive():
+            return None
+
+        probe_id = f"probe_{int(time.time() * 1000)}"
+        t0 = time.time()
+        try:
+            result = self.call_streaming(
+                "Respond with exactly one word: OK",
+                probe_id,
+                timeout=timeout,
+            )
+            latency_ms = int((time.time() - t0) * 1000)
+            status = "error" if result.get("error") else "success"
+            error = result.get("error")
+            logger.debug(
+                "[HEALTH] probe complete | latency=%dms status=%s error=%s",
+                latency_ms, status, error,
+            )
+            return {"latency_ms": latency_ms, "status": status, "error": error}
+        except TimeoutError:
+            latency_ms = int((time.time() - t0) * 1000)
+            logger.debug(
+                "[HEALTH] probe timeout | latency=%dms", latency_ms,
+            )
+            return {"latency_ms": latency_ms, "status": "timeout",
+                    "error": "probe_timeout"}
+        except Exception as e:
+            latency_ms = int((time.time() - t0) * 1000)
+            logger.debug(
+                "[HEALTH] probe error | latency=%dms err=%s", latency_ms, e,
+            )
+            return {"latency_ms": latency_ms, "status": "error",
+                    "error": str(e)}
+
     # ──────────────────────────────────────────────────────────────────────
     # Internal: Reader thread
     # ──────────────────────────────────────────────────────────────────────
@@ -632,16 +800,21 @@ class GeminiBridge:
     # ──────────────────────────────────────────────────────────────────────
 
     def _send_raw(self, obj):
-        """Send a JSON line to the bridge's stdin."""
+        """Send a JSON line to the bridge's stdin.
+
+        9.0 T1: Serialized via _send_lock to prevent interleaved writes
+        when multiple threads access the same bridge concurrently.
+        """
         if not self._process or self._process.poll() is not None:
             raise RuntimeError("Bridge process is not running")
 
         line = json.dumps(obj, ensure_ascii=False) + "\n"
-        try:
-            self._process.stdin.write(line)
-            self._process.stdin.flush()
-        except (BrokenPipeError, OSError) as e:
-            raise RuntimeError(f"Bridge stdin write failed: {e}")
+        with self._send_lock:
+            try:
+                self._process.stdin.write(line)
+                self._process.stdin.flush()
+            except (BrokenPipeError, OSError) as e:
+                raise RuntimeError(f"Bridge stdin write failed: {e}")
 
     # ──────────────────────────────────────────────────────────────────────
     # Internal: Path resolution
@@ -701,7 +874,7 @@ class GeminiBridge:
         return self._last_error
 
     def get_stats(self):
-        """Return bridge stats dict."""
+        """Return bridge stats dict (enhanced in 6.2 with health monitor fields)."""
         ping_data = {}
         if self.is_alive():
             try:
@@ -711,9 +884,17 @@ class GeminiBridge:
 
         return {
             "alive": self.is_alive(),
+            "healthy": self._bridge_healthy,
             "boot_count": self._boot_count,
             "total_calls": self._total_calls,
             "last_error": self._last_error,
+            # 6.2 health monitor fields
+            "death_count": self._death_count,
+            "stall_count": self._stall_count,
+            "consecutive_stalls": self._consecutive_stalls,
+            "last_death_time": self._last_death_time,
+            "boot_time": self._boot_time,
+            # Bridge-side ping data
             "uptime_ms": ping_data.get("uptime_ms"),
             "bridge_calls": ping_data.get("calls"),
             "active_calls": ping_data.get("active_calls"),

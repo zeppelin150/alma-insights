@@ -27,6 +27,12 @@ from src.ui.main_window import MainWindow
 
 
 def main():
+    # ── Memory profiler (opt-in: python main.py --profile) ──
+    if "--profile" in sys.argv:
+        sys.argv.remove("--profile")
+        from src.data.memory_profiler import MemoryProfiler
+        MemoryProfiler.start()
+
     # High DPI support
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
@@ -39,6 +45,10 @@ def main():
 
     # Apply theme
     app.setStyleSheet(get_stylesheet())
+
+    # ── Qt Error Guard (catches silent delegate/paint errors) ──
+    from src.ui.qt_error_guard import QtErrorGuard
+    guard = QtErrorGuard(app)
 
     # Default font
     font = QFont("Segoe UI", 10)
@@ -53,6 +63,10 @@ def main():
     # Launch main window
     window = MainWindow()
     window.show()
+
+    # Wire guard to status bar if available
+    if hasattr(window, 'qt_error_label'):
+        guard.attach_to_status_bar(window.qt_error_label)
 
     sys.exit(app.exec())
 

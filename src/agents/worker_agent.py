@@ -67,6 +67,7 @@ class WorkerAgent:
 
         # Metrics (supervisor reads these)
         self.batches_processed = 0
+        self._batches_since_reset = 0      # supervisor grace window (5.3)
         self.tickets_classified = 0
         self.tickets_failed = 0
         self.tools_called = 0
@@ -115,6 +116,10 @@ class WorkerAgent:
         batch_id = batch_payload["batch_id"]
         trc = batch_payload["trc"]
         tickets = batch_payload["tickets"]
+        self._call_timeout = batch_payload.get("call_timeout", 600)
+
+        # Build per-ticket TRC lookup for mixed batches (5.3 fix)
+        ticket_trc_map = {t["ticket_id"]: t.get("trc", trc) for t in tickets}
 
         # Set tool context for this batch
         self.tool_registry.set_context(
@@ -122,6 +127,7 @@ class WorkerAgent:
             batch_id=batch_id,
             trc=trc,
             agent_id=self.agent_id,
+            ticket_trc_map=ticket_trc_map,
         )
 
         # Build prompt
@@ -172,6 +178,7 @@ class WorkerAgent:
         # Update metrics
         elapsed = time.time() - start_time
         self.batches_processed += 1
+        self._batches_since_reset += 1
         self.tickets_classified += classified
         self.tickets_failed += failed
         self.tools_called += batch_tool_calls
@@ -257,7 +264,7 @@ class WorkerAgent:
             result = self.bridge.call_streaming(
                 prompt, request_id,
                 on_token=on_token,
-                timeout=600,
+                timeout=getattr(self, '_call_timeout', 600),
             )
         except TimeoutError as e:
             return {
@@ -268,6 +275,10 @@ class WorkerAgent:
                 "recoverable": True,
             }
         except RuntimeError as e:
+            logger.debug(
+                "[HEALTH] worker %s bridge RuntimeError | err=%s alive=%s",
+                self.agent_id, e, self.bridge.is_alive(),
+            )
             return {
                 "classified": len(classified_ids),
                 "failed": len(tickets) - len(classified_ids),
@@ -667,30 +678,56 @@ QUALITY RULES:
             f"Worker {self.agent_id}: resetting "
             f"(context ~{self.context_tokens_estimate} tokens)"
         )
+        logger.debug(
+            "[HEALTH] worker %s reset | bridge_alive=%s stalls=%d deaths=%d",
+            self.agent_id, self.bridge.is_alive(),
+            getattr(self.bridge, '_stall_count', 0),
+            getattr(self.bridge, '_death_count', 0),
+        )
         self.bridge.restart()
         self.context_tokens_estimate = 0
         self.stream_parser.reset()
 
         # Reset supervisor-monitored metrics to prevent death spiral
-        self.batches_processed = 0
+        # NOTE: batches_processed is NOT reset — it's a lifetime metric
+        self._batches_since_reset = 0    # grace window for supervisor (5.3)
         self.parse_rate = 1.0
         self.avg_confidence = 0.0
 
     def get_health(self):
         """
         Return health metrics dict for supervisor monitoring.
+        Enhanced in 6.2 with bridge health fields.
         """
-        return {
+        # 6.2: Pull bridge health stats
+        bridge_alive = False
+        bridge_stats = {}
+        try:
+            bridge_alive = self.bridge.is_alive()
+            bridge_stats = {
+                "bridge_stalls": getattr(self.bridge, '_stall_count', 0),
+                "bridge_deaths": getattr(self.bridge, '_death_count', 0),
+                "bridge_consecutive_stalls": getattr(self.bridge, '_consecutive_stalls', 0),
+                "bridge_healthy": getattr(self.bridge, '_bridge_healthy', False),
+            }
+        except Exception:
+            pass
+
+        health = {
             "agent_id": self.agent_id,
             "status": self.status,
-            "batches_done": self.batches_processed,
+            "batches_done": self._batches_since_reset,
             "tickets_done": self.tickets_classified,
             "tool_calls": self.tools_called,
             "parse_rate": round(self.parse_rate, 3),
             "avg_confidence": round(self.avg_confidence, 3),
             "context_tokens": self.context_tokens_estimate,
             "last_progress": time.time() - self._last_progress_time,
+            # 6.2 bridge health
+            "bridge_alive": bridge_alive,
         }
+        health.update(bridge_stats)
+        return health
 
     @staticmethod
     def _load_prompt_template():

@@ -6,13 +6,15 @@ Search, filter, and read rebuilt ticket conversation threads.
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QComboBox, QTableWidget, QTableWidgetItem,
-    QHeaderView, QFrame, QAbstractItemView,
+    QHeaderView, QFrame, QAbstractItemView, QStackedWidget,
     QFileDialog, QMessageBox, QProgressDialog, QApplication
 )
 from PySide6.QtCore import Qt, QDate, Signal
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QAction, QPixmap, QPainter, QColor, QPen
 from src.ui.theme import *
 from src.ui.widgets.date_picker import ModernDatePicker
+from src.ui.widgets.empty_state import EmptyState
+from src.ui.widgets.filter_chip_bar import FilterChipBar
 
 
 # Sentinel values for dataset combo
@@ -125,6 +127,10 @@ class ConversationSearchPage(QWidget):
         self.keyword_input = QLineEdit()
         self.keyword_input.setPlaceholderText("Search ticket text, subjects, TRC labels...")
         self.keyword_input.setMinimumWidth(280)
+        # Search icon (Build 10.0: T17)
+        self.keyword_input.addAction(
+            self._make_search_icon(), QLineEdit.LeadingPosition
+        )
 
         kw_col = QVBoxLayout()
         kw_col.setSpacing(4)
@@ -213,13 +219,32 @@ class ConversationSearchPage(QWidget):
 
         filter_layout.addLayout(row2)
         layout.addWidget(filter_card)
-        layout.addSpacing(16)
+        layout.addSpacing(8)
+
+        # ── Filter Chip Bar (Build 10.0: T14) ──
+        self._chip_bar = FilterChipBar()
+        self._chip_bar.filter_removed.connect(self._on_chip_removed)
+        self._chip_bar.all_cleared.connect(self.clear_filters)
+        layout.addWidget(self._chip_bar)
+        layout.addSpacing(8)
 
         # ── Results Count ──
         self.results_label = QLabel("")
         self.results_label.setStyleSheet(f"font-size: 12px; color: {ALMA_TEXT_LIGHT}; padding: 0 4px;")
         layout.addWidget(self.results_label)
         layout.addSpacing(8)
+
+        # ── Empty State (Build 10.0: T13) ──
+        self._empty_state = EmptyState(
+            message="Try adjusting your filters or date range",
+            icon="search",
+            heading="No conversations found",
+            description="Try adjusting your filters or date range",
+            action_label="Clear Filters",
+        )
+        self._empty_state.action_clicked.connect(self.clear_filters)
+        self._empty_state.setVisible(False)
+        layout.addWidget(self._empty_state)
 
         # ── Results Table (full width) ──
         self.results_table = QTableWidget()
@@ -234,20 +259,30 @@ class ConversationSearchPage(QWidget):
         self.results_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeToContents)
         self.results_table.setColumnWidth(0, 90)
         self.results_table.verticalHeader().setVisible(False)
-        self.results_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.results_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        configure_table(self.results_table)
         self.results_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.results_table.setAlternatingRowColors(True)
         self.results_table.setStyleSheet(f"""
             QTableWidget {{
                 alternate-background-color: rgba(3,40,27,0.02);
             }}
-            QTableWidget::item:selected {{
-                background: rgba(20, 87, 63, 0.10);
-                color: {ALMA_TEXT_DARK};
-            }}
         """)
         layout.addWidget(self.results_table, 1)
+
+    @staticmethod
+    def _make_search_icon():
+        """Create a magnifying glass QIcon for the search input (Build 10.0: T17)."""
+        from PySide6.QtGui import QIcon
+        pix = QPixmap(16, 16)
+        pix.fill(QColor(0, 0, 0, 0))
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.Antialiasing)
+        pen = QPen(QColor(ALMA_TEXT_LIGHT), 1.5)
+        p.setPen(pen)
+        p.drawEllipse(3, 3, 8, 8)
+        p.drawLine(10, 10, 13, 13)
+        p.end()
+        return QIcon(pix)
 
     def _connect_signals(self):
         self.search_btn.clicked.connect(self.run_search)
@@ -424,10 +459,16 @@ class ConversationSearchPage(QWidget):
         self.data_loaded.emit(stats)
 
     def _import_csv(self):
-        """Open file picker and ingest a Lightdash CSV export."""
+        """Open file picker and run agentic CSV reformatter + import.
+
+        Build 8.0 two-phase flow:
+          Phase 1: Analyze CSV headers (COLUMN_MAP → cache → Gemini → offline)
+          Phase 2: If ambiguous, show MappingPreviewDialog; then import with
+                   column_override passed to ingest_csv().
+        """
         file_path, _ = QFileDialog.getOpenFileName(
             self,
-            "Import Lightdash CSV Export",
+            "Import CSV Data",
             "",
             "CSV Files (*.csv);;All Files (*)",
         )
@@ -436,15 +477,118 @@ class ConversationSearchPage(QWidget):
 
         fname = file_path.split("/")[-1].split("\\")[-1]
         self._pending_csv_fname = fname
+        self._pending_csv_path = file_path
 
         main_win = self.window()
         if hasattr(main_win, '_job_queue'):
-            self._import_csv_via_queue(file_path, main_win)
+            self._analyze_csv_via_queue(file_path, main_win)
         else:
             self._import_csv_legacy(file_path)
 
-    def _import_csv_via_queue(self, file_path, main_win):
-        """Route CSV import through the unified job queue."""
+    # ── Build 8.0: Two-phase import flow ──────────────────────
+
+    def _get_bridge_client(self):
+        """Get the shared ReportBridgeClient from AIReportsPage (Build 8.0).
+
+        Returns None if unavailable (Gemini not configured, bridge offline, etc.).
+        """
+        try:
+            main_win = self.window()
+            if hasattr(main_win, 'reports_page'):
+                return main_win.reports_page._get_gemini_client()
+        except Exception:
+            pass
+        return None
+
+    def _analyze_csv_via_queue(self, file_path, main_win):
+        """Phase 1: Analyze CSV columns via job queue (Build 8.0)."""
+        from src.data.job_queue import JobDescriptor, CallableWorker
+
+        bridge_client = self._get_bridge_client()
+        queue = main_win._job_queue
+
+        def create_worker():
+            def do_analyze():
+                from src.agents.csv_reformatter import CSVReformatter
+                reformatter = CSVReformatter()
+                return reformatter.analyze_csv(file_path, bridge_client)
+
+            worker = CallableWorker(do_analyze)
+            worker.finished_result.connect(self._on_csv_analysis_done)
+            worker.error.connect(self._on_csv_analysis_error)
+            return worker
+
+        job = JobDescriptor(
+            job_id="csv_analyze",
+            name="CSV Analysis",
+            description=f"Analyzing {self._pending_csv_fname} columns...",
+            create_worker=create_worker,
+        )
+        queue.submit(job)
+
+    def _on_csv_analysis_done(self, mapping_result):
+        """Handle CSV analysis completion — decide whether to show dialog.
+
+        Build 8.0 decision logic:
+          - COLUMN_MAP or cache hit → skip dialog, import directly
+          - All high-confidence Gemini → skip dialog, import directly
+          - Any ambiguity → show MappingPreviewDialog
+        """
+        from src.agents.csv_reformatter import MappingResult
+
+        if not isinstance(mapping_result, MappingResult):
+            # Fallback: treat as legacy path
+            self._start_csv_import(None)
+            return
+
+        # Fast paths: skip dialog entirely
+        if mapping_result.source in ("column_map", "cache"):
+            self._start_csv_import(mapping_result.get_column_override())
+            return
+
+        if mapping_result.all_high_confidence and mapping_result.is_valid:
+            self._start_csv_import(mapping_result.get_column_override())
+            return
+
+        # Ambiguity: show preview dialog
+        try:
+            from src.ui.dialogs.mapping_preview_dialog import MappingPreviewDialog
+
+            dialog = MappingPreviewDialog(mapping_result, parent=self)
+            if dialog.exec() == dialog.Accepted:
+                override = dialog.get_column_override()
+                self._start_csv_import(override)
+            # else: user cancelled, do nothing
+        except Exception as e:
+            import traceback
+            QMessageBox.critical(
+                self, "Mapping Error",
+                f"Failed to show mapping preview:\n\n{traceback.format_exc()}"
+            )
+
+    def _on_csv_analysis_error(self, error_text):
+        """Handle CSV analysis failure — fall back to legacy import."""
+        import logging
+        logger = logging.getLogger("alma.csv_reformatter")
+        logger.warning("CSV analysis failed, falling back to legacy import: %s",
+                       error_text[:200])
+
+        # Fall back to standard import (COLUMN_MAP only)
+        file_path = getattr(self, '_pending_csv_path', None)
+        if file_path:
+            self._start_csv_import(None)
+
+    def _start_csv_import(self, column_override):
+        """Phase 2: Submit the actual CSV import job with optional column_override."""
+        file_path = getattr(self, '_pending_csv_path', None)
+        if not file_path:
+            return
+
+        main_win = self.window()
+        if not hasattr(main_win, '_job_queue'):
+            self._import_csv_legacy(file_path)
+            return
+
         from src.data.job_queue import JobDescriptor, CallableWorker
         db_path = self.db.db_path
         queue = main_win._job_queue
@@ -459,7 +603,8 @@ class ConversationSearchPage(QWidget):
                     return ingest_csv(
                         file_path, db,
                         progress_callback=lambda msg, pct:
-                            queue.job_progress.emit("csv_import", msg, pct or -1)
+                            queue.job_progress.emit("csv_import", msg, pct or -1),
+                        column_override=column_override,
                     )
                 finally:
                     db.close()
@@ -475,7 +620,7 @@ class ConversationSearchPage(QWidget):
             description=f"Importing {self._pending_csv_fname}",
             create_worker=create_worker,
         )
-        main_win._job_queue.submit(job)
+        queue.submit(job)
 
     def _on_csv_import_done(self, stats):
         """Handle CSV import completion from the job queue."""
@@ -624,6 +769,13 @@ class ConversationSearchPage(QWidget):
             + (" (showing first 1,000)" if count >= 1000 else "")
         )
 
+        # Toggle empty state vs results table (Build 10.0: T13)
+        self._empty_state.setVisible(count == 0)
+        self.results_table.setVisible(count > 0)
+
+        # Sync filter chip bar (Build 10.0: T14)
+        self._sync_chips()
+
         # Log the search
         self.db.log_analysis(
             "conversation_search",
@@ -640,8 +792,38 @@ class ConversationSearchPage(QWidget):
         self.results_table.setRowCount(0)
         self.results_label.setText("")
         self._current_results = []
+        # Reset empty state (Build 10.0: T13)
+        self._empty_state.setVisible(False)
+        self.results_table.setVisible(True)
         if hasattr(self, '_drilldown') and self._drilldown.is_open():
             self._drilldown.close_panel()
+
+    # ── Filter Chip Bar helpers (Build 10.0: T14) ──
+
+    def _sync_chips(self):
+        """Sync chip bar to show active non-default filters."""
+        active = {}
+        kw = self.keyword_input.text().strip()
+        if kw:
+            active["Keyword"] = kw if len(kw) <= 20 else kw[:17] + "\u2026"
+        trc = self.trc_combo.currentData()
+        if trc:
+            text = self.trc_combo.currentText()
+            active["TRC"] = text.split(" \u2014 ")[0] if " \u2014 " in text else text
+        csat = self.csat_combo.currentData()
+        if csat:
+            active["CSAT"] = self.csat_combo.currentText()
+        self._chip_bar.set_filters(active)
+
+    def _on_chip_removed(self, key):
+        """Handle a single filter chip being dismissed."""
+        if key == "Keyword":
+            self.keyword_input.clear()
+        elif key == "TRC":
+            self.trc_combo.setCurrentIndex(0)
+        elif key == "CSAT":
+            self.csat_combo.setCurrentIndex(0)
+        self.run_search()
 
     def _populate_table(self, results):
         self.results_table.setRowCount(0)
@@ -670,10 +852,12 @@ class ConversationSearchPage(QWidget):
                 status_item.setForeground(Qt.GlobalColor.darkRed)
             self.results_table.setItem(i, 3, status_item)
 
-            # CSAT
+            # CSAT (right-aligned — Build 10.0: T17)
             csat = r.get("csat_score")
             csat_text = str(int(csat)) if csat else "—"
-            self.results_table.setItem(i, 4, QTableWidgetItem(csat_text))
+            csat_item = QTableWidgetItem(csat_text)
+            csat_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self.results_table.setItem(i, 4, csat_item)
 
             # Date
             date_str = r.get("created_at", "")[:10]
@@ -687,4 +871,21 @@ class ConversationSearchPage(QWidget):
 
         conv = self._current_results[row]
         # Open directly to thread view (Level 2) with prev/next across results
-        self._drilldown.show_conversation(conv, self._current_results, row)
+        # thread_fetcher lazy-loads full_thread on demand (avoids 7 GB bulk load)
+        self._drilldown.show_conversation(
+            conv, self._current_results, row,
+            thread_fetcher=lambda tid: self.db.get_conversation(tid),
+        )
+
+    # ── Memory management ─────────────────────────────
+
+    def hideEvent(self, event):
+        """Trim heavy thread data when page is hidden (user navigates away).
+
+        Strips full_thread from cached results to reclaim memory while
+        keeping enough data for the drill-down panel to work if the user
+        navigates back and clicks a row.
+        """
+        for r in self._current_results:
+            r.pop("full_thread", None)
+        super().hideEvent(event)

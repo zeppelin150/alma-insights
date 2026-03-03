@@ -6,6 +6,10 @@ Analyze the following pre-computed ticket analytics and produce a structured rep
 TICKET DATA:
 {data_block}
 
+{temporal_context}
+
+Given the temporal progression above, identify inflection points where metrics shifted, and whether interventions correlated with improvements or deterioration.
+
 Produce the following sections:
 
 ## TOPLINE VOLUME

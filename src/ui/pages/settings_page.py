@@ -8,7 +8,7 @@ import webbrowser
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QFrame, QScrollArea, QSizePolicy, QMessageBox,
-    QComboBox, QFileDialog, QTextEdit,
+    QComboBox, QFileDialog, QTextEdit, QTabWidget,
 )
 from PySide6.QtCore import Qt, Signal, QThread
 from src.ui.theme import *
@@ -668,6 +668,11 @@ class SettingsPage(QWidget):
         self._build_section_defaults_section()
 
         # ════════════════════════════════════
+        #  SECTION 13: Memory Diagnostics
+        # ════════════════════════════════════
+        self._build_memory_debug_section()
+
+        # ════════════════════════════════════
         #  Disabled state overlay
         # ════════════════════════════════════
         self._update_api_state(False)
@@ -676,10 +681,24 @@ class SettingsPage(QWidget):
 
         scroll.setWidget(inner)
 
+        # ── QTabWidget wrapper ──
+        self._tab_widget = QTabWidget()
+        self._tab_widget.setObjectName("SettingsTab")
+        self._tab_widget.setDocumentMode(True)
+        self._tab_widget.addTab(scroll, "General")
+
+        # Scanning Costs placeholder (populated when db_manager is set)
+        self._cost_placeholder = QLabel("Scanning Costs will appear after data loads.")
+        self._cost_placeholder.setAlignment(Qt.AlignCenter)
+        self._cost_placeholder.setStyleSheet(
+            f"font-size: 13px; color: {ALMA_TEXT_LIGHT}; padding: 40px;"
+        )
+        self._tab_widget.addTab(self._cost_placeholder, "Scanning Costs")
+
         # Outer layout
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
-        outer.addWidget(scroll)
+        outer.addWidget(self._tab_widget)
 
     def _connect_signals(self):
         self.add_dataset_btn.clicked.connect(lambda: self._add_dataset_row())
@@ -1316,6 +1335,7 @@ class SettingsPage(QWidget):
         model_col.addWidget(model_lbl)
         self.gemini_model_combo = QComboBox()
         self.gemini_model_combo.addItem("gemini-2.5-flash", "gemini-2.5-flash")
+        self.gemini_model_combo.addItem("gemini-2.5-flash-lite", "gemini-2.5-flash-lite")
         self.gemini_model_combo.addItem("gemini-2.5-pro", "gemini-2.5-pro")
         self.gemini_model_combo.addItem("gemini-2.0-flash", "gemini-2.0-flash")
         self.gemini_model_combo.setStyleSheet(f"""
@@ -1618,9 +1638,20 @@ class SettingsPage(QWidget):
     # ═══════════════════════════════════════════
 
     def set_db_manager(self, db):
-        """Set db reference for intervention management."""
+        """Set db reference for intervention management and Scanning Costs tab."""
         self._db = db
         self._refresh_interventions()
+
+        # Populate Scanning Costs tab with CostDashboard
+        try:
+            from src.ui.widgets.cost_dashboard import CostDashboard
+            self._cost_dashboard = CostDashboard(db)
+            idx = self._tab_widget.indexOf(self._cost_placeholder)
+            if idx >= 0:
+                self._tab_widget.removeTab(idx)
+                self._tab_widget.insertTab(idx, self._cost_dashboard, "Scanning Costs")
+        except Exception:
+            pass  # CostDashboard may not be available
 
     def _add_intervention(self):
         from src.ui.dialogs.intervention_dialog import InterventionDialog
@@ -2055,6 +2086,165 @@ class SettingsPage(QWidget):
 
         self.layout_inner.addWidget(card)
         self.layout_inner.addSpacing(24)
+
+    # ═══════════════════════════════════════════
+    #  SECTION 13: MEMORY DIAGNOSTICS
+    # ═══════════════════════════════════════════
+
+    def _build_memory_debug_section(self):
+        self.layout_inner.addWidget(self._section_label("MEMORY DIAGNOSTICS"))
+        self.layout_inner.addSpacing(8)
+
+        card = self._card()
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(20, 18, 20, 18)
+        card_layout.setSpacing(10)
+
+        # Title row
+        title_row = QHBoxLayout()
+        title_col = QVBoxLayout()
+        title_col.setSpacing(2)
+        title = QLabel("Memory Profiler")
+        title.setStyleSheet(f"font-size: 14px; font-weight: 600; color: {ALMA_TEXT_DARK};")
+        desc = QLabel(
+            "Take a memory snapshot to diagnose allocation bloat. "
+            "Shows object counts, large containers, conversation dict copies, "
+            "and QThread worker lifecycle."
+        )
+        desc.setStyleSheet(f"font-size: 12px; color: {ALMA_TEXT_LIGHT};")
+        desc.setWordWrap(True)
+        title_col.addWidget(title)
+        title_col.addWidget(desc)
+        title_row.addLayout(title_col, 1)
+
+        self._mem_snapshot_btn = QPushButton("Take Snapshot")
+        self._mem_snapshot_btn.setCursor(Qt.PointingHandCursor)
+        self._mem_snapshot_btn.setFixedHeight(32)
+        self._mem_snapshot_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {ALMA_GREEN_DARK}; color: {ALMA_WHITE};
+                border: none; border-radius: 8px;
+                padding: 6px 18px; font-size: 12px; font-weight: 600;
+            }}
+            QPushButton:hover {{ background: {ALMA_GREEN_MID}; }}
+        """)
+        self._mem_snapshot_btn.clicked.connect(self._on_memory_snapshot)
+        title_row.addWidget(self._mem_snapshot_btn)
+
+        self._mem_gc_btn = QPushButton("Force GC")
+        self._mem_gc_btn.setCursor(Qt.PointingHandCursor)
+        self._mem_gc_btn.setFixedHeight(32)
+        self._mem_gc_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {ALMA_TEXT_MID};
+                border: 1px solid {ALMA_BORDER}; border-radius: 8px;
+                padding: 6px 14px; font-size: 12px; font-weight: 500;
+            }}
+            QPushButton:hover {{ background: {ALMA_HOVER_LIGHT}; }}
+        """)
+        self._mem_gc_btn.clicked.connect(self._on_force_gc)
+        title_row.addWidget(self._mem_gc_btn)
+
+        card_layout.addLayout(title_row)
+
+        # Quick stats row (updated on snapshot)
+        self._mem_quick_stats = QLabel("No snapshot taken yet")
+        self._mem_quick_stats.setStyleSheet(
+            f"font-size: 12px; color: {ALMA_TEXT_MID}; padding: 4px 0;"
+        )
+        card_layout.addWidget(self._mem_quick_stats)
+
+        # Full report area (scrollable text)
+        self._mem_report_area = QTextEdit()
+        self._mem_report_area.setReadOnly(True)
+        self._mem_report_area.setVisible(False)
+        self._mem_report_area.setMinimumHeight(300)
+        self._mem_report_area.setMaximumHeight(500)
+        self._mem_report_area.setStyleSheet(f"""
+            QTextEdit {{
+                background: {ALMA_WHITE}; color: {ALMA_TEXT_DARK};
+                border: 1px solid {ALMA_BORDER_LIGHT}; border-radius: 8px;
+                padding: 12px; font-family: 'Consolas', 'Courier New', monospace;
+                font-size: 11px; line-height: 1.4;
+            }}
+        """)
+        card_layout.addWidget(self._mem_report_area)
+
+        self.layout_inner.addWidget(card)
+        self.layout_inner.addSpacing(24)
+
+    def _on_memory_snapshot(self):
+        """Take a memory snapshot and display the report."""
+        self._mem_snapshot_btn.setText("Analyzing...")
+        self._mem_snapshot_btn.setEnabled(False)
+        from PySide6.QtWidgets import QApplication
+        QApplication.processEvents()
+
+        try:
+            from src.data.memory_profiler import MemoryProfiler
+            report = MemoryProfiler.snapshot()
+            text = MemoryProfiler.format_report(report)
+
+            # Quick stats summary
+            rss = report.get("process_rss_mb")
+            rss_str = f"{rss:.0f} MB" if rss else "N/A"
+            tracked = report.get("tracemalloc_mb", 0)
+            gc_objs = report.get("gc_objects_total", 0)
+            alma = report.get("alma_objects", {})
+            conv_total = alma.get("conversation_dicts_total", 0)
+            conv_thread = alma.get("conversation_dicts_with_full_thread", 0)
+            thread_mb = alma.get("full_thread_total_mb", 0)
+            result_dicts = alma.get("analysis_result_dicts", 0)
+            workers = alma.get("qthread_workers", [])
+            worker_count = len(workers)
+            running = sum(1 for w in workers if w.get("status") == "running")
+
+            self._mem_quick_stats.setText(
+                f"RSS: {rss_str}  |  "
+                f"Tracked: {tracked:.1f} MB  |  "
+                f"GC Objects: {gc_objs:,}  |  "
+                f"Conv Dicts: {conv_total} ({conv_thread} with full_thread = {thread_mb:.1f} MB)  |  "
+                f"Result Dicts: {result_dicts}  |  "
+                f"Workers: {worker_count} ({running} running)"
+            )
+
+            self._mem_report_area.setPlainText(text)
+            self._mem_report_area.setVisible(True)
+
+        except Exception as e:
+            import traceback
+            self._mem_quick_stats.setText(f"Error: {e}")
+            self._mem_report_area.setPlainText(traceback.format_exc())
+            self._mem_report_area.setVisible(True)
+        finally:
+            self._mem_snapshot_btn.setText("Take Snapshot")
+            self._mem_snapshot_btn.setEnabled(True)
+
+    def _on_force_gc(self):
+        """Force garbage collection and show before/after stats."""
+        import gc as _gc
+        from src.data.memory_profiler import MemoryProfiler
+
+        before_rss = MemoryProfiler._get_process_rss_mb()
+        before_objs = len(_gc.get_objects())
+
+        collected = _gc.collect()
+
+        after_rss = MemoryProfiler._get_process_rss_mb()
+        after_objs = len(_gc.get_objects())
+
+        before_str = f"{before_rss:.0f}" if before_rss else "?"
+        after_str = f"{after_rss:.0f}" if after_rss else "?"
+        delta_str = ""
+        if before_rss and after_rss:
+            delta = after_rss - before_rss
+            delta_str = f" ({delta:+.0f} MB)"
+
+        self._mem_quick_stats.setText(
+            f"GC collected {collected} objects  |  "
+            f"RSS: {before_str} → {after_str} MB{delta_str}  |  "
+            f"Objects: {before_objs:,} → {after_objs:,}"
+        )
 
     # ═══════════════════════════════════════════
     #  BEHAVIOR SETTINGS PERSISTENCE

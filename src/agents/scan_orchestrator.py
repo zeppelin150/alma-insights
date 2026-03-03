@@ -97,6 +97,9 @@ class ScanOrchestrator:
         self._scan_lock = threading.Lock()
         self._stop_event = threading.Event()
 
+        # 6.3: Adaptive thresholds (set by canary probes before each scan)
+        self._adaptive_call_timeout = 600  # default; overridden by probes
+
     # ──────────────────────────────────────────────────────────────────────
     # Public API (matches ScanWorkerManager)
     # ──────────────────────────────────────────────────────────────────────
@@ -131,11 +134,37 @@ class ScanOrchestrator:
                   AND (trc_code IS NULL OR trc_code = '')
             """, (date_start, date_end + ' 23:59:59')).fetchone()
 
+            # ── Query thread length stats per TRC (5.4 input-aware batching) ──
+            thread_stats_rows = conn.execute("""
+                SELECT trc_code AS trc,
+                       AVG(CASE WHEN LENGTH(COALESCE(full_thread, '')) > 3000
+                                THEN 3000
+                                ELSE LENGTH(COALESCE(full_thread, ''))
+                           END) AS avg_thread,
+                       SUM(CASE WHEN LENGTH(COALESCE(full_thread, '')) > 3000
+                                THEN 3000
+                                ELSE LENGTH(COALESCE(full_thread, ''))
+                           END) AS total_thread_chars
+                FROM conversations
+                WHERE created_at >= ? AND created_at <= ?
+                  AND trc_code IS NOT NULL AND trc_code != ''
+                GROUP BY trc_code
+            """, (date_start, date_end + ' 23:59:59')).fetchall()
+
+            trc_thread_stats = {
+                r['trc']: {'avg_thread': r['avg_thread'] or 0,
+                           'total_thread_chars': r['total_thread_chars'] or 0}
+                for r in thread_stats_rows
+            }
+
             # ── Init batch packer (model-adaptive, 5.2) ──
             self._batch_packer = BatchPacker(conn, model=self._model)
 
-            # ── Partition into batches (model-adaptive max, 5.2) ──
-            from src.agents.batch_packer import MODEL_MAX_BATCH
+            # ── Partition into batches (dual-constraint, 5.4) ──
+            from src.agents.batch_packer import (
+                MODEL_MAX_BATCH, JSON_OVERHEAD_PER_TICKET,
+                THREAD_TRUNCATION_LIMIT,
+            )
             max_batch_tickets = MODEL_MAX_BATCH.get(
                 self._model, MAX_BATCH_TICKETS
             )
@@ -154,9 +183,12 @@ class ScanOrchestrator:
 
                 total_tickets += n
 
-                # Use BatchPacker for dynamic sizing
+                # Use BatchPacker for dual-constraint sizing (5.4)
+                avg_thread = trc_thread_stats.get(
+                    trc, {}
+                ).get('avg_thread', 0)
                 dynamic_size = self._batch_packer.compute_batch_size(
-                    trc, n
+                    trc, n, avg_thread_chars=avg_thread
                 )
                 effective_max = min(dynamic_size, max_batch_tickets)
 
@@ -203,13 +235,32 @@ class ScanOrchestrator:
                     small_trcs.append(('(untagged)', untagged_n))
                     small_total += untagged_n
 
-            # Pack small TRCs into mixed batches (model-adaptive cap)
-            MIXED_BATCH_CAP = max_batch_tickets
+            # Pack small TRCs into mixed batches (dual constraint: count + input chars, 5.4)
             if small_trcs:
+                MIXED_INPUT_CAP = self._batch_packer.get_input_budget()
                 current_pack = []
                 current_count = 0
+                current_input_chars = 0
+
                 for trc, n in small_trcs:
-                    if current_count + n > MIXED_BATCH_CAP and current_pack:
+                    # Input char estimate for this TRC (capped threads + JSON overhead)
+                    stats = trc_thread_stats.get(trc, {})
+                    trc_thread_chars = stats.get(
+                        'total_thread_chars',
+                        n * THREAD_TRUNCATION_LIMIT
+                    )
+                    trc_total_chars = trc_thread_chars + (
+                        n * JSON_OVERHEAD_PER_TICKET
+                    )
+
+                    would_exceed_count = (
+                        current_count + n > max_batch_tickets
+                    )
+                    would_exceed_input = (
+                        current_input_chars + trc_total_chars > MIXED_INPUT_CAP
+                    )
+
+                    if (would_exceed_count or would_exceed_input) and current_pack:
                         trc_list = [t for t, _ in current_pack]
                         batches.append(self._make_batch(
                             scan_id, batch_num,
@@ -218,8 +269,11 @@ class ScanOrchestrator:
                         batch_num += 1
                         current_pack = []
                         current_count = 0
+                        current_input_chars = 0
+
                     current_pack.append((trc, n))
                     current_count += n
+                    current_input_chars += trc_total_chars
 
                 if current_pack:
                     if len(current_pack) == 1:
@@ -380,6 +434,17 @@ class ScanOrchestrator:
             if progress:
                 result['classified_count'] = progress['classified']
                 result['total_count'] = progress['total']
+
+            # Count actually classified tickets from nlp_ticket_classifications
+            try:
+                classified_row = conn.execute(
+                    "SELECT COUNT(*) AS n FROM nlp_ticket_classifications "
+                    "WHERE scan_id = ?",
+                    (sid,)
+                ).fetchone()
+                result['classified_tickets'] = classified_row['n'] if classified_row else 0
+            except Exception:
+                result['classified_tickets'] = 0
 
             return result
         finally:
@@ -641,26 +706,11 @@ class ScanOrchestrator:
                                  duration_ms=boot_ms)
                 raise
 
-            # Gemini ping
+            # ── 6.3: Canary probe burst ──
             self._emit_event(scan_id, 'preflight', 'running',
-                             'Gemini ping — testing model response...')
-            t0 = time.time()
-            try:
-                ping_result = self._bridges[0].ping(timeout=30)
-                ping_ms = int((time.time() - t0) * 1000)
-                if ping_result:
-                    self._emit_event(scan_id, 'preflight', 'complete',
-                                     f'Gemini ping — model responding ({ping_ms}ms)',
-                                     duration_ms=ping_ms)
-                else:
-                    self._emit_event(scan_id, 'preflight', 'warning',
-                                     f'Gemini ping — no response ({ping_ms}ms)',
-                                     duration_ms=ping_ms)
-            except Exception as e:
-                ping_ms = int((time.time() - t0) * 1000)
-                self._emit_event(scan_id, 'preflight', 'warning',
-                                 f'Gemini ping — {e} ({ping_ms}ms)',
-                                 duration_ms=ping_ms)
+                             'Canary probes — measuring API latency...')
+            probe_results = self._run_canary_probes(scan_id)
+            self._derive_adaptive_thresholds(scan_id, probe_results)
 
             # Worker spawn events
             for i, worker in enumerate(self._workers):
@@ -718,6 +768,9 @@ class ScanOrchestrator:
                                  'Scan stopped by user')
                 logger.info(f"Scan {scan_id[:8]}: stopped by user")
                 return
+
+            # ── 6b. Retry sweep for any remaining failed batches ──
+            self._retry_sweep(scan_id, date_start, date_end)
 
             self._emit_event(scan_id, 'info', 'complete',
                              'Classification complete')
@@ -870,6 +923,39 @@ class ScanOrchestrator:
                 except Exception:
                     pass
 
+                # ── 6.2: Early dead-bridge check before rate-governor wait ──
+                if not worker.bridge.is_alive():
+                    logger.warning(
+                        "[HEALTH] %s bridge dead before rate-governor acquire "
+                        "— restarting bridge",
+                        worker.agent_id,
+                    )
+                    restarted = False
+                    for _ra in range(3):
+                        try:
+                            worker.bridge.restart()
+                            time.sleep(3)
+                            if worker.bridge.is_alive():
+                                restarted = True
+                                logger.info(
+                                    "[HEALTH] %s bridge revived (attempt %d)",
+                                    worker.agent_id, _ra + 1,
+                                )
+                                break
+                        except Exception as _re:
+                            logger.error(
+                                "[HEALTH] bridge restart attempt %d failed: %s",
+                                _ra + 1, _re,
+                            )
+                            time.sleep(2 ** _ra)
+                    if not restarted:
+                        logger.error(
+                            "[HEALTH] %s bridge unrecoverable — requeueing batch",
+                            worker.agent_id,
+                        )
+                        self._batch_queue.put(batch)
+                        break  # exit worker loop; this worker is dead
+
                 # Acquire rate governor slot
                 if not self._rate_governor.acquire(timeout=120):
                     logger.warning(
@@ -877,6 +963,33 @@ class ScanOrchestrator:
                     )
                     self._batch_queue.put(batch)  # re-queue
                     continue
+
+                # Requeue guard: skip if stalled batch already fully classified (5.3)
+                retry_count = batch.get('retry_count', 0)
+                expected_tickets = batch.get('ticket_count', 0)
+                if retry_count > 0 and expected_tickets > 0:
+                    already_done = conn.execute("""
+                        SELECT COUNT(DISTINCT ticket_id)
+                        FROM nlp_ticket_classifications
+                        WHERE scan_id = ? AND batch_id = ?
+                    """, (scan_id, batch_id)).fetchone()[0]
+                    if already_done >= expected_tickets:
+                        logger.info(
+                            f"Batch {batch_id[:8]} already fully classified "
+                            f"({already_done}/{expected_tickets}), "
+                            f"skipping requeue"
+                        )
+                        conn.execute(
+                            "UPDATE nlp_batches SET status = 'completed' "
+                            "WHERE batch_id = ?", (batch_id,)
+                        )
+                        conn.commit()
+                        if self._supervisor:
+                            self._supervisor.notify_batch_complete(
+                                worker.agent_id,
+                                {"classified": already_done}
+                            )
+                        continue
 
                 # Get tickets for this batch (skip already-classified on resume, 5.2)
                 tickets = self._get_tickets_for_batch(
@@ -945,6 +1058,7 @@ class ScanOrchestrator:
                     "chunk_total": batch.get('trc_chunk_total', 1),
                     "date_start": date_start,
                     "date_end": date_end,
+                    "call_timeout": self._adaptive_call_timeout,
                 }
 
                 # Check context overflow
@@ -954,8 +1068,10 @@ class ScanOrchestrator:
                 # Ensure bridge is alive before classifying
                 if not worker.bridge.is_alive():
                     logger.warning(
-                        f"Worker {worker.agent_id}: bridge dead, "
-                        f"restarting before batch {batch_id[:8]}"
+                        "[HEALTH] %s bridge dead pre-classify | "
+                        "batch=%s deaths=%d",
+                        worker.agent_id, batch_id[:8],
+                        getattr(worker.bridge, '_death_count', 0),
                     )
                     restarted = False
                     for restart_attempt in range(3):
@@ -995,8 +1111,46 @@ class ScanOrchestrator:
                         self._rate_governor.report_rate_limit()
                     else:
                         self._rate_governor.report_error()
+
+                    # ── 6.2: Track stall events on bridge + escalate ──
+                    if "stall_timeout" in error_code:
+                        needs_restart = worker.bridge.record_stall()
+                        if needs_restart:
+                            self._emit_event(
+                                scan_id, 'warning', 'running',
+                                f'Bridge stall escalation on {worker.agent_id} '
+                                f'— auto-restarting bridge',
+                                metadata={
+                                    'worker': worker.agent_id,
+                                    'consecutive_stalls':
+                                        worker.bridge._consecutive_stalls,
+                                }
+                            )
+                            logger.warning(
+                                "[HEALTH] stall escalation restart | %s",
+                                worker.agent_id,
+                            )
+                            try:
+                                worker.bridge.restart()
+                                time.sleep(3)
+                            except Exception as _se:
+                                logger.error(
+                                    "[HEALTH] stall escalation restart failed: %s",
+                                    _se,
+                                )
+                    elif "bridge_dead" in error_code:
+                        self._emit_event(
+                            scan_id, 'warning', 'running',
+                            f'Bridge dead detected on {worker.agent_id} '
+                            f'during call',
+                            metadata={'worker': worker.agent_id}
+                        )
+                    else:
+                        # Non-stall error — reset consecutive stall counter
+                        worker.bridge.record_success()
                 else:
                     self._rate_governor.report_success(elapsed)
+                    worker.bridge.record_success()
 
                 # Record batch size for learning
                 n_classified = result.get("classified", 0)
@@ -1048,6 +1202,12 @@ class ScanOrchestrator:
                         continue  # skip marking as failed
 
                 try:
+                    _in_tok = result.get("input_tokens", 0)
+                    _out_tok = result.get("output_tokens", 0)
+                    _batch_cost = UsageTracker.estimate_cost(
+                        _in_tok, _out_tok, self._model
+                    ) if not has_error else 0.0
+
                     conn.execute("""
                         UPDATE nlp_batches
                         SET status = ?,
@@ -1055,26 +1215,36 @@ class ScanOrchestrator:
                             ticket_count = ?,
                             latency_ms = ?,
                             input_tokens = ?,
-                            output_tokens = ?
+                            output_tokens = ?,
+                            cost_usd = ?,
+                            error_message = ?,
+                            retry_count = ?
                         WHERE batch_id = ?
                     """, (
                         status, datetime.utcnow().isoformat(),
                         len(tickets),
                         int(elapsed * 1000),
-                        result.get("input_tokens", 0),
-                        result.get("output_tokens", 0),
+                        _in_tok,
+                        _out_tok,
+                        _batch_cost,
+                        str(result.get("error", "")) if has_error else None,
+                        batch.get("retry_count", 0),
                         batch_id,
                     ))
 
-                    # Update scan progress
+                    # Update scan progress + running cost
                     conn.execute("""
                         UPDATE nlp_scan_runs SET
                             completed_batches = (
                                 SELECT COUNT(*) FROM nlp_batches
                                 WHERE scan_id = ? AND status = 'completed'
+                            ),
+                            actual_cost_usd = COALESCE(
+                                (SELECT SUM(cost_usd) FROM gemini_usage
+                                 WHERE scan_id = ?), 0.0
                             )
                         WHERE scan_id = ?
-                    """, (scan_id, scan_id))
+                    """, (scan_id, scan_id, scan_id))
                     conn.commit()
                 except Exception as e:
                     logger.error(f"Batch status update failed: {e}")
@@ -1129,9 +1299,13 @@ class ScanOrchestrator:
                                 SELECT COUNT(*) FROM nlp_batches
                                 WHERE scan_id = ?
                                   AND status = 'completed'
+                            ),
+                            actual_cost_usd = COALESCE(
+                                (SELECT SUM(cost_usd) FROM gemini_usage
+                                 WHERE scan_id = ?), 0.0
                             )
                         WHERE scan_id = ?
-                    """, (scan_id, scan_id))
+                    """, (scan_id, scan_id, scan_id))
                     conn.commit()
                 except Exception:
                     pass
@@ -1142,6 +1316,385 @@ class ScanOrchestrator:
                     )
 
         conn.close()
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Internal: Retry Sweep
+    # ──────────────────────────────────────────────────────────────────────
+
+    def _retry_sweep(self, scan_id, date_start, date_end):
+        """One final retry pass for failed batches after main scan completes.
+
+        Boots a single fresh worker with a clean bridge context and
+        re-attempts each failed batch once.  Called automatically at
+        the end of ``_run_scan`` and also by ``retry_failed_batches``.
+        """
+        conn = self._get_conn()
+        try:
+            failed = conn.execute("""
+                SELECT batch_id, batch_number, trc, trc_chunk,
+                       trc_chunk_total, ticket_count, retry_count
+                FROM nlp_batches
+                WHERE scan_id = ? AND status = 'failed'
+                ORDER BY batch_number
+            """, (scan_id,)).fetchall()
+
+            if not failed:
+                return  # nothing to retry
+
+            n_failed = len(failed)
+            logger.info(
+                f"Retry sweep: {n_failed} failed batch(es) to retry"
+            )
+            self._emit_event(
+                scan_id, 'info', 'running',
+                f'Retry sweep: re-attempting {n_failed} failed batch(es)'
+            )
+
+            # Boot one fresh worker with clean bridge context
+            self._boot_workers(1, scan_id=scan_id)
+            worker = self._workers[0]
+
+            for batch_row in failed:
+                if self._cancelled or self._stop_event.is_set():
+                    break
+
+                batch_id = batch_row['batch_id']
+                trc = batch_row['trc']
+                batch_num = batch_row['batch_number']
+                chunk_n = batch_row['trc_chunk'] or 1
+                chunk_total = batch_row['trc_chunk_total'] or 1
+
+                # Mark as running
+                conn.execute(
+                    "UPDATE nlp_batches SET status = 'running' "
+                    "WHERE batch_id = ?",
+                    (batch_id,)
+                )
+                conn.commit()
+
+                self._emit_event(
+                    scan_id, 'batch_start', 'running',
+                    f'Retry sweep batch {batch_num} | {trc[:40]}',
+                    metadata={'batch_id': batch_id, 'trc': trc}
+                )
+
+                # Get remaining unclassified tickets for this batch
+                tickets = self._get_tickets_for_batch(
+                    conn, trc, chunk_n, chunk_total,
+                    date_start, date_end, scan_id=scan_id
+                )
+
+                if not tickets:
+                    conn.execute(
+                        "UPDATE nlp_batches SET status = 'completed' "
+                        "WHERE batch_id = ?",
+                        (batch_id,)
+                    )
+                    conn.commit()
+                    logger.info(
+                        f"Retry sweep batch {batch_id[:8]}: "
+                        f"all tickets already classified"
+                    )
+                    continue
+
+                # Build payload (same structure as _worker_loop)
+                stats_ctx = ""
+                sub_tax = ""
+                try:
+                    stats_result = worker.tool_registry.execute(
+                        "get_stats_context", {"trc": trc}
+                    )
+                    stats_ctx = self._format_stats_context(stats_result)
+                    tax_result = worker.tool_registry.execute(
+                        "query_taxonomy", {"trc": trc}
+                    )
+                    sub_tax = self._format_taxonomy(tax_result)
+                except Exception as e:
+                    logger.debug(f"Retry sweep context build failed: {e}")
+
+                payload = {
+                    "scan_id": scan_id,
+                    "batch_id": batch_id,
+                    "trc": trc,
+                    "tickets": tickets,
+                    "stats_context": stats_ctx,
+                    "sub_taxonomy": sub_tax,
+                    "chunk_n": chunk_n,
+                    "chunk_total": chunk_total,
+                    "date_start": date_start,
+                    "date_end": date_end,
+                }
+
+                # Ensure bridge is alive
+                if not worker.bridge.is_alive():
+                    try:
+                        worker.bridge.restart()
+                        time.sleep(3)
+                    except Exception:
+                        logger.error(
+                            f"Retry sweep: bridge restart failed for "
+                            f"batch {batch_id[:8]}"
+                        )
+                        continue
+
+                # Classify
+                start = time.time()
+                result = worker.classify_batch(payload)
+                elapsed = time.time() - start
+                has_error = bool(result.get('error'))
+                status = 'completed' if not has_error else 'failed'
+
+                conn.execute("""
+                    UPDATE nlp_batches
+                    SET status = ?,
+                        completed_at = ?,
+                        latency_ms = ?,
+                        error_message = ?,
+                        retry_count = retry_count + 1,
+                        input_tokens = ?,
+                        output_tokens = ?
+                    WHERE batch_id = ?
+                """, (
+                    status,
+                    datetime.utcnow().isoformat(),
+                    int(elapsed * 1000),
+                    str(result.get('error', '')) if has_error else None,
+                    result.get('input_tokens', 0),
+                    result.get('output_tokens', 0),
+                    batch_id,
+                ))
+                conn.commit()
+
+                sweep_lbl = 'complete' if not has_error else 'error'
+                classified = result.get('classified', 0)
+                self._emit_event(
+                    scan_id, 'batch_complete', sweep_lbl,
+                    f'Retry sweep batch {batch_num}: {status} '
+                    f'| {classified}/{len(tickets)}',
+                    metadata={'batch_id': batch_id}
+                )
+                logger.info(
+                    f"Retry sweep batch {batch_id[:8]}: {status} "
+                    f"({classified}/{len(tickets)} classified, "
+                    f"{elapsed:.1f}s)"
+                )
+
+            # Shutdown the sweep worker's bridge
+            try:
+                worker.bridge.shutdown()
+            except Exception:
+                pass
+        finally:
+            conn.close()
+
+    def retry_failed_batches(self, scan_id):
+        """Re-run only the failed batches from a completed scan.
+
+        Called from the UI 'Retry Failed Batches' button.  Validates the
+        scan is in a retryable state, marks it as running, executes a
+        retry sweep, then re-finalizes.
+        """
+        conn = self._get_conn()
+        try:
+            scan = conn.execute(
+                "SELECT * FROM nlp_scan_runs WHERE scan_id = ?",
+                (scan_id,)
+            ).fetchone()
+            if not scan:
+                raise ValueError(f"Scan {scan_id} not found")
+
+            retryable = (
+                'completed', 'completed_with_errors',
+                'scan_complete', 'analysis_complete',
+            )
+            if scan['status'] not in retryable:
+                raise ValueError(
+                    f"Scan status '{scan['status']}' is not retryable"
+                )
+
+            failed_count = conn.execute("""
+                SELECT COUNT(*) FROM nlp_batches
+                WHERE scan_id = ? AND status = 'failed'
+            """, (scan_id,)).fetchone()[0]
+            if failed_count == 0:
+                raise ValueError("No failed batches to retry")
+
+            date_start = scan['date_range_start']
+            date_end = scan['date_range_end']
+
+            # Mark scan as running
+            conn.execute(
+                "UPDATE nlp_scan_runs SET status = 'running' "
+                "WHERE scan_id = ?",
+                (scan_id,)
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        self._cancelled = False
+        self._stop_event.clear()
+
+        logger.info(
+            f"retry_failed_batches: retrying {failed_count} batch(es) "
+            f"for scan {scan_id[:8]}"
+        )
+
+        try:
+            self._retry_sweep(scan_id, date_start, date_end)
+        finally:
+            self._finalize_scan(scan_id)
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Internal: Canary Probes (Build 6.3)
+    # ──────────────────────────────────────────────────────────────────────
+
+    def _run_canary_probes(self, scan_id):
+        """Fire a canary probe through each bridge and store results.
+
+        Probes are sequential to avoid rate-limit interference.
+        Returns list of probe result dicts.
+        """
+        from src.data.db_manager import DatabaseManager
+        results = []
+        db = None
+        try:
+            db = DatabaseManager(Path(self.db_path))
+        except Exception as e:
+            logger.warning("[HEALTH] canary probe: DB init failed: %s", e)
+
+        for i, bridge in enumerate(self._bridges):
+            probe = bridge.probe(timeout=30)
+            if probe is None:
+                probe = {"latency_ms": 0, "status": "error",
+                         "error": "bridge_not_alive"}
+            results.append(probe)
+            logger.debug(
+                "[HEALTH] canary probe | bridge=%d latency=%dms status=%s",
+                i, probe.get("latency_ms", 0), probe.get("status"),
+            )
+            # Persist
+            if db:
+                try:
+                    db.store_probe(
+                        scan_id, i, "pre_scan",
+                        probe["status"], probe.get("latency_ms", 0),
+                        probe.get("error"),
+                    )
+                except Exception as e:
+                    logger.debug("Probe store failed: %s", e)
+
+        if db:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+        # Emit summary event
+        n_ok = sum(1 for r in results if r["status"] == "success")
+        latencies = sorted(
+            r["latency_ms"] for r in results if r["status"] == "success"
+        )
+        p50 = latencies[len(latencies) // 2] if latencies else 0
+        p95_idx = min(int(len(latencies) * 0.95), max(len(latencies) - 1, 0))
+        p95 = latencies[p95_idx] if latencies else 0
+
+        if n_ok > 0:
+            self._emit_event(
+                scan_id, 'preflight', 'complete',
+                f'Canary probes — {n_ok}/{len(results)} OK, '
+                f'P50={p50}ms P95={p95}ms',
+                duration_ms=p95,
+                metadata={'probes': len(results), 'ok': n_ok,
+                          'p50_ms': p50, 'p95_ms': p95},
+            )
+        else:
+            self._emit_event(
+                scan_id, 'preflight', 'warning',
+                f'Canary probes — 0/{len(results)} OK (all failed)',
+                metadata={'probes': len(results), 'ok': 0},
+            )
+
+        return results
+
+    def _derive_adaptive_thresholds(self, scan_id, probe_results):
+        """Compute adaptive stall timeout + rate governor floor from probes.
+
+        Uses current scan probes + historical P95 (7-day rolling).
+        """
+        # Current scan P50/P95
+        latencies = sorted(
+            r["latency_ms"] for r in probe_results
+            if r.get("status") == "success"
+        )
+        if not latencies:
+            logger.info(
+                "[HEALTH] no successful probes — using default thresholds"
+            )
+            self._adaptive_call_timeout = 600  # default
+            return
+
+        current_p50 = latencies[len(latencies) // 2]
+        p95_idx = min(int(len(latencies) * 0.95), len(latencies) - 1)
+        current_p95 = latencies[p95_idx]
+
+        # Historical P95 from DB
+        historical_p95 = None
+        try:
+            from src.data.db_manager import DatabaseManager
+            db = DatabaseManager(Path(self.db_path))
+            historical_p95 = db.get_probe_percentile(95, days=7)
+            db.close()
+        except Exception:
+            pass
+
+        # Use whichever P95 is higher (conservative)
+        reference_p95 = max(
+            current_p95,
+            historical_p95 or current_p95,
+        )
+
+        # Derive adaptive call timeout
+        # reference_p95 is for a single trivial probe (~2 tokens out).
+        # A real batch with 25 tickets will take much longer.
+        # Multiplier: reference_p95_seconds * tickets_per_batch * overhead
+        avg_batch_tickets = 25  # default; could be read from batch_packer
+        batch_multiplier = avg_batch_tickets * 2.5  # ~2.5s per ticket estimate
+        adaptive_timeout = max(
+            45,   # floor: bridge-side STALL_MS
+            min(
+                600,  # ceiling: current hardcoded max
+                (reference_p95 / 1000) * batch_multiplier * 1.5,
+            ),
+        )
+        self._adaptive_call_timeout = round(adaptive_timeout)
+
+        # Derive rate governor floor (probes are fast; don't tighten below 3x P50)
+        p50_seconds = current_p50 / 1000
+        adaptive_floor = max(15.0, p50_seconds * 3.0)
+        if self._rate_governor:
+            self._rate_governor.set_probe_floor(adaptive_floor)
+
+        logger.info(
+            "[HEALTH] adaptive thresholds | current_p50=%dms current_p95=%dms "
+            "historical_p95=%s adaptive_timeout=%ds rate_floor=%.1fs",
+            current_p50, current_p95,
+            f"{historical_p95}ms" if historical_p95 else "none",
+            self._adaptive_call_timeout, adaptive_floor,
+        )
+        self._emit_event(
+            scan_id, 'preflight', 'complete',
+            f'Adaptive thresholds — timeout={self._adaptive_call_timeout}s, '
+            f'rate_floor={adaptive_floor:.1f}s '
+            f'(probe P50={current_p50}ms P95={current_p95}ms)',
+            metadata={
+                'adaptive_timeout': self._adaptive_call_timeout,
+                'rate_floor': round(adaptive_floor, 1),
+                'current_p50': current_p50,
+                'current_p95': current_p95,
+                'historical_p95': historical_p95,
+            },
+        )
 
     # ──────────────────────────────────────────────────────────────────────
     # Internal: Infrastructure
@@ -1163,6 +1716,30 @@ class ScanOrchestrator:
             except Exception:
                 bridge._usage_tracker = None
                 bridge._scan_id = scan_id
+
+            # 6.2: Wire death callback for scan event emission
+            def _make_death_cb(worker_idx, sid):
+                def _on_bridge_death(bridge_ref):
+                    logger.error(
+                        "[HEALTH] bridge death callback | worker_%d scan=%s",
+                        worker_idx, (sid or "?")[:8],
+                    )
+                    if sid:
+                        try:
+                            self._emit_event(
+                                sid, 'warning', 'running',
+                                f'Bridge died for worker_{worker_idx} — '
+                                f'watchdog detected exit',
+                                metadata={
+                                    'worker': f'worker_{worker_idx}',
+                                    'death_count': bridge_ref._death_count,
+                                }
+                            )
+                        except Exception:
+                            pass
+                return _on_bridge_death
+            bridge.set_on_death(_make_death_cb(i, scan_id))
+
             bridge.ensure_running()
             self._bridges.append(bridge)
 
@@ -1358,43 +1935,118 @@ class ScanOrchestrator:
         return section
 
     def _finalize_scan(self, scan_id):
-        """Mark scan as completed in the database."""
+        """Mark scan as completed (or completed_with_errors) in the database."""
         conn = self._get_conn()
         try:
-            # Count actual classifications
-            count = conn.execute("""
-                SELECT COUNT(*) as n FROM nlp_ticket_classifications
-                WHERE scan_id = ?
-            """, (scan_id,)).fetchone()
-
             completed_batches = conn.execute("""
                 SELECT COUNT(*) as n FROM nlp_batches
                 WHERE scan_id = ? AND status = 'completed'
             """, (scan_id,)).fetchone()
 
+            failed_batches = conn.execute("""
+                SELECT COUNT(*) as n FROM nlp_batches
+                WHERE scan_id = ? AND status = 'failed'
+            """, (scan_id,)).fetchone()
+
+            # Aggregate tokens from nlp_batches (authoritative source)
+            token_row = conn.execute("""
+                SELECT COALESCE(SUM(input_tokens), 0) as total_in,
+                       COALESCE(SUM(output_tokens), 0) as total_out,
+                       COALESCE(SUM(cost_usd), 0.0) as total_cost
+                FROM nlp_batches WHERE scan_id = ?
+            """, (scan_id,)).fetchone()
+            total_tokens_in = token_row['total_in'] if token_row else 0
+            total_tokens_out = token_row['total_out'] if token_row else 0
+            actual_cost = token_row['total_cost'] if token_row else 0.0
+
+            # Fall back to gemini_usage if batch-level cost is zero
+            if actual_cost == 0.0:
+                usage_row = conn.execute("""
+                    SELECT COALESCE(SUM(cost_usd), 0.0) as total_cost
+                    FROM gemini_usage WHERE scan_id = ?
+                """, (scan_id,)).fetchone()
+                actual_cost = usage_row['total_cost'] if usage_row else 0.0
+
+            failed_n = failed_batches['n'] if failed_batches else 0
+            final_status = (
+                'completed_with_errors' if failed_n > 0 else 'completed'
+            )
+
+            # Build informative error_log from batch-level errors
+            error_log_text = None
+            if failed_n > 0:
+                error_reasons = conn.execute("""
+                    SELECT error_message, COUNT(*) as cnt
+                    FROM nlp_batches
+                    WHERE scan_id = ? AND status = 'failed'
+                      AND error_message IS NOT NULL
+                    GROUP BY error_message
+                """, (scan_id,)).fetchall()
+                parts = [f"{failed_n} batch(es) failed"]
+                for row in error_reasons:
+                    parts.append(f"  {row['error_message']}: {row['cnt']}")
+                error_log_text = "; ".join(parts)
+
             conn.execute("""
                 UPDATE nlp_scan_runs SET
-                    status = 'completed',
+                    status = ?,
                     completed_batches = ?,
-                    completed_at = ?
+                    completed_at = ?,
+                    actual_cost_usd = ?,
+                    total_input_tokens = ?,
+                    total_output_tokens = ?,
+                    error_log = CASE WHEN ? IS NOT NULL
+                        THEN ? ELSE error_log END
                 WHERE scan_id = ?
             """, (
+                final_status,
                 completed_batches['n'] if completed_batches else 0,
                 datetime.utcnow().isoformat(),
+                actual_cost,
+                total_tokens_in,
+                total_tokens_out,
+                error_log_text, error_log_text,
                 scan_id,
             ))
             conn.commit()
+
+            if failed_n > 0:
+                logger.warning(
+                    f"Scan {scan_id[:8]} finalized as {final_status}: "
+                    f"{failed_n} batch(es) failed"
+                )
         finally:
             conn.close()
 
     def _mark_scan_error(self, scan_id, error_msg):
-        """Mark scan as failed."""
+        """Mark scan as failed with timestamp and error details."""
         conn = self._get_conn()
         try:
+            # Also roll up whatever tokens/cost were captured before failure
+            token_row = conn.execute("""
+                SELECT COALESCE(SUM(input_tokens), 0) as total_in,
+                       COALESCE(SUM(output_tokens), 0) as total_out,
+                       COALESCE(SUM(cost_usd), 0.0) as total_cost
+                FROM nlp_batches WHERE scan_id = ?
+            """, (scan_id,)).fetchone()
+
             conn.execute("""
-                UPDATE nlp_scan_runs SET status = 'failed'
+                UPDATE nlp_scan_runs SET
+                    status = 'failed',
+                    completed_at = ?,
+                    error_log = ?,
+                    total_input_tokens = ?,
+                    total_output_tokens = ?,
+                    actual_cost_usd = ?
                 WHERE scan_id = ?
-            """, (scan_id,))
+            """, (
+                datetime.utcnow().isoformat(),
+                error_msg,
+                token_row['total_in'] if token_row else 0,
+                token_row['total_out'] if token_row else 0,
+                token_row['total_cost'] if token_row else 0.0,
+                scan_id,
+            ))
             conn.commit()
         finally:
             conn.close()

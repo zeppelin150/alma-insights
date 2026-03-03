@@ -309,19 +309,15 @@ def compute_sentiment_trends(conn, date_start, date_end, trc_filter, window_size
         else:
             conv["_sentiment"] = 0.0
 
-    # Determine TRC grouping
+    # Determine TRC grouping — return ALL TRCs so the UI can filter
     if trc_filter:
         trc_groups = {trc_filter: [c for c in conversations if c.get("trc_code") == trc_filter]}
     else:
-        # Top 5 TRCs by volume
-        trc_counts = defaultdict(int)
+        trc_groups = defaultdict(list)
         for c in conversations:
-            if c.get("trc_code"):
-                trc_counts[c["trc_code"]] += 1
-        top_trcs = sorted(trc_counts, key=trc_counts.get, reverse=True)[:5]
-        trc_groups = {}
-        for trc in top_trcs:
-            trc_groups[trc] = [c for c in conversations if c.get("trc_code") == trc]
+            code = c.get("trc_code")
+            if code:
+                trc_groups[code].append(c)
 
     # Bucket and average
     result = {}
@@ -1952,15 +1948,19 @@ def suggest_keyword_improvements(terms, gemini_client):
     if not terms or not gemini_client:
         return {"suppress": [], "add_to_map": []}
 
-    all_terms = terms.get("all_terms", [])
-    rising = terms.get("rising_terms", [])
+    # terms dict comes from compute_rising_terms: {"rising": [...], "cooling": [...]}
+    all_terms = terms.get("rising", []) + terms.get("cooling", [])
+    rising = terms.get("rising", [])
 
-    # Format terms for the prompt
+    # Format terms for the prompt (dicts from compute_rising_terms have
+    # 'term', 'velocity', 'current_score' keys)
     all_lines = []
     for t in all_terms[:40]:
         if isinstance(t, dict):
-            all_lines.append(f"  {t.get('term', t.get('word', ''))}: "
-                           f"score={t.get('score', t.get('tfidf', ''))}")
+            name = t.get("term", t.get("word", ""))
+            score = t.get("current_score", t.get("score", t.get("tfidf", 0)))
+            vel = t.get("velocity", 0)
+            all_lines.append(f"  {name}: score={score:.4f}, velocity={vel:+.4f}")
         elif isinstance(t, (list, tuple)) and len(t) >= 2:
             all_lines.append(f"  {t[0]}: score={t[1]:.4f}")
 

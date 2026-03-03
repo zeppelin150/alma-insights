@@ -144,7 +144,8 @@ class KeywordReviewPanel(QWidget):
                 self._add_cbs.append(cb)
                 self._container_layout.addWidget(row)
 
-        self.show()
+        # Visibility is controlled by the DrilldownPanel — do NOT self.show()
+        # as that creates a floating top-level window.
 
     def _build_row(self, label_text, detail_text, is_suppress=True):
         row = QFrame()

@@ -119,7 +119,8 @@ def _parse_row(row, col_mapping):
     return record
 
 
-def ingest_csv(file_path, db, progress_callback=None, dataset_id=None):
+def ingest_csv(file_path, db, progress_callback=None, dataset_id=None,
+               column_override=None):
     """
     Ingest a Lightdash CSV export into the database.
 
@@ -128,6 +129,9 @@ def ingest_csv(file_path, db, progress_callback=None, dataset_id=None):
         db: DatabaseManager instance
         progress_callback: Optional callable(message, percent) for UI updates
         dataset_id: Optional dataset ID for A/B testing (tags all ingested conversations)
+        column_override: Optional dict {normalized_header: target_field} from
+                        CSVReformatter.  When provided, used instead of COLUMN_MAP
+                        for column mapping.  (Build 8.0)
 
     Returns:
         dict with ingestion stats
@@ -156,8 +160,18 @@ def ingest_csv(file_path, db, progress_callback=None, dataset_id=None):
     reader = csv.reader(io.StringIO(text))
     headers = next(reader)
 
-    # Map columns
-    col_mapping, unmapped = _map_columns(headers)
+    # Map columns — use override if provided (Build 8.0), else COLUMN_MAP
+    if column_override:
+        col_mapping = {}
+        unmapped = []
+        for i, h in enumerate(headers):
+            norm = _normalize_header(h)
+            if norm in column_override:
+                col_mapping[i] = column_override[norm]
+            else:
+                unmapped.append(h.strip())
+    else:
+        col_mapping, unmapped = _map_columns(headers)
     mapped_fields = set(col_mapping.values())
 
     # Validate required fields

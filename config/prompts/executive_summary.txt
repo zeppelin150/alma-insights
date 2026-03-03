@@ -4,7 +4,9 @@ Data is provided as pre-computed statistics. You do NOT load files or access URL
 TICKET DATA:
 {data_block}
 
-Produce a concise 1-page executive summary:
+{temporal_context}
+
+Produce a concise 1-page executive summary. Use the temporal progression to highlight trajectory (improving vs. worsening) for each finding:
 
 ## KEY METRICS
 | Metric | Value | Trend |

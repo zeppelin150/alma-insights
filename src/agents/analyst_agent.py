@@ -178,11 +178,11 @@ Output ONLY valid JSON. No markdown. No preamble."""
                        c.sentiment_intensity, c.sentiment_polarity,
                        c.anomaly_flag, c.summary,
                        c.sub_cluster_confidence, c.is_novel,
-                       conv.message as thread_sample
+                       conv.thread_text as thread_sample
                 FROM nlp_ticket_classifications c
                 LEFT JOIN (
                     SELECT ticket_id,
-                           GROUP_CONCAT(message, ' | ') as message
+                           GROUP_CONCAT(full_thread, ' | ') as thread_text
                     FROM conversations
                     GROUP BY ticket_id
                 ) conv ON conv.ticket_id = c.ticket_id
