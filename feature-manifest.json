@@ -19,7 +19,7 @@
         "src/ui/pages/nlp_scanner_page.py"
       ],
       "guru_collection": null,
-      "guru_card_id": null,
+      "guru_card_id": "61043060-405d-49a9-9e12-63c8a1fab9d5",
       "audience": "CX Operations analysts and managers",
       "guide_focus": "What the scanner does, how scans are triggered, what outputs it produces, how to interpret scan results"
     },
@@ -33,7 +33,7 @@
         "config/prompts/voc_*.txt"
       ],
       "guru_collection": null,
-      "guru_card_id": null,
+      "guru_card_id": "0d90eba5-4264-4de2-804c-ec3c1b71ca85",
       "audience": "CX Operations leads reviewing VOC reports",
       "guide_focus": "How VOC analysis works, what a VOC report contains, confidence tiers, how to action findings"
     },
@@ -46,7 +46,7 @@
         "src/data/trending_engine.py"
       ],
       "guru_collection": null,
-      "guru_card_id": null,
+      "guru_card_id": "08ef38b7-cbae-4cf9-8a4e-209ba7e1a988",
       "audience": "CX Operations analysts monitoring real-time trends",
       "guide_focus": "What the watchlist tracks, how EWMA thresholds work, how alerts surface, how to configure sensitivity"
     },
@@ -99,7 +99,7 @@
         "migrations/*.sql"
       ],
       "guru_collection": null,
-      "guru_card_id": null,
+      "guru_card_id": "ba2002cd-25c1-4f59-a85a-a377d0823625",
       "audience": "Platform administrators and power users",
       "guide_focus": "Data retention, storage architecture, how to query historical data, cache management"
     },
@@ -117,7 +117,7 @@
         "src/gemini/prompts.py"
       ],
       "guru_collection": null,
-      "guru_card_id": null,
+      "guru_card_id": "80f660e1-7f9c-4193-9fb8-f848f6fb7a18",
       "audience": "Technical stakeholders and compliance reviewers",
       "guide_focus": "Which AI handles what, PHI routing logic, model selection, how tool definitions work"
     },
@@ -135,7 +135,7 @@
         "main.py"
       ],
       "guru_collection": null,
-      "guru_card_id": null,
+      "guru_card_id": "571464e2-76f3-43a2-9e15-6d428abb8f76",
       "audience": "All Alma Insights users",
       "guide_focus": "Getting started, configuration, updates, general navigation"
     },

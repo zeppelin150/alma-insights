@@ -113,6 +113,7 @@ jobs:
                       'preferredPhrase': f'{feature_name} — Product Guide',
                       'content': content,
                       'collection': {'id': coll_id},
+                      'shareStatus': 'TEAM',
                   }
 
                   try:
@@ -167,6 +168,7 @@ jobs:
                       'preferredPhrase': title,
                       'content': content,
                       'collection': {'id': coll_id},
+                      'shareStatus': 'TEAM',
                   }
 
                   try:
