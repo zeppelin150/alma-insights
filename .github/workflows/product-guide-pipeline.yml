@@ -87,7 +87,7 @@ jobs:
         with:
           name: commit-diff
           path: /tmp/commit_diff.txt
-          retention-days: 7
+          retention-days: 3
 
   # ──────────────────────────────────────────────
   # Stage 2: Claude assessment
@@ -178,7 +178,7 @@ jobs:
         with:
           name: claude-assessment
           path: /tmp/assessment.json
-          retention-days: 30
+          retention-days: 7
 
       # ──────────────────────────────────────────
       # Create a GitHub Issue if product changes detected

@@ -8,9 +8,15 @@
       "name": "Scanner & Ticket Analysis",
       "description": "The core scanning engine that processes Zendesk tickets through multi-phase LLM pipelines for classification and NLP analysis.",
       "file_patterns": [
-        "src/**/scanner/**",
-        "src/**/scan_ledger*",
-        "src/**/ticket_classif*"
+        "src/agents/scan_orchestrator.py",
+        "src/data/scan_worker.py",
+        "src/data/scan_server_manager.py",
+        "src/data/scan_worker_manager.py",
+        "src/data/scan_ledger.py",
+        "src/data/scan_report_builder.py",
+        "src/data/nlp_meta_analyzer.py",
+        "src/data/nlp_synthesis.py",
+        "src/ui/pages/nlp_scanner_page.py"
       ],
       "guru_collection": null,
       "guru_card_id": null,
@@ -22,9 +28,9 @@
       "name": "Voice of Customer (VOC) Pipeline",
       "description": "Multi-agent analysis pipeline that produces confirmed findings with confidence tiering from ticket data.",
       "file_patterns": [
-        "src/**/voc/**",
-        "src/**/voc_*",
-        "src/**/root_cause*"
+        "src/data/voc_builder.py",
+        "src/agents/voc_batch_packer.py",
+        "config/prompts/voc_*.txt"
       ],
       "guru_collection": null,
       "guru_card_id": null,
@@ -36,9 +42,8 @@
       "name": "EWMA Watchlist Engine",
       "description": "Exponentially weighted moving average engine that monitors ticket volume trends and surfaces alerts for anomalous patterns.",
       "file_patterns": [
-        "src/**/watchlist/**",
-        "src/**/ewma*",
-        "src/**/alert*"
+        "src/data/watchlist_engine.py",
+        "src/data/trending_engine.py"
       ],
       "guru_collection": null,
       "guru_card_id": null,
@@ -50,10 +55,16 @@
       "name": "Guru Knowledge Base Integration",
       "description": "Integration layer for analyzing, generating, and managing Guru KB cards including card graph building and content generation.",
       "file_patterns": [
-        "src/**/guru/**",
-        "src/**/guru_*",
-        "src/**/card_graph*",
-        "src/**/kb_*"
+        "src/data/guru_client.py",
+        "src/data/guru_content_pipeline.py",
+        "src/data/guru_effectiveness.py",
+        "src/data/guru_friction_pipeline.py",
+        "src/data/guru_graph_builder.py",
+        "src/ui/pages/guru_page.py",
+        "src/ui/widgets/guru_card_viewer.py",
+        "src/ui/widgets/guru_workbench_panel.py",
+        "migrations/003_guru_tables.sql",
+        "migrations/004_guru_card_graph.sql"
       ],
       "guru_collection": null,
       "guru_card_id": null,
@@ -65,9 +76,12 @@
       "name": "Zendesk Source Monitor",
       "description": "Monitors Zendesk data sources for availability, freshness, and schema changes.",
       "file_patterns": [
-        "src/**/source_monitor*",
-        "src/**/zendesk_source*",
-        "src/**/source_abstraction*"
+        "src/data/zendesk_client.py",
+        "src/data/zendesk_monitor.py",
+        "src/data/source_types.py",
+        "src/data/source_warehouse.py",
+        "src/ui/pages/source_monitor_page.py",
+        "migrations/002_source_warehouse.sql"
       ],
       "guru_collection": null,
       "guru_card_id": null,
@@ -79,10 +93,10 @@
       "name": "Data Warehouse & Storage",
       "description": "Local data warehouse layer handling ticket data persistence, caching, and query interfaces.",
       "file_patterns": [
-        "src/**/warehouse/**",
-        "src/**/data_warehouse*",
-        "src/**/db_*",
-        "src/**/storage*"
+        "src/data/db_manager.py",
+        "src/data/csv_ingestion.py",
+        "src/data/smart_pipeline.py",
+        "migrations/*.sql"
       ],
       "guru_collection": null,
       "guru_card_id": null,
@@ -94,11 +108,13 @@
       "name": "Dual-Provider AI Architecture",
       "description": "Task-routed architecture using Gemini for PHI-certified NLP and Claude for non-PHI operations including content generation and analysis.",
       "file_patterns": [
-        "src/**/claude_client*",
-        "src/**/model_registry*",
-        "src/**/provider*",
-        "src/**/gemini*",
-        "src/**/tool_def*"
+        "src/llm/claude_client.py",
+        "src/llm/claude_tools.py",
+        "src/llm/model_registry.py",
+        "src/gemini/gemini_client.py",
+        "src/gemini/gemini_bridge.mjs",
+        "src/gemini/client_factory.py",
+        "src/gemini/prompts.py"
       ],
       "guru_collection": null,
       "guru_card_id": null,
@@ -110,10 +126,13 @@
       "name": "Platform Core & Settings",
       "description": "Core platform infrastructure including settings management, auto-update system, and UI framework.",
       "file_patterns": [
-        "src/**/settings*",
-        "src/**/auto_update*",
-        "src/**/main_window*",
-        "src/**/app*"
+        "src/data/settings_manager.py",
+        "src/ui/pages/settings_page.py",
+        "src/updater/update_checker.py",
+        "src/updater/updater.py",
+        "src/updater/schema_migrator.py",
+        "src/ui/main_window.py",
+        "main.py"
       ],
       "guru_collection": null,
       "guru_card_id": null,
@@ -125,8 +144,7 @@
       "name": "GitHub Integration",
       "description": "GitHub wiring for issue tracking, deployment coordination, and development workflow integration.",
       "file_patterns": [
-        "src/**/github*",
-        "src/**/gh_*"
+        "scripts/make_release.py"
       ],
       "guru_collection": null,
       "guru_card_id": null,
