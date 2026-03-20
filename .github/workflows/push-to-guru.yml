@@ -1,0 +1,205 @@
+# .github/workflows/push-to-guru.yml
+#
+# Manual workflow: push reviewed guides to Guru.
+# Run this AFTER reviewing the output from either:
+#   - Bootstrap Product Guides (Phase 1)
+#   - Product Guide Assessment (Phase 2)
+#
+# This is your human-in-the-loop gate. Nothing reaches Guru
+# without you explicitly triggering this workflow.
+#
+# SETUP:
+#   1. Add GURU_USER_EMAIL as a repository secret
+#   2. Add GURU_API as a repository secret (user token, not collection token)
+
+name: Push to Guru
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: 'Run ID of the bootstrap or assessment workflow to pull artifacts from'
+        required: true
+      artifact_name:
+        description: 'Artifact name to download'
+        required: false
+        default: 'bootstrap-guides'
+        type: choice
+        options:
+          - bootstrap-guides
+          - claude-assessment
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  GURU_COLLECTION_ID: 'a7390906-48bf-48c3-806a-edddcec431c3'
+
+jobs:
+  push:
+    name: Push to Guru
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download artifacts from source run
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ github.event.inputs.artifact_name }}
+          path: /tmp/guides
+          run-id: ${{ github.event.inputs.source_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: List downloaded files
+        run: |
+          echo "📦 Downloaded artifacts:"
+          ls -la /tmp/guides/
+          echo ""
+
+      - name: Push to Guru
+        env:
+          GURU_USER_EMAIL: ${{ secrets.GURU_USER_EMAIL }}
+          GURU_API_TOKEN: ${{ secrets.GURU_API }}
+        run: |
+          python3 << 'PYEOF'
+          import json, os, glob, base64, requests
+
+          email = os.environ['GURU_USER_EMAIL']
+          token = os.environ['GURU_API_TOKEN']
+          collection_id = os.environ.get('GURU_COLLECTION_ID', '')
+
+          # Guru uses Basic Auth: email:token base64 encoded
+          credentials = base64.b64encode(f"{email}:{token}".encode()).decode()
+          headers = {
+              'Authorization': f'Basic {credentials}',
+              'Content-Type': 'application/json'
+          }
+          GURU_BASE_URL = 'https://api.getguru.com/api/v1'
+
+          # Check which type of artifact we're processing
+          record_files = sorted(glob.glob('/tmp/guides/*_record.json'))
+          assessment_file = '/tmp/guides/assessment.json'
+
+          pushed = 0
+          failed = 0
+
+          if record_files:
+              # Bootstrap guides — each record is a feature guide
+              print(f"📚 Processing {len(record_files)} bootstrap guide(s)\n")
+
+              for record_path in record_files:
+                  with open(record_path) as f:
+                      record = json.load(f)
+
+                  if record.get('status') != 'success':
+                      print(f"⏭️  Skipping {record['feature_name']} (status: {record['status']})")
+                      continue
+
+                  feature_name = record['feature_name']
+                  content = record['guide_content']
+                  card_id = record.get('guru_card_id')
+
+                  # Use collection from manifest if available, else env var
+                  coll_id = record.get('guru_collection') or collection_id
+                  if not coll_id or coll_id == 'your-collection-id-here':
+                      print(f"⚠️  {feature_name}: No collection ID — skipping")
+                      print(f"    Set GURU_COLLECTION_ID in the workflow or in feature-manifest.json")
+                      failed += 1
+                      continue
+
+                  card_data = {
+                      'preferredPhrase': f'{feature_name} — Product Guide',
+                      'content': content,
+                      'collection': {'id': coll_id},
+                  }
+
+                  try:
+                      if card_id:
+                          resp = requests.put(
+                              f'{GURU_BASE_URL}/cards/{card_id}',
+                              headers=headers,
+                              json=card_data
+                          )
+                          action = "Updated"
+                      else:
+                          resp = requests.post(
+                              f'{GURU_BASE_URL}/cards',
+                              headers=headers,
+                              json=card_data
+                          )
+                          action = "Created"
+
+                      if resp.status_code in (200, 201):
+                          new_card = resp.json()
+                          new_id = new_card.get('id', 'unknown')
+                          print(f"✅ {action}: {feature_name}")
+                          print(f"   Card ID: {new_id}")
+                          print(f"   → Add this to feature-manifest.json: \"guru_card_id\": \"{new_id}\"")
+                          pushed += 1
+                      else:
+                          print(f"❌ {feature_name} — HTTP {resp.status_code}: {resp.text[:200]}")
+                          failed += 1
+
+                  except Exception as e:
+                      print(f"❌ {feature_name} — {e}")
+                      failed += 1
+
+          elif os.path.exists(assessment_file):
+              # Diff pipeline assessment — push guide updates
+              print(f"📋 Processing diff assessment\n")
+
+              with open(assessment_file) as f:
+                  assessment = json.load(f)
+
+              for update in assessment.get('guide_updates', []):
+                  title = update['card_title']
+                  content = update['card_content']
+
+                  coll_id = collection_id
+                  if not coll_id or coll_id == 'your-collection-id-here':
+                      print(f"⚠️  {title}: No collection ID — skipping")
+                      failed += 1
+                      continue
+
+                  card_data = {
+                      'preferredPhrase': title,
+                      'content': content,
+                      'collection': {'id': coll_id},
+                  }
+
+                  try:
+                      if update['update_type'] == 'update':
+                          # TODO: Look up card ID by title or from manifest
+                          print(f"⚠️  {title}: Update requested but no card ID — creating new card instead")
+
+                      resp = requests.post(
+                          f'{GURU_BASE_URL}/cards',
+                          headers=headers,
+                          json=card_data
+                      )
+
+                      if resp.status_code in (200, 201):
+                          new_card = resp.json()
+                          print(f"✅ Created: {title} (ID: {new_card.get('id', '?')})")
+                          pushed += 1
+                      else:
+                          print(f"❌ {title} — HTTP {resp.status_code}: {resp.text[:200]}")
+                          failed += 1
+
+                  except Exception as e:
+                      print(f"❌ {title} — {e}")
+                      failed += 1
+          else:
+              print("❌ No recognizable artifacts found. Expected *_record.json or assessment.json")
+              exit(1)
+
+          print(f"\n{'='*40}")
+          print(f"✅ Pushed: {pushed}  ❌ Failed: {failed}")
+          print(f"{'='*40}")
+
+          if failed > 0:
+              exit(1)
+
+          PYEOF

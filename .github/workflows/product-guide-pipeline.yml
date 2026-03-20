@@ -1,0 +1,232 @@
+# .github/workflows/product-guide-pipeline.yml
+#
+# Phase 2: On every qualifying commit to main, analyze the diff with Claude
+# and create a GitHub Issue if product guide updates are needed.
+# After review, manually trigger push-to-guru.yml to publish.
+#
+# SETUP:
+#   1. Add GITHUBANTHROPIC as a repository secret
+#   2. Adjust path filters below to match your repo structure
+
+name: Product Guide Assessment
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      # Adjust these to match Alma Insights' structure
+      - 'src/**'
+      - 'alma_insights/**'
+      - 'lib/**'
+      - '!**/*test*'
+      - '!**/__tests__/**'
+      - '!.github/**'
+
+  workflow_dispatch:
+    inputs:
+      base_ref:
+        description: 'Base ref for diff (e.g., HEAD~1, a commit SHA)'
+        required: false
+        default: 'HEAD~1'
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  MAX_DIFF_LINES: 5000
+  CLAUDE_MODEL: claude-sonnet-4-20250514
+
+jobs:
+  # ──────────────────────────────────────────────
+  # Stage 1: Extract and validate the diff
+  # ──────────────────────────────────────────────
+  extract-diff:
+    name: Extract Commit Diff
+    runs-on: ubuntu-latest
+    outputs:
+      diff_lines: ${{ steps.diff.outputs.diff_lines }}
+      should_skip: ${{ steps.validate.outputs.should_skip }}
+      changed_files_summary: ${{ steps.diff.outputs.changed_files_summary }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate diff
+        id: diff
+        run: |
+          BASE_REF="${{ github.event.inputs.base_ref || 'HEAD~1' }}"
+          git diff "$BASE_REF" HEAD > /tmp/commit_diff.txt
+          DIFF_LINES=$(wc -l < /tmp/commit_diff.txt)
+          echo "diff_lines=$DIFF_LINES" >> "$GITHUB_OUTPUT"
+
+          git diff --stat "$BASE_REF" HEAD > /tmp/changed_files.txt
+          SUMMARY=$(cat /tmp/changed_files.txt)
+          echo "changed_files_summary<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$SUMMARY" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Validate diff size
+        id: validate
+        run: |
+          DIFF_LINES=${{ steps.diff.outputs.diff_lines }}
+          if [ "$DIFF_LINES" -eq 0 ]; then
+            echo "should_skip=true" >> "$GITHUB_OUTPUT"
+          elif [ "$DIFF_LINES" -gt "$MAX_DIFF_LINES" ]; then
+            echo "should_skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload diff artifact
+        if: steps.validate.outputs.should_skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: commit-diff
+          path: /tmp/commit_diff.txt
+          retention-days: 7
+
+  # ──────────────────────────────────────────────
+  # Stage 2: Claude assessment
+  # ──────────────────────────────────────────────
+  claude-assessment:
+    name: Claude Assessment
+    needs: extract-diff
+    if: needs.extract-diff.outputs.should_skip != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download diff artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: commit-diff
+          path: /tmp
+
+      - name: Run Claude assessment
+        id: assess
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.GITHUBANTHROPIC }}
+        run: |
+          DIFF_CONTENT=$(cat /tmp/commit_diff.txt)
+
+          # Truncate if too large
+          MAX_CHARS=600000
+          if [ ${#DIFF_CONTENT} -gt $MAX_CHARS ]; then
+            DIFF_CONTENT="${DIFF_CONTENT:0:$MAX_CHARS}
+
+          [TRUNCATED]"
+          fi
+
+          python3 << 'EOF'
+          import json, os, requests
+
+          diff_content = open('/tmp/commit_diff.txt').read()[:600000]
+          changed_files = """${{ needs.extract-diff.outputs.changed_files_summary }}"""
+
+          payload = {
+              "model": "${{ env.CLAUDE_MODEL }}",
+              "max_tokens": 4096,
+              "system": "You are a product documentation analyst for Alma Insights, a PySide6 desktop analytics platform for CX operations intelligence. Analyze code diffs and determine:\n\n1. WHETHER changes have user-facing or product-behavior implications.\n2. If yes, WHAT changed from a product perspective.\n3. A DRAFT of product guide content to create or update.\n\nRespond in JSON:\n{\n  \"has_product_changes\": boolean,\n  \"confidence\": \"high\" | \"medium\" | \"low\",\n  \"summary\": \"One-paragraph product-perspective summary\",\n  \"affected_features\": [\"list of feature areas\"],\n  \"guide_updates\": [\n    {\n      \"card_title\": \"Guru card title\",\n      \"card_content\": \"Full markdown content\",\n      \"update_type\": \"new\" | \"update\",\n      \"priority\": \"high\" | \"medium\" | \"low\"\n    }\n  ],\n  \"review_notes\": \"Caveats for the human reviewer\"\n}\n\nIf changes are purely technical with no user-facing impact, set has_product_changes to false.",
+              "messages": [
+                  {
+                      "role": "user",
+                      "content": f"Analyze this commit diff for product guide updates.\n\nChanged files:\n{changed_files}\n\nDiff:\n{diff_content}"
+                  }
+              ]
+          }
+
+          resp = requests.post(
+              "https://api.anthropic.com/v1/messages",
+              headers={
+                  "Content-Type": "application/json",
+                  "x-api-key": os.environ["ANTHROPIC_API_KEY"],
+                  "anthropic-version": "2023-06-01",
+              },
+              json=payload,
+              timeout=120
+          )
+
+          if resp.status_code != 200:
+              print(f"API error {resp.status_code}: {resp.text}")
+              exit(1)
+
+          text = ""
+          for block in resp.json().get("content", []):
+              if block.get("type") == "text":
+                  text += block["text"]
+
+          # Parse JSON from Claude
+          cleaned = text.strip().removeprefix("```json").removesuffix("```").strip()
+          assessment = json.loads(cleaned)
+
+          with open('/tmp/assessment.json', 'w') as f:
+              json.dump(assessment, f, indent=2)
+
+          # Write outputs
+          has_changes = assessment.get("has_product_changes", False)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"has_product_changes={'true' if has_changes else 'false'}\n")
+
+          print(json.dumps(assessment, indent=2))
+
+          EOF
+
+      - name: Upload assessment artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-assessment
+          path: /tmp/assessment.json
+          retention-days: 30
+
+      # ──────────────────────────────────────────
+      # Create a GitHub Issue if product changes detected
+      # ──────────────────────────────────────────
+      - name: Create review issue
+        if: steps.assess.outputs.has_product_changes == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 << 'PYEOF'
+          import json
+
+          with open('/tmp/assessment.json') as f:
+              a = json.load(f)
+
+          body = []
+          body.append("## 📋 Product Guide Update Needed\n")
+          body.append(f"**Trigger**: Commit to main")
+          body.append(f"**Confidence**: {a.get('confidence', '?')}")
+          body.append(f"**Run**: [Workflow Run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})\n")
+          body.append(f"### Summary\n{a.get('summary', 'N/A')}\n")
+          body.append(f"**Affected features**: {', '.join(a.get('affected_features', []))}\n")
+
+          if a.get('review_notes'):
+              body.append(f"> ⚠️ **Review notes**: {a['review_notes']}\n")
+
+          for i, update in enumerate(a.get('guide_updates', []), 1):
+              body.append(f"### Guide {i}: {update.get('card_title', 'Untitled')}")
+              body.append(f"**Type**: {update.get('update_type', '?')} | **Priority**: {update.get('priority', '?')}\n")
+              content = update.get('card_content', '')
+              if len(content) > 3000:
+                  content = content[:3000] + "\n\n*[Truncated — see artifacts]*"
+              body.append(f"<details>\n<summary>Click to expand</summary>\n\n{content}\n\n</details>\n")
+
+          body.append("---\n")
+          body.append("### ✅ To publish: Run **Push to Guru** workflow with this run's ID")
+          body.append(f"Run ID: `${{ github.run_id }}`")
+
+          with open('/tmp/issue_body.md', 'w') as f:
+              f.write("\n".join(body))
+
+          PYEOF
+
+          gh issue create \
+            --title "📋 Guide Update — $(date +%Y-%m-%d) — $(git log -1 --pretty=%s | head -c 60)" \
+            --body-file /tmp/issue_body.md \
+            --label "documentation"
+
+      - name: No product changes
+        if: steps.assess.outputs.has_product_changes != 'true'
+        run: echo "✅ No product-facing changes detected. No action needed."

@@ -1,0 +1,137 @@
+# .github/workflows/bootstrap-product-guides.yml
+#
+# Phase 1: Generate product guides from the full codebase.
+# Creates a GitHub Issue with the generated guides for review.
+# After review, manually trigger push-to-guru.yml to publish.
+#
+# SETUP:
+#   1. Add GITHUBANTHROPIC as a repository secret
+#   2. Place feature-manifest.json in your repo root
+
+name: Bootstrap Product Guides
+
+on:
+  workflow_dispatch:
+    inputs:
+      features:
+        description: 'Comma-separated feature IDs to process (blank = all)'
+        required: false
+        default: ''
+      model:
+        description: 'Claude model to use'
+        required: false
+        default: 'claude-sonnet-4-20250514'
+        type: choice
+        options:
+          - claude-sonnet-4-20250514
+          - claude-opus-4-5-20250220
+      dry_run:
+        description: 'Dry run — generate prompts only, no API calls'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  generate-guides:
+    name: Generate Product Guides
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run bootstrap generator
+        id: bootstrap
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.GITHUBANTHROPIC }}
+        run: |
+          CMD="python .github/scripts/bootstrap_guides.py"
+          CMD="$CMD --manifest feature-manifest.json"
+          CMD="$CMD --repo-root ."
+          CMD="$CMD --output /tmp/guides"
+          CMD="$CMD --model ${{ github.event.inputs.model }}"
+
+          FEATURES="${{ github.event.inputs.features }}"
+          if [ -n "$FEATURES" ]; then
+            FEATURE_ARGS=$(echo "$FEATURES" | tr ',' ' ')
+            CMD="$CMD --features $FEATURE_ARGS"
+          fi
+
+          if [ "${{ github.event.inputs.dry_run }}" == "true" ]; then
+            CMD="$CMD --dry-run"
+          fi
+
+          echo "Running: $CMD"
+          $CMD
+
+      - name: Upload generated guides
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootstrap-guides
+          path: /tmp/guides/
+          retention-days: 30
+
+      - name: Create review issue
+        if: github.event.inputs.dry_run != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 << 'PYEOF'
+          import json, os, glob
+
+          body = []
+          body.append("## 📚 Bootstrap Product Guides — Ready for Review\n")
+          body.append(f"**Model**: `${{ github.event.inputs.model }}`")
+          body.append(f"**Run**: [Workflow Run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})")
+          body.append(f"**Artifacts**: Download full guides from the workflow run link above.\n")
+          body.append("---\n")
+
+          summary_path = '/tmp/guides/bootstrap_summary.json'
+          if os.path.exists(summary_path):
+              with open(summary_path) as f:
+                  summary = json.load(f)
+
+              body.append("### Results\n")
+              body.append("| Feature | Status | Files |")
+              body.append("|---------|--------|-------|")
+              for r in summary.get('results', []):
+                  icon = {"success": "✅", "dry_run": "🔍", "error": "❌", "no_files": "⚠️"}.get(r['status'], "?")
+                  files = r.get('files_found', '-')
+                  body.append(f"| {r['feature_name']} | {icon} {r['status']} | {files} |")
+              body.append("\n---\n")
+
+          for guide_path in sorted(glob.glob('/tmp/guides/*_guide.md')):
+              feature_id = os.path.basename(guide_path).replace('_guide.md', '')
+              with open(guide_path) as f:
+                  content = f.read()
+
+              preview = content[:3000] + "\n\n*[Truncated — see artifacts]*" if len(content) > 3000 else content
+              body.append(f"### 📄 {feature_id}\n")
+              body.append(f"<details>\n<summary>Click to expand</summary>\n\n{preview}\n\n</details>\n")
+
+          body.append("---\n")
+          body.append("### ✅ Next Steps\n")
+          body.append("1. Review the guides above (expand each section)")
+          body.append("2. Download full content from [workflow artifacts](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})")
+          body.append("3. Run **Push to Guru** workflow and enter this issue's run ID")
+          body.append("4. Close this issue once published\n")
+
+          with open('/tmp/issue_body.md', 'w') as f:
+              f.write("\n".join(body))
+          PYEOF
+
+          gh issue create \
+            --title "📚 Product Guide Review — $(date +%Y-%m-%d)" \
+            --body-file /tmp/issue_body.md \
+            --label "documentation"

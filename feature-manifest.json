@@ -1,0 +1,146 @@
+{
+  "_comment": "Maps feature areas to file patterns and metadata. The bootstrap workflow uses this to chunk the codebase into Claude-sized bites and generate per-feature product guides.",
+  "_instructions": "Update glob patterns to match your actual directory structure. Each feature area gets its own Claude call and its own Guru card.",
+
+  "features": [
+    {
+      "id": "scanner",
+      "name": "Scanner & Ticket Analysis",
+      "description": "The core scanning engine that processes Zendesk tickets through multi-phase LLM pipelines for classification and NLP analysis.",
+      "file_patterns": [
+        "src/**/scanner/**",
+        "src/**/scan_ledger*",
+        "src/**/ticket_classif*"
+      ],
+      "guru_collection": null,
+      "guru_card_id": null,
+      "audience": "CX Operations analysts and managers",
+      "guide_focus": "What the scanner does, how scans are triggered, what outputs it produces, how to interpret scan results"
+    },
+    {
+      "id": "voc_pipeline",
+      "name": "Voice of Customer (VOC) Pipeline",
+      "description": "Multi-agent analysis pipeline that produces confirmed findings with confidence tiering from ticket data.",
+      "file_patterns": [
+        "src/**/voc/**",
+        "src/**/voc_*",
+        "src/**/root_cause*"
+      ],
+      "guru_collection": null,
+      "guru_card_id": null,
+      "audience": "CX Operations leads reviewing VOC reports",
+      "guide_focus": "How VOC analysis works, what a VOC report contains, confidence tiers, how to action findings"
+    },
+    {
+      "id": "watchlist",
+      "name": "EWMA Watchlist Engine",
+      "description": "Exponentially weighted moving average engine that monitors ticket volume trends and surfaces alerts for anomalous patterns.",
+      "file_patterns": [
+        "src/**/watchlist/**",
+        "src/**/ewma*",
+        "src/**/alert*"
+      ],
+      "guru_collection": null,
+      "guru_card_id": null,
+      "audience": "CX Operations analysts monitoring real-time trends",
+      "guide_focus": "What the watchlist tracks, how EWMA thresholds work, how alerts surface, how to configure sensitivity"
+    },
+    {
+      "id": "guru_integration",
+      "name": "Guru Knowledge Base Integration",
+      "description": "Integration layer for analyzing, generating, and managing Guru KB cards including card graph building and content generation.",
+      "file_patterns": [
+        "src/**/guru/**",
+        "src/**/guru_*",
+        "src/**/card_graph*",
+        "src/**/kb_*"
+      ],
+      "guru_collection": null,
+      "guru_card_id": null,
+      "audience": "Enablement and CX Operations teams managing knowledge bases",
+      "guide_focus": "How Guru analysis works, card graph visualization, content generation workflow, KB health metrics"
+    },
+    {
+      "id": "source_monitor",
+      "name": "Zendesk Source Monitor",
+      "description": "Monitors Zendesk data sources for availability, freshness, and schema changes.",
+      "file_patterns": [
+        "src/**/source_monitor*",
+        "src/**/zendesk_source*",
+        "src/**/source_abstraction*"
+      ],
+      "guru_collection": null,
+      "guru_card_id": null,
+      "audience": "CX Operations analysts and platform administrators",
+      "guide_focus": "What sources are monitored, how freshness is tracked, what alerts indicate, troubleshooting stale data"
+    },
+    {
+      "id": "data_warehouse",
+      "name": "Data Warehouse & Storage",
+      "description": "Local data warehouse layer handling ticket data persistence, caching, and query interfaces.",
+      "file_patterns": [
+        "src/**/warehouse/**",
+        "src/**/data_warehouse*",
+        "src/**/db_*",
+        "src/**/storage*"
+      ],
+      "guru_collection": null,
+      "guru_card_id": null,
+      "audience": "Platform administrators and power users",
+      "guide_focus": "Data retention, storage architecture, how to query historical data, cache management"
+    },
+    {
+      "id": "ai_architecture",
+      "name": "Dual-Provider AI Architecture",
+      "description": "Task-routed architecture using Gemini for PHI-certified NLP and Claude for non-PHI operations including content generation and analysis.",
+      "file_patterns": [
+        "src/**/claude_client*",
+        "src/**/model_registry*",
+        "src/**/provider*",
+        "src/**/gemini*",
+        "src/**/tool_def*"
+      ],
+      "guru_collection": null,
+      "guru_card_id": null,
+      "audience": "Technical stakeholders and compliance reviewers",
+      "guide_focus": "Which AI handles what, PHI routing logic, model selection, how tool definitions work"
+    },
+    {
+      "id": "platform_core",
+      "name": "Platform Core & Settings",
+      "description": "Core platform infrastructure including settings management, auto-update system, and UI framework.",
+      "file_patterns": [
+        "src/**/settings*",
+        "src/**/auto_update*",
+        "src/**/main_window*",
+        "src/**/app*"
+      ],
+      "guru_collection": null,
+      "guru_card_id": null,
+      "audience": "All Alma Insights users",
+      "guide_focus": "Getting started, configuration, updates, general navigation"
+    },
+    {
+      "id": "github_integration",
+      "name": "GitHub Integration",
+      "description": "GitHub wiring for issue tracking, deployment coordination, and development workflow integration.",
+      "file_patterns": [
+        "src/**/github*",
+        "src/**/gh_*"
+      ],
+      "guru_collection": null,
+      "guru_card_id": null,
+      "audience": "Development and operations stakeholders",
+      "guide_focus": "What GitHub integration provides, how issues flow, deployment coordination"
+    }
+  ],
+
+  "global_context": {
+    "product_name": "Alma Insights",
+    "product_type": "PySide6 desktop analytics platform for CX operations intelligence",
+    "primary_data_source": "Zendesk ticket data",
+    "tech_stack": "Python, PySide6, SQLite/local warehouse",
+    "deployment": "Desktop application with auto-update",
+    "primary_users": "CX Operations analysts, managers, and enablement teams at Alma"
+  }
+}
