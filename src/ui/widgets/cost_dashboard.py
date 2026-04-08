@@ -13,7 +13,7 @@ from datetime import datetime
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame,
-    QDoubleSpinBox, QComboBox, QProgressBar, QScrollArea,
+    QDoubleSpinBox, QSpinBox, QComboBox, QProgressBar, QScrollArea,
 )
 from PySide6.QtCore import Qt, Signal
 
@@ -76,6 +76,10 @@ class CostDashboard(QWidget):
 
         # ── Plan Reference ──
         self._build_plan_reference(layout)
+        layout.addSpacing(16)
+
+        # ── Worker Config ──
+        self._build_worker_config(layout)
 
         layout.addStretch()
         scroll.setWidget(content)
@@ -240,6 +244,71 @@ class CostDashboard(QWidget):
 
         section.add_widget(container)
         parent_layout.addWidget(section)
+
+    def _build_worker_config(self, parent_layout):
+        """Build NLP scan worker count selector."""
+        from src.data.settings_manager import get_section, update_section
+
+        section = CollapsibleSection(
+            "NLP Scan Workers", initially_collapsed=True,
+            section_key="cost.worker_config"
+        )
+        container = QWidget()
+        cl = QVBoxLayout(container)
+        cl.setContentsMargins(0, 4, 0, 0)
+        cl.setSpacing(8)
+
+        # Worker count selector row
+        worker_row = QHBoxLayout()
+        worker_lbl = QLabel("Workers:")
+        worker_lbl.setStyleSheet(
+            f"font-size: 12px; color: {ALMA_TEXT_DARK}; border: none;"
+        )
+        worker_row.addWidget(worker_lbl)
+
+        # Load current value from settings
+        current = 8
+        try:
+            current = get_section("nlp_scan", {}).get("parallel_workers", 8)
+        except Exception:
+            pass
+
+        self._worker_spin = QSpinBox()
+        self._worker_spin.setRange(1, 32)
+        self._worker_spin.setValue(current)
+        self._worker_spin.setStyleSheet(f"""
+            QSpinBox {{
+                font-size: 12px; padding: 4px 12px;
+                border: 1px solid {ALMA_BORDER};
+                border-radius: 4px; background: {ALMA_WHITE};
+                min-width: 80px;
+            }}
+        """)
+        self._worker_spin.valueChanged.connect(self._on_worker_count_changed)
+        worker_row.addWidget(self._worker_spin)
+        worker_row.addStretch()
+        cl.addLayout(worker_row)
+
+        detail = QLabel(
+            "Parallel Gemini workers for NLP classification scans. "
+            "Higher values increase throughput but use more API concurrency."
+        )
+        detail.setStyleSheet(
+            f"font-size: 11px; color: {ALMA_TEXT_MID}; border: none; padding: 8px;"
+        )
+        detail.setWordWrap(True)
+        cl.addWidget(detail)
+
+        section.add_widget(container)
+        parent_layout.addWidget(section)
+
+    def _on_worker_count_changed(self, value):
+        """Persist worker count to settings."""
+        from src.data.settings_manager import update_section
+        try:
+            update_section("nlp_scan", {"parallel_workers": value})
+        except Exception as e:
+            logger.warning("Failed to save worker count: %s", e)
 
     # ── Refresh ──
 
@@ -438,7 +507,7 @@ class CostDashboard(QWidget):
         frame.setStyleSheet(f"""
             QFrame {{
                 background: {ALMA_BG_ELEVATED};
-                border: 1px solid rgba(214, 210, 202, 0.45);
+                border: none;
                 border-radius: 8px;
             }}
         """)
@@ -465,7 +534,7 @@ class CostDashboard(QWidget):
         progress.setTextVisible(False)
         progress.setStyleSheet(f"""
             QProgressBar {{
-                border: 1px solid {ALMA_BORDER_LIGHT};
+                border: none;
                 border-radius: 4px;
                 background: {ALMA_CREAM};
             }}
@@ -491,7 +560,7 @@ class CostDashboard(QWidget):
         frame.setStyleSheet(f"""
             QFrame {{
                 background: {ALMA_BG_ELEVATED};
-                border: 1px solid rgba(214, 210, 202, 0.45);
+                border: none;
                 border-radius: 12px;
             }}
         """)
