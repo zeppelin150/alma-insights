@@ -17,11 +17,14 @@ Design philosophy: The supervisor is a "deterministic control plane"
 simple threshold comparison that completes in microseconds.
 """
 
+from __future__ import annotations
+
 import logging
-import sqlite3
 import threading
 import time
 from datetime import datetime
+
+from src.data.connection_factory import get_connection
 
 logger = logging.getLogger("alma.supervisor")
 
@@ -72,14 +75,17 @@ class Supervisor:
         self._restarts = 0
         self._errors = []
 
+        # F6: Tail-batch cutoff tracking
+        self._batch_durations: list[float] = []
+        self._last_completion_time = time.time()
+
         # DB connection (lazy)
         self._conn = None
 
     @property
     def conn(self):
         if self._conn is None:
-            self._conn = sqlite3.connect(self.db_path)
-            self._conn.row_factory = sqlite3.Row
+            self._conn = get_connection(self.db_path)
         return self._conn
 
     def set_scan(self, scan_id, total_batches, total_tickets):
@@ -93,6 +99,8 @@ class Supervisor:
         self._total_tokens_out = 0
         self._restarts = 0
         self._errors = []
+        self._batch_durations = []
+        self._last_completion_time = time.time()
 
     def run(self):
         """
@@ -123,6 +131,16 @@ class Supervisor:
                 self._update_scan_progress()
                 break
 
+            # F6: Tail stall cutoff — if 95%+ done and remaining stalled
+            if self.should_cutoff():
+                remaining = self._total_batches - self._completed_batches
+                logger.warning(
+                    f"Supervisor: tail cutoff — {remaining} batch(es) "
+                    f"stalled past 3x median, proceeding to post-scan"
+                )
+                self._update_scan_progress()
+                break
+
             self._stop_event.wait(timeout=self.POLL_INTERVAL)
 
         # Close DB
@@ -147,6 +165,12 @@ class Supervisor:
             self._classified_tickets += result.get("classified", 0)
             self._total_tokens_in += result.get("input_tokens", 0)
             self._total_tokens_out += result.get("output_tokens", 0)
+
+            # F6: Track batch durations for tail cutoff
+            elapsed = result.get("elapsed_seconds", 0.0)
+            if elapsed > 0:
+                self._batch_durations.append(elapsed)
+            self._last_completion_time = time.time()
 
             if result.get("error"):
                 self._errors.append(
@@ -329,6 +353,37 @@ class Supervisor:
         remaining = self._total_batches - self._completed_batches
         estimate = self.rate_governor.estimate_completion(remaining)
 
+        # ── 5.4b: Query actual DB count instead of in-memory accumulator ──
+        # The in-memory _classified_tickets only accumulates from
+        # notify_batch_complete() calls. When a batch streams classifications
+        # via tool_call before its bridge fails, those rows exist in DB but
+        # the retry reports only its own new classifications. The in-memory
+        # counter falls behind. Querying the DB gives the true count.
+        # ── NDJSON pivot fix: dedup-skipped batches report classified > 0
+        # but don't insert rows under the current scan_id. Use max of DB
+        # count and in-memory accumulator to handle both scenarios.
+        classified_count = self._classified_tickets  # fallback
+        in_flight_batches = 0
+        try:
+            row = self.conn.execute(
+                "SELECT COUNT(*) AS n FROM nlp_ticket_classifications"
+                " WHERE scan_id = ?",
+                (self.scan_id,),
+            ).fetchone()
+            if row:
+                classified_count = max(row["n"], self._classified_tickets)
+            # In-flight batches (MCP tools persist immediately, so DB is
+            # the authoritative source for real-time progress)
+            row2 = self.conn.execute(
+                "SELECT COUNT(*) AS n FROM nlp_batches"
+                " WHERE scan_id = ? AND status = 'running'",
+                (self.scan_id,),
+            ).fetchone()
+            if row2:
+                in_flight_batches = row2["n"]
+        except Exception as e:
+            logger.debug(f"Supervisor: DB progress query failed: {e}")
+
         try:
             self.conn.execute("""
                 INSERT INTO scan_progress
@@ -349,7 +404,7 @@ class Supervisor:
                     tokens_out = excluded.tokens_out
             """, (
                 self.scan_id,
-                self._classified_tickets,
+                classified_count,
                 self._total_tickets,
                 sum(w.tools_called for w in self.workers),
                 self._completed_batches,
@@ -366,6 +421,30 @@ class Supervisor:
     # ──────────────────────────────────────────────────────────────────────
     # Status
     # ──────────────────────────────────────────────────────────────────────
+
+    def should_cutoff(self) -> bool:
+        """F6: Check if remaining batches should be abandoned (tail stall).
+
+        Returns True when 95%+ batches are done and no new completion
+        has arrived within 3x the median batch duration (min 120s).
+        """
+        with self._lock:
+            if self._total_batches == 0:
+                return False
+
+            completion_pct = self._completed_batches / self._total_batches
+            if completion_pct < 0.95:
+                return False
+
+            if len(self._batch_durations) < 3:
+                return False
+
+            durations = sorted(self._batch_durations)
+            median = durations[len(durations) // 2]
+            cutoff_threshold = max(median * 3.0, 120.0)  # at least 2 min
+
+            time_since_last = time.time() - self._last_completion_time
+            return time_since_last > cutoff_threshold
 
     def _all_complete(self):
         """Check if all batches have been processed."""

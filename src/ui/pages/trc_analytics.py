@@ -11,6 +11,7 @@ Refactored to use AnalysisPageBase building blocks with 5 tabs:
 """
 
 import logging
+from src.data.connection_factory import get_connection
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QPushButton,
@@ -20,6 +21,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QDate, QThread, Signal, QTimer
 from PySide6.QtGui import QColor
 
+from src.data.settings_manager import load_settings, save_settings, get_section
 from src.ui.theme import (
     ALMA_GREEN_DARK, ALMA_GREEN_MID, ALMA_GREEN_SUBTLE,
     ALMA_WHITE, ALMA_CREAM,
@@ -62,9 +64,7 @@ class AnalyticsWorker(QThread):
 
     def run(self):
         try:
-            import sqlite3
-            conn = sqlite3.connect(str(self.db_path))
-            conn.row_factory = sqlite3.Row
+            conn = get_connection(self.db_path)
 
             from src.data.trc_analytics import compute_trc_analytics
             result = compute_trc_analytics(
@@ -131,7 +131,8 @@ class TRCAnalyticsPage(AnalysisPageBase):
 
     def set_drilldown_panel(self, panel):
         super().set_drilldown_panel(panel)
-        self._reports_tab.set_drilldown_panel(panel)
+        self._reports_tab.set_drilldown_panel(
+            panel, detail_callback=self._render_report_detail_html)
 
     # ═══════════════════════════════════════════
     #  FILTER BAR SETUP
@@ -1025,7 +1026,7 @@ class TRCAnalyticsPage(AnalysisPageBase):
         f = QFrame()
         f.setStyleSheet(f"""
             QFrame {{
-                background: {ALMA_BG_ELEVATED}; border: 1px solid rgba(214, 210, 202, 0.45);
+                background: {ALMA_BG_ELEVATED}; border: none;
                 border-radius: 12px;
             }}
         """)
@@ -1038,7 +1039,7 @@ class TRCAnalyticsPage(AnalysisPageBase):
         card.setStyleSheet("""
             QFrame {
                 background: rgba(20, 87, 63, 0.04);
-                border: 1px solid rgba(20, 87, 63, 0.15);
+                border: none;
                 border-radius: 10px;
             }
         """)
@@ -1152,19 +1153,17 @@ class TRCAnalyticsPage(AnalysisPageBase):
         self._scan_model_combo.setStyleSheet(FIELD)
         _models = [
             ("gemini-2.5-flash", "Gemini 2.5 Flash (recommended)"),
-            ("gemini-2.5-flash-lite", "Gemini 2.5 Flash Lite (faster)"),
             ("gemini-2.5-pro", "Gemini 2.5 Pro (highest quality)"),
-            ("gemini-2.0-flash", "Gemini 2.0 Flash (legacy)"),
+            ("gemini-3-flash-preview", "Gemini 3 Flash (preview)"),
+            ("gemini-3.1-pro-preview", "Gemini 3.1 Pro (preview)"),
+            ("gemini-2.5-flash-lite", "Gemini 2.5 Flash Lite (budget)"),
         ]
         for model_id, model_label in _models:
             self._scan_model_combo.addItem(model_label, model_id)
         # Read current model from settings
         _current_model = "gemini-2.5-flash"
         try:
-            import yaml
-            with open("config/settings.yaml") as f:
-                _cfg = yaml.safe_load(f) or {}
-            _current_model = _cfg.get("gemini", {}).get("model", "gemini-2.5-flash")
+            _current_model = get_section("gemini", {}).get("model", "gemini-2.5-flash")
         except Exception:
             pass
         for i in range(self._scan_model_combo.count()):
@@ -1181,7 +1180,7 @@ class TRCAnalyticsPage(AnalysisPageBase):
         budget_callout = QFrame()
         budget_callout.setStyleSheet(f"""
             QFrame {{
-                background: {ALMA_GREEN_SUBTLE}; border: 1px solid {ALMA_BORDER_LIGHT};
+                background: {ALMA_GREEN_SUBTLE}; border: none;
                 border-radius: 8px;
             }}
         """)
@@ -1192,10 +1191,7 @@ class TRCAnalyticsPage(AnalysisPageBase):
         # Read budget cap from settings
         self._scan_budget_cap_value = 50.0
         try:
-            import yaml
-            with open("config/settings.yaml") as f:
-                _cfg = yaml.safe_load(f) or {}
-            self._scan_budget_cap_value = _cfg.get("nlp_scan", {}).get("budget_cap", 50.0)
+            self._scan_budget_cap_value = get_section("nlp_scan", {}).get("budget_cap", 50.0)
         except Exception:
             pass
 
@@ -1221,7 +1217,7 @@ class TRCAnalyticsPage(AnalysisPageBase):
         est_frame = QFrame()
         est_frame.setStyleSheet(f"""
             QFrame {{
-                background: {ALMA_CREAM}; border: 1px solid {ALMA_BORDER_LIGHT};
+                background: {ALMA_CREAM}; border: none;
                 border-radius: 8px;
             }}
         """)
@@ -1336,6 +1332,22 @@ class TRCAnalyticsPage(AnalysisPageBase):
         self._scan_retry_btn.setVisible(False)
         btn_layout.addWidget(self._scan_retry_btn)
 
+        # View Analyst Reports (visible after completed scan with reports)
+        self._view_analyst_reports_btn = QPushButton("View Analyst Reports")
+        self._view_analyst_reports_btn.setCursor(Qt.PointingHandCursor)
+        self._view_analyst_reports_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {ALMA_GREEN_DARK};
+                border: 1px solid {ALMA_GREEN_DARK}; border-radius: 8px;
+                padding: 10px 20px; font-weight: 600; font-size: 13px;
+            }}
+            QPushButton:hover {{ background: rgba(20, 87, 63, 0.06); }}
+            QPushButton:disabled {{ color: {ALMA_TEXT_LIGHT}; border-color: {ALMA_BORDER}; }}
+        """)
+        self._view_analyst_reports_btn.clicked.connect(self._open_analyst_reports)
+        self._view_analyst_reports_btn.setVisible(False)
+        btn_layout.addWidget(self._view_analyst_reports_btn)
+
         btn_layout.addStretch()
         return container
 
@@ -1366,7 +1378,7 @@ class TRCAnalyticsPage(AnalysisPageBase):
         self._scan_history_table.setMaximumHeight(250)
         self._scan_history_table.setStyleSheet(f"""
             QTableWidget {{
-                background: {ALMA_WHITE}; border: 1px solid {ALMA_BORDER_LIGHT};
+                background: {ALMA_WHITE}; border: none;
                 border-radius: 8px; font-size: 11px; color: {ALMA_TEXT_DARK};
             }}
             QHeaderView::section {{
@@ -1511,14 +1523,11 @@ class TRCAnalyticsPage(AnalysisPageBase):
 
             # Read budget cap + workers from settings (not UI controls)
             _budget = self._scan_budget_cap_value
-            _workers = 3
+            _workers = 8
             try:
-                import yaml
-                with open("config/settings.yaml") as f:
-                    _s = yaml.safe_load(f) or {}
-                _nlp = _s.get("nlp_scan", {})
+                _nlp = get_section("nlp_scan", {})
                 _budget = _nlp.get("budget_cap", 50.0)
-                _workers = _nlp.get("parallel_workers", 3)
+                _workers = _nlp.get("parallel_workers", 8)
             except Exception:
                 pass
 
@@ -1579,10 +1588,7 @@ class TRCAnalyticsPage(AnalysisPageBase):
         try:
             _budget = self._scan_budget_cap_value
             try:
-                import yaml
-                with open("config/settings.yaml") as f:
-                    _s = yaml.safe_load(f) or {}
-                _budget = _s.get("nlp_scan", {}).get("budget_cap", 50.0)
+                _budget = get_section("nlp_scan", {}).get("budget_cap", 50.0)
             except Exception:
                 pass
             self._scan_mgr.resume_scan(
@@ -1695,7 +1701,8 @@ class TRCAnalyticsPage(AnalysisPageBase):
 
             if scan_status in terminal:
                 self._stop_scan_polling()
-                self._scan_monitor.stop_monitoring()
+                is_success = scan_status in ("completed", "completed_with_errors")
+                self._scan_monitor.stop_monitoring(completed=is_success)
                 self._active_scan_id = None
                 self.scan_active_changed.emit(False)
                 self._reset_scan_ui()
@@ -1764,12 +1771,30 @@ class TRCAnalyticsPage(AnalysisPageBase):
             logger.error(f"Poll failed: {e}")
 
     def _run_post_scan_analysis(self):
-        """Run meta-analysis after scan completes, then refresh tabs."""
+        """Run meta-analysis after scan completes, then refresh tabs.
+
+        Guarded against re-entry: if already running or already completed
+        for this scan, skip.
+        """
+        if getattr(self, '_meta_analysis_running', False):
+            return
         try:
             scan = self.db.get_latest_completed_scan()
             if not scan:
                 return
 
+            # Check if meta-analysis already ran for this scan
+            existing = self.db.conn.execute(
+                "SELECT COUNT(*) FROM nlp_findings WHERE scan_id = ?",
+                (scan["scan_id"],)
+            ).fetchone()[0]
+            if existing > 0:
+                self._refresh_scanner_tab()
+                if hasattr(self, '_taxonomy'):
+                    self._taxonomy.refresh()
+                return
+
+            self._meta_analysis_running = True
             from src.data.nlp_meta_analyzer import NLPMetaAnalyzer
             analyzer = NLPMetaAnalyzer(self.db)
             analyzer.run_analysis(scan["scan_id"])
@@ -1782,18 +1807,97 @@ class TRCAnalyticsPage(AnalysisPageBase):
         except Exception as e:
             logger.error(f"Post-scan analysis failed: {e}")
             self._scan_est_label.setText(f"Meta-analysis failed: {e}")
+        finally:
+            self._meta_analysis_running = False
 
     def _on_nlp_scan_completed(self):
         """Handle scan_completed signal from ScanMonitorWidget."""
         self._stop_scan_polling()
-        self._scan_monitor.stop_monitoring()
+        self._scan_monitor.stop_monitoring(completed=True)
         self._active_scan_id = None
         self.scan_active_changed.emit(False)
         self._reset_scan_ui()
 
         self._refresh_scanner_tab()
+        self._show_analyst_reports_button()
         if hasattr(self, '_taxonomy'):
             self._taxonomy.refresh()
+
+    # ═══════════════════════════════════════════
+    #  NLP SCANNER — ANALYST REPORTS
+    # ═══════════════════════════════════════════
+
+    def _show_analyst_reports_button(self):
+        """Show 'View Analyst Reports' button if the latest scan has reports."""
+        try:
+            scan = self.db.get_latest_completed_scan()
+            if scan:
+                reports = self.db.get_analyst_reports(scan["scan_id"])
+                self._view_analyst_reports_btn.setVisible(len(reports) > 0)
+            else:
+                self._view_analyst_reports_btn.setVisible(False)
+        except Exception:
+            self._view_analyst_reports_btn.setVisible(False)
+
+    def _open_analyst_reports(self):
+        """Open the DrilldownPanel with a unified analyst report for the latest scan."""
+        if not self._drilldown:
+            return
+
+        try:
+            scan = self.db.get_latest_completed_scan()
+            if not scan:
+                return
+            raw_reports = self.db.get_analyst_reports(scan["scan_id"])
+            if not raw_reports:
+                return
+
+            # Format all reports into a single cohesive markdown document
+            from src.data.analyst_report_formatter import format_analyst_reports_as_markdown
+            from src.ui.widgets.markdown_viewer import MarkdownViewer
+            md = format_analyst_reports_as_markdown(raw_reports)
+            if not md:
+                return
+
+            # Build a MarkdownViewer widget for the unified report
+            if not hasattr(self, "_analyst_report_viewer"):
+                self._analyst_report_viewer = MarkdownViewer()
+            self._analyst_report_viewer.set_markdown(md)
+
+            self._drilldown.show_widget(
+                "Analyst Reports",
+                f"Scan {scan['scan_id'][:8]}",
+                self._analyst_report_viewer,
+            )
+        except Exception as e:
+            logger.error(f"Failed to open analyst reports: {e}")
+
+    def _render_analyst_report_html(self, report_id):
+        """Render an analyst report as styled HTML for DrilldownPanel Level 2.
+
+        Uses the shared analyst_report_formatter → md_to_html pipeline
+        for consistent Alma-branded styling across all report views.
+        """
+        try:
+            row = self.db.conn.execute(
+                "SELECT * FROM analyst_reports WHERE report_id = ?",
+                (report_id,)
+            ).fetchone()
+            if not row:
+                return "<p>Report not found.</p>"
+        except Exception:
+            return "<p>Error loading report.</p>"
+
+        try:
+            from src.data.analyst_report_formatter import format_analyst_reports_as_markdown
+            from src.ui.widgets.markdown_viewer import md_to_html
+            md = format_analyst_reports_as_markdown([dict(row)])
+            return md_to_html(md) if md else "<p>No content.</p>"
+        except Exception:
+            # Fallback: return raw content as plain text
+            content = dict(row).get("content", "")
+            import html as html_mod
+            return f"<p>{html_mod.escape(content)}</p>"
 
     # ═══════════════════════════════════════════
     #  NLP SCANNER — DATA / REFRESH
@@ -1810,10 +1914,10 @@ class TRCAnalyticsPage(AnalysisPageBase):
             ticket_count = self.db.get_ticket_count_in_range(ds, de)
             batches = max(1, (ticket_count + 19) // 20) if ticket_count else 0
 
-            # Gemini 2.0 Flash: $0.10/M input, $0.40/M output
+            # Gemini 2.5 Flash: $0.075/M input, $0.30/M output
             input_tokens = ticket_count * 600
             output_tokens = ticket_count * 200
-            cost = (input_tokens / 1e6) * 0.10 + (output_tokens / 1e6) * 0.40
+            cost = (input_tokens / 1e6) * 0.075 + (output_tokens / 1e6) * 0.30
 
             est_seconds = (batches * 10) / 3  # fixed 3 workers via dynamic batching
             est_min = est_seconds / 60
@@ -1859,6 +1963,7 @@ class TRCAnalyticsPage(AnalysisPageBase):
         self._sync_scan_date_range()
         self._update_scan_cost_estimate()
         self._refresh_scan_history()
+        self._show_analyst_reports_button()
 
     def _populate_scan_trc_combo(self):
         """Populate scanner TRC filter dropdown."""
@@ -1875,13 +1980,10 @@ class TRCAnalyticsPage(AnalysisPageBase):
     def _sync_scan_date_range(self):
         """Sync scanner date pickers to actual data range."""
         try:
-            row = self.db.conn.execute(
-                "SELECT MIN(created_at) AS mn, MAX(created_at) AS mx "
-                "FROM conversations"
-            ).fetchone()
-            if row and row["mn"] and row["mx"]:
-                mn = row["mn"][:10].split("-")
-                mx = row["mx"][:10].split("-")
+            mn_d, mx_d = self.db.get_date_range()
+            if mn_d and mx_d:
+                mn = mn_d[:10].split("-")
+                mx = mx_d[:10].split("-")
                 if len(mn) == 3 and len(mx) == 3:
                     self._scan_date_start.set_date(
                         QDate(int(mn[0]), int(mn[1]), int(mn[2]))
@@ -1967,14 +2069,9 @@ class TRCAnalyticsPage(AnalysisPageBase):
             logger.warning("Model change blocked — scan is active")
             return
         try:
-            import yaml
-            from pathlib import Path
-            cfg_path = Path("config/settings.yaml")
-            with open(cfg_path) as f:
-                cfg = yaml.safe_load(f) or {}
+            cfg = load_settings()
             cfg.setdefault("gemini", {})["model"] = model_id
-            with open(cfg_path, "w") as f:
-                yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=True)
+            save_settings(cfg)
             logger.info(f"Scan model changed to: {model_id}")
             # Force re-init scan manager on next scan to pick up new model
             self._scan_mgr = None
