@@ -18,29 +18,28 @@ MANIFEST:
 TICKETS:
 {ticket_jsonl}
 
-For EACH ticket, call the store_classification tool using a fenced code block. Output one block per ticket, with NO text before, between, or after:
+For EACH ticket, output one JSON object per line (NDJSON format). Output ALL {n_tickets} classifications with NO text before, between, or after the JSON lines.
 
-```tool_call
-{{"tool": "store_classification", "args": {{
-  "ticket_id": "<ticket_id>",
-  "sub_cluster": "<behavioral sub-pattern, <8 words>",
-  "sub_cluster_confidence": <0.0-1.0>,
-  "is_novel": <true|false>,
-  "novel_justification": "<why this is genuinely new, or null>",
-  "sentiment_intensity": <1-5>,
-  "sentiment_polarity": "<positive|negative|mixed|neutral>",
-  "friction_type": "<one of: access_blocked, self_serve_failure, automation_loop, incorrect_charge, missing_information, policy_confusion, feature_broken, feature_missing, process_delay, communication_gap, escalation_demand, repeat_contact, positive_feedback, other>",
-  "anomaly_flag": "<normal|unusual|critical>",
-  "anomaly_reason": "<why flagged, or null>",
-  "entities": {{"payer": null, "product_area": null, "feature": null}},
-  "key_phrases": ["<phrase1>", "<phrase2>"],
-  "root_cause_hint": "<one sentence hypothesis>",
-  "summary": "<1-2 sentence de-identified summary>"
-}}}}
-```
+Each JSON object MUST contain these fields:
+  ticket_id: "<ticket_id>"
+  sub_cluster: "<behavioral sub-pattern, <8 words>"
+  sub_cluster_confidence: <0.0-1.0>
+  is_novel: <true|false>
+  novel_justification: "<why this is genuinely new, or null>"
+  sentiment_intensity: <1-5>
+  sentiment_polarity: "<positive|negative|mixed|neutral>"
+  friction_type: "<one of: access_blocked, self_serve_failure, automation_loop, incorrect_charge, missing_information, policy_confusion, feature_broken, feature_missing, process_delay, communication_gap, escalation_demand, repeat_contact, positive_feedback, other>"
+  anomaly_flag: "<normal|unusual|critical>"
+  anomaly_reason: "<why flagged, or null>"
+  entities: {{"payer": null, "product_area": null, "feature": null}}
+  key_phrases: ["<phrase1>", "<phrase2>"]
+  root_cause_hint: "<one sentence hypothesis>"
+  summary: "<1-2 sentence de-identified summary>"
 
-You MUST classify ALL {n_tickets} tickets. Output exactly {n_tickets} tool_call blocks.
-No JSON arrays. No preamble. No explanation. No text between blocks.
+You MUST classify ALL {n_tickets} tickets. Output exactly {n_tickets} JSON lines.
+No JSON arrays. No preamble. No explanation. No text between JSON objects. No markdown fencing.
+
+TOOL CONSTRAINT: Do NOT attempt to use any tools — no file reading, no code execution, no web search, no shell commands, no codebase exploration, no agent delegation. Output ONLY NDJSON text.
 
 CLASSIFICATION RULES:
 - FIRST, attempt to match each ticket to an existing sub-pattern using the names, descriptions, and n-grams provided above.
