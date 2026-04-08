@@ -46,6 +46,9 @@ class CostDashboard(QWidget):
     def set_active_scan(self, scan_id):
         """Set the active scan ID so 'This Scan' cost can be queried."""
         self._active_scan_id = scan_id
+        # Lock worker spinner during active scan to prevent mid-scan changes
+        if hasattr(self, "_worker_spin"):
+            self._worker_spin.setEnabled(scan_id is None)
 
     def _build_ui(self):
         outer = QVBoxLayout(self)
