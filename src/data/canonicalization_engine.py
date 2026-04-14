@@ -1,0 +1,686 @@
+"""Canonicalization engine — Phase 3.
+
+Clusters ticket embeddings per TRC into persistent canonical groups using
+HDBSCAN + KNN-assign, with a three-stage flow:
+
+    1. Snap incoming tickets to existing canonical cluster centroids when
+       cosine > existing_match_threshold (default 0.75).
+    2. Run HDBSCAN on the remaining embeddings per TRC.
+    3. Assign HDBSCAN noise points to their nearest centroid (any TRC cluster)
+       via KNN when cosine > knn_threshold; else mark `unclustered`.
+
+Every assignment is audited via `assignment_method` (hdbscan_core,
+hdbscan_border, knn_fallback, unclustered, snapped_existing) and the
+corresponding confidence number on `ticket_index`.
+
+Centroids are confidence-weighted: each ticket's contribution to its cluster
+centroid is weighted by `nlp_ticket_classifications.sub_cluster_confidence`
+(NULL ⇒ 0.5). Centroids are L2-normalized before persistence so cosine
+similarity reduces to a dot product.
+
+Plan reference: canonicalization-enrichment.md §3 (lines 241–411).
+
+Public API:
+    run_canonicalization(conn, scan_id, *, trc=None, force_recluster=False,
+                         params=None) -> CanonicalizationResult
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Iterable, Optional
+
+import numpy as np
+
+logger = logging.getLogger(__name__)
+
+# ──────────────────────────────────────────────────────────────────────────
+# Tuning defaults — canonicalization-enrichment.md §3.2 / §3.3
+# ──────────────────────────────────────────────────────────────────────────
+
+DEFAULT_PARAMS: dict = {
+    "min_cluster_size": 5,
+    "min_samples": 2,
+    "cluster_selection_epsilon": 0.0,
+    "metric": "euclidean",  # HDBSCAN: we feed L2-normalized vectors,
+                            # for which Euclidean distance is a monotonic
+                            # function of cosine distance. Using Euclidean
+                            # avoids hdbscan's slower pairwise-cosine path.
+    "existing_match_threshold": 0.75,  # cosine
+    "knn_threshold": 0.75,             # cosine
+    "hdbscan_core_prob": 0.8,
+    "hdbscan_border_prob": 0.4,
+    "allow_single_cluster": True,
+}
+
+# Embedding dimension (Qwen3-Embedding-0.6B) — confirmed at load time
+_EMBED_DIM_FALLBACK = 1024
+
+# Sentinel for tickets without sub_cluster_confidence in classifications
+_DEFAULT_CONFIDENCE = 0.5
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Data classes
+# ──────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class ClusterStats:
+    cluster_id: str
+    trc: str
+    member_count: int
+    label_source: str
+    canonical_label: Optional[str]
+    new: bool
+    representative_ticket_id: Optional[str]
+
+    def as_dict(self) -> dict:
+        return {
+            "cluster_id": self.cluster_id,
+            "trc": self.trc,
+            "member_count": self.member_count,
+            "label_source": self.label_source,
+            "canonical_label": self.canonical_label,
+            "new": self.new,
+            "representative_ticket_id": self.representative_ticket_id,
+        }
+
+
+@dataclass
+class CanonicalizationResult:
+    scan_id: str
+    trc_scope: Optional[str]  # None = all TRCs
+    tickets_processed: int
+    tickets_assigned: int
+    tickets_unclustered: int
+    method_counts: dict                       # {method: count}
+    clusters: list[ClusterStats] = field(default_factory=list)
+    wall_time_ms: int = 0
+
+    def summary(self) -> dict:
+        return {
+            "scan_id": self.scan_id,
+            "trc_scope": self.trc_scope,
+            "tickets_processed": self.tickets_processed,
+            "tickets_assigned": self.tickets_assigned,
+            "tickets_unclustered": self.tickets_unclustered,
+            "method_counts": self.method_counts,
+            "n_clusters": len(self.clusters),
+            "wall_time_ms": self.wall_time_ms,
+        }
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────────────────────────────────
+
+def _l2_normalize(vec: np.ndarray) -> np.ndarray:
+    """L2-normalize a 1D vector (or row-wise a 2D matrix)."""
+    if vec.ndim == 1:
+        norm = float(np.linalg.norm(vec))
+        if norm == 0.0:
+            return vec
+        return vec / norm
+    norms = np.linalg.norm(vec, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    return vec / norms
+
+
+def _slugify_trc(trc: str) -> str:
+    return "".join(c if c.isalnum() else "-" for c in (trc or "unknown").lower()).strip("-") or "unknown"
+
+
+def _new_cluster_id(trc: str) -> str:
+    return f"{_slugify_trc(trc)}-{uuid.uuid4().hex[:12]}"
+
+
+def _blob_to_vec(blob: bytes, dim: int) -> np.ndarray:
+    arr = np.frombuffer(blob, dtype=np.float32)
+    if arr.size != dim:
+        # Defensive: mismatched dim — truncate/pad is worse than loud failure
+        raise ValueError(f"Embedding blob has {arr.size} floats, expected {dim}")
+    return arr.copy()
+
+
+def _vec_to_blob(vec: np.ndarray) -> bytes:
+    return vec.astype(np.float32).tobytes()
+
+
+def _compute_medoid(embeddings: np.ndarray, centroid: np.ndarray) -> int:
+    """Return index of the member closest to the centroid (max cosine)."""
+    if len(embeddings) == 0:
+        return -1
+    sims = embeddings @ centroid
+    return int(np.argmax(sims))
+
+
+def _compute_confidence_weighted_centroid(
+    embeddings: np.ndarray, confidences: np.ndarray,
+) -> np.ndarray:
+    """Confidence-weighted mean, L2-normalized.
+
+    NULL confidences should arrive as `_DEFAULT_CONFIDENCE` already. All-zero
+    weights fall back to uniform mean to avoid division by zero.
+    """
+    if len(embeddings) == 0:
+        raise ValueError("Empty cluster")
+    w = np.asarray(confidences, dtype=np.float32)
+    if w.sum() <= 0.0:
+        w = np.ones_like(w)
+    w = w / w.sum()
+    mean = (embeddings * w[:, None]).sum(axis=0)
+    return _l2_normalize(mean)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# DB loaders
+# ──────────────────────────────────────────────────────────────────────────
+
+def _load_embeddings_for_trc(
+    conn, trc: Optional[str],
+) -> tuple[list[str], list[str], np.ndarray, np.ndarray]:
+    """Return (ticket_ids, trcs, embedding_matrix, confidences).
+
+    Loads ticket_index rows that have a matching ticket_embeddings row.
+    Optional `trc` filter. Confidence pulled from
+    nlp_ticket_classifications.sub_cluster_confidence (most recent per ticket).
+    """
+    params: list = []
+    where_trc = ""
+    if trc:
+        where_trc = " AND ti.trc_code = ?"
+        params.append(trc)
+
+    # Subquery pulls the latest sub_cluster_confidence per ticket by batch_id
+    # rowid (classifications are insert-only, so higher rowid = newer).
+    sql = f"""
+        SELECT ti.ticket_id,
+               ti.trc_code,
+               te.embedding_blob,
+               te.dim_size,
+               COALESCE(
+                   (SELECT c.sub_cluster_confidence
+                      FROM nlp_ticket_classifications c
+                     WHERE c.ticket_id = ti.ticket_id
+                  ORDER BY c.rowid DESC LIMIT 1),
+                   ?
+               ) AS conf
+          FROM ticket_index ti
+          JOIN ticket_embeddings te ON te.ticket_id = ti.ticket_id
+         WHERE 1=1 {where_trc}
+    """
+    rows = conn.execute(sql, [_DEFAULT_CONFIDENCE] + params).fetchall()
+
+    if not rows:
+        return [], [], np.empty((0, _EMBED_DIM_FALLBACK), dtype=np.float32), np.empty(0, dtype=np.float32)
+
+    ticket_ids: list[str] = []
+    trcs: list[str] = []
+    vecs: list[np.ndarray] = []
+    confs: list[float] = []
+    dim = _EMBED_DIM_FALLBACK
+    for r in rows:
+        tid, trc_code, blob, dim_size, conf = r[0], r[1], r[2], r[3], r[4]
+        dim = int(dim_size or dim)
+        try:
+            vec = _blob_to_vec(blob, dim)
+        except ValueError as exc:
+            logger.warning("Skipping ticket %s: %s", tid, exc)
+            continue
+        ticket_ids.append(tid)
+        trcs.append(trc_code or "unknown")
+        vecs.append(vec)
+        confs.append(float(conf) if conf is not None else _DEFAULT_CONFIDENCE)
+
+    matrix = np.vstack(vecs).astype(np.float32)
+    matrix = _l2_normalize(matrix)
+    return ticket_ids, trcs, matrix, np.asarray(confs, dtype=np.float32)
+
+
+def _load_existing_centroids(
+    conn, trc: Optional[str],
+) -> tuple[list[str], list[str], np.ndarray]:
+    """Return (cluster_ids, trcs, centroid_matrix) for active clusters."""
+    params: list = []
+    where = "WHERE COALESCE(tier, 'probationary') NOT IN ('retired','split')"
+    if trc:
+        where += " AND trc = ?"
+        params.append(trc)
+    rows = conn.execute(
+        f"SELECT cluster_id, trc, centroid_blob FROM canonical_clusters {where}",
+        params,
+    ).fetchall()
+    if not rows:
+        return [], [], np.empty((0, _EMBED_DIM_FALLBACK), dtype=np.float32)
+
+    cids: list[str] = []
+    trcs: list[str] = []
+    mats: list[np.ndarray] = []
+    dim = _EMBED_DIM_FALLBACK
+    for cid, t, blob in rows:
+        if blob is None:
+            continue
+        arr = np.frombuffer(blob, dtype=np.float32)
+        if mats and arr.size != dim:
+            continue
+        dim = arr.size
+        cids.append(cid)
+        trcs.append(t or "unknown")
+        mats.append(arr)
+    if not mats:
+        return [], [], np.empty((0, dim), dtype=np.float32)
+    matrix = _l2_normalize(np.vstack(mats).astype(np.float32))
+    return cids, trcs, matrix
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Core algorithms
+# ──────────────────────────────────────────────────────────────────────────
+
+def _match_to_existing_centroids(
+    embeddings: np.ndarray,
+    existing_centroids: np.ndarray,
+    existing_cluster_ids: list[str],
+    threshold: float,
+) -> dict[int, tuple[str, float]]:
+    """Snap each embedding to the best existing centroid above `threshold`.
+
+    Returns {row_index: (cluster_id, cosine)}; rows not in the dict are unmatched.
+    """
+    if len(embeddings) == 0 or len(existing_centroids) == 0:
+        return {}
+    sims = embeddings @ existing_centroids.T  # (N, K)
+    best_k = np.argmax(sims, axis=1)
+    best_sim = sims[np.arange(len(sims)), best_k]
+    out: dict[int, tuple[str, float]] = {}
+    for i, (k, s) in enumerate(zip(best_k, best_sim)):
+        if s >= threshold:
+            out[i] = (existing_cluster_ids[int(k)], float(s))
+    return out
+
+
+def _hdbscan_per_trc(
+    embeddings: np.ndarray, params: dict,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Run HDBSCAN on an embedding matrix.
+
+    Returns (labels, membership_probs); labels of -1 are noise.
+    Empty/tiny inputs short-circuit to all-noise.
+    """
+    n = len(embeddings)
+    if n == 0:
+        return np.empty(0, dtype=np.int32), np.empty(0, dtype=np.float32)
+
+    min_cluster_size = max(2, int(params.get("min_cluster_size", 5)))
+    if n < min_cluster_size:
+        return (np.full(n, -1, dtype=np.int32), np.zeros(n, dtype=np.float32))
+
+    # Lazy import so unit tests that don't exercise HDBSCAN don't require install.
+    import hdbscan  # type: ignore
+
+    clusterer = hdbscan.HDBSCAN(
+        min_cluster_size=min_cluster_size,
+        min_samples=int(params.get("min_samples", 2)),
+        cluster_selection_epsilon=float(params.get("cluster_selection_epsilon", 0.0)),
+        metric=params.get("metric", "euclidean"),
+        # allow_single_cluster lets HDBSCAN form ONE cluster when the data is
+        # cohesive — otherwise it would always require ≥2 clusters and dump
+        # everything into noise (label -1) for single-issue TRCs.
+        allow_single_cluster=bool(params.get("allow_single_cluster", True)),
+        prediction_data=False,
+        core_dist_n_jobs=1,
+    )
+    labels = clusterer.fit_predict(embeddings.astype(np.float64))
+    probs = clusterer.probabilities_
+    return (
+        np.asarray(labels, dtype=np.int32),
+        np.asarray(probs, dtype=np.float32),
+    )
+
+
+def _knn_assign_noise(
+    noise_embeddings: np.ndarray,
+    all_centroids: np.ndarray,
+    all_cluster_ids: list[str],
+    threshold: float,
+) -> list[Optional[tuple[str, float]]]:
+    """For each noise embedding, return (cluster_id, cosine) or None."""
+    if len(noise_embeddings) == 0 or len(all_centroids) == 0:
+        return [None] * len(noise_embeddings)
+    sims = noise_embeddings @ all_centroids.T
+    best_k = np.argmax(sims, axis=1)
+    best_sim = sims[np.arange(len(sims)), best_k]
+    out: list[Optional[tuple[str, float]]] = []
+    for k, s in zip(best_k, best_sim):
+        if s >= threshold:
+            out.append((all_cluster_ids[int(k)], float(s)))
+        else:
+            out.append(None)
+    return out
+
+
+def _classify_method(prob: float, params: dict) -> str:
+    core_p = float(params.get("hdbscan_core_prob", 0.8))
+    border_p = float(params.get("hdbscan_border_prob", 0.4))
+    if prob >= core_p:
+        return "hdbscan_core"
+    if prob >= border_p:
+        return "hdbscan_border"
+    return "hdbscan_border"  # prob < border gets clipped (noise is -1 branch)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# DB writers
+# ──────────────────────────────────────────────────────────────────────────
+
+def _upsert_cluster(
+    conn, *, cluster_id: str, trc: str, centroid: np.ndarray,
+    rep_ticket: Optional[str], member_count: int, scan_id: str, new: bool,
+) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    if new:
+        conn.execute(
+            """
+            INSERT INTO canonical_clusters
+              (cluster_id, trc, centroid_blob, representative_ticket_id,
+               member_count, lifetime_tickets, lifetime_scans, tier,
+               discovered_scan_id, first_seen_at, last_seen_scan_id, last_seen_at,
+               label_source)
+            VALUES (?, ?, ?, ?, ?, ?, 1, 'probationary', ?, ?, ?, ?, 'medoid')
+            """,
+            (
+                cluster_id, trc, _vec_to_blob(centroid), rep_ticket,
+                member_count, member_count, scan_id, now, scan_id, now,
+            ),
+        )
+    else:
+        conn.execute(
+            """
+            UPDATE canonical_clusters
+               SET centroid_blob = ?,
+                   representative_ticket_id = COALESCE(?, representative_ticket_id),
+                   member_count = ?,
+                   lifetime_tickets = lifetime_tickets + ?,
+                   lifetime_scans = lifetime_scans + 1,
+                   last_seen_scan_id = ?,
+                   last_seen_at = ?
+             WHERE cluster_id = ?
+            """,
+            (
+                _vec_to_blob(centroid), rep_ticket, member_count, member_count,
+                scan_id, now, cluster_id,
+            ),
+        )
+
+
+def _write_ticket_assignment(
+    conn, *, ticket_id: str, cluster_id: Optional[str],
+    confidence: Optional[float], method: str, membership_prob: Optional[float],
+    now_iso: str,
+) -> None:
+    conn.execute(
+        """
+        UPDATE ticket_index
+           SET canonical_issue_id = ?,
+               canonical_confidence = ?,
+               assignment_method = ?,
+               hdbscan_membership_prob = ?,
+               canonicalized_at = ?
+         WHERE ticket_id = ?
+        """,
+        (cluster_id, confidence, method, membership_prob, now_iso, ticket_id),
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Public entry point
+# ──────────────────────────────────────────────────────────────────────────
+
+def run_canonicalization(
+    conn,
+    scan_id: str,
+    *,
+    trc: Optional[str] = None,
+    force_recluster: bool = False,
+    params: Optional[dict] = None,
+) -> CanonicalizationResult:
+    """Run canonicalization across all TRCs (or one TRC if `trc` is given).
+
+    When `force_recluster=True`, existing centroids are ignored (stage 1 skipped)
+    — used by the tuning harness for clean grid-search runs. The persisted
+    canonical_clusters rows remain; this just changes assignment for THIS run.
+    """
+    import time
+    t0 = time.perf_counter()
+
+    p = dict(DEFAULT_PARAMS)
+    if params:
+        p.update(params)
+
+    ticket_ids, ticket_trcs, embeddings, confidences = _load_embeddings_for_trc(conn, trc)
+    if not ticket_ids:
+        return CanonicalizationResult(
+            scan_id=scan_id, trc_scope=trc, tickets_processed=0,
+            tickets_assigned=0, tickets_unclustered=0,
+            method_counts={}, clusters=[], wall_time_ms=0,
+        )
+
+    # Group by TRC so each TRC is clustered independently
+    trc_to_indices: dict[str, list[int]] = {}
+    for i, t in enumerate(ticket_trcs):
+        trc_to_indices.setdefault(t, []).append(i)
+
+    method_counts: dict[str, int] = {}
+    cluster_stats: list[ClusterStats] = []
+    assignments: dict[int, tuple[Optional[str], Optional[float], str, Optional[float]]] = {}
+    # index -> (cluster_id|None, confidence|None, method, membership_prob|None)
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    for trc_code, indices in trc_to_indices.items():
+        trc_idx = np.asarray(indices, dtype=np.int64)
+        sub_embeds = embeddings[trc_idx]
+        sub_confs = confidences[trc_idx]
+
+        # ── stage 1: snap to existing centroids ──
+        if not force_recluster:
+            ex_cids, ex_trcs, ex_mat = _load_existing_centroids(conn, trc_code)
+        else:
+            ex_cids, ex_trcs, ex_mat = [], [], np.empty((0, sub_embeds.shape[1]), dtype=np.float32)
+
+        matched = _match_to_existing_centroids(
+            sub_embeds, ex_mat, ex_cids, threshold=p["existing_match_threshold"],
+        )
+        remaining_mask = np.ones(len(sub_embeds), dtype=bool)
+        for row_i, (cid, cos) in matched.items():
+            orig_i = int(trc_idx[row_i])
+            assignments[orig_i] = (cid, cos, "snapped_existing", None)
+            remaining_mask[row_i] = False
+            method_counts["snapped_existing"] = method_counts.get("snapped_existing", 0) + 1
+
+        remaining_idx = np.where(remaining_mask)[0]
+        remaining_embeds = sub_embeds[remaining_idx]
+        remaining_confs = sub_confs[remaining_idx]
+
+        # ── stage 2: HDBSCAN on remaining ──
+        labels, probs = _hdbscan_per_trc(remaining_embeds, p)
+
+        # Build per-new-cluster groupings
+        new_clusters: dict[int, list[int]] = {}
+        for local_i, lab in enumerate(labels):
+            if lab >= 0:
+                new_clusters.setdefault(int(lab), []).append(local_i)
+
+        # Compute + persist new cluster centroids
+        new_cluster_id_for_label: dict[int, str] = {}
+        centroid_cache: dict[str, np.ndarray] = {}
+        for lab, members in new_clusters.items():
+            member_embeds = remaining_embeds[members]
+            member_confs = remaining_confs[members]
+            centroid = _compute_confidence_weighted_centroid(member_embeds, member_confs)
+            medoid_local = _compute_medoid(member_embeds, centroid)
+            rep_ticket = ticket_ids[int(trc_idx[remaining_idx[members[medoid_local]]])] if medoid_local >= 0 else None
+            cid = _new_cluster_id(trc_code)
+            new_cluster_id_for_label[lab] = cid
+            centroid_cache[cid] = centroid
+            _upsert_cluster(
+                conn, cluster_id=cid, trc=trc_code, centroid=centroid,
+                rep_ticket=rep_ticket, member_count=len(members),
+                scan_id=scan_id, new=True,
+            )
+            cluster_stats.append(ClusterStats(
+                cluster_id=cid, trc=trc_code, member_count=len(members),
+                label_source="medoid", canonical_label=None, new=True,
+                representative_ticket_id=rep_ticket,
+            ))
+
+        # Record assignments for HDBSCAN-clustered (non-noise) members
+        for local_i, lab in enumerate(labels):
+            if lab < 0:
+                continue
+            orig_i = int(trc_idx[remaining_idx[local_i]])
+            cid = new_cluster_id_for_label[int(lab)]
+            prob = float(probs[local_i])
+            cos = float(remaining_embeds[local_i] @ centroid_cache[cid])
+            method = _classify_method(prob, p)
+            assignments[orig_i] = (cid, cos, method, prob)
+            method_counts[method] = method_counts.get(method, 0) + 1
+
+        # ── stage 3: KNN-assign HDBSCAN noise ──
+        noise_local = [i for i, lab in enumerate(labels) if lab < 0]
+        if noise_local:
+            # All centroids visible across TRCs — per plan §3 noise can snap
+            # to any cluster regardless of TRC. We keep TRC scoping by
+            # convention but allow cross-TRC fallback matches here.
+            all_cids, _all_trcs, all_mat = _load_existing_centroids(conn, trc=None)
+            noise_embeds = remaining_embeds[noise_local]
+            knn_results = _knn_assign_noise(
+                noise_embeds, all_mat, all_cids, threshold=p["knn_threshold"],
+            )
+            for local_i, res in zip(noise_local, knn_results):
+                orig_i = int(trc_idx[remaining_idx[local_i]])
+                prob = float(probs[local_i]) if len(probs) else 0.0
+                if res is None:
+                    assignments[orig_i] = (None, None, "unclustered", prob)
+                    method_counts["unclustered"] = method_counts.get("unclustered", 0) + 1
+                else:
+                    cid, cos = res
+                    assignments[orig_i] = (cid, cos, "knn_fallback", prob)
+                    method_counts["knn_fallback"] = method_counts.get("knn_fallback", 0) + 1
+
+    # ── write ticket_index assignments ──
+    assigned_count = 0
+    unclustered_count = 0
+    for i in range(len(ticket_ids)):
+        cid, conf, method, prob = assignments.get(
+            i, (None, None, "unclustered", None),
+        )
+        _write_ticket_assignment(
+            conn, ticket_id=ticket_ids[i], cluster_id=cid, confidence=conf,
+            method=method, membership_prob=prob, now_iso=now_iso,
+        )
+        if cid is not None:
+            assigned_count += 1
+        else:
+            unclustered_count += 1
+
+    conn.commit()
+
+    wall_ms = int((time.perf_counter() - t0) * 1000)
+    return CanonicalizationResult(
+        scan_id=scan_id, trc_scope=trc, tickets_processed=len(ticket_ids),
+        tickets_assigned=assigned_count, tickets_unclustered=unclustered_count,
+        method_counts=method_counts, clusters=cluster_stats, wall_time_ms=wall_ms,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Utilities
+# ──────────────────────────────────────────────────────────────────────────
+
+def _load_centroid_vec(conn, cluster_id: str) -> np.ndarray:
+    """Fetch a single centroid vector by cluster_id (L2-normalized)."""
+    row = conn.execute(
+        "SELECT centroid_blob FROM canonical_clusters WHERE cluster_id = ?",
+        (cluster_id,),
+    ).fetchone()
+    if row is None or row[0] is None:
+        raise KeyError(cluster_id)
+    vec = np.frombuffer(row[0], dtype=np.float32).copy()
+    return _l2_normalize(vec)
+
+
+def score_golden_set(
+    conn, golden_pairs: Iterable[tuple[str, str, bool]],
+) -> dict:
+    """Score canonicalization against a golden set of (ticket_a, ticket_b, same_issue?) triples.
+
+    Precision = (same-cluster ∩ same-issue) / same-cluster
+    Recall    = (same-cluster ∩ same-issue) / same-issue
+    """
+    # Build ticket_id -> cluster_id map
+    rows = conn.execute(
+        "SELECT ticket_id, canonical_issue_id FROM ticket_index WHERE canonical_issue_id IS NOT NULL"
+    ).fetchall()
+    clust_map = {r[0]: r[1] for r in rows}
+
+    tp = fp = fn = tn = 0
+    for a, b, same_issue in golden_pairs:
+        ca = clust_map.get(a)
+        cb = clust_map.get(b)
+        if ca is None or cb is None:
+            # Unclustered pair; count as negative prediction
+            if same_issue:
+                fn += 1
+            else:
+                tn += 1
+            continue
+        pred_same = (ca == cb)
+        if pred_same and same_issue:
+            tp += 1
+        elif pred_same and not same_issue:
+            fp += 1
+        elif not pred_same and same_issue:
+            fn += 1
+        else:
+            tn += 1
+
+    precision = tp / (tp + fp) if (tp + fp) else 0.0
+    recall = tp / (tp + fn) if (tp + fn) else 0.0
+    f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) else 0.0
+    return {
+        "tp": tp, "fp": fp, "fn": fn, "tn": tn,
+        "precision": precision, "recall": recall, "f1": f1,
+    }
+
+
+def record_tuning_run(
+    conn, *, params: dict, scores: dict, scan_id: Optional[str] = None,
+    trc: Optional[str] = None, wall_time_ms: int = 0, notes: str = "",
+) -> str:
+    """Persist a tuning-harness row; return the generated run_id."""
+    run_id = uuid.uuid4().hex
+    conn.execute(
+        """
+        INSERT INTO canonicalization_tuning_runs
+          (run_id, params_json, silhouette, davies_bouldin,
+           golden_precision, golden_recall, golden_f1,
+           noise_pct, n_clusters, gemini_coherence, wall_time_ms,
+           scan_id, trc, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            run_id, json.dumps(params),
+            scores.get("silhouette"), scores.get("davies_bouldin"),
+            scores.get("precision"), scores.get("recall"), scores.get("f1"),
+            scores.get("noise_pct"), scores.get("n_clusters"),
+            scores.get("gemini_coherence"), wall_time_ms,
+            scan_id, trc, notes,
+        ),
+    )
+    conn.commit()
+    return run_id

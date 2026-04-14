@@ -7,6 +7,8 @@ numpy>=1.24.0
 scipy>=1.11.0
 vaderSentiment>=3.3.2
 sentence-transformers>=2.2.0
+hdbscan>=0.8.29
+markdown>=3.5.0
 
 # Optional — Google Drive export
 # google-api-python-client>=2.100.0
