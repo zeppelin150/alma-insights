@@ -60,6 +60,28 @@ def main():
     if os.path.exists(icon_path):
         app.setWindowIcon(QIcon(icon_path))
 
+    # Apply any staged update (before importing src modules that hold file locks)
+    from src.updater.updater import apply_staged_update
+    if apply_staged_update():
+        # Re-import after file swap to pick up new code
+        importlib.invalidate_caches()
+
+    # Migrate settings from config/ → data/ (one-time, survives auto-updates)
+    from src.data.settings_manager import get_settings_path
+    get_settings_path()
+
+    # WAL health check: auto-checkpoint if WAL grew beyond threshold while app
+    # was closed (e.g. after an aborted scan). Bounded, non-blocking.
+    try:
+        from src.data.connection_factory import wal_health_check
+        wal_result = wal_health_check()
+        if wal_result["action_taken"] != "none":
+            print(f"[startup] WAL {wal_result['action_taken']}: "
+                  f"{wal_result['wal_size_mb']}MB, "
+                  f"checkpointed {wal_result['checkpointed_pages']} pages")
+    except Exception as exc:  # noqa: BLE001 — non-fatal at startup
+        print(f"[startup] WAL health check failed: {exc}")
+
     # Launch main window
     window = MainWindow()
     window.show()
