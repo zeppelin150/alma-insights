@@ -55,6 +55,11 @@ DEFAULT_PARAMS: dict = {
     "hdbscan_core_prob": 0.8,
     "hdbscan_border_prob": 0.4,
     "allow_single_cluster": True,
+    # Phase 4 — multi-label tier thresholds (plan §4.2)
+    "multilabel_primary_threshold": 0.75,
+    "multilabel_secondary_threshold": 0.65,
+    "multilabel_tertiary_threshold": 0.55,
+    "multilabel_enabled": True,
 }
 
 # Embedding dimension (Qwen3-Embedding-0.6B) — confirmed at load time
@@ -417,6 +422,96 @@ def _upsert_cluster(
         )
 
 
+def _compute_multilabel_ranks(
+    embedding: np.ndarray,
+    all_cluster_ids: list[str],
+    all_centroids: np.ndarray,
+    all_cluster_trcs: list[str],
+    ticket_trc: str,
+    params: dict,
+) -> list[tuple[str, int, float, str]]:
+    """Return top-3 ranked assignments as (cluster_id, rank, cosine, tier).
+
+    Candidates scoped to the ticket's TRC first, then cross-TRC allowed for
+    fill. Each rank has its own tier threshold; rank-1 above primary_threshold
+    becomes 'primary', etc. Rows below their tier threshold are dropped.
+    """
+    if len(all_centroids) == 0:
+        return []
+
+    primary_t = float(params.get("multilabel_primary_threshold", 0.75))
+    secondary_t = float(params.get("multilabel_secondary_threshold", 0.65))
+    tertiary_t = float(params.get("multilabel_tertiary_threshold", 0.55))
+    thresholds = (primary_t, secondary_t, tertiary_t)
+    tier_names = ("primary", "secondary", "tertiary")
+
+    sims = embedding @ all_centroids.T  # shape (K,)
+    # Prefer same-TRC candidates; fall back to cross-TRC for later ranks
+    same_trc_mask = np.asarray([t == ticket_trc for t in all_cluster_trcs], dtype=bool)
+    # Sort all candidates by similarity desc
+    order = np.argsort(-sims)
+
+    # Partition: same-TRC first (in score order), then cross-TRC (in score order)
+    same_order = [i for i in order if same_trc_mask[i]]
+    cross_order = [i for i in order if not same_trc_mask[i]]
+    final_order = same_order + cross_order
+
+    out: list[tuple[str, int, float, str]] = []
+    seen: set[str] = set()
+    for rank in (1, 2, 3):
+        t = thresholds[rank - 1]
+        tier = tier_names[rank - 1]
+        # Take the next best unseen candidate meeting this rank's threshold
+        picked = None
+        for k in final_order:
+            cid = all_cluster_ids[k]
+            if cid in seen:
+                continue
+            if float(sims[k]) < t:
+                continue
+            picked = (cid, rank, float(sims[k]), tier)
+            break
+        if picked is None:
+            break
+        out.append(picked)
+        seen.add(picked[0])
+    return out
+
+
+def _write_multilabel_assignments(
+    conn, *, ticket_id: str, ranked: list[tuple[str, int, float, str]],
+    method: str, scan_id: str,
+) -> None:
+    """Replace-all semantics: delete prior assignments for this ticket, write new."""
+    conn.execute(
+        "DELETE FROM ticket_canonical_assignments WHERE ticket_id = ?",
+        (ticket_id,),
+    )
+    for cid, rank, cos, tier in ranked:
+        conn.execute(
+            """INSERT INTO ticket_canonical_assignments
+                 (ticket_id, cluster_id, rank, cosine_similarity,
+                  assignment_tier, assignment_method, assigned_in_scan_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (ticket_id, cid, rank, cos, tier, method, scan_id),
+        )
+
+
+def _log_transition(
+    conn, *, ticket_id: str, scan_id: str,
+    old_primary: Optional[str], new_primary: Optional[str],
+    old_cos: Optional[float], new_cos: Optional[float],
+    reason: str,
+) -> None:
+    conn.execute(
+        """INSERT INTO assignment_transitions
+             (ticket_id, scan_id, old_primary_cluster_id, new_primary_cluster_id,
+              old_cosine, new_cosine, transition_reason)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (ticket_id, scan_id, old_primary, new_primary, old_cos, new_cos, reason),
+    )
+
+
 def _write_ticket_assignment(
     conn, *, ticket_id: str, cluster_id: Optional[str],
     confidence: Optional[float], method: str, membership_prob: Optional[float],
@@ -572,9 +667,28 @@ def run_canonicalization(
                     assignments[orig_i] = (cid, cos, "knn_fallback", prob)
                     method_counts["knn_fallback"] = method_counts.get("knn_fallback", 0) + 1
 
-    # ── write ticket_index assignments ──
+    # ── Phase 4: load prior primary assignments for transition logging ──
+    prior_primary: dict[str, tuple[Optional[str], Optional[float]]] = {}
+    if p.get("multilabel_enabled", True):
+        try:
+            for r in conn.execute(
+                """SELECT ticket_id, cluster_id, cosine_similarity
+                     FROM ticket_canonical_assignments
+                    WHERE assignment_tier = 'primary'"""
+            ).fetchall():
+                prior_primary[r[0]] = (r[1], r[2])
+        except Exception:
+            # Multi-label table might not be present (migration 018 not applied)
+            prior_primary = {}
+
+    # Load ALL centroids (across TRCs) once for multi-label scoring
+    ml_cids, ml_trcs, ml_centroids = _load_existing_centroids(conn, trc=None)
+
+    # ── write ticket_index assignments + multi-label rows ──
     assigned_count = 0
     unclustered_count = 0
+    multilabel_enabled = p.get("multilabel_enabled", True) and len(ml_centroids) > 0
+
     for i in range(len(ticket_ids)):
         cid, conf, method, prob = assignments.get(
             i, (None, None, "unclustered", None),
@@ -587,6 +701,56 @@ def run_canonicalization(
             assigned_count += 1
         else:
             unclustered_count += 1
+
+        # Multi-label write — skip silently if migration 018 isn't applied
+        if multilabel_enabled:
+            try:
+                ranked = _compute_multilabel_ranks(
+                    embeddings[i], ml_cids, ml_centroids, ml_trcs,
+                    ticket_trc=ticket_trcs[i], params=p,
+                )
+                # Invariant: if the engine picked a primary cluster (cid),
+                # that cluster MUST be rank 1 in ticket_canonical_assignments
+                # — otherwise the two tables disagree. Threshold gating
+                # applies only to secondary/tertiary candidates.
+                if cid is not None and (not ranked or ranked[0][0] != cid):
+                    existing_cos = conf if conf is not None else 0.0
+                    new_ranked: list[tuple[str, int, float, str]] = [
+                        (cid, 1, float(existing_cos), "primary"),
+                    ]
+                    for old_cid, _old_rank, old_cos, _old_tier in ranked:
+                        if old_cid == cid or len(new_ranked) >= 3:
+                            continue
+                        rank = len(new_ranked) + 1
+                        tier = ("secondary", "tertiary")[rank - 2]
+                        new_ranked.append((old_cid, rank, old_cos, tier))
+                    ranked = new_ranked
+                _write_multilabel_assignments(
+                    conn, ticket_id=ticket_ids[i], ranked=ranked,
+                    method=method, scan_id=scan_id,
+                )
+                # Transition log
+                old = prior_primary.get(ticket_ids[i])
+                new_primary = ranked[0] if ranked else None
+                new_cid = new_primary[0] if new_primary else None
+                new_cos = new_primary[2] if new_primary else None
+                if old is None and new_cid is not None:
+                    _log_transition(
+                        conn, ticket_id=ticket_ids[i], scan_id=scan_id,
+                        old_primary=None, new_primary=new_cid,
+                        old_cos=None, new_cos=new_cos,
+                        reason="new_ticket",
+                    )
+                elif old is not None and new_cid != old[0]:
+                    _log_transition(
+                        conn, ticket_id=ticket_ids[i], scan_id=scan_id,
+                        old_primary=old[0], new_primary=new_cid,
+                        old_cos=old[1], new_cos=new_cos,
+                        reason="centroid_shift",
+                    )
+            except sqlite3.OperationalError:
+                # Migration 018 not applied — silently skip multi-label.
+                multilabel_enabled = False
 
     conn.commit()
 
