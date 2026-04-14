@@ -32,9 +32,15 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-_BATCH_SIZE = 32
+_BATCH_SIZE = 64           # doubled — CPU inference amortizes well up to 64-128
 _RAW_BODY_MAX_CHARS = 2048
 _COMMENTS_LIMIT = 3
+
+# Qwen3's default max_seq_length is 32768 tokens. sentence-transformers pads
+# each batch to the longest sequence in it — one outlier ticket drags the
+# whole batch. 512 tokens comfortably holds our 2048-char truncated bodies
+# with headroom, and cuts attention cost from O(32768²) to O(512²) per layer.
+_MAX_SEQ_LENGTH = 512
 
 # Cache redaction engine at module level — construction parses JSON files.
 _redactor = None
@@ -87,6 +93,15 @@ def build_embeddings(conn, force: bool = False) -> int:
         return 0
 
     logger.info("Embedding %d tickets (of %d total)", len(to_embed), len(tickets))
+
+    # Cap model.max_seq_length before encoding — otherwise sentence-transformers
+    # pads each batch to the model's 32k default, killing CPU throughput.
+    from src.data.embedding.model_loader import get_model
+    _m = get_model()
+    if _m is not None and getattr(_m, "max_seq_length", 0) > _MAX_SEQ_LENGTH:
+        logger.info("Capping model.max_seq_length %s -> %d",
+                     _m.max_seq_length, _MAX_SEQ_LENGTH)
+        _m.max_seq_length = _MAX_SEQ_LENGTH
 
     texts = [t[1] for t in to_embed]
     from src.data.embedding.encoder import embed_documents
