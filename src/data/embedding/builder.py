@@ -59,12 +59,22 @@ def _get_redactor():
     return _redactor
 
 
-def build_embeddings(conn, force: bool = False) -> int:
+def build_embeddings(conn, force: bool = False, composition_mode: str = "raw_body") -> int:
     """Build embeddings for all tickets, skipping unchanged ones.
 
     Args:
         conn: SQLite connection.
         force: If True, re-embed everything (ignore hashes).
+        composition_mode: one of
+            - "raw_body" (default, Phase 2): subject + first N comments, PHI-redacted.
+              Zero LLM influence. Grounded in user-written content.
+            - "composite_A": structured header with Gemini's NLP labels
+              (trc / friction_type / sub_cluster) + subject + first 2 comments.
+              Uses LLM abstraction as a concept anchor; raw body grounds truth.
+            - "composite_C": subject repeated 3× + compact LLM label line + 2 comments.
+              Subject-weighted variant; tests whether subject alone carries
+              concept signal.
+        Hash includes the composition_mode, so switching modes force-re-embeds.
 
     Returns:
         Count of embeddings written.
@@ -74,7 +84,7 @@ def build_embeddings(conn, force: bool = False) -> int:
         logger.warning("Embedding model not available, skipping build")
         return 0
 
-    tickets = _load_ticket_texts(conn)
+    tickets = _load_ticket_texts(conn, composition_mode=composition_mode)
     if not tickets:
         logger.info("No tickets to embed")
         return 0
@@ -101,10 +111,36 @@ def build_embeddings(conn, force: bool = False) -> int:
         logger.info("Capping model.max_seq_length %s -> %d",
                      _m.max_seq_length, _MAX_SEQ_LENGTH)
         _m.max_seq_length = _MAX_SEQ_LENGTH
+    # Log device for visibility (mps/cuda/cpu — affects throughput dramatically)
+    if _m is not None and hasattr(_m, "device"):
+        logger.info("Embedding device: %s", _m.device)
 
-    texts = [t[1] for t in to_embed]
+    # Encode in chunks so progress is visible in the log instead of one
+    # 30+ minute black-box call. Chunk size is many batches' worth so the
+    # per-chunk encode-call overhead stays negligible.
     from src.data.embedding.encoder import embed_documents
-    embeddings = embed_documents(texts, batch_size=_BATCH_SIZE)
+    import time as _time
+    texts = [t[1] for t in to_embed]
+    chunk_size = max(_BATCH_SIZE * 4, 128)   # ~4 batches per progress tick
+    pieces: list = []
+    n_total = len(texts)
+    n_chunks = (n_total + chunk_size - 1) // chunk_size
+    t_start = _time.perf_counter()
+    for ci, start in enumerate(range(0, n_total, chunk_size), 1):
+        end = min(start + chunk_size, n_total)
+        t0 = _time.perf_counter()
+        chunk_emb = embed_documents(texts[start:end], batch_size=_BATCH_SIZE)
+        pieces.append(chunk_emb)
+        elapsed = _time.perf_counter() - t_start
+        chunk_dt = _time.perf_counter() - t0
+        rate = end / elapsed if elapsed else 0.0
+        eta = (n_total - end) / rate if rate else 0.0
+        logger.info(
+            "Embedding chunk %d/%d  (tickets %d-%d, %.1fs)  total %d/%d  "
+            "rate %.1f tk/s  ETA %.0fs",
+            ci, n_chunks, start, end, chunk_dt, end, n_total, rate, eta,
+        )
+    embeddings = np.vstack(pieces)
 
     written = _write_embeddings(conn, to_embed, embeddings)
     conn.commit()
@@ -116,18 +152,17 @@ def build_embeddings(conn, force: bool = False) -> int:
 # source text loading (Phase 2: raw body primary, composed text fallback)
 # ──────────────────────────────────────────────────────────────────────
 
-def _load_ticket_texts(conn) -> list[tuple[str, str, str]]:
+def _load_ticket_texts(conn, composition_mode: str = "raw_body") -> list[tuple[str, str, str]]:
     """Load (ticket_id, source_text, source_text_hash) tuples for every ticket.
 
-    Prefers raw body (subject + first 3 comment bodies, PHI-redacted,
-    truncated). Falls back to composed classification text when no
-    conversation body is available.
+    Three composition modes:
+    - "raw_body" (default): subject + first N comments, PHI-redacted.
+    - "composite_A": structured [trc][friction][sub_cluster] header + raw body.
+    - "composite_C": subject×3 + compact label line + 2 comments.
+
+    For composite modes, pulls the latest sub_cluster from
+    nlp_ticket_classifications per ticket.
     """
-    # Pull classification fields + conversation body in one query — LEFT JOIN
-    # so tickets without conversation rows still appear (and fall back).
-    # We try the shared `conversations` table first; per-source tables are
-    # searched only if the shared table has no matches (covered by the
-    # multi-source registry lookup elsewhere in the pipeline).
     rows = conn.execute(
         """
         SELECT ti.ticket_id,
@@ -142,6 +177,10 @@ def _load_ticket_texts(conn) -> list[tuple[str, str, str]]:
     # augment with a best-effort sweep of per-source conversation tables.
     per_source_bodies = _load_per_source_bodies(conn) if rows else {}
 
+    # For composite modes, fetch latest sub_cluster per ticket from NLP output.
+    # Falls back gracefully if the classification table is empty.
+    nlp_labels = _load_nlp_labels(conn) if composition_mode != "raw_body" else {}
+
     result: list[tuple[str, str, str]] = []
     for r in rows:
         tid = r[0]
@@ -154,19 +193,104 @@ def _load_ticket_texts(conn) -> list[tuple[str, str, str]]:
         if not full_thread and tid in per_source_bodies:
             subject, full_thread = per_source_bodies[tid]
 
-        raw_text = _compose_raw_body(subject, full_thread, thread_preview)
-        if raw_text:
-            source_text = raw_text
-            source_kind = "raw_body"
+        # Prefer NLP-table sub_cluster (richer than ticket_index.sub_pattern);
+        # fall back to ticket_index columns.
+        nlp_sub = nlp_labels.get(tid, {}).get("sub_cluster") or sub
+        nlp_friction = nlp_labels.get(tid, {}).get("friction_type") or friction
+
+        if composition_mode == "composite_A":
+            source_text = _compose_composite_A(
+                subject=subject, full_thread=full_thread,
+                thread_preview=thread_preview, trc=trc,
+                friction_type=nlp_friction, sub_cluster=nlp_sub,
+            )
+            source_kind = "composite_A"
+        elif composition_mode == "composite_C":
+            source_text = _compose_composite_C(
+                subject=subject, full_thread=full_thread,
+                thread_preview=thread_preview, trc=trc,
+                friction_type=nlp_friction, sub_cluster=nlp_sub,
+            )
+            source_kind = "composite_C"
         else:
-            source_text = _compose_classification_text(trc, friction, sub, snippet)
-            source_kind = "composed_fallback"
+            raw_text = _compose_raw_body(subject, full_thread, thread_preview)
+            if raw_text:
+                source_text = raw_text
+                source_kind = "raw_body"
+            else:
+                source_text = _compose_classification_text(trc, friction, sub, snippet)
+                source_kind = "composed_fallback"
 
         text_hash = hashlib.sha256(
             (source_kind + "|" + source_text).encode("utf-8")
         ).hexdigest()[:16]
         result.append((tid, source_text, text_hash))
     return result
+
+
+def _load_nlp_labels(conn) -> dict[str, dict]:
+    """Return {ticket_id: {sub_cluster, friction_type}} from most recent NLP row."""
+    try:
+        rows = conn.execute(
+            """SELECT ticket_id, sub_cluster, friction_type
+                 FROM nlp_ticket_classifications
+                ORDER BY rowid DESC"""
+        ).fetchall()
+    except Exception:
+        return {}
+    out: dict[str, dict] = {}
+    for r in rows:
+        tid = r[0]
+        if tid in out:
+            continue   # keep first (most recent by rowid DESC)
+        out[tid] = {"sub_cluster": r[1], "friction_type": r[2]}
+    return out
+
+
+def _compose_composite_A(*, subject, full_thread, thread_preview,
+                          trc, friction_type, sub_cluster) -> str:
+    """Variant A: structured LLM header + raw body."""
+    header_parts = []
+    if trc: header_parts.append(f"[trc: {trc}]")
+    if friction_type: header_parts.append(f"[friction: {friction_type}]")
+    if sub_cluster: header_parts.append(f"[issue: {sub_cluster}]")
+    header = " ".join(header_parts)
+
+    # Use the existing raw-body composer but with a tighter cap (leave room for header)
+    raw = _compose_raw_body(subject, full_thread, thread_preview)
+    if not raw:
+        # If no body at all, use header alone
+        return header or ""
+    # Shorter body in composite mode so header has proportional weight
+    if len(raw) > 1500:
+        raw = raw[:1500]
+    if header:
+        return f"{header}\n\n{raw}"
+    return raw
+
+
+def _compose_composite_C(*, subject, full_thread, thread_preview,
+                          trc, friction_type, sub_cluster) -> str:
+    """Variant C: subject repeated 3x + compact LLM line + 2 comments."""
+    subject_s = (subject or "").strip()
+    label_bits = [x for x in (trc, friction_type, sub_cluster) if x]
+    label_line = " / ".join(label_bits) if label_bits else ""
+
+    parts: list[str] = []
+    if subject_s:
+        parts.append(subject_s)
+        parts.append(subject_s)
+        parts.append(subject_s)
+    if label_line:
+        parts.append(f"[{label_line}]")
+    # Short body: first 2 comments, ~1200 chars, redacted
+    body_text = _compose_raw_body(subject=None, full_thread=full_thread,
+                                   thread_preview=thread_preview)
+    if body_text:
+        if len(body_text) > 1200:
+            body_text = body_text[:1200]
+        parts.append(body_text)
+    return "\n\n".join(parts)
 
 
 def _load_per_source_bodies(conn) -> dict[str, tuple[str, str]]:
