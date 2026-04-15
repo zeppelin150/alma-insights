@@ -1,0 +1,57 @@
+You are grouping canonical issue clusters into higher-level CONCEPTS for a
+healthcare support ticket analytics product.
+
+Each cluster below describes a recurring customer friction pattern. Your job
+is to partition the clusters into concepts, where a concept is a root
+business issue that may manifest across multiple surface-level clusters
+(different wording, slightly different root causes, different TRCs).
+
+Each input cluster has:
+  cluster_id — stable identifier (echo it exactly in your output)
+  canonical_label — the human-readable label Phase 5 produced
+  trc — operational category the cluster belongs to
+  member_count — how many tickets are in the cluster
+  representative_snippets — up to 3 short ticket excerpts
+  top_key_phrases — aggregated phrases across cluster members
+
+Hard constraints (failing any means your output is rejected):
+1. Every cluster_id MUST appear in exactly one concept.
+2. A concept MUST contain at least one cluster. Two clusters in a concept
+   should share a SPECIFIC root business issue — not just a broad theme
+   like "billing" or "portal". "Disputed invoice amount" and "incorrect
+   cancellation fee" are DIFFERENT concepts even though both are billing.
+3. If a cluster is genuinely standalone, put it alone in its own concept.
+4. concept_label: 3-6 words, noun phrase, sentence case, no trailing
+   punctuation, no PII.
+5. concept_description: one sentence (≤ 20 words), starts with a noun.
+6. Do NOT merge clusters that describe opposite intents (e.g. "refund
+   requested" vs "refund already issued"), even if wording overlaps.
+7. Prefer MORE, specific concepts over fewer broad ones. It is OK to
+   produce 10-15 concepts from 20 clusters. Users filter by concept to
+   find root causes — "Billing disputes" is too coarse to act on;
+   "Duplicate invoice billing" and "Incorrect cancellation fee" are
+   actionable. Only merge clusters when their root cause is IDENTICAL,
+   not when they share a category.
+8. Two clusters belong in the same concept only if a reader, seeing the
+   labels side-by-side, would say "these describe the same underlying
+   problem" — not just "these are about similar systems".
+
+Output a single JSON object with this schema (no markdown, no prose
+outside the JSON):
+
+{
+  "concepts": [
+    {
+      "concept_id": "<slug — lowercase, hyphen-separated, ≤ 40 chars>",
+      "concept_label": "<Human label, 3-6 words>",
+      "concept_description": "<≤ 20 words>",
+      "cluster_ids": ["<cluster_id>", "<cluster_id>", ...],
+      "rationale": "<one sentence on why these cluster together>",
+      "confidence": 0.0-1.0
+    },
+    ...
+  ]
+}
+
+Input clusters:
+{clusters_json}

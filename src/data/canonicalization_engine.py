@@ -975,6 +975,65 @@ def score_golden_set(
     }
 
 
+def score_golden_set_by_concept(
+    conn, golden_pairs: Iterable[tuple[str, str, bool]],
+) -> dict:
+    """Score canonicalization against a golden set at the *concept* level.
+
+    Phase 7 introduced `canonical_concepts`: a Level-2 grouping of clusters
+    produced by one batched LLM call per scan. Two tickets are considered
+    "same" at this level if they land in clusters linked to the same
+    concept_id. This addresses the pairwise-recall ceiling (~0.65) we hit
+    with cluster-level scoring in Phase 3.
+
+    The traversal is:
+      ticket_index.canonical_issue_id  (cluster)
+        → canonical_clusters.concept_id  (concept)
+
+    Tickets whose cluster has NULL concept_id fall back to cluster_id so
+    they aren't silently dropped.
+    """
+    rows = conn.execute(
+        """
+        SELECT ti.ticket_id,
+               COALESCE(cc.concept_id, 'cluster:' || ti.canonical_issue_id) AS effective_group
+        FROM ticket_index ti
+        LEFT JOIN canonical_clusters cc ON cc.cluster_id = ti.canonical_issue_id
+        WHERE ti.canonical_issue_id IS NOT NULL
+        """
+    ).fetchall()
+    group_map = {r[0]: r[1] for r in rows}
+
+    tp = fp = fn = tn = 0
+    for a, b, same_issue in golden_pairs:
+        ga = group_map.get(a)
+        gb = group_map.get(b)
+        if ga is None or gb is None:
+            if same_issue:
+                fn += 1
+            else:
+                tn += 1
+            continue
+        pred_same = (ga == gb)
+        if pred_same and same_issue:
+            tp += 1
+        elif pred_same and not same_issue:
+            fp += 1
+        elif not pred_same and same_issue:
+            fn += 1
+        else:
+            tn += 1
+
+    precision = tp / (tp + fp) if (tp + fp) else 0.0
+    recall = tp / (tp + fn) if (tp + fn) else 0.0
+    f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) else 0.0
+    return {
+        "tp": tp, "fp": fp, "fn": fn, "tn": tn,
+        "precision": precision, "recall": recall, "f1": f1,
+        "scoring_level": "concept",
+    }
+
+
 def record_tuning_run(
     conn, *, params: dict, scores: dict, scan_id: Optional[str] = None,
     trc: Optional[str] = None, wall_time_ms: int = 0, notes: str = "",
