@@ -40,21 +40,18 @@ class TestComposeRawBody:
         assert "Billing" in out
         assert "Charged twice" in out
 
-    def test_limits_to_first_three_comments(self):
-        # Thread with 5 comments separated by the canonical "---" delimiter
-        thread = "\n\n---\n\n".join([
-            "CUSTOMER:\nComment one about auto pay",
-            "AGENT:\nLooking into it",
-            "CUSTOMER:\nThanks",
-            "AGENT:\nFixed",
-            "CUSTOMER:\nConfirmed working",
-        ])
+    def test_limits_to_comments_limit(self):
+        # Thread with 10 comments — composer keeps only the first _COMMENTS_LIMIT
+        from src.data.embedding.builder import _COMMENTS_LIMIT
+        comments = [f"COMMENT-{i:02d} body text for ticket" for i in range(10)]
+        thread = "\n\n---\n\n".join(comments)
         out = _compose_raw_body(subject="auto pay", full_thread=thread, thread_preview=None)
-        assert "Comment one" in out
-        assert "Looking into it" in out
-        assert "Thanks" in out
-        # Later comments should NOT be present
-        assert "Confirmed working" not in out
+        # First _COMMENTS_LIMIT present
+        for i in range(_COMMENTS_LIMIT):
+            assert f"COMMENT-{i:02d}" in out, f"expected COMMENT-{i:02d} in body"
+        # Later comments excluded
+        for i in range(_COMMENTS_LIMIT, 10):
+            assert f"COMMENT-{i:02d}" not in out, f"COMMENT-{i:02d} should be truncated"
 
     def test_truncates_to_max_chars(self):
         big = "x" * 10_000

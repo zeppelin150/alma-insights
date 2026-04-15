@@ -33,14 +33,13 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 _BATCH_SIZE = 64           # doubled — CPU inference amortizes well up to 64-128
-_RAW_BODY_MAX_CHARS = 2048
-_COMMENTS_LIMIT = 3
+_RAW_BODY_MAX_CHARS = 8192  # lean into Qwen3's long context; multi-turn threads
+_COMMENTS_LIMIT = 8          # was 3 — allow more back-and-forth per ticket
 
-# Qwen3's default max_seq_length is 32768 tokens. sentence-transformers pads
-# each batch to the longest sequence in it — one outlier ticket drags the
-# whole batch. 512 tokens comfortably holds our 2048-char truncated bodies
-# with headroom, and cuts attention cost from O(32768²) to O(512²) per layer.
-_MAX_SEQ_LENGTH = 512
+# Qwen3 supports 32k tokens but attention is quadratic in seq length. 2048 tokens
+# holds our 8192-char bodies with headroom (~3.5-4 chars/token) and keeps CPU
+# inference tractable. Bump this together with _RAW_BODY_MAX_CHARS when changing.
+_MAX_SEQ_LENGTH = 2048
 
 # Cache redaction engine at module level — construction parses JSON files.
 _redactor = None
