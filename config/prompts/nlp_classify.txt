@@ -9,6 +9,8 @@ STATISTICAL CONTEXT FOR THIS TRC:
 
 {sub_taxonomy_section}
 
+{canonical_menu_section}
+
 MANIFEST:
 - Tickets in this batch: {n_tickets}
 - Comments: {n_comments}

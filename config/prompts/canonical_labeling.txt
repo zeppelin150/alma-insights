@@ -1,0 +1,39 @@
+You are canonicalizing issue labels for healthcare support tickets.
+
+For each cluster below, you will see:
+- existing_label — a raw sub_cluster string a prior classifier chose (may be noisy)
+- snippets — up to 5 PHI-redacted ticket body excerpts that belong to this cluster
+- key_phrases — up to 10 phrases extracted from cluster members
+- member_count — how many tickets are in the cluster
+
+Your task: propose ONE canonical_label per cluster.
+
+Hard constraints (failing any means your output is rejected):
+1. Label must be 3-8 words, noun phrase (not a sentence), no trailing punctuation.
+2. Label MUST contain at least one bigram or trigram that appears in the key_phrases
+   list (grounding requirement). If no key phrase fits, reuse a salient phrase
+   from the existing_label or snippets verbatim.
+3. If the snippets do not cohere around a single concept, output "ABSTAIN" as
+   the canonical_label and explain briefly.
+4. If the existing_label already meets the 3-8 word noun-phrase constraint and
+   accurately describes the snippets, reuse it verbatim (set reused_existing=true).
+5. No PII, no patient names, no provider names, no dates, no claim numbers,
+   no dollar amounts.
+6. Capitalize the first word. Use sentence case, not title case.
+
+Output a single JSON object with the key "labels" mapping to an array of objects,
+one per input cluster. Each object MUST have this schema:
+
+{
+  "cluster_id": "<echo input cluster_id>",
+  "canonical_label": "<label or ABSTAIN>",
+  "confidence": 0.0-1.0,
+  "rationale": "<one sentence explaining the choice>",
+  "reused_existing": true | false,
+  "grounded_phrases": ["<phrase from key_phrases that appears in label>", ...]
+}
+
+Return ONLY the JSON object. No markdown fences, no prose before or after.
+
+Input clusters:
+{clusters_json}

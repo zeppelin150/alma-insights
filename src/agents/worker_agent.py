@@ -47,6 +47,27 @@ CLASSIFY_PROMPT_PATH = (
 )
 
 
+def _format_canonical_menu(labels, trc: str) -> str:
+    """Format the Phase 5.5 canonical-label feed-forward section.
+
+    `labels` is a list of strings (canonical_label values for active clusters
+    in this TRC). Returns an empty-string placeholder when no labels exist
+    so the prompt template still interpolates cleanly.
+    """
+    if not labels:
+        return "EXISTING CANONICAL PATTERNS FOR THIS TRC: (none yet — first scan of this TRC)"
+    # Cap at 40 to keep prompt size bounded
+    capped = labels[:40]
+    bullets = "\n".join(f"  - \"{lbl}\"" for lbl in capped if lbl)
+    return (
+        "EXISTING CANONICAL PATTERNS FOR THIS TRC:\n"
+        "If a ticket matches one of the patterns below semantically, use that EXACT label\n"
+        "as the sub_cluster. Only mint a new sub_cluster if no pattern fits. This preserves\n"
+        "cross-scan consistency — do not rephrase existing labels.\n\n"
+        f"{bullets}"
+    )
+
+
 class WorkerAgent:
     """
     Persistent Gemini worker with tool-use loop.
@@ -745,6 +766,8 @@ class WorkerAgent:
         tickets = batch_payload["tickets"]
         stats_context = batch_payload.get("stats_context", "")
         sub_taxonomy = batch_payload.get("sub_taxonomy", "")
+        canonical_menu = batch_payload.get("canonical_menu", [])  # Phase 5.5 feed-forward
+        canonical_menu_section = _format_canonical_menu(canonical_menu, trc)
 
         # Build ticket JSONL
         ticket_lines = []
@@ -767,6 +790,7 @@ class WorkerAgent:
                 trc_path=trc,
                 statistical_context=stats_context or "No anomalies detected.",
                 sub_taxonomy_section=sub_taxonomy or "No existing sub-patterns.",
+                canonical_menu_section=canonical_menu_section,
                 n_tickets=len(tickets),
                 n_comments=sum(
                     t.get("full_thread", "").count("\n") + 1
@@ -782,7 +806,7 @@ class WorkerAgent:
             # Inline fallback
             prompt = self._build_inline_prompt(
                 trc, tickets, stats_context, sub_taxonomy,
-                ticket_jsonl, batch_payload
+                ticket_jsonl, batch_payload, canonical_menu_section
             )
 
         # Single-turn output instructions (bridge is one prompt → one response)
@@ -801,7 +825,8 @@ class WorkerAgent:
         return acp_prefix + prompt
 
     def _build_inline_prompt(self, trc, tickets, stats_context,
-                              sub_taxonomy, ticket_jsonl, batch_payload):
+                              sub_taxonomy, ticket_jsonl, batch_payload,
+                              canonical_menu_section: str = ""):
         """Inline prompt fallback if template file is missing."""
         return f"""You are classifying support tickets for an RCM healthcare platform.
 TRC: {trc}
@@ -810,6 +835,8 @@ STATISTICAL CONTEXT:
 {stats_context or "No anomalies detected."}
 
 {sub_taxonomy or "No existing sub-patterns."}
+
+{canonical_menu_section}
 
 MANIFEST:
 - Tickets: {len(tickets)}

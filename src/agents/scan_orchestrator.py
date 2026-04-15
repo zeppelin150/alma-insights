@@ -1356,6 +1356,10 @@ class ScanOrchestrator:
         except Exception as e:
             logger.debug(f"Context build failed: {e}")
 
+        # Phase 5.5 — feed-forward canonical labels for this TRC so the
+        # classifier reuses them instead of re-inventing variants.
+        canonical_menu = self._load_canonical_menu(trc)
+
         return {
             "scan_id": scan_id,
             "batch_id": batch_id,
@@ -1363,12 +1367,40 @@ class ScanOrchestrator:
             "tickets": tickets,
             "stats_context": stats_ctx,
             "sub_taxonomy": sub_tax,
+            "canonical_menu": canonical_menu,
             "chunk_n": batch.get('trc_chunk', 1),
             "chunk_total": batch.get('trc_chunk_total', 1),
             "date_start": date_start,
             "date_end": date_end,
             "call_timeout": self._adaptive_call_timeout,
         }
+
+    def _load_canonical_menu(self, trc: str) -> list[str]:
+        """Return active canonical_label values for a TRC (Phase 5.5).
+
+        Fails soft — returns [] if the table or rows don't exist yet.
+        """
+        try:
+            from src.data.connection_factory import get_connection
+            conn = get_connection(self.db_path, readonly=True)
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT canonical_label FROM canonical_clusters
+                    WHERE trc = ?
+                      AND canonical_label IS NOT NULL
+                      AND (tier IS NULL OR tier NOT IN ('retired', 'split'))
+                    ORDER BY member_count DESC
+                    LIMIT 50
+                    """,
+                    (trc,),
+                ).fetchall()
+                return [r[0] for r in rows if r[0]]
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.debug("Canonical menu load failed for TRC=%s: %s", trc, exc)
+            return []
 
     def _maybe_reset_context(self, worker):
         """Reset worker context if it has overflowed."""
@@ -1749,6 +1781,7 @@ class ScanOrchestrator:
                     "tickets": tickets,
                     "stats_context": stats_ctx,
                     "sub_taxonomy": sub_tax,
+                    "canonical_menu": self._load_canonical_menu(trc),
                     "chunk_n": chunk_n,
                     "chunk_total": chunk_total,
                     "date_start": date_start,
