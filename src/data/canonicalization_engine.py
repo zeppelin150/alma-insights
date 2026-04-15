@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -60,6 +61,11 @@ DEFAULT_PARAMS: dict = {
     "multilabel_secondary_threshold": 0.65,
     "multilabel_tertiary_threshold": 0.55,
     "multilabel_enabled": True,
+    # Centroid-merge post-pass — addresses HDBSCAN over-splitting (Phase 3
+    # gate showed 101 clusters for ~15 ground-truth concepts, recall 0.58).
+    # After per-TRC clustering, greedily merge two clusters if their
+    # centroid cosine exceeds this threshold. Set to 0.0 to disable.
+    "centroid_merge_threshold": 0.85,
 }
 
 # Embedding dimension (Qwen3-Embedding-0.6B) — confirmed at load time
@@ -368,6 +374,88 @@ def _knn_assign_noise(
     return out
 
 
+@dataclass
+class MergeEvent:
+    """One centroid-merge event for the audit log."""
+    kept_label: int
+    absorbed_label: int
+    kept_count_before: int
+    kept_count_after: int
+    absorbed_count: int
+    cosine_at_merge: float
+
+
+def _merge_close_clusters(
+    new_clusters: dict[int, list[int]],
+    embeddings: np.ndarray,
+    confidences: np.ndarray,
+    threshold: float,
+) -> tuple[dict[int, list[int]], dict[int, np.ndarray], list[MergeEvent]]:
+    """Greedy agglomerative merge of HDBSCAN clusters with cosine > threshold.
+
+    HDBSCAN often over-splits cohesive concepts into sub-clusters based on
+    fine-grained wording. This pass collapses any pair of new clusters whose
+    confidence-weighted centroids sit closer than `threshold` (cosine).
+
+    Args:
+        new_clusters: {hdbscan_label: [member_indices]} — labels are merged in
+            place; the lower label number wins on collision.
+        embeddings: L2-normalized embedding matrix indexed by member_indices.
+        confidences: per-row confidence weights for centroid computation.
+        threshold: cosine threshold above which two clusters merge. <=0 disables.
+
+    Returns:
+        (merged_clusters, label_to_centroid_cache, merge_events).
+    """
+    # Always compute initial per-label centroids
+    centroids = {
+        lab: _compute_confidence_weighted_centroid(
+            embeddings[members], confidences[members],
+        )
+        for lab, members in new_clusters.items()
+    }
+    events: list[MergeEvent] = []
+
+    if threshold <= 0.0 or len(new_clusters) < 2:
+        return dict(new_clusters), centroids, events
+
+    # Working copies
+    clusters = {lab: list(members) for lab, members in new_clusters.items()}
+
+    while len(centroids) >= 2:
+        labels = sorted(centroids.keys())
+        mat = np.vstack([centroids[lab] for lab in labels])
+        sims = mat @ mat.T
+        np.fill_diagonal(sims, -1.0)
+        i, j = np.unravel_index(np.argmax(sims), sims.shape)
+        max_sim = float(sims[i, j])
+        if max_sim < threshold:
+            break
+        keep, drop = labels[i], labels[j]
+        if keep == drop:
+            break
+        if drop < keep:
+            keep, drop = drop, keep
+        kept_before = len(clusters[keep])
+        absorbed_count = len(clusters[drop])
+        # Merge drop into keep
+        clusters[keep] = clusters[keep] + clusters[drop]
+        centroids[keep] = _compute_confidence_weighted_centroid(
+            embeddings[clusters[keep]], confidences[clusters[keep]],
+        )
+        events.append(MergeEvent(
+            kept_label=keep, absorbed_label=drop,
+            kept_count_before=kept_before,
+            kept_count_after=len(clusters[keep]),
+            absorbed_count=absorbed_count,
+            cosine_at_merge=max_sim,
+        ))
+        del clusters[drop]
+        del centroids[drop]
+
+    return clusters, centroids, events
+
+
 def _classify_method(prob: float, params: dict) -> str:
     core_p = float(params.get("hdbscan_core_prob", 0.8))
     border_p = float(params.get("hdbscan_border_prob", 0.4))
@@ -420,6 +508,37 @@ def _upsert_cluster(
                 scan_id, now, cluster_id,
             ),
         )
+
+
+def _write_merge_events(
+    conn, *, scan_id: str, trc: str,
+    events: list[MergeEvent],
+    label_to_cluster_id: dict[int, str],
+    threshold: float,
+) -> None:
+    """Persist merge audit rows. Best-effort: silently no-ops if migration
+    019 hasn't been applied (kept_cluster_id FK references canonical_clusters)."""
+    if not events:
+        return
+    try:
+        for ev in events:
+            kept_id = label_to_cluster_id.get(ev.kept_label)
+            if kept_id is None:
+                continue
+            conn.execute(
+                """INSERT INTO cluster_merge_events
+                     (scan_id, trc, kept_cluster_id,
+                      kept_member_count_before, kept_member_count_after,
+                      absorbed_member_count, cosine_at_merge,
+                      centroid_merge_threshold)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (scan_id, trc, kept_id,
+                 ev.kept_count_before, ev.kept_count_after,
+                 ev.absorbed_count, ev.cosine_at_merge, threshold),
+            )
+    except sqlite3.OperationalError:
+        # Migration 019 not applied — older schema, audit silently skipped
+        pass
 
 
 def _compute_multilabel_ranks(
@@ -610,13 +729,37 @@ def run_canonicalization(
             if lab >= 0:
                 new_clusters.setdefault(int(lab), []).append(local_i)
 
-        # Compute + persist new cluster centroids
+        # Centroid-merge post-pass — collapse over-split sub-clusters
+        merge_threshold = float(p.get("centroid_merge_threshold", 0.0))
+        merged_clusters, label_centroids, merge_events = _merge_close_clusters(
+            new_clusters, remaining_embeds, remaining_confs,
+            threshold=merge_threshold,
+        )
+        # Build label->surviving-label map (for original HDBSCAN labels that
+        # got absorbed into another). After merge, only labels in
+        # `merged_clusters` remain as keys; for the others, we need to know
+        # which kept-label they belong to so per-row assignments still work.
+        label_to_kept: dict[int, int] = {}
+        for kept_lab, members in merged_clusters.items():
+            for orig_lab in new_clusters.keys():
+                if orig_lab == kept_lab:
+                    label_to_kept[orig_lab] = kept_lab
+                    continue
+                # If every member of orig_lab now appears in kept_lab's list,
+                # orig_lab was absorbed.
+                if all(m in members for m in new_clusters[orig_lab]) and orig_lab not in label_to_kept:
+                    label_to_kept[orig_lab] = kept_lab
+        # Sanity: ensure every original label maps to something
+        for orig_lab in new_clusters.keys():
+            label_to_kept.setdefault(orig_lab, orig_lab)
+
+        # Compute + persist new cluster centroids (post-merge)
         new_cluster_id_for_label: dict[int, str] = {}
         centroid_cache: dict[str, np.ndarray] = {}
-        for lab, members in new_clusters.items():
+        for lab, members in merged_clusters.items():
             member_embeds = remaining_embeds[members]
             member_confs = remaining_confs[members]
-            centroid = _compute_confidence_weighted_centroid(member_embeds, member_confs)
+            centroid = label_centroids[lab]
             medoid_local = _compute_medoid(member_embeds, centroid)
             rep_ticket = ticket_ids[int(trc_idx[remaining_idx[members[medoid_local]]])] if medoid_local >= 0 else None
             cid = _new_cluster_id(trc_code)
@@ -633,12 +776,22 @@ def run_canonicalization(
                 representative_ticket_id=rep_ticket,
             ))
 
-        # Record assignments for HDBSCAN-clustered (non-noise) members
+        # Persist merge audit events (after kept clusters have IDs)
+        _write_merge_events(
+            conn, scan_id=scan_id, trc=trc_code, events=merge_events,
+            label_to_cluster_id=new_cluster_id_for_label,
+            threshold=merge_threshold,
+        )
+
+        # Record assignments for HDBSCAN-clustered (non-noise) members.
+        # `labels` holds the ORIGINAL HDBSCAN label per row; map through
+        # label_to_kept so absorbed-cluster members point at the surviving cid.
         for local_i, lab in enumerate(labels):
             if lab < 0:
                 continue
             orig_i = int(trc_idx[remaining_idx[local_i]])
-            cid = new_cluster_id_for_label[int(lab)]
+            kept_lab = label_to_kept.get(int(lab), int(lab))
+            cid = new_cluster_id_for_label[kept_lab]
             prob = float(probs[local_i])
             cos = float(remaining_embeds[local_i] @ centroid_cache[cid])
             method = _classify_method(prob, p)
