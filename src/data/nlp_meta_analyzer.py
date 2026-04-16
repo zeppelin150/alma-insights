@@ -19,14 +19,39 @@ logger = logging.getLogger("alma.nlp_meta")
 
 
 class NLPMetaAnalyzer:
+    """Post-scan Layer-2 synthesis across all classified tickets.
+
+    Runs after per-ticket classification completes. Aggregates
+    sub-pattern distributions, cross-TRC correlations, sentiment
+    shifts, and writes findings to `nlp_findings`. Uses an LLM for
+    narrative synthesis but statistical methods for the underlying
+    aggregations.
+
+    Entry point: `run_analysis(scan_id, source_id)`.
+    """
 
     def __init__(self, db):
         self.db = db
 
-    def run_analysis(self, scan_id):
+    def run_analysis(self, scan_id, source_id=None):
         """
         Main entry. Called when scan status = 'scan_complete'.
+
+        Args:
+            scan_id: The scan run ID
+            source_id: Optional source_id to tag sub_patterns with. If not provided,
+                       attempts to read from nlp_scan_runs.source_id.
         """
+        if not source_id:
+            try:
+                row = self.db.conn.execute(
+                    "SELECT source_id FROM nlp_scan_runs WHERE scan_id = ?", (scan_id,)
+                ).fetchone()
+                if row and row[0]:
+                    source_id = row[0]
+            except Exception:
+                pass
+        self._current_source_id = source_id
         logger.info(f"Starting meta-analysis for scan {scan_id}")
         self.db.conn.execute(
             "UPDATE nlp_scan_runs SET status = 'analyzing' WHERE scan_id = ?",
@@ -64,6 +89,14 @@ class NLPMetaAnalyzer:
 
             # 8. Select exemplar tickets
             self._select_exemplars_for_findings(scan_id)
+
+            # 8.5 Tag tickets to findings (Session 3 — hybrid chat)
+            try:
+                from src.data.post_nlp import tag_tickets_to_findings
+                tag_count = tag_tickets_to_findings(self.db.conn, scan_id)
+                logger.info("Tagged %d ticket-theme pairs for scan %s", tag_count, scan_id)
+            except Exception as e:
+                logger.warning("Ticket-theme tagging failed (non-fatal): %s", e)
 
             # HIPAA A7: Prune old provisional classifications
             self._prune_provisional(scan_id)
@@ -246,12 +279,13 @@ class NLPMetaAnalyzer:
                             (pattern_id, trc, label, description, friction_type,
                              tier, discovered_scan, discovered_at,
                              last_seen_scan, last_seen_at,
-                             lifetime_tickets, lifetime_scans)
-                        VALUES (?, ?, ?, ?, ?, 'probationary', ?, ?, ?, ?, ?, 1)
+                             lifetime_tickets, lifetime_scans, source_id)
+                        VALUES (?, ?, ?, ?, ?, 'probationary', ?, ?, ?, ?, ?, 1, ?)
                     """, (
                         pattern_id, trc, sub_cluster,
                         f"Discovered in scan {scan_id[:8]}",
                         friction, scan_id, now, scan_id, now, cnt,
+                        self._current_source_id,
                     ))
 
         self.db.commit()

@@ -52,7 +52,7 @@ class ToastWidget(QWidget):
         self.setStyleSheet(
             f"ToastWidget {{"
             f"  background: #FFFFFF;"
-            f"  border: 1px solid rgba(214, 210, 202, 0.45);"
+            f"  border: none;"
             f"  border-left: 4px solid {border_color};"
             f"  border-radius: 10px;"
             f"}}"

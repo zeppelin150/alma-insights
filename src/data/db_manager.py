@@ -6,8 +6,10 @@ SQLite backend for ticket storage, conversation rebuilding, and full-text search
 import sqlite3
 import os
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
+
+from src.data.connection_factory import get_connection
 
 
 DB_DIR = Path(__file__).resolve().parent.parent.parent / "data"
@@ -27,11 +29,19 @@ class DatabaseManager:
     @property
     def conn(self):
         if self._conn is None:
-            self._conn = sqlite3.connect(str(self.db_path))
-            self._conn.row_factory = sqlite3.Row
-            self._conn.execute("PRAGMA journal_mode=WAL")
-            self._conn.execute("PRAGMA foreign_keys=ON")
+            self._conn = get_connection(self.db_path)
         return self._conn
+
+    def get_connection(self):
+        """Return the shared connection (alias for .conn property)."""
+        return self.conn
+
+    @property
+    def _wq(self):
+        """Lazy warehouse query instance for migrated queries."""
+        from src.data.source_registry import SourceRegistry
+        from src.data.warehouse_query import WarehouseQuery
+        return WarehouseQuery(self.conn, SourceRegistry(self.conn))
 
     def _pre_migrate_schemas(self):
         """Drop old-schema tables before CREATE INDEX runs in initialize().
@@ -391,7 +401,8 @@ class DatabaseManager:
                 budget_cap_usd      REAL DEFAULT 50.0,
                 error_log       TEXT,
                 config_snapshot TEXT,
-                completed_at    TEXT
+                completed_at    TEXT,
+                source_id       TEXT
             );
 
             CREATE TABLE IF NOT EXISTS nlp_batches (
@@ -458,6 +469,7 @@ class DatabaseManager:
                 lifetime_tickets INTEGER DEFAULT 0,
                 lifetime_scans  INTEGER DEFAULT 0,
                 merged_into     TEXT,
+                source_id       TEXT,
                 UNIQUE(trc, label)
             );
 
@@ -637,6 +649,24 @@ class DatabaseManager:
             CREATE INDEX IF NOT EXISTS idx_probe_scan ON probe_history(scan_id);
             CREATE INDEX IF NOT EXISTS idx_probe_ts   ON probe_history(timestamp);
 
+            -- ═══ REPORT SCHEDULES (Phase 5.5A) ═══
+
+            CREATE TABLE IF NOT EXISTS report_schedules (
+                schedule_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+                name            TEXT NOT NULL,
+                page            TEXT NOT NULL,
+                config_json     TEXT NOT NULL,
+                timezone        TEXT DEFAULT 'America/New_York',
+                repeat_type     TEXT DEFAULT 'weekly',
+                repeat_day      INTEGER DEFAULT 1,
+                repeat_time     TEXT DEFAULT '06:00',
+                enabled         INTEGER DEFAULT 1,
+                last_run_at     TEXT,
+                next_run_at     TEXT,
+                created_at      TEXT NOT NULL,
+                updated_at      TEXT NOT NULL
+            );
+
             -- ═══ CHART LAYOUTS (Pass 3.1 UI Polish) ═══
 
             CREATE TABLE IF NOT EXISTS chart_layouts (
@@ -679,6 +709,16 @@ class DatabaseManager:
             CREATE INDEX IF NOT EXISTS idx_nlp_tc_friction ON nlp_ticket_classifications(friction_type);
             CREATE INDEX IF NOT EXISTS idx_nlp_tc_novel ON nlp_ticket_classifications(is_novel);
             CREATE UNIQUE INDEX IF NOT EXISTS idx_nlp_tc_scan_ticket ON nlp_ticket_classifications(scan_id, ticket_id);
+            CREATE TABLE IF NOT EXISTS nlp_batch_tickets (
+                batch_id    TEXT NOT NULL,
+                ticket_id   TEXT NOT NULL,
+                scan_id     TEXT NOT NULL,
+                PRIMARY KEY (batch_id, ticket_id),
+                FOREIGN KEY (batch_id) REFERENCES nlp_batches(batch_id),
+                FOREIGN KEY (scan_id) REFERENCES nlp_scan_runs(scan_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_nbt_scan ON nlp_batch_tickets(scan_id);
+            CREATE INDEX IF NOT EXISTS idx_nbt_ticket ON nlp_batch_tickets(ticket_id);
             CREATE INDEX IF NOT EXISTS idx_sp_trc ON sub_patterns(trc);
             CREATE INDEX IF NOT EXISTS idx_sp_tier ON sub_patterns(tier);
             CREATE INDEX IF NOT EXISTS idx_sp_merged ON sub_patterns(merged_into);
@@ -730,117 +770,109 @@ class DatabaseManager:
 
     def _migrate(self):
         """Add columns/tables that may be missing in older databases."""
-        # Column migrations for tickets table
-        existing = {
-            row[1] for row in self.conn.execute("PRAGMA table_info(tickets)").fetchall()
-        }
-        migrations = [
-            ("assignment_to_resolution_hours", "REAL"),
-            ("total_resolution_hours", "REAL"),
-            ("first_reply_hours", "REAL"),
-            ("requester_hash", "TEXT DEFAULT ''"),
-        ]
-        for col_name, col_type in migrations:
-            if col_name not in existing:
-                self.conn.execute(
-                    f"ALTER TABLE tickets ADD COLUMN {col_name} {col_type}"
-                )
-
-        # Column migrations for conversations table (Pass 3.0)
-        conv_cols = {
-            row[1] for row in self.conn.execute("PRAGMA table_info(conversations)").fetchall()
-        }
-        if "dataset_id" not in conv_cols:
-            self.conn.execute(
-                "ALTER TABLE conversations ADD COLUMN dataset_id INTEGER DEFAULT 0"
-            )
-        if "content_hash" not in conv_cols:
-            self.conn.execute(
-                "ALTER TABLE conversations ADD COLUMN content_hash TEXT"
-            )
-
-        # Column migrations for analysis_reports (Pass 3.0)
-        report_cols = {
-            row[1] for row in self.conn.execute("PRAGMA table_info(analysis_reports)").fetchall()
-        }
-        for col_name, col_type in [
-            ("report_type", "TEXT DEFAULT 'standard'"),
-            ("chat_history", "TEXT DEFAULT ''"),
-            ("exported_at", "TEXT DEFAULT ''"),
-        ]:
-            if col_name not in report_cols:
-                self.conn.execute(
-                    f"ALTER TABLE analysis_reports ADD COLUMN {col_name} {col_type}"
-                )
-
-        # Table-level migrations for Pass 1.5 tables
         existing_tables = {
             row[0] for row in self.conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
             ).fetchall()
         }
-        pass15_tables = [
+
+        self._migrate_ticket_columns()
+        self._migrate_conversation_columns()
+        self._migrate_report_columns()
+        self._migrate_ensure_tables(existing_tables)
+        self._migrate_scan_progress_columns(existing_tables)
+        self._migrate_scan_runs_columns(existing_tables)
+        self._migrate_poisson_schema(existing_tables)
+        self._migrate_classification_columns(existing_tables)
+        self._migrate_indexes()
+
+        self.conn.commit()
+
+        # Run numbered SQL migrations (Phase 2 — schema_migrator)
+        try:
+            from src.updater.schema_migrator import SchemaMigrator
+            SchemaMigrator().migrate(self.conn)
+        except Exception as exc:
+            import logging
+            logging.getLogger("alma.db").warning(
+                "Schema migration skipped: %s", exc
+            )
+
+    # ── Migration sub-methods ──
+
+    def _add_columns_if_missing(self, table: str, columns: list):
+        """Add columns to *table* that don't already exist."""
+        existing = {
+            row[1] for row in self.conn.execute(
+                f"PRAGMA table_info({table})"
+            ).fetchall()
+        }
+        for col_name, col_type in columns:
+            if col_name not in existing:
+                self.conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {col_name} {col_type}"
+                )
+
+    def _migrate_ticket_columns(self):
+        self._add_columns_if_missing("tickets", [
+            ("assignment_to_resolution_hours", "REAL"),
+            ("total_resolution_hours", "REAL"),
+            ("first_reply_hours", "REAL"),
+            ("requester_hash", "TEXT DEFAULT ''"),
+        ])
+
+    def _migrate_conversation_columns(self):
+        self._add_columns_if_missing("conversations", [
+            ("dataset_id", "INTEGER DEFAULT 0"),
+            ("content_hash", "TEXT"),
+        ])
+
+    def _migrate_report_columns(self):
+        self._add_columns_if_missing("analysis_reports", [
+            ("report_type", "TEXT DEFAULT 'standard'"),
+            ("chat_history", "TEXT DEFAULT ''"),
+            ("exported_at", "TEXT DEFAULT ''"),
+        ])
+
+    def _migrate_ensure_tables(self, existing_tables):
+        """Ensure all required tables exist (calls initialize() if any missing)."""
+        required = [
+            # Pass 1.5
             "user_terms", "tfidf_feedback", "discovered_compounds",
             "daily_baselines", "rolling_stats", "anomaly_flags",
             "hourly_counts", "daily_counts", "trc_baselines",
             "hourly_baselines", "incident_flags", "analysis_reports",
-        ]
-        pass30_tables = [
+            # Pass 3.0
             "prompt_library", "datasets", "interventions",
             "ticket_entities", "smart_report_runs",
-        ]
-        pass40_tables = [
+            # Pass 4.0
             "nlp_scan_runs", "nlp_batches", "nlp_ticket_classifications",
             "sub_patterns", "sub_pattern_ngrams", "sub_pattern_snapshots",
             "provisional_classifications", "nlp_findings",
-        ]
-        pass50_tables = [
+            # Pass 5.0
             "agent_health", "scan_progress", "review_flags",
             "analyst_reports", "trc_batch_profiles",
-        ]
-        pass51_tables = [
+            # Pass 5.1
             "gemini_usage", "cost_limits", "scan_events",
         ]
-        if not all(t in existing_tables for t in pass15_tables):
-            self.initialize()
-        if not all(t in existing_tables for t in pass30_tables):
-            self.initialize()
-        if not all(t in existing_tables for t in pass40_tables):
-            self.initialize()
-        if not all(t in existing_tables for t in pass50_tables):
-            self.initialize()
-        if not all(t in existing_tables for t in pass51_tables):
+        if not all(t in existing_tables for t in required):
             self.initialize()
 
-        # Column migrations for scan_progress (Pass 5.1)
+    def _migrate_scan_progress_columns(self, existing_tables):
         if "scan_progress" in existing_tables:
-            sp_cols = {
-                row[1] for row in self.conn.execute(
-                    "PRAGMA table_info(scan_progress)"
-                ).fetchall()
-            }
-            for col_name, col_type in [
+            self._add_columns_if_missing("scan_progress", [
                 ("tokens_in", "INTEGER DEFAULT 0"),
                 ("tokens_out", "INTEGER DEFAULT 0"),
-            ]:
-                if col_name not in sp_cols:
-                    self.conn.execute(
-                        f"ALTER TABLE scan_progress ADD COLUMN {col_name} {col_type}"
-                    )
+            ])
 
-        # Column migration for nlp_scan_runs.completed_at
+    def _migrate_scan_runs_columns(self, existing_tables):
         if "nlp_scan_runs" in existing_tables:
-            sr_cols = {
-                row[1] for row in self.conn.execute(
-                    "PRAGMA table_info(nlp_scan_runs)"
-                ).fetchall()
-            }
-            if "completed_at" not in sr_cols:
-                self.conn.execute(
-                    "ALTER TABLE nlp_scan_runs ADD COLUMN completed_at TEXT"
-                )
+            self._add_columns_if_missing("nlp_scan_runs", [
+                ("completed_at", "TEXT"),
+            ])
 
-        # Migrate trc_baselines from Gaussian to Poisson schema
+    def _migrate_poisson_schema(self, existing_tables):
+        """Migrate trc_baselines and incident_flags from Gaussian to Poisson schema."""
         if "trc_baselines" in existing_tables:
             bl_cols = {
                 row[1] for row in self.conn.execute(
@@ -852,7 +884,6 @@ class DatabaseManager:
                 self.conn.commit()
                 self.initialize()
 
-        # Migrate incident_flags from Gaussian to Poisson schema
         if "incident_flags" in existing_tables:
             fl_cols = {
                 row[1] for row in self.conn.execute(
@@ -864,7 +895,14 @@ class DatabaseManager:
                 self.conn.commit()
                 self.initialize()
 
-        # Pass 3.0 indexes (run after column migrations)
+    def _migrate_classification_columns(self, existing_tables):
+        if "nlp_ticket_classifications" in existing_tables:
+            self._add_columns_if_missing("nlp_ticket_classifications", [
+                ("novelty_verdict", "TEXT"),
+                ("novelty_match", "TEXT"),
+            ])
+
+    def _migrate_indexes(self):
         try:
             self.conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_conversations_dataset "
@@ -872,8 +910,6 @@ class DatabaseManager:
             )
         except Exception:
             pass
-
-        self.conn.commit()
 
     def close(self):
         if self._conn:
@@ -893,15 +929,8 @@ class DatabaseManager:
 
     # ─── Ticket Operations ───
 
-    def upsert_ticket(self, ticket: dict):
-        self.conn.execute("""
-            INSERT OR REPLACE INTO tickets
-                (ticket_id, subject, trc_code, trc_label, status, priority, channel,
-                 csat_score, created_at, updated_at, solved_at,
-                 requester_name, requester_email, assignee_name, group_name, tags, custom_fields,
-                 assignment_to_resolution_hours, total_resolution_hours, first_reply_hours)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-        """, (
+    def upsert_ticket(self, ticket: dict, table_prefix: str | None = None):
+        vals = (
             str(ticket.get("ticket_id", "")),
             ticket.get("subject", ""),
             ticket.get("trc_code", ""),
@@ -922,14 +951,29 @@ class DatabaseManager:
             ticket.get("assignment_to_resolution_hours"),
             ticket.get("total_resolution_hours"),
             ticket.get("first_reply_hours"),
-        ))
-
-    def upsert_comment(self, comment: dict):
+        )
         self.conn.execute("""
-            INSERT OR REPLACE INTO comments
-                (comment_id, ticket_id, author_name, author_role, body, is_public, created_at)
-            VALUES (?,?,?,?,?,?,?)
-        """, (
+            INSERT OR REPLACE INTO tickets
+                (ticket_id, subject, trc_code, trc_label, status, priority, channel,
+                 csat_score, created_at, updated_at, solved_at,
+                 requester_name, requester_email, assignee_name, group_name, tags, custom_fields,
+                 assignment_to_resolution_hours, total_resolution_hours, first_reply_hours)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, vals)
+        if table_prefix:
+            now = datetime.now(timezone.utc).isoformat()
+            self.conn.execute(f"""
+                INSERT OR REPLACE INTO [{table_prefix}_tickets]
+                    (ticket_id, subject, trc_code, trc_label, status, priority, channel,
+                     csat_score, created_at, updated_at, solved_at,
+                     requester_name, requester_email, assignee_name, group_name, tags, custom_fields,
+                     assignment_to_resolution_hours, total_resolution_hours, first_reply_hours,
+                     source_id, imported_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, vals + (table_prefix, now))
+
+    def upsert_comment(self, comment: dict, table_prefix: str | None = None):
+        vals = (
             str(comment.get("comment_id", "")),
             str(comment.get("ticket_id", "")),
             comment.get("author_name", ""),
@@ -937,16 +981,22 @@ class DatabaseManager:
             comment.get("body", ""),
             1 if comment.get("is_public", True) else 0,
             comment.get("created_at", ""),
-        ))
-
-    def upsert_conversation(self, conv: dict):
+        )
         self.conn.execute("""
-            INSERT OR REPLACE INTO conversations
-                (ticket_id, subject, trc_code, trc_label, status, csat_score,
-                 created_at, solved_at, message_count, client_messages, agent_messages,
-                 full_thread, thread_preview)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-        """, (
+            INSERT OR REPLACE INTO comments
+                (comment_id, ticket_id, author_name, author_role, body, is_public, created_at)
+            VALUES (?,?,?,?,?,?,?)
+        """, vals)
+        if table_prefix:
+            self.conn.execute(f"""
+                INSERT OR REPLACE INTO [{table_prefix}_comments]
+                    (comment_id, ticket_id, author_name, author_role, body, is_public, created_at,
+                     source_id)
+                VALUES (?,?,?,?,?,?,?,?)
+            """, vals + (table_prefix,))
+
+    def upsert_conversation(self, conv: dict, table_prefix: str | None = None):
+        vals = (
             str(conv["ticket_id"]),
             conv.get("subject", ""),
             conv.get("trc_code", ""),
@@ -960,7 +1010,23 @@ class DatabaseManager:
             conv.get("agent_messages", 0),
             conv.get("full_thread", ""),
             conv.get("thread_preview", ""),
-        ))
+            conv.get("dataset_id", 0),
+        )
+        self.conn.execute("""
+            INSERT OR REPLACE INTO conversations
+                (ticket_id, subject, trc_code, trc_label, status, csat_score,
+                 created_at, solved_at, message_count, client_messages, agent_messages,
+                 full_thread, thread_preview, dataset_id)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, vals)
+        if table_prefix:
+            self.conn.execute(f"""
+                INSERT OR REPLACE INTO [{table_prefix}_conversations]
+                    (ticket_id, subject, trc_code, trc_label, status, csat_score,
+                     created_at, solved_at, message_count, client_messages, agent_messages,
+                     full_thread, thread_preview, dataset_id, source_id)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, vals + (table_prefix,))
 
     def commit(self):
         self.conn.commit()
@@ -969,6 +1035,20 @@ class DatabaseManager:
         """Rebuild FTS5 index after bulk inserts."""
         try:
             self.conn.execute("INSERT INTO conversations_fts(conversations_fts) VALUES('rebuild')")
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass
+
+    def rebuild_source_fts(self, table_prefix: str):
+        """Rebuild per-source FTS5 index from per-source conversations table."""
+        fts = f"[{table_prefix}_fts]"
+        conv = f"[{table_prefix}_conversations]"
+        try:
+            self.conn.execute(f"DELETE FROM {fts}")
+            self.conn.execute(f"""
+                INSERT INTO {fts}(ticket_id, subject, trc_label, full_thread)
+                SELECT ticket_id, subject, trc_label, full_thread FROM {conv}
+            """)
             self.conn.commit()
         except sqlite3.OperationalError:
             pass
@@ -982,88 +1062,130 @@ class DatabaseManager:
                          c.message_count, c.client_messages, c.agent_messages,
                          c.thread_preview"""
 
-    def get_trc_codes(self):
+    def get_trc_codes(self, source_id=None):
         """Return distinct TRC codes with labels."""
-        rows = self.conn.execute(
-            "SELECT DISTINCT trc_code, trc_label FROM conversations WHERE trc_code != '' ORDER BY trc_label"
-        ).fetchall()
-        return [{"code": r["trc_code"], "label": r["trc_label"]} for r in rows]
+        rows = self._wq.query_conversations_raw(
+            "SELECT DISTINCT trc_code, trc_label FROM {table} WHERE trc_code != '' ORDER BY trc_label",
+            source_id=source_id,
+        )
+        seen = {}
+        for r in rows:
+            code = r[0]
+            if code not in seen:
+                seen[code] = r[1]
+        return [{"code": c, "label": l} for c, l in sorted(seen.items(), key=lambda x: x[1] or "")]
 
-    def get_date_range(self):
+    def get_date_range(self, source_id=None):
         """Return min and max created_at dates."""
-        row = self.conn.execute(
-            "SELECT MIN(created_at) as min_date, MAX(created_at) as max_date FROM conversations"
-        ).fetchone()
-        return row["min_date"], row["max_date"]
+        rows = self._wq.query_conversations_raw(
+            "SELECT MIN(created_at) as min_date, MAX(created_at) as max_date FROM {table}",
+            source_id=source_id,
+        )
+        min_d = min((r[0] for r in rows if r[0]), default=None)
+        max_d = max((r[1] for r in rows if r[1]), default=None)
+        return min_d, max_d
 
     def search_conversations(self, keyword="", trc_code="", date_from="", date_to="",
                               csat_min=None, csat_max=None, limit=1000):
-        """Search conversations with filters."""
+        """Search conversations with filters (routed to warehouse)."""
+        # If keyword search, use warehouse FTS first to get matching IDs
+        fts_ticket_ids = None
+        if keyword:
+            fts_results = self._wq.search_fts(keyword, limit=limit)
+            fts_ticket_ids = {r["ticket_id"] for r in fts_results}
+            if not fts_ticket_ids:
+                return []
+
         conditions = []
         params = []
 
-        if keyword:
-            # Use FTS5 for keyword search
-            conditions.append(
-                "c.ticket_id IN (SELECT ticket_id FROM conversations_fts WHERE conversations_fts MATCH ?)"
-            )
-            params.append(keyword)
+        if fts_ticket_ids:
+            placeholders = ",".join("?" * len(fts_ticket_ids))
+            conditions.append(f"ticket_id IN ({placeholders})")
+            params.extend(list(fts_ticket_ids))
 
         if trc_code:
-            conditions.append("c.trc_code = ?")
+            conditions.append("trc_code = ?")
             params.append(trc_code)
 
         if date_from:
-            conditions.append("c.created_at >= ?")
+            conditions.append("SUBSTR(created_at, 1, 10) >= ?")
             params.append(date_from)
 
         if date_to:
-            conditions.append("c.created_at <= ?")
+            conditions.append("SUBSTR(created_at, 1, 10) <= ?")
             params.append(date_to)
 
         if csat_min is not None:
-            conditions.append("c.csat_score >= ?")
+            conditions.append("csat_score >= ?")
             params.append(csat_min)
 
         if csat_max is not None:
-            conditions.append("c.csat_score <= ?")
+            conditions.append("csat_score <= ?")
             params.append(csat_max)
 
         where_clause = " AND ".join(conditions) if conditions else "1=1"
 
-        query = f"""
-            SELECT {self._SEARCH_COLUMNS}
-            FROM conversations c
+        _cols_list = "ticket_id, subject, trc_code, trc_label, status, csat_score, created_at, solved_at, message_count, client_messages, agent_messages, thread_preview"
+        rows = self._wq.query_conversations_raw(f"""
+            SELECT {_cols_list}
+            FROM {{table}}
             WHERE {where_clause}
-            ORDER BY c.created_at DESC
+            ORDER BY created_at DESC
             LIMIT ?
-        """
-        params.append(limit)
-        return [dict(r) for r in self.conn.execute(query, params).fetchall()]
+        """, params + [limit])
+        _col_names = [c.strip() for c in _cols_list.split(",")]
+        return [dict(zip(_col_names, r)) for r in rows]
 
     def get_conversation(self, ticket_id):
         """Get a single conversation with full thread."""
-        row = self.conn.execute(
-            "SELECT * FROM conversations WHERE ticket_id = ?", (ticket_id,)
-        ).fetchone()
-        return dict(row) if row else None
+        rows = self._wq.query_conversations_raw(
+            "SELECT ticket_id, subject, trc_code, trc_label, status, csat_score, "
+            "created_at, solved_at, message_count, client_messages, agent_messages, "
+            "full_thread, thread_preview, dataset_id FROM {table} WHERE ticket_id = ?",
+            (ticket_id,),
+        )
+        if not rows:
+            return None
+        _cols = ["ticket_id", "subject", "trc_code", "trc_label", "status", "csat_score",
+                 "created_at", "solved_at", "message_count", "client_messages", "agent_messages",
+                 "full_thread", "thread_preview", "dataset_id"]
+        return dict(zip(_cols, rows[0]))
 
     def get_ticket_count(self):
-        row = self.conn.execute("SELECT COUNT(*) as cnt FROM conversations").fetchone()
-        return row["cnt"]
+        return self._wq.get_ticket_count()
 
     def get_trc_stats(self):
         """Aggregate stats by TRC code."""
-        return [dict(r) for r in self.conn.execute("""
+        rows = self._wq.query_conversations_raw("""
             SELECT trc_code, trc_label,
                    COUNT(*) as ticket_count,
                    AVG(csat_score) as avg_csat,
                    AVG(message_count) as avg_messages
-            FROM conversations
+            FROM {table}
             WHERE trc_code != ''
             GROUP BY trc_code, trc_label
             ORDER BY ticket_count DESC
-        """).fetchall()]
+        """)
+        # Aggregate across sources
+        _agg = {}
+        for r in rows:
+            key = (r[0], r[1])
+            if key not in _agg:
+                _agg[key] = {"count": 0, "csat_sum": 0.0, "csat_n": 0, "msgs_sum": 0.0, "msgs_n": 0}
+            _agg[key]["count"] += r[2]
+            if r[3] is not None:
+                _agg[key]["csat_sum"] += r[3] * r[2]
+                _agg[key]["csat_n"] += r[2]
+            if r[4] is not None:
+                _agg[key]["msgs_sum"] += r[4] * r[2]
+                _agg[key]["msgs_n"] += r[2]
+        return sorted([
+            {"trc_code": k[0], "trc_label": k[1], "ticket_count": v["count"],
+             "avg_csat": v["csat_sum"] / v["csat_n"] if v["csat_n"] else None,
+             "avg_messages": v["msgs_sum"] / v["msgs_n"] if v["msgs_n"] else None}
+            for k, v in _agg.items()
+        ], key=lambda x: x["ticket_count"], reverse=True)
 
     def log_analysis(self, action, parameters=None, ticket_count=0, gemini_invoked=False, notes=""):
         self.conn.execute("""
@@ -1304,25 +1426,27 @@ class DatabaseManager:
 
     def populate_daily_counts(self):
         """
-        Rebuild daily_counts from conversations.created_at.
+        Rebuild daily_counts from per-source conversation tables.
         Call after data import. Idempotent — deletes and re-inserts.
-
-        Uses SUBSTR instead of DATE() because timestamps may have
-        single-digit hours (e.g. '2025-01-01 0:17:00') which DATE()
-        cannot parse.
         """
         self.conn.execute("DELETE FROM daily_counts")
-        self.conn.execute("""
-            INSERT INTO daily_counts (date, trc_code, ticket_count)
-            SELECT
-                SUBSTR(created_at, 1, 10) as date,
-                trc_code,
-                COUNT(*) as ticket_count
-            FROM conversations
+        rows = self._wq.query_conversations_raw("""
+            SELECT SUBSTR(created_at, 1, 10) as date, trc_code, COUNT(*) as ticket_count
+            FROM {table}
             WHERE trc_code != '' AND created_at IS NOT NULL AND created_at != ''
                   AND LENGTH(created_at) >= 10
             GROUP BY SUBSTR(created_at, 1, 10), trc_code
         """)
+        # Aggregate across sources, then insert
+        _agg = {}
+        for r in rows:
+            key = (r[0], r[1])
+            _agg[key] = _agg.get(key, 0) + r[2]
+        for (date, trc), count in _agg.items():
+            self.conn.execute(
+                "INSERT INTO daily_counts (date, trc_code, ticket_count) VALUES (?, ?, ?)",
+                (date, trc, count),
+            )
         self.conn.commit()
 
     def get_daily_series(self, trc_code, date_from, date_to):
@@ -1337,15 +1461,11 @@ class DatabaseManager:
 
     def populate_hourly_counts(self):
         """
-        Rebuild hourly_counts from conversations.created_at.
+        Rebuild hourly_counts from per-source conversation tables.
         Call after data import. Idempotent — deletes and re-inserts.
-
-        Uses SUBSTR-based extraction instead of DATE()/STRFTIME() because
-        timestamps may have single-digit hours that those functions can't parse.
         """
         self.conn.execute("DELETE FROM hourly_counts")
-        self.conn.execute("""
-            INSERT INTO hourly_counts (date, hour, trc_code, ticket_count)
+        rows = self._wq.query_conversations_raw("""
             SELECT
                 SUBSTR(created_at, 1, 10) as date,
                 CAST(SUBSTR(created_at,
@@ -1354,7 +1474,7 @@ class DatabaseManager:
                 ) AS INTEGER) as hour,
                 trc_code,
                 COUNT(*) as ticket_count
-            FROM conversations
+            FROM {table}
             WHERE trc_code != '' AND created_at IS NOT NULL AND created_at != ''
                   AND LENGTH(created_at) >= 10 AND INSTR(created_at, ' ') > 0
             GROUP BY SUBSTR(created_at, 1, 10),
@@ -1364,6 +1484,15 @@ class DatabaseManager:
                      ) AS INTEGER),
                      trc_code
         """)
+        _agg = {}
+        for r in rows:
+            key = (r[0], r[1], r[2])
+            _agg[key] = _agg.get(key, 0) + r[3]
+        for (date, hour, trc), count in _agg.items():
+            self.conn.execute(
+                "INSERT INTO hourly_counts (date, hour, trc_code, ticket_count) VALUES (?, ?, ?, ?)",
+                (date, hour, trc, count),
+            )
         self.conn.commit()
 
     def get_hourly_series(self, trc_code, date_from, date_to):
@@ -1437,6 +1566,30 @@ class DatabaseManager:
             "SELECT * FROM analysis_reports WHERE report_id = ?", (report_id,)
         ).fetchone()
         return dict(row) if row else None
+
+    # ─── Analysis Runs (Build 11.0) ───
+
+    def get_report_run(self, run_id: str):
+        """Get a report from analysis_runs by run_id."""
+        row = self.conn.execute(
+            "SELECT * FROM analysis_runs WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def get_report_run_count(self):
+        """Count rows in analysis_runs."""
+        row = self.conn.execute(
+            "SELECT COUNT(*) as cnt FROM analysis_runs"
+        ).fetchone()
+        return row[0] if row else 0
+
+    def get_latest_report_runs(self, limit=1):
+        """Get latest report runs from analysis_runs."""
+        rows = self.conn.execute(
+            "SELECT run_id, run_date, prompt_template, ticket_count "
+            "FROM analysis_runs ORDER BY run_date DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     # ─── Prompt Library (Pass 3.0) ───
 
@@ -1554,10 +1707,23 @@ class DatabaseManager:
         return cur.lastrowid
 
     def delete_dataset(self, dataset_id):
-        """Delete a dataset and its associated conversations."""
-        self.conn.execute(
-            "DELETE FROM conversations WHERE dataset_id = ?", (dataset_id,)
-        )
+        """Delete a dataset and its associated conversations from all source tables."""
+        # Delete from per-source conversation tables
+        from src.data.source_registry import SourceRegistry
+        registry = SourceRegistry(self.conn)
+        for src in registry.list_sources():
+            prefix = src["table_prefix"]
+            try:
+                self.conn.execute(
+                    f"DELETE FROM [{prefix}_conversations] WHERE dataset_id = ?", (dataset_id,)
+                )
+            except Exception:
+                pass
+        # Also clean from legacy shared table if it exists
+        try:
+            self.conn.execute("DELETE FROM conversations WHERE dataset_id = ?", (dataset_id,))
+        except Exception:
+            pass
         self.conn.execute(
             "DELETE FROM datasets WHERE dataset_id = ?", (dataset_id,)
         )
@@ -1653,10 +1819,11 @@ class DatabaseManager:
         conditions = ["te.entity_type = ?"]
         params = [entity_type]
         if date_from:
-            conditions.append("c.created_at >= ?")
+            # ── 5.4b: SUBSTR date comparison (single-digit hour fix) ──
+            conditions.append("SUBSTR(c.created_at, 1, 10) >= ?")
             params.append(date_from)
         if date_to:
-            conditions.append("c.created_at <= ?")
+            conditions.append("SUBSTR(c.created_at, 1, 10) <= ?")
             params.append(date_to)
         where = " AND ".join(conditions)
         rows = self.conn.execute(f"""
@@ -1712,6 +1879,26 @@ class DatabaseManager:
         """, (limit,)).fetchall()
         return [dict(r) for r in rows]
 
+    def get_smart_runs_with_reports(self, limit=20):
+        """Return recent smart runs JOINed with report summary and run cost."""
+        rows = self.conn.execute("""
+            SELECT r.*,
+                   ar.summary  AS report_summary,
+                   CASE WHEN ar.full_results IS NOT NULL
+                             AND ar.full_results != ''
+                        THEN 1 ELSE 0 END AS has_full_results,
+                   COALESCE(
+                       (SELECT SUM(cost_usd) FROM gemini_usage
+                        WHERE created_at >= r.started_at
+                          AND created_at <= COALESCE(r.completed_at, r.started_at)),
+                       0) AS run_cost_usd
+            FROM smart_report_runs r
+            LEFT JOIN analysis_reports ar ON r.report_id = ar.report_id
+            ORDER BY r.started_at DESC
+            LIMIT ?
+        """, (limit,)).fetchall()
+        return [dict(r) for r in rows]
+
     def update_report_exported(self, report_id):
         """Mark a report as exported to Google Drive."""
         self.conn.execute(
@@ -1756,30 +1943,38 @@ class DatabaseManager:
 
     def get_trc_ticket_counts(self, date_start, date_end):
         """Return ticket counts per TRC in a date range for batch planning."""
-        rows = self.conn.execute("""
+        rows = self._wq.query_conversations_raw("""
             SELECT trc_code AS trc, COUNT(DISTINCT ticket_id) AS n
-            FROM conversations
-            WHERE created_at >= ? AND created_at <= ?
+            FROM {table}
+            WHERE SUBSTR(created_at, 1, 10) >= ?
+              AND SUBSTR(created_at, 1, 10) <= ?
             GROUP BY trc_code
             ORDER BY n DESC
-        """, (date_start, date_end)).fetchall()
-        return [dict(r) for r in rows]
+        """, (date_start, date_end))
+        _agg = {}
+        for r in rows:
+            _agg[r[0]] = _agg.get(r[0], 0) + r[1]
+        return sorted(
+            [{"trc": t, "n": n} for t, n in _agg.items()],
+            key=lambda x: x["n"], reverse=True,
+        )
 
     def get_tickets_for_trc(self, trc, date_start, date_end, limit=None):
         """Return tickets + full_thread for a TRC in a date range."""
-        query = """
-            SELECT c.ticket_id, c.subject, c.trc_code, c.trc_label,
-                   c.csat_score, c.created_at, c.full_thread,
-                   c.message_count, c.client_messages, c.agent_messages
-            FROM conversations c
-            WHERE c.trc_code = ? AND c.created_at >= ? AND c.created_at <= ?
-            ORDER BY c.created_at ASC
-        """
-        params = [trc, date_start, date_end]
-        if limit:
-            query += " LIMIT ?"
-            params.append(limit)
-        return [dict(r) for r in self.conn.execute(query, params).fetchall()]
+        limit_clause = f"LIMIT {int(limit)}" if limit else ""
+        rows = self._wq.query_conversations_raw(f"""
+            SELECT ticket_id, subject, trc_code, trc_label,
+                   csat_score, created_at, full_thread,
+                   message_count, client_messages, agent_messages
+            FROM {{table}}
+            WHERE trc_code = ?
+              AND SUBSTR(created_at, 1, 10) >= ?
+              AND SUBSTR(created_at, 1, 10) <= ?
+            ORDER BY created_at ASC {limit_clause}
+        """, (trc, date_start, date_end))
+        _cols = ["ticket_id", "subject", "trc_code", "trc_label", "csat_score",
+                 "created_at", "full_thread", "message_count", "client_messages", "agent_messages"]
+        return [dict(zip(_cols, r)) for r in rows]
 
     def get_active_sub_patterns(self, trc):
         """Return active + probationary sub-patterns for a TRC."""
@@ -1952,21 +2147,22 @@ class DatabaseManager:
         return result
 
     def get_trc_list(self):
-        """Return distinct TRC codes from conversations."""
-        rows = self.conn.execute("""
-            SELECT DISTINCT trc_code FROM conversations
+        """Return distinct TRC codes from warehouse."""
+        rows = self._wq.query_conversations_raw("""
+            SELECT DISTINCT trc_code FROM {table}
             WHERE trc_code IS NOT NULL AND trc_code != ''
             ORDER BY trc_code
-        """).fetchall()
-        return [r["trc_code"] for r in rows]
+        """)
+        return sorted({r[0] for r in rows if r[0]})
 
     def get_ticket_count_in_range(self, date_start, date_end):
         """Count distinct tickets in a date range."""
-        row = self.conn.execute("""
-            SELECT COUNT(DISTINCT ticket_id) AS n FROM conversations
-            WHERE created_at >= ? AND created_at <= ?
-        """, (date_start, date_end + " 23:59:59")).fetchone()
-        return row["n"] if row else 0
+        rows = self._wq.query_conversations_raw("""
+            SELECT COUNT(DISTINCT ticket_id) AS n FROM {table}
+            WHERE SUBSTR(created_at, 1, 10) >= ?
+              AND SUBSTR(created_at, 1, 10) <= ?
+        """, (date_start, date_end))
+        return sum(r[0] for r in rows if r and r[0])
 
     def get_nlp_aggregate_for_trc(self, trc, scan_id=None):
         """Aggregate NLP classifications for a TRC from most recent scan.
@@ -2269,6 +2465,81 @@ class DatabaseManager:
             (scan_id,)
         ).fetchall()
         return [dict(r) for r in rows]
+
+    # ─── Report Schedules (Phase 5.5A) ───
+
+    def save_schedule(self, name, page, config_json, timezone="America/New_York",
+                      repeat_type="weekly", repeat_day=1, repeat_time="06:00",
+                      next_run_at=None):
+        """Insert a new report schedule. Returns the schedule_id."""
+        import json as _json
+        now = datetime.now().isoformat()
+        config_str = (
+            _json.dumps(config_json) if isinstance(config_json, dict) else config_json
+        )
+        cur = self.conn.execute("""
+            INSERT INTO report_schedules
+            (name, page, config_json, timezone, repeat_type, repeat_day,
+             repeat_time, enabled, next_run_at, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+        """, (name, page, config_str, timezone, repeat_type, repeat_day,
+              repeat_time, next_run_at, now, now))
+        self.conn.commit()
+        return cur.lastrowid
+
+    def get_schedules(self, enabled_only=False):
+        """Return all report schedules (optionally only enabled ones)."""
+        sql = "SELECT * FROM report_schedules"
+        if enabled_only:
+            sql += " WHERE enabled = 1"
+        sql += " ORDER BY created_at"
+        rows = self.conn.execute(sql).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_schedule(self, schedule_id, **kwargs):
+        """Update schedule fields. Accepts: name, config_json, timezone,
+        repeat_type, repeat_day, repeat_time, enabled, next_run_at."""
+        import json as _json
+        allowed = {
+            "name", "config_json", "timezone", "repeat_type",
+            "repeat_day", "repeat_time", "enabled", "next_run_at",
+        }
+        sets = []
+        params = []
+        for k, v in kwargs.items():
+            if k not in allowed:
+                continue
+            if k == "config_json" and isinstance(v, dict):
+                v = _json.dumps(v)
+            sets.append(f"{k} = ?")
+            params.append(v)
+        if not sets:
+            return
+        sets.append("updated_at = ?")
+        params.append(datetime.now().isoformat())
+        params.append(schedule_id)
+        self.conn.execute(
+            f"UPDATE report_schedules SET {', '.join(sets)} WHERE schedule_id = ?",
+            params,
+        )
+        self.conn.commit()
+
+    def delete_schedule(self, schedule_id):
+        """Delete a report schedule by ID."""
+        self.conn.execute(
+            "DELETE FROM report_schedules WHERE schedule_id = ?", (schedule_id,)
+        )
+        self.conn.commit()
+
+    def update_schedule_last_run(self, schedule_id, next_run_at=None):
+        """Mark a schedule as just-run and update next_run_at."""
+        now = datetime.now().isoformat()
+        self.conn.execute("""
+            UPDATE report_schedules
+            SET last_run_at = ?, next_run_at = ?, updated_at = ?
+            WHERE schedule_id = ?
+        """, (now, next_run_at, now, schedule_id))
+        self.conn.commit()
 
     # ─── Demo Data ───
 

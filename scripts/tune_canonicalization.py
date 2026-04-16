@@ -8,8 +8,10 @@ Davies-Bouldin, persist results to `canonicalization_tuning_runs`.
 Usage:
     python scripts/tune_canonicalization.py \\
         --db data/local_warehouse.db \\
-        --golden C:/Users/Chris/Downloads/alma_test_10000_1_golden_set.csv \\
+        --golden data/test_fixtures/alma_test_10000_1_golden_set.csv \\
         [--trc BILLING] [--no-llm] [--jobs 4]
+
+    # Or export ALMA_GOLDEN_SET_CSV to override the default path.
 
 Design notes:
 - Each grid cell operates on a clone of the DB (SQLite `.backup`) so runs

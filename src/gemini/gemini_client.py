@@ -23,6 +23,8 @@ HIPAA COMPLIANCE:
   email addresses, phone numbers, SSNs, member IDs, credit card numbers.
 """
 
+from __future__ import annotations
+
 import os
 import subprocess
 import re
@@ -53,9 +55,20 @@ def _load_redaction_config():
 
 
 class GeminiClient:
+    """Subprocess-based Gemini CLI wrapper with mandatory PII redaction.
 
-    def __init__(self, cli_path="", model="gemini-2.5-flash",
-                 temperature=0.2, pii_redaction=True):
+    Wraps the `gemini` CLI binary for one-shot prompt calls. The CLI
+    path is auto-detected at init time if not provided. Every call
+    applies PII/PHI redaction before sending — this cannot be disabled
+    in production paths (HIPAA constraint).
+
+    Duck-typed to match ClaudeClient via `.generate(prompt, system_prompt, timeout)`.
+    See `src.gemini.client_factory.build_client_for_task()` for selecting
+    between providers.
+    """
+
+    def __init__(self, cli_path: str = "", model: str = "gemini-2.5-flash",
+                 temperature: float = 0.2, pii_redaction: bool = True) -> None:
         self.cli_path = cli_path or self._find_cli()
         self.model = model
         self.temperature = temperature
@@ -64,17 +77,14 @@ class GeminiClient:
 
     def _find_cli(self) -> str:
         import shutil
-        config_path = Path(__file__).parent.parent.parent / "config" / "settings.yaml"
-        if config_path.exists():
-            try:
-                import yaml
-                with open(config_path, encoding="utf-8") as f:
-                    config = yaml.safe_load(f)
-                path = config.get("gemini", {}).get("cli_path", "")
-                if path and Path(path).exists():
-                    return path
-            except Exception:
-                pass
+        try:
+            from src.data.settings_manager import get_section
+            gemini_cfg = get_section("gemini", {})
+            path = gemini_cfg.get("cli_path", "")
+            if path and Path(path).exists():
+                return path
+        except Exception:
+            pass
         return shutil.which("gemini") or ""
 
     def is_available(self) -> bool:
@@ -94,6 +104,67 @@ class GeminiClient:
         except Exception:
             pass
         return False
+
+    def list_models(self, timeout: int = 15) -> list[str]:
+        """Query Gemini CLI for available models.
+
+        Returns list of model ID strings (e.g. ['gemini-2.5-flash', 'gemini-2.5-pro']).
+        Caches result after first successful call.
+        Falls back to built-in defaults on failure.
+        """
+        if hasattr(self, "_cached_models") and self._cached_models:
+            return self._cached_models
+
+        _FALLBACK = [
+            "gemini-2.5-flash", "gemini-2.5-pro",
+            "gemini-3-flash-preview", "gemini-3.1-pro-preview",
+            "gemini-2.5-flash-lite",
+        ]
+
+        if not self.cli_path or not Path(self.cli_path).exists():
+            return _FALLBACK
+
+        env = os.environ.copy()
+        api_key = self._get_api_key()
+        if api_key:
+            env["GEMINI_API_KEY"] = api_key
+
+        # Try common CLI patterns for listing models
+        for cmd in [
+            [self.cli_path, "models", "list"],
+            [self.cli_path, "--list-models"],
+        ]:
+            try:
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=timeout,
+                    encoding="utf-8", errors="replace", env=env,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    models = self._parse_model_list(result.stdout)
+                    if models:
+                        self._cached_models = models
+                        return models
+            except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+                continue
+
+        return _FALLBACK
+
+    @staticmethod
+    def _parse_model_list(output: str) -> list[str]:
+        """Extract model IDs from CLI output."""
+        models = []
+        for line in output.strip().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or line.startswith("-"):
+                continue
+            # Extract model ID — handle formats like "gemini-2.5-flash" or
+            # "models/gemini-2.5-flash" or tabular output with model names
+            token = line.split()[0].strip()
+            if "/" in token:
+                token = token.rsplit("/", 1)[-1]
+            if token.startswith("gemini"):
+                models.append(token)
+        return models
 
     def _get_api_key(self) -> str:
         """Load the saved Gemini API key, or empty string if not set."""

@@ -174,7 +174,7 @@ class BatchProgressRow(QWidget):
         self._progress.setFixedHeight(14)
         self._progress.setStyleSheet(f"""
             QProgressBar {{
-                border: 1px solid {ALMA_BORDER_LIGHT};
+                border: none;
                 border-radius: 4px;
                 background: {ALMA_CREAM};
                 text-align: center;
@@ -204,7 +204,7 @@ class BatchProgressRow(QWidget):
         self._progress.setValue(100)
         self._progress.setStyleSheet(f"""
             QProgressBar {{
-                border: 1px solid {ALMA_BORDER_LIGHT};
+                border: none;
                 border-radius: 4px;
                 background: {ALMA_CREAM};
                 text-align: center;
@@ -221,7 +221,7 @@ class BatchProgressRow(QWidget):
     def set_error(self):
         self._progress.setStyleSheet(f"""
             QProgressBar {{
-                border: 1px solid {ALMA_BORDER_LIGHT};
+                border: none;
                 border-radius: 4px;
                 background: {ALMA_CREAM};
                 text-align: center;
@@ -269,7 +269,7 @@ class ScanMonitorWidget(QWidget):
         card.setStyleSheet(f"""
             QFrame {{
                 background: {ALMA_BG_ELEVATED};
-                border: 1px solid rgba(214, 210, 202, 0.45);
+                border: none;
                 border-radius: 12px;
             }}
         """)
@@ -319,7 +319,7 @@ class ScanMonitorWidget(QWidget):
         self._progress_bar.setTextVisible(False)
         self._progress_bar.setStyleSheet(f"""
             QProgressBar {{
-                border: 1px solid {ALMA_BORDER_LIGHT};
+                border: none;
                 border-radius: 6px;
                 background: {ALMA_CREAM};
             }}
@@ -354,7 +354,7 @@ class ScanMonitorWidget(QWidget):
         self._log_text.setStyleSheet(f"""
             QPlainTextEdit {{
                 background: {ALMA_WHITE};
-                border: 1px solid {ALMA_BORDER_LIGHT};
+                border: none;
                 border-radius: 8px;
                 font-family: 'Consolas', 'Courier New', monospace;
                 font-size: 11px;
@@ -432,10 +432,41 @@ class ScanMonitorWidget(QWidget):
         self.setVisible(True)
         self._poll_timer.start()
 
-    def stop_monitoring(self):
-        """Stop polling and freeze display."""
+    def stop_monitoring(self, completed: bool = False):
+        """Stop polling and freeze display.
+
+        Args:
+            completed: If True, force the UI to 100% completion state
+                       regardless of classified/total gap.
+        """
         self._poll_timer.stop()
         self._sprout.stop()
+
+        if completed:
+            self._set_complete_state()
+
+    def _set_complete_state(self):
+        """Force the UI to show 100% completion."""
+        self._pct_label.setText("100% complete")
+        self._pct_label.setStyleSheet(
+            f"font-size: 26px; font-weight: 700; color: {ALMA_SUCCESS}; border: none;"
+        )
+        self._progress_bar.setValue(100)
+        self._remaining_label.setText("Complete")
+
+        # Update detail label with final classified count
+        try:
+            progress = self.db.get_scan_progress(self._scan_id)
+            if progress:
+                classified = progress.get("classified", 0)
+                total = progress.get("total", 0)
+                self._detail_label.setText(
+                    f"{classified:,} of {total:,} tickets classified"
+                )
+        except Exception:
+            pass
+
+        self.scan_completed.emit()
 
     def set_error_state(self, message="Error"):
         """Show error state on the monitor."""
@@ -562,7 +593,9 @@ class ScanMonitorWidget(QWidget):
 
         classified = progress.get("classified", 0)
         total = progress.get("total", 0)
-        pct = int(classified / total * 100) if total > 0 else 0
+        pct = round(classified / total * 100) if total > 0 else 0
+        # Cap at 99% during active scan — 100% is set by _set_complete_state()
+        pct = min(pct, 99) if total > 0 and classified < total else pct
 
         self._pct_label.setText(f"{pct}% scanning...")
         self._progress_bar.setValue(pct)
@@ -573,7 +606,7 @@ class ScanMonitorWidget(QWidget):
         if est_remaining and est_remaining > 0:
             mins = int(est_remaining) // 60
             self._remaining_label.setText(f"Est. remaining: ~{mins} min")
-        elif pct >= 100:
+        elif classified >= total and total > 0:
             self._remaining_label.setText("Complete")
 
         # Token info

@@ -28,8 +28,11 @@ The parser handles:
 - Multiple fenced blocks in a single chunk
 """
 
+from __future__ import annotations
+
 import json
 import logging
+from collections.abc import Generator
 from enum import Enum
 
 logger = logging.getLogger("alma.stream_parser")
@@ -49,7 +52,7 @@ class ParsedEvent:
 
     __slots__ = ("event_type", "data", "raw")
 
-    def __init__(self, event_type, data=None, raw=""):
+    def __init__(self, event_type: StreamEvent, data: dict | None = None, raw: str = "") -> None:
         self.event_type = event_type  # StreamEvent enum
         self.data = data              # Parsed dict (for structured events)
         self.raw = raw                # Raw text content
@@ -90,7 +93,7 @@ class StreamParser:
     def __init__(self):
         self.reset()
 
-    def reset(self):
+    def reset(self) -> None:
         """Reset parser state for a new batch."""
         self._buffer = ""
         self._in_fence = False
@@ -98,7 +101,7 @@ class StreamParser:
         self._fence_content = ""
         self._text_accumulator = ""
 
-    def feed(self, chunk):
+    def feed(self, chunk: str) -> Generator[ParsedEvent, None, None]:
         """
         Feed a text chunk and yield parsed events.
 
@@ -181,7 +184,7 @@ class StreamParser:
                 self._in_fence = True
                 self._fence_content = ""
 
-    def flush(self):
+    def flush(self) -> Generator[ParsedEvent, None, None]:
         """
         Flush any remaining buffered content as events.
         Call this when the stream ends to get any trailing text.
@@ -272,12 +275,12 @@ class StreamParser:
         )
 
     @property
-    def is_in_fence(self):
+    def is_in_fence(self) -> bool:
         """True if parser is currently inside a fenced block."""
         return self._in_fence
 
     @property
-    def pending_fence_type(self):
+    def pending_fence_type(self) -> str | None:
         """The fence type currently being parsed, or None."""
         return self._fence_type
 

@@ -3,6 +3,7 @@ Alma Insights — A/B Dataset Comparison Engine (Pass 3.0)
 Statistical comparison of two ticket datasets using chi-squared, Mann-Whitney U,
 and independent t-tests via scipy.stats.
 """
+from __future__ import annotations
 
 import json
 from collections import Counter
@@ -13,7 +14,7 @@ from scipy import stats as sp_stats
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 
-def compute_dataset_stats(db, dataset_id, date_start="", date_end=""):
+def compute_dataset_stats(db: object, dataset_id: int | None, date_start: str = "", date_end: str = "") -> dict:
     """Compute comprehensive statistics for a single dataset.
 
     Returns dict with keys: ticket_count, date_range, trc_distribution,
@@ -35,57 +36,84 @@ def compute_dataset_stats(db, dataset_id, date_start="", date_end=""):
 
     where = " AND ".join(conditions) if conditions else "1=1"
 
+    from src.data.source_registry import SourceRegistry
+    from src.data.warehouse_query import WarehouseQuery
+    _registry = SourceRegistry(db.conn)
+    _wq = WarehouseQuery(db.conn, _registry)
+
     # ── Ticket count & date range ──
-    row = db.conn.execute(
+    _cnt_rows = _wq.query_conversations_raw(
         f"SELECT COUNT(*) as cnt, MIN(created_at) as min_d, MAX(created_at) as max_d "
-        f"FROM conversations WHERE {where}", params
-    ).fetchone()
-    ticket_count = row["cnt"]
-    actual_start = row["min_d"] or date_start or ""
-    actual_end = row["max_d"] or date_end or ""
+        f"FROM {{table}} WHERE {where}", params
+    )
+    ticket_count = sum(r[0] for r in _cnt_rows if r[0])
+    actual_start = min((r[1] for r in _cnt_rows if r[1]), default=None) or date_start or ""
+    actual_end = max((r[2] for r in _cnt_rows if r[2]), default=None) or date_end or ""
 
     # ── TRC distribution ──
-    trc_rows = db.conn.execute(f"""
+    _trc_rows = _wq.query_conversations_raw(f"""
         SELECT trc_code, COUNT(*) as cnt
-        FROM conversations WHERE {where} AND trc_code != ''
+        FROM {{table}} WHERE {where} AND trc_code != ''
         GROUP BY trc_code ORDER BY cnt DESC
-    """, params).fetchall()
-    trc_distribution = {r["trc_code"]: r["cnt"] for r in trc_rows}
+    """, params)
+    trc_distribution = {}
+    for r in _trc_rows:
+        trc_distribution[r[0]] = trc_distribution.get(r[0], 0) + r[1]
 
     # ── CSAT by TRC ──
-    csat_rows = db.conn.execute(f"""
+    _csat_rows = _wq.query_conversations_raw(f"""
         SELECT trc_code, AVG(csat_score) as avg_csat,
                COUNT(csat_score) as rated
-        FROM conversations WHERE {where} AND csat_score IS NOT NULL AND trc_code != ''
-        GROUP BY trc_code ORDER BY cnt DESC
-    """, params).fetchall()
-    csat_by_trc = {r["trc_code"]: {"avg": round(r["avg_csat"], 2), "count": r["rated"]}
-                   for r in csat_rows}
+        FROM {{table}} WHERE {where} AND csat_score IS NOT NULL AND trc_code != ''
+        GROUP BY trc_code
+    """, params)
+    csat_by_trc = {}
+    for r in _csat_rows:
+        if r[0] not in csat_by_trc:
+            csat_by_trc[r[0]] = {"avg": round(r[1], 2) if r[1] else 0, "count": r[2]}
+        else:
+            old = csat_by_trc[r[0]]
+            total_n = old["count"] + r[2]
+            csat_by_trc[r[0]] = {
+                "avg": round((old["avg"] * old["count"] + (r[1] or 0) * r[2]) / total_n, 2) if total_n else 0,
+                "count": total_n,
+            }
 
-    # ── Resolution times ──
-    res_rows = db.conn.execute(f"""
-        SELECT t.assignment_to_resolution_hours, t.total_resolution_hours, t.first_reply_hours
-        FROM tickets t
-        JOIN conversations c ON t.ticket_id = c.ticket_id
-        WHERE {where.replace('created_at', 'c.created_at').replace('dataset_id', 'c.dataset_id')}
-          AND t.assignment_to_resolution_hours IS NOT NULL
-    """, params).fetchall()
-    resolution_times = [r["total_resolution_hours"] for r in res_rows
-                        if r["total_resolution_hours"] is not None]
-    first_reply_times = [r["first_reply_hours"] for r in res_rows
-                         if r["first_reply_hours"] is not None]
+    # ── Resolution times (JOIN per source) ──
+    _c_where = where.replace('created_at', 'c.created_at').replace('dataset_id', 'c.dataset_id')
+    res_rows_flat = []
+    for src in _registry.list_sources():
+        prefix = src["table_prefix"]
+        try:
+            _rr = db.conn.execute(f"""
+                SELECT t.assignment_to_resolution_hours, t.total_resolution_hours, t.first_reply_hours
+                FROM [{prefix}_tickets] t
+                JOIN [{prefix}_conversations] c ON t.ticket_id = c.ticket_id
+                WHERE {_c_where} AND t.assignment_to_resolution_hours IS NOT NULL
+            """, params).fetchall()
+            res_rows_flat.extend(_rr)
+        except Exception:
+            pass
+    if not res_rows_flat and _wq._legacy_mode:
+        res_rows_flat = db.conn.execute(f"""
+            SELECT t.assignment_to_resolution_hours, t.total_resolution_hours, t.first_reply_hours
+            FROM tickets t JOIN conversations c ON t.ticket_id = c.ticket_id
+            WHERE {_c_where} AND t.assignment_to_resolution_hours IS NOT NULL
+        """, params).fetchall()
+    resolution_times = [r[1] for r in res_rows_flat if r[1] is not None]
+    first_reply_times = [r[2] for r in res_rows_flat if r[2] is not None]
 
     # ── Sentiment by TRC (VADER) ──
     analyzer = SentimentIntensityAnalyzer()
-    preview_rows = db.conn.execute(f"""
+    preview_rows = _wq.query_conversations_raw(f"""
         SELECT trc_code, thread_preview
-        FROM conversations WHERE {where} AND thread_preview != '' AND trc_code != ''
-    """, params).fetchall()
+        FROM {{table}} WHERE {where} AND thread_preview != '' AND trc_code != ''
+    """, params)
 
     sentiment_by_trc = {}
     for r in preview_rows:
-        trc = r["trc_code"]
-        compound = analyzer.polarity_scores(r["thread_preview"])["compound"]
+        trc = r[0]
+        compound = analyzer.polarity_scores(r[1])["compound"]
         sentiment_by_trc.setdefault(trc, []).append(compound)
 
     # Average per TRC
@@ -102,9 +130,8 @@ def compute_dataset_stats(db, dataset_id, date_start="", date_end=""):
     tfidf_top30 = []
     try:
         from src.data.trending_engine import run_full_analysis
-        import sqlite3
-        conn = sqlite3.connect(str(db.db_path))
-        conn.row_factory = sqlite3.Row
+        from src.data.connection_factory import get_connection
+        conn = get_connection(db.db_path)
         analysis = run_full_analysis(
             conn, actual_start[:10], actual_end[:10],
             trc_filter=None, window_size="Weekly",
@@ -132,7 +159,7 @@ def compute_dataset_stats(db, dataset_id, date_start="", date_end=""):
     }
 
 
-def compare_datasets(stats_a, stats_b):
+def compare_datasets(stats_a: dict, stats_b: dict) -> dict:
     """Run statistical comparisons between two dataset stats dicts.
 
     Returns dict with:
@@ -259,7 +286,7 @@ def compare_datasets(stats_a, stats_b):
     return comparison
 
 
-def build_ab_data_block(stats_a, stats_b, comparison):
+def build_ab_data_block(stats_a: dict, stats_b: dict, comparison: dict) -> dict:
     """Build a combined data block dict for prompt variable replacement."""
     block = {}
 

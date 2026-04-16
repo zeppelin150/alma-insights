@@ -21,8 +21,15 @@ from src.data.canonicalization_engine import (
 )
 from src.data.embedding.builder import build_embeddings
 
+import os
+
 DB = _ROOT / "data" / "phase3_gate_test.db"
-GOLDEN = Path(r"C:/Users/Chris/Downloads/alma_test_10000_1_golden_set.csv")
+# Override with the ALMA_GOLDEN_SET_CSV env var; fallback expects the CSV at
+# data/test_fixtures/ (gitignored) or an explicit path the operator provides.
+GOLDEN = Path(os.environ.get(
+    "ALMA_GOLDEN_SET_CSV",
+    str(_ROOT / "data" / "test_fixtures" / "alma_test_10000_1_golden_set.csv"),
+))
 
 
 def _reset_canon(conn):

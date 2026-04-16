@@ -1,0 +1,560 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Guru Card Workbench — Wireframe v2</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --green-dark: #03281B;
+    --green-mid: #0A3D2C;
+    --green-light: #14573F;
+    --green-subtle: #1B6B4D;
+    --cream: #F3F1EC;
+    --white: #FAFAF8;
+    --bg-elevated: #FFFFFF;
+    --text-dark: #1A1A1A;
+    --text-mid: #4A4A4A;
+    --text-light: #7A7A7A;
+    --text-on-dark: #F3F1EC;
+    --border: #D6D2CA;
+    --border-light: #E8E5DE;
+    --hover-light: #EAE7E0;
+    --success: #16763A;
+    --warning: #B45309;
+    --error: #C41E1E;
+    --info: #1D6FA5;
+    --bg-inset: #F7F5F0;
+    --purple: #7C3AED;
+    --teal: #0D9488;
+    --redline: #D32F2F;
+    --redline-bg: rgba(211, 47, 47, 0.06);
+    --redline-border: rgba(211, 47, 47, 0.25);
+    --insert-bg: rgba(22, 118, 58, 0.05);
+    --insert-border: rgba(22, 118, 58, 0.3);
+  }
+  body {
+    font-family: 'Segoe UI', 'SF Pro Display', 'Helvetica Neue', Arial, sans-serif;
+    background: var(--cream); color: var(--text-dark); padding: 0; min-height: 100vh;
+  }
+  .page-header { padding: 20px 28px 0; }
+  .page-title { font-size: 22px; font-weight: 700; color: var(--text-dark); letter-spacing: -0.3px; }
+  .page-subtitle { font-size: 13px; color: var(--text-mid); margin-top: 2px; }
+  .tab-bar { display: flex; gap: 0; margin: 16px 28px 0; border-bottom: 2px solid var(--border-light); }
+  .tab { padding: 10px 20px; font-size: 13px; font-weight: 500; color: var(--text-light); cursor: pointer; border-bottom: 3px solid transparent; margin-bottom: -2px; }
+  .tab:hover { color: var(--text-dark); }
+  .tab.active { color: var(--green-dark); font-weight: 600; border-bottom-color: var(--green-dark); }
+  .content { padding: 16px 28px 28px; }
+
+  /* Card */
+  .card { background: var(--bg-elevated); border: 1px solid rgba(214,210,202,0.45); border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,0.05); margin-bottom: 16px; }
+  .card-header { padding: 16px 20px 12px; border-bottom: 1px solid var(--border-light); display: flex; align-items: center; justify-content: space-between; }
+  .card-title { font-size: 14px; font-weight: 700; color: var(--text-dark); }
+  .card-body { padding: 16px 20px; }
+
+  /* Workbench */
+  .workbench-grid { display: grid; grid-template-columns: 340px 1fr; gap: 16px; min-height: 600px; }
+  .input-panel { display: flex; flex-direction: column; gap: 12px; }
+  .output-panel { display: flex; flex-direction: column; gap: 12px; }
+
+  /* Selection cards */
+  .selection-card { background: var(--bg-elevated); border: 1px solid rgba(214,210,202,0.45); border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.04); overflow: hidden; }
+  .selection-header { padding: 12px 16px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border-light); }
+  .selection-title { font-size: 12px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; }
+  .selection-title.green { color: var(--green-light); }
+  .selection-title.blue { color: var(--info); }
+  .selection-title.amber { color: var(--warning); }
+  .selection-title.purple { color: var(--purple); }
+  .selection-body { padding: 12px 16px; }
+  .accent-green { border-left: 4px solid var(--green-light); }
+  .accent-blue { border-left: 4px solid var(--info); }
+  .accent-amber { border-left: 4px solid var(--warning); }
+  .accent-purple { border-left: 4px solid var(--purple); }
+
+  /* Check items */
+  .check-item { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-radius: 8px; cursor: pointer; margin-bottom: 4px; }
+  .check-item:hover { background: var(--hover-light); }
+  .check-item.selected { background: rgba(3,40,27,0.06); }
+  .checkbox { width: 18px; height: 18px; border-radius: 4px; border: 1.5px solid var(--border); background: var(--white); display: flex; align-items: center; justify-content: center; font-size: 12px; color: white; flex-shrink: 0; }
+  .checkbox.checked { background: var(--green-dark); border-color: var(--green-dark); }
+  .check-label { font-size: 13px; color: var(--text-dark); font-weight: 500; flex: 1; min-width: 0; }
+  .check-meta { font-size: 11px; color: var(--text-light); flex-shrink: 0; }
+
+  /* Badges */
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+  .badge-green { background: rgba(22,118,58,0.12); color: var(--success); }
+  .badge-amber { background: rgba(180,83,9,0.12); color: var(--warning); }
+  .badge-red { background: rgba(196,30,30,0.12); color: var(--error); }
+  .badge-blue { background: rgba(29,111,165,0.12); color: var(--info); }
+  .badge-gray { background: rgba(0,0,0,0.06); color: var(--text-light); }
+
+  /* Inputs */
+  .search-input { width: 100%; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--white); font-size: 13px; color: var(--text-dark); font-family: inherit; outline: none; }
+  .search-input::placeholder { color: var(--text-light); }
+  .context-textarea { width: 100%; min-height: 64px; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--white); font-size: 13px; color: var(--text-dark); font-family: inherit; resize: vertical; outline: none; line-height: 1.5; }
+  .context-textarea::placeholder { color: var(--text-light); }
+
+  /* Buttons */
+  .btn-primary { background: var(--green-dark); color: var(--cream); border: none; border-radius: 8px; padding: 10px 24px; font-size: 13px; font-weight: 600; cursor: pointer; font-family: inherit; }
+  .btn-ghost { background: transparent; color: var(--green-dark); border: 1px solid var(--green-dark); border-radius: 6px; padding: 6px 14px; font-size: 12px; font-weight: 600; cursor: pointer; font-family: inherit; }
+  .btn-secondary { background: transparent; color: var(--green-dark); border: 1px solid rgba(214,210,202,0.7); border-radius: 8px; padding: 8px 20px; font-size: 13px; font-weight: 500; cursor: pointer; font-family: inherit; }
+  .btn-export { background: transparent; color: var(--text-mid); border: 1px solid var(--border); border-radius: 6px; padding: 4px 12px; font-size: 11px; font-weight: 600; cursor: pointer; font-family: inherit; }
+  .add-link { display: flex; align-items: center; gap: 6px; padding: 8px 12px; border-radius: 8px; border: 1.5px dashed var(--border); color: var(--text-mid); font-size: 12px; cursor: pointer; background: transparent; }
+
+  /* Chip */
+  .chip { display: inline-flex; align-items: center; gap: 4px; padding: 4px 12px; border-radius: 14px; font-size: 12px; font-weight: 500; background: rgba(3,40,27,0.08); color: var(--green-dark); border: 1px solid rgba(3,40,27,0.15); }
+  .chip .remove { cursor: pointer; font-size: 14px; opacity: 0.5; margin-left: 2px; }
+
+  /* Status */
+  .status-bar { display: flex; align-items: center; gap: 8px; padding: 8px 16px; background: rgba(3,40,27,0.04); border-radius: 8px; font-size: 12px; color: var(--text-mid); }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; }
+  .status-dot.success { background: var(--success); }
+
+  /* Phase */
+  .phase-track { display: flex; gap: 2px; margin-bottom: 12px; }
+  .phase-step { flex: 1; height: 4px; border-radius: 2px; background: var(--border-light); }
+  .phase-step.complete { background: var(--success); }
+
+  /* Export */
+  .export-row { display: flex; gap: 8px; justify-content: flex-end; padding-top: 8px; border-top: 1px solid var(--border-light); margin-top: 12px; }
+
+  /* KPI */
+  .kpi-row { display: flex; gap: 12px; margin-bottom: 16px; }
+  .kpi-card { flex: 1; background: var(--bg-elevated); border: 1px solid rgba(214,210,202,0.45); border-radius: 12px; padding: 16px; box-shadow: 0 2px 10px rgba(0,0,0,0.04); }
+  .kpi-card.kpi-green { border-left: 4px solid var(--green-light); }
+  .kpi-card.kpi-blue { border-left: 4px solid var(--info); }
+  .kpi-card.kpi-teal { border-left: 4px solid var(--teal); }
+  .kpi-card.kpi-amber { border-left: 4px solid var(--warning); }
+  .kpi-label { font-size: 12px; font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase; color: var(--text-light); margin-bottom: 4px; }
+  .kpi-value { font-size: 28px; font-weight: 700; color: var(--text-dark); letter-spacing: -0.5px; }
+  .kpi-subtitle { font-size: 11px; color: var(--text-light); margin-top: 2px; }
+
+  /* ═══════════════════════════════════════════════════
+     GURU CARD REDLINE VIEW
+     ═══════════════════════════════════════════════════ */
+
+  .guru-card-view {
+    background: var(--white);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+
+  /* Card chrome — mimics Guru card header */
+  .guru-chrome {
+    background: var(--bg-inset);
+    border-bottom: 1px solid var(--border-light);
+    padding: 12px 20px;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .guru-chrome-title {
+    font-size: 16px; font-weight: 700; color: var(--text-dark);
+  }
+  .guru-chrome-meta {
+    font-size: 11px; color: var(--text-light);
+  }
+  .guru-collection {
+    display: inline-block; padding: 2px 10px; border-radius: 10px;
+    font-size: 10px; font-weight: 600; letter-spacing: 0.3px;
+    background: rgba(3,40,27,0.08); color: var(--green-dark);
+  }
+
+  /* Card body content — rendered like actual Guru card text */
+  .guru-body {
+    padding: 20px 24px;
+    font-size: 13px; line-height: 1.8; color: var(--text-dark);
+  }
+  .guru-body h2 {
+    font-size: 15px; font-weight: 700; color: var(--green-light);
+    margin: 20px 0 8px; padding-bottom: 4px;
+    border-bottom: 1px solid var(--border-light);
+  }
+  .guru-body h2:first-child { margin-top: 0; }
+  .guru-body p { margin: 6px 0; }
+  .guru-body ol, .guru-body ul { padding-left: 24px; margin: 6px 0; }
+  .guru-body li { margin: 4px 0; }
+
+  /* Original card text (unchanged) */
+  .guru-original {
+    color: var(--text-dark);
+  }
+
+  /* Redline: inserted text */
+  .redline-insert {
+    color: var(--redline);
+    font-weight: 600;
+    background: var(--redline-bg);
+    border-left: 3px solid var(--redline);
+    padding: 8px 12px;
+    margin: 8px 0;
+    border-radius: 0 6px 6px 0;
+    position: relative;
+  }
+  .redline-insert::before {
+    content: "PROPOSED";
+    position: absolute; top: -8px; left: 12px;
+    font-size: 9px; font-weight: 700; letter-spacing: 0.8px;
+    color: var(--redline); background: var(--white);
+    padding: 0 4px;
+  }
+
+  /* Redline: modified text (strikethrough + replacement) */
+  .redline-modify {
+    background: rgba(29,111,165,0.04);
+    border-left: 3px solid var(--info);
+    padding: 8px 12px;
+    margin: 8px 0;
+    border-radius: 0 6px 6px 0;
+    position: relative;
+  }
+  .redline-modify::before {
+    content: "EDIT";
+    position: absolute; top: -8px; left: 12px;
+    font-size: 9px; font-weight: 700; letter-spacing: 0.8px;
+    color: var(--info); background: var(--white);
+    padding: 0 4px;
+  }
+  .redline-old {
+    text-decoration: line-through;
+    color: var(--text-light);
+    font-style: italic;
+  }
+  .redline-new {
+    color: var(--redline);
+    font-weight: 600;
+  }
+
+  /* Warning annotation */
+  .redline-warning {
+    background: rgba(180,83,9,0.06);
+    border-left: 3px solid var(--warning);
+    padding: 8px 12px;
+    margin: 8px 0;
+    border-radius: 0 6px 6px 0;
+    font-size: 12px;
+    color: var(--text-mid);
+    position: relative;
+  }
+  .redline-warning::before {
+    content: "UNCONFIRMED";
+    position: absolute; top: -8px; left: 12px;
+    font-size: 9px; font-weight: 700; letter-spacing: 0.8px;
+    color: var(--warning); background: var(--white);
+    padding: 0 4px;
+  }
+
+  /* Redline legend */
+  .redline-legend {
+    display: flex; gap: 16px; padding: 8px 20px;
+    background: var(--bg-inset); border-top: 1px solid var(--border-light);
+    font-size: 11px; color: var(--text-light);
+  }
+  .legend-item { display: flex; align-items: center; gap: 6px; }
+  .legend-swatch { width: 12px; height: 3px; border-radius: 2px; }
+</style>
+<script src="https://mcp.figma.com/mcp/html-to-design/capture.js" async></script>
+</head>
+<body>
+
+<!-- Page Header -->
+<div class="page-header">
+  <div class="page-title">Guru Knowledge Base</div>
+  <div class="page-subtitle">Friction analysis &middot; Content drafts &middot; Effectiveness tracking</div>
+</div>
+
+<!-- Tab Bar -->
+<div class="tab-bar">
+  <div class="tab">Cards</div>
+  <div class="tab active">Card Workbench</div>
+  <div class="tab">Gap Analysis</div>
+  <div class="tab">Drafts</div>
+  <div class="tab">Effectiveness</div>
+  <div class="tab">Connection</div>
+</div>
+
+<!-- Content -->
+<div class="content">
+
+  <!-- KPI Row -->
+  <div class="kpi-row">
+    <div class="kpi-card kpi-green">
+      <div class="kpi-label">Cards Selected</div>
+      <div class="kpi-value">2</div>
+      <div class="kpi-subtitle">of 47 synced cards</div>
+    </div>
+    <div class="kpi-card kpi-blue">
+      <div class="kpi-label">Reference Cards</div>
+      <div class="kpi-value">1</div>
+      <div class="kpi-subtitle">product guide linked</div>
+    </div>
+    <div class="kpi-card kpi-teal">
+      <div class="kpi-label">Friction Scope</div>
+      <div class="kpi-value">231</div>
+      <div class="kpi-subtitle">tickets across 2 TRCs</div>
+    </div>
+    <div class="kpi-card kpi-amber">
+      <div class="kpi-label">Last Analysis</div>
+      <div class="kpi-value">Mar 11</div>
+      <div class="kpi-subtitle">3 drafts generated</div>
+    </div>
+  </div>
+
+  <!-- Workbench Grid -->
+  <div class="workbench-grid">
+
+    <!-- LEFT: Input Panel -->
+    <div class="input-panel">
+
+      <!-- 1. Select Cards to Update -->
+      <div class="selection-card accent-green">
+        <div class="selection-header">
+          <div class="selection-title green">Select Cards to Update</div>
+          <span class="badge badge-green">2 selected</span>
+        </div>
+        <div class="selection-body">
+          <input type="text" class="search-input" placeholder="Search cards..." style="margin-bottom: 8px;">
+          <div class="check-item selected">
+            <div class="checkbox checked">&#10003;</div>
+            <div class="check-label">Billing Deduction Process</div>
+            <span class="badge badge-red">Critical Gap</span>
+          </div>
+          <div class="check-item selected">
+            <div class="checkbox checked">&#10003;</div>
+            <div class="check-label">Payout Rate Dispute Resolution</div>
+            <span class="badge badge-amber">Needs Update</span>
+          </div>
+          <div class="check-item">
+            <div class="checkbox"></div>
+            <div class="check-label">Provider Credentialing Updates</div>
+            <span class="badge badge-gray">Minor Gap</span>
+          </div>
+          <div class="check-item">
+            <div class="checkbox"></div>
+            <div class="check-label">Refund &amp; Charge Corrections</div>
+            <span class="badge badge-amber">Needs Update</span>
+          </div>
+          <div class="check-item">
+            <div class="checkbox"></div>
+            <div class="check-label">Client Self-Serve Health Plan</div>
+            <span class="badge badge-green">Up to Date</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 2. Link Reference Cards -->
+      <div class="selection-card accent-blue">
+        <div class="selection-header">
+          <div class="selection-title blue">Reference Cards (Product Guides)</div>
+          <span class="badge badge-blue">1 linked</span>
+        </div>
+        <div class="selection-body">
+          <div class="check-item selected">
+            <div class="checkbox checked" style="background: var(--info); border-color: var(--info);">&#10003;</div>
+            <div class="check-label">Billing Service v2.4 Guide</div>
+            <span class="badge badge-blue">product</span>
+          </div>
+          <button class="add-link" style="width: 100%; margin-top: 4px;">
+            <span class="plus">+</span> Link product guide card...
+          </button>
+        </div>
+      </div>
+
+      <!-- 3. Scope by TRC -->
+      <div class="selection-card accent-amber">
+        <div class="selection-header">
+          <div class="selection-title amber">Friction Scope (TRCs)</div>
+          <span class="badge badge-amber">2 TRCs</span>
+        </div>
+        <div class="selection-body">
+          <div class="check-item selected">
+            <div class="checkbox checked" style="background: var(--warning); border-color: var(--warning);">&#10003;</div>
+            <div class="check-label">Payout Rates Inquiry</div>
+            <div class="check-meta">142 tickets</div>
+          </div>
+          <div class="check-item selected">
+            <div class="checkbox checked" style="background: var(--warning); border-color: var(--warning);">&#10003;</div>
+            <div class="check-label">Billing Deductions</div>
+            <div class="check-meta">89 tickets</div>
+          </div>
+          <div class="check-item">
+            <div class="checkbox"></div>
+            <div class="check-label">Re-Credentialing</div>
+            <div class="check-meta">34 tickets</div>
+          </div>
+          <div class="check-item">
+            <div class="checkbox"></div>
+            <div class="check-label">Charge Corrections</div>
+            <div class="check-meta">67 tickets</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 4. Additional Context -->
+      <div class="selection-card accent-purple">
+        <div class="selection-header">
+          <div class="selection-title purple">Analysis Context</div>
+        </div>
+        <div class="selection-body">
+          <textarea class="context-textarea">Focus on the auto-deduction changes from v2.4 and how they affect the CXA resolution workflow.</textarea>
+        </div>
+      </div>
+
+      <!-- Run Button -->
+      <button class="btn-primary" style="width: 100%; padding: 12px; font-size: 14px;">
+        Run Analysis
+      </button>
+    </div>
+
+    <!-- RIGHT: Output Panel -->
+    <div class="output-panel">
+
+      <!-- Status -->
+      <div class="status-bar">
+        <div class="status-dot success"></div>
+        <span><strong>Analysis complete</strong> &mdash; 2 cards analyzed, 1 product guide referenced, 231 friction tickets processed</span>
+      </div>
+
+      <!-- Phase progress -->
+      <div class="phase-track">
+        <div class="phase-step complete"></div>
+        <div class="phase-step complete"></div>
+        <div class="phase-step complete"></div>
+      </div>
+      <div style="display: flex; justify-content: space-between; font-size: 10px; color: var(--text-light); margin-top: -8px; margin-bottom: 12px;">
+        <span>Search &amp; Gather</span>
+        <span>Per-Card Analysis</span>
+        <span>Synthesis &amp; Draft</span>
+      </div>
+
+      <!-- ═══ GURU CARD REDLINE VIEW ═══ -->
+      <div class="card" style="flex: 1; margin-bottom: 0;">
+        <div class="card-header">
+          <div class="card-title">Redline View: Billing Deduction Process</div>
+          <div style="display: flex; gap: 6px;">
+            <span class="chip">Billing Deductions <span class="remove">&times;</span></span>
+            <span class="chip">Payout Rates <span class="remove">&times;</span></span>
+          </div>
+        </div>
+
+        <div style="padding: 0;">
+          <!-- Guru card rendered inline -->
+          <div class="guru-card-view">
+            <div class="guru-chrome">
+              <div>
+                <div class="guru-chrome-title">Billing Deduction Process</div>
+                <div class="guru-chrome-meta">Last verified: Feb 14, 2026 &middot; Owner: CX Ops</div>
+              </div>
+              <div class="guru-collection">Billing &amp; Payments</div>
+            </div>
+
+            <div class="guru-body">
+
+              <h2>1. Overview</h2>
+              <p class="guru-original">
+                This card outlines the standard process for handling provider billing deductions. CXAs should follow these steps when a provider contacts us regarding unexpected deductions from their payout.
+              </p>
+
+              <h2>2. Resolution Steps</h2>
+              <ol class="guru-original">
+                <li><strong>Step 1:</strong> Verify the provider's identity and pull up their account in the Provider Portal.</li>
+                <li><strong>Step 2:</strong> Navigate to Billing &gt; Deduction History to review recent deductions.</li>
+                <li><strong>Step 3:</strong> Confirm the deduction matches the scheduled rate table adjustment.</li>
+              </ol>
+
+              <!-- REDLINE: New step inserted -->
+              <div class="redline-insert">
+                <strong>Step 3a (NEW):</strong> Check the 'Source' column for 'AUTO-v2.4'. If present, this deduction was auto-applied by the billing engine. Follow the auto-deduction appeal pathway in Section 4b below instead of standard escalation.
+              </div>
+
+              <ol start="4" class="guru-original">
+                <li><strong>Step 4:</strong> If the deduction is correct, walk the provider through the rate table changes.</li>
+              </ol>
+
+              <ol start="5">
+                <li>
+                  <!-- REDLINE: Modified step -->
+                  <div class="redline-modify">
+                    <strong>Step 5: Escalation</strong><br>
+                    <span class="redline-old">If unresolved, escalate to Billing Support L2 via the standard escalation form. Expected response time: 48 hours.</span><br>
+                    <span class="redline-new">If Source = AUTO-v2.4, escalate to the Billing Automation Team (not L2). They have direct override access with no 48hr hold. For all other deductions, use the standard L2 escalation.</span>
+                  </div>
+                </li>
+              </ol>
+
+              <h2>3. Common Scenarios</h2>
+              <p class="guru-original">
+                <strong>Scenario 1:</strong> Provider states deduction was not communicated. Direct them to the rate change notification email sent on the 1st of each month.
+              </p>
+              <p class="guru-original">
+                <strong>Scenario 2:</strong> Deduction amount differs from published rates. Verify the effective date — rate changes may have a 30-day lag.
+              </p>
+
+              <!-- REDLINE: New scenario -->
+              <div class="redline-insert">
+                <strong>Scenario 4b (NEW): Provider disputes auto-deduction amount</strong><br>
+                89 tickets in the last 30 days match this pattern. Provider calls stating deduction amount doesn't match expected payout. Root cause: v2.4 applies deductions using updated rate tables that haven't been communicated to providers yet. Resolution: Confirm the deduction source is AUTO-v2.4, explain the timing gap, and offer a manual review by the Automation Team if the provider requests it.
+              </div>
+
+              <!-- REDLINE: Warning annotation -->
+              <div class="redline-warning">
+                <strong>Needs confirmation:</strong> 23 tickets suggest deductions apply before the provider's billing cycle closes. This may be a v2.4 batch processing bug rather than expected behavior. Do not include in runbook until Billing Automation Team confirms.
+              </div>
+
+              <h2>4. Related Resources</h2>
+              <ul class="guru-original">
+                <li>Rate Table Change Log (updated monthly)</li>
+                <li>Provider Communication Templates</li>
+              </ul>
+
+              <!-- REDLINE: New cross-reference -->
+              <div class="redline-insert">
+                <strong>NEW:</strong> Billing Service v2.4 Guide (product guide) — for CXAs who need to understand the underlying auto-deduction logic and rate table engine changes.
+              </div>
+
+            </div>
+
+            <!-- Legend -->
+            <div class="redline-legend">
+              <div class="legend-item">
+                <div class="legend-swatch" style="background: var(--redline);"></div>
+                <span>Proposed addition</span>
+              </div>
+              <div class="legend-item">
+                <div class="legend-swatch" style="background: var(--info);"></div>
+                <span>Proposed edit</span>
+              </div>
+              <div class="legend-item">
+                <div class="legend-swatch" style="background: var(--warning);"></div>
+                <span>Unconfirmed — needs review</span>
+              </div>
+              <div class="legend-item">
+                <span style="color: var(--text-mid);">Original text is unchanged</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Export + Actions -->
+        <div style="padding: 12px 20px;">
+          <div style="display: flex; gap: 8px; justify-content: space-between; align-items: center;">
+            <div style="display: flex; gap: 8px;">
+              <button class="btn-export">Copy</button>
+              <button class="btn-export">Save .md</button>
+              <button class="btn-export">Save .html</button>
+            </div>
+            <div style="display: flex; gap: 8px;">
+              <button class="btn-ghost" style="color: var(--error); border-color: var(--error);">Reject</button>
+              <button class="btn-secondary">Edit Draft</button>
+              <button class="btn-primary">Commit to Drafts</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

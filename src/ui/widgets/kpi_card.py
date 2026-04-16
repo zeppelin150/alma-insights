@@ -37,7 +37,7 @@ class KPICard(QFrame):
         self.setObjectName("KPICard")
         self.setStyleSheet(
             f"#KPICard {{ background: {ALMA_BG_ELEVATED};"
-            " border: 1px solid rgba(214, 210, 202, 0.45);"
+            " border: none;"
             " border-radius: 12px; }}"
         )
         apply_card_shadow_soft(self)

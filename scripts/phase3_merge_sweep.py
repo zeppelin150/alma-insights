@@ -13,8 +13,13 @@ from src.data.canonicalization_engine import (
     DEFAULT_PARAMS, run_canonicalization, score_golden_set,
 )
 
+import os
+
 DB = _ROOT / "data" / "phase3_gate_test.db"
-GOLDEN = Path(r"C:/Users/Chris/Downloads/alma_test_10000_1_golden_set.csv")
+GOLDEN = Path(os.environ.get(
+    "ALMA_GOLDEN_SET_CSV",
+    str(_ROOT / "data" / "test_fixtures" / "alma_test_10000_1_golden_set.csv"),
+))
 
 
 def _reset(conn):

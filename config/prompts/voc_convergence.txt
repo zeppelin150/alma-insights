@@ -34,16 +34,24 @@ ASSEMBLY INSTRUCTIONS:
 
 You are producing the FINAL executive report. The accumulator provides depth (progressive sharpening across {rounds_completed} rounds) and the specialists provide breadth (focused domain lenses). Your job is to:
 
+**CRITICAL — DEDUPLICATION RULES:**
+- The inputs above are RAW WORKING NOTES from multiple analysis passes. They WILL contain overlapping and repeated content. Your job is to MERGE them into ONE clean report.
+- Do NOT reproduce the accumulator ledger, running synthesis, or specialist reports verbatim. They are REFERENCE material — extract insights, do not copy paragraphs.
+- Each section heading (## 1 through ## 7) must appear EXACTLY ONCE in your output.
+- If you find the same finding in multiple inputs, state it ONCE with the strongest evidence citation.
+- Target length: 300-500 lines. If your output exceeds 600 lines, you are duplicating content.
+
 1. **Cross-reference** accumulator findings with specialist reports. Where they AGREE, state with high confidence. Where they DISAGREE, flag for review and explain the discrepancy.
 
-2. **Write Section 1 (Executive Summary)** — synthesize the most impactful findings from all sources.
+2. **Write Section 1 (Executive Summary)** — synthesize the most impactful findings from all sources into 3-5 sentences plus key metrics.
 
 3. **Integrate Sections 2-6** from the specialists, enriched by accumulator patterns:
    - If the accumulator identified a cross-round pattern that a specialist missed, ADD it.
    - If a specialist identified something the accumulator didn't, INCLUDE it (specialists have focused lenses).
    - If they disagree on severity or trajectory, NOTE both assessments.
+   - Write each section in YOUR OWN WORDS — do not paste specialist output as-is.
 
-4. **Write Section 7 (Appendix: TRC Summary Table)** from the accumulator ledger.
+4. **Write Section 7 (Appendix: TRC Summary Table)** from the accumulator ledger — as a MARKDOWN TABLE only, not prose.
 
 OUTPUT FORMAT:
 
@@ -114,4 +122,6 @@ RULES:
 - Use plain business language — this report is for operations leadership, not data scientists
 - If data is insufficient for a confident conclusion, state the limitation explicitly
 - Do NOT invent data or extrapolate beyond what the evidence supports
-- The report should be 3-5 pages — comprehensive but not redundant
+- The report should be 3-5 pages — comprehensive but NOT redundant
+- Do NOT repeat the same finding in multiple sections — each finding belongs in ONE primary section with cross-references elsewhere
+- Do NOT include raw accumulator round output or specialist report text — SYNTHESIZE into your own narrative

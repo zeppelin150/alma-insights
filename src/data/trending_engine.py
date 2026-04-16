@@ -285,15 +285,20 @@ def _bucket_conversations(conversations, window_size):
 #  SENTIMENT TRENDS
 # ═══════════════════════════════════════════
 
-def compute_sentiment_trends(conn, date_start, date_end, trc_filter, window_size):
+def compute_sentiment_trends(conn, date_start, date_end, trc_filter, window_size,
+                              conversations=None):
     """
     Returns {trc: [(window_label, avg_compound), ...]}
     If trc_filter is None/empty, groups by top 5 TRCs by volume.
+
+    When called from run_full_analysis(), pre-fetched conversations are passed
+    to avoid a redundant DB query.
     """
     _ensure_nltk_data()
     from nltk.sentiment.vader import SentimentIntensityAnalyzer
 
-    conversations = _fetch_conversations(conn, date_start, date_end, trc_filter)
+    if conversations is None:
+        conversations = _fetch_conversations(conn, date_start, date_end, trc_filter)
     if not conversations:
         return {}
 
@@ -505,17 +510,21 @@ def _get_user_term_actions(conn):
 # ═══════════════════════════════════════════
 
 def compute_rising_terms(conn, date_start, date_end, trc_filter, window_size,
-                         conn_for_feedback=None):
+                         conn_for_feedback=None, conversations=None):
     """
     Returns {
         rising: [{term, velocity, current_score, sparkline_data,
                   temporal_promoted, recency_score, peak_recency, user_action}, ...],
         cooling: [{...same...}, ...]
     }
+
+    When called from run_full_analysis(), pre-fetched conversations are passed
+    to avoid a redundant DB query.
     """
     _ensure_nltk_data()
 
-    conversations = _fetch_conversations(conn, date_start, date_end, trc_filter)
+    if conversations is None:
+        conversations = _fetch_conversations(conn, date_start, date_end, trc_filter)
     if not conversations:
         return {"rising": [], "cooling": []}
 
@@ -612,16 +621,21 @@ def compute_rising_terms(conn, date_start, date_end, trc_filter, window_size,
 #  TOPIC CLUSTERS (K-Means)
 # ═══════════════════════════════════════════
 
-def compute_topic_clusters(conn, date_start, date_end, trc_filter):
+def compute_topic_clusters(conn, date_start, date_end, trc_filter,
+                            conversations=None):
     """
     Returns {clusters: [{label, terms, ticket_ids, count, avg_csat, avg_sentiment}, ...]}
+
+    When called from run_full_analysis(), pre-fetched conversations are passed
+    to avoid a redundant DB query.
     """
     _ensure_nltk_data()
     from nltk.sentiment.vader import SentimentIntensityAnalyzer
     from sklearn.feature_extraction.text import TfidfVectorizer
     from sklearn.cluster import KMeans
 
-    conversations = _fetch_conversations(conn, date_start, date_end, trc_filter)
+    if conversations is None:
+        conversations = _fetch_conversations(conn, date_start, date_end, trc_filter)
     if len(conversations) < 20:
         return {"clusters": [], "message": "Need at least 20 conversations for clustering"}
 
@@ -714,87 +728,65 @@ def compute_topic_clusters(conn, date_start, date_end, trc_filter):
 #  NMF TOPIC MODELING
 # ═══════════════════════════════════════════
 
-def compute_topic_model(conn, date_start, date_end, trc_filter, window_size,
-                        tfidf_matrix=None, feature_names=None, texts_meta=None):
-    """
-    Decompose conversations into latent topics using NMF (overlapping topics).
-
-    When called from run_full_analysis(), tfidf_matrix/feature_names/texts_meta are
-    pre-computed and passed in. When called standalone, they are computed internally.
-
-    Returns {
-        topics: [{label, top_terms, ticket_ids, count, avg_csat, avg_sentiment,
-                  trend_direction, trend_slope, trend_sparkline}, ...],
-        multi_topic_tickets: [{ticket_id, topics, subject}, ...],
-        method: "nmf",
-    }
-    """
-    from sklearn.decomposition import NMF
+def _build_tfidf_standalone(conn, date_start, date_end, trc_filter):
+    """Build TF-IDF matrix and metadata from conversations (standalone mode)."""
     from sklearn.feature_extraction.text import TfidfVectorizer
 
-    # If not pre-computed, build TF-IDF and metadata internally
-    if tfidf_matrix is None or feature_names is None or texts_meta is None:
-        _ensure_nltk_data()
-        from nltk.sentiment.vader import SentimentIntensityAnalyzer
-        sia = SentimentIntensityAnalyzer()
+    _ensure_nltk_data()
+    from nltk.sentiment.vader import SentimentIntensityAnalyzer
+    sia = SentimentIntensityAnalyzer()
 
-        conversations = _fetch_conversations(conn, date_start, date_end, trc_filter)
-        if len(conversations) < 20:
-            return {"topics": [], "multi_topic_tickets": [], "method": "nmf",
-                    "message": "Need at least 20 conversations for topic modeling"}
+    conversations = _fetch_conversations(conn, date_start, date_end, trc_filter)
+    if len(conversations) < 20:
+        return None, None, None, "Need at least 20 conversations for topic modeling"
 
-        texts = []
-        texts_meta = []
-        for conv in conversations:
-            cleaned = _clean_thread_text(conv.get("full_thread", ""))
-            tokens = _tokenize_and_clean(cleaned)
-            text = " ".join(tokens)
-            if text.strip():
-                sentiment = sia.polarity_scores(cleaned)["compound"] if cleaned.strip() else 0.0
-                texts.append(text)
-                texts_meta.append({
-                    "ticket_id": conv["ticket_id"],
-                    "subject": conv.get("subject", ""),
-                    "csat_score": conv.get("csat_score"),
-                    "sentiment": sentiment,
-                    "created_at": conv.get("created_at", ""),
-                    "trc_code": conv.get("trc_code", ""),
-                })
+    texts = []
+    texts_meta = []
+    for conv in conversations:
+        cleaned = _clean_thread_text(conv.get("full_thread", ""))
+        tokens = _tokenize_and_clean(cleaned)
+        text = " ".join(tokens)
+        if text.strip():
+            sentiment = sia.polarity_scores(cleaned)["compound"] if cleaned.strip() else 0.0
+            texts.append(text)
+            texts_meta.append({
+                "ticket_id": conv["ticket_id"],
+                "subject": conv.get("subject", ""),
+                "csat_score": conv.get("csat_score"),
+                "sentiment": sentiment,
+                "created_at": conv.get("created_at", ""),
+                "trc_code": conv.get("trc_code", ""),
+            })
 
-        if len(texts) < 20:
-            return {"topics": [], "multi_topic_tickets": [], "method": "nmf",
-                    "message": "Not enough text content for topic modeling"}
+    if len(texts) < 20:
+        return None, None, None, "Not enough text content for topic modeling"
 
-        vectorizer = TfidfVectorizer(
-            max_features=5000, min_df=2, max_df=0.85,
-            ngram_range=(1, 3), token_pattern=r'(?u)\b\w[\w-]+\b',
-        )
-        try:
-            tfidf_matrix = vectorizer.fit_transform(texts)
-            feature_names = vectorizer.get_feature_names_out()
-        except ValueError:
-            return {"topics": [], "multi_topic_tickets": [], "method": "nmf",
-                    "message": "Could not vectorize conversations"}
+    vectorizer = TfidfVectorizer(
+        max_features=5000, min_df=2, max_df=0.85,
+        ngram_range=(1, 3), token_pattern=r'(?u)\b\w[\w-]+\b',
+    )
+    try:
+        tfidf_matrix = vectorizer.fit_transform(texts)
+        feature_names = vectorizer.get_feature_names_out()
+    except ValueError:
+        return None, None, None, "Could not vectorize conversations"
+
+    return tfidf_matrix, feature_names, texts_meta, None
+
+
+def _run_nmf_model(tfidf_matrix, feature_names, texts_meta):
+    """Run NMF topic decomposition. Returns (topics, W, k)."""
+    from sklearn.decomposition import NMF
 
     n_docs = tfidf_matrix.shape[0]
-    if n_docs < 20:
-        return {"topics": [], "multi_topic_tickets": [], "method": "nmf",
-                "message": "Not enough documents for topic modeling"}
-
-    # Auto-select K
     k = min(12, max(3, n_docs // 15))
 
-    # Fit NMF
     nmf = NMF(n_components=k, random_state=42, max_iter=300, init='nndsvda')
-    W = nmf.fit_transform(tfidf_matrix)   # (n_docs, k) — doc-topic scores
-    H = nmf.components_                    # (k, n_features) — topic-term weights
+    W = nmf.fit_transform(tfidf_matrix)
+    H = nmf.components_
 
-    # Build topic info
     topics = []
-    MULTI_TOPIC_THRESHOLD = 0.15
-
     for ti in range(k):
-        # Top terms from this topic's component vector
         top_term_indices = H[ti].argsort()[-8:][::-1]
         top_terms = [
             {"term": _display_term(feature_names[idx]), "weight": float(H[ti][idx])}
@@ -802,20 +794,15 @@ def compute_topic_model(conn, date_start, date_end, trc_filter, window_size,
         ]
         label = ", ".join(t["term"] for t in top_terms[:5])
 
-        # Find documents where this topic scores highest
         primary_mask = W[:, ti] == W.max(axis=1)
         primary_indices = np.where(primary_mask)[0]
-
-        # All docs with any score > 0.01 for this topic
         all_mask = W[:, ti] > 0.01
         all_indices = np.where(all_mask)[0]
 
         ticket_ids = [texts_meta[idx]["ticket_id"] for idx in primary_indices]
-
         csat_scores = [texts_meta[idx]["csat_score"] for idx in all_indices
                        if texts_meta[idx].get("csat_score") is not None]
         avg_csat = float(np.mean(csat_scores)) if csat_scores else None
-
         sentiments = [texts_meta[idx].get("sentiment", 0) for idx in all_indices]
         avg_sentiment = float(np.mean(sentiments)) if sentiments else 0.0
 
@@ -831,79 +818,83 @@ def compute_topic_model(conn, date_start, date_end, trc_filter, window_size,
             "trend_sparkline": [],
         })
 
-    # ── Compute topic trends over time ──
+    return topics, W, k
+
+
+def _assign_doc_to_window(created, window_size):
+    """Map a document's created_at string to a window label."""
+    if not created:
+        return None
+    try:
+        from datetime import datetime
+        dt = datetime.strptime(created[:10], "%Y-%m-%d")
+    except (ValueError, TypeError):
+        return None
+
+    if window_size == "Hourly":
+        hour = created[11:13] if len(created) >= 13 else "00"
+        return f"{created[:10]} {hour}:00"
+    elif window_size == "Daily":
+        return dt.strftime("%Y-%m-%d")
+    elif window_size == "Weekly":
+        iso = dt.isocalendar()
+        return f"{iso[0]}-W{iso[1]:02d}"
+    elif window_size == "Biweekly":
+        iso = dt.isocalendar()
+        biweek = (iso[1] - 1) // 2 + 1
+        return f"{iso[0]}-BW{biweek:02d}"
+    else:
+        return dt.strftime("%Y-%m")
+
+
+def _compute_topic_trends(topics, W, texts_meta, window_size):
+    """Compute trend sparklines and direction for each topic."""
+    n_docs = W.shape[0]
     convs_for_buckets = [
         {"created_at": texts_meta[i].get("created_at", "")}
         for i in range(n_docs)
     ]
     buckets = _bucket_conversations(convs_for_buckets, window_size)
-    if len(buckets) >= 2:
-        window_labels = list(buckets.keys())
-        # Build doc_index → window_index mapping
-        doc_window = {}
-        for wi, (wlabel, wconvs) in enumerate(buckets.items()):
-            for _ in wconvs:
-                pass  # We need actual indices
+    if len(buckets) < 2:
+        return
 
-        # Alternative: map each doc to its window by date
-        for di in range(n_docs):
-            created = texts_meta[di].get("created_at", "")
-            if not created:
-                continue
-            try:
-                from datetime import datetime
-                dt = datetime.strptime(created[:10], "%Y-%m-%d")
-            except (ValueError, TypeError):
-                continue
-
-            if window_size == "Hourly":
-                hour = created[11:13] if len(created) >= 13 else "00"
-                wlabel = f"{created[:10]} {hour}:00"
-            elif window_size == "Daily":
-                wlabel = dt.strftime("%Y-%m-%d")
-            elif window_size == "Weekly":
-                iso = dt.isocalendar()
-                wlabel = f"{iso[0]}-W{iso[1]:02d}"
-            elif window_size == "Biweekly":
-                iso = dt.isocalendar()
-                biweek = (iso[1] - 1) // 2 + 1
-                wlabel = f"{iso[0]}-BW{biweek:02d}"
-            else:
-                wlabel = dt.strftime("%Y-%m")
-
+    window_labels = list(buckets.keys())
+    doc_window = {}
+    for di in range(n_docs):
+        wlabel = _assign_doc_to_window(texts_meta[di].get("created_at", ""), window_size)
+        if wlabel:
             doc_window[di] = wlabel
 
-        for ti_idx, topic in enumerate(topics):
-            scores_per_window = []
-            for wlabel in window_labels:
-                doc_indices = [di for di, wl in doc_window.items() if wl == wlabel]
-                if doc_indices:
-                    avg_score = float(np.mean([W[di, ti_idx] for di in doc_indices]))
-                else:
-                    avg_score = 0.0
-                scores_per_window.append(avg_score)
+    for ti_idx, topic in enumerate(topics):
+        scores_per_window = []
+        for wlabel in window_labels:
+            doc_indices = [di for di, wl in doc_window.items() if wl == wlabel]
+            if doc_indices:
+                avg_score = float(np.mean([W[di, ti_idx] for di in doc_indices]))
+            else:
+                avg_score = 0.0
+            scores_per_window.append(avg_score)
 
-            topic["trend_sparkline"] = scores_per_window
-            if len(scores_per_window) >= 2:
-                x = np.arange(len(scores_per_window), dtype=float)
-                slope = float(np.polyfit(x, scores_per_window, 1)[0])
-                topic["trend_slope"] = slope
-                if slope > 0.005:
-                    topic["trend_direction"] = "rising"
-                elif slope < -0.005:
-                    topic["trend_direction"] = "declining"
-                else:
-                    topic["trend_direction"] = "stable"
+        topic["trend_sparkline"] = scores_per_window
+        if len(scores_per_window) >= 2:
+            x = np.arange(len(scores_per_window), dtype=float)
+            slope = float(np.polyfit(x, scores_per_window, 1)[0])
+            topic["trend_slope"] = slope
+            if slope > 0.005:
+                topic["trend_direction"] = "rising"
+            elif slope < -0.005:
+                topic["trend_direction"] = "declining"
+            else:
+                topic["trend_direction"] = "stable"
 
-    # Sort by count descending
-    topics.sort(key=lambda t: t["count"], reverse=True)
 
-    # ── Identify multi-topic tickets ──
+def _find_multi_topic_tickets(W, k, texts_meta, topics, threshold=0.15):
+    """Find tickets that belong to multiple topics."""
     multi_topic_tickets = []
-    for di in range(n_docs):
+    for di in range(W.shape[0]):
         scores = W[di]
         significant = [(ti, float(scores[ti])) for ti in range(k)
-                       if scores[ti] > MULTI_TOPIC_THRESHOLD]
+                       if scores[ti] > threshold]
         if len(significant) >= 2:
             significant.sort(key=lambda x: -x[1])
             multi_topic_tickets.append({
@@ -914,6 +905,48 @@ def compute_topic_model(conn, date_start, date_end, trc_filter, window_size,
                     for ti, sc in significant
                 ],
             })
+    return multi_topic_tickets
+
+
+def compute_topic_model(conn, date_start, date_end, trc_filter, window_size,
+                        tfidf_matrix=None, feature_names=None, texts_meta=None):
+    """
+    Decompose conversations into latent topics using NMF (overlapping topics).
+
+    When called from run_full_analysis(), tfidf_matrix/feature_names/texts_meta are
+    pre-computed and passed in. When called standalone, they are computed internally.
+
+    Returns {
+        topics: [{label, top_terms, ticket_ids, count, avg_csat, avg_sentiment,
+                  trend_direction, trend_slope, trend_sparkline}, ...],
+        multi_topic_tickets: [{ticket_id, topics, subject}, ...],
+        method: "nmf",
+    }
+    """
+    _empty = {"topics": [], "multi_topic_tickets": [], "method": "nmf"}
+
+    # Build TF-IDF if not pre-computed
+    if tfidf_matrix is None or feature_names is None or texts_meta is None:
+        tfidf_matrix, feature_names, texts_meta, err = _build_tfidf_standalone(
+            conn, date_start, date_end, trc_filter
+        )
+        if err:
+            return {**_empty, "message": err}
+
+    if tfidf_matrix.shape[0] < 20:
+        return {**_empty, "message": "Not enough documents for topic modeling"}
+
+    # Run NMF
+    topics, W, k = _run_nmf_model(tfidf_matrix, feature_names, texts_meta)
+
+    # Compute trends
+    _compute_topic_trends(topics, W, texts_meta, window_size)
+
+    # Sort by count descending
+    topics.sort(key=lambda t: t["count"], reverse=True)
+
+    # Find multi-topic tickets
+    multi_topic_tickets = _find_multi_topic_tickets(W, k, texts_meta, topics)
 
     return {
         "topics": topics,
@@ -986,7 +1019,6 @@ def compute_cross_trc_correlations(conn, date_start, date_end, window_size,
         correlations: [{trc_a, trc_b, metric_a, metric_b, r, p_value,
                         strength, direction, interpretation,
                         series_a, series_b, window_labels}, ...],
-        per_trc_series: {...}
     }
     """
     from scipy.stats import pearsonr
@@ -998,7 +1030,7 @@ def compute_cross_trc_correlations(conn, date_start, date_end, window_size,
 
     trc_list = sorted(per_trc_series.keys())
     if len(trc_list) < 2:
-        return {"correlations": [], "per_trc_series": per_trc_series}
+        return {"correlations": []}
 
     def _flatten_metrics(trc_data):
         """Yield (metric_name, values_list) for each metric in a TRC."""
@@ -1044,7 +1076,7 @@ def compute_cross_trc_correlations(conn, date_start, date_end, window_size,
                         direction = "positive" if r > 0 else "negative"
 
                         # Human-readable interpretation
-                        verb_a = "rises" if direction == "positive" else "rises"
+                        verb_a = "rises" if direction == "positive" else "falls"
                         verb_b = "rise" if direction == "positive" else "fall"
                         interpretation = (
                             f"When {metric_a_name} {verb_a} in {trc_a}, "
@@ -1071,7 +1103,7 @@ def compute_cross_trc_correlations(conn, date_start, date_end, window_size,
     correlations.sort(key=lambda c: abs(c["r"]), reverse=True)
     correlations = correlations[:20]
 
-    return {"correlations": correlations, "per_trc_series": per_trc_series}
+    return {"correlations": correlations}
 
 
 # ═══════════════════════════════════════════
@@ -1231,6 +1263,13 @@ def compute_temporal_leads(correlations_result, window_size, max_lag=4):
 #  DRILL-DOWN HELPERS
 # ═══════════════════════════════════════════
 
+def _get_wq(conn):
+    """Get a WarehouseQuery instance for trending engine queries."""
+    from src.data.source_registry import SourceRegistry
+    from src.data.warehouse_query import WarehouseQuery
+    return WarehouseQuery(conn, SourceRegistry(conn))
+
+
 def get_tickets_for_term(db, term, date_start, date_end, trc_filter, limit=50):
     """Return conversations containing a given term.
 
@@ -1238,39 +1277,40 @@ def get_tickets_for_term(db, term, date_start, date_end, trc_filter, limit=50):
     for ALL constituent words appearing in the thread text. For single words,
     uses direct substring matching.
     """
-    conditions = ["c.created_at >= ?", "c.created_at <= ?"]
+    conditions = ["created_at >= ?", "created_at <= ?"]
     params = [date_start, date_end]
 
     if trc_filter:
-        conditions.append("c.trc_code = ?")
+        conditions.append("trc_code = ?")
         params.append(trc_filter)
 
     where = " AND ".join(conditions)
 
-    query = f"""
-        SELECT c.ticket_id, c.subject, c.trc_code, c.status,
-               c.csat_score, c.created_at, c.thread_preview, c.full_thread
-        FROM conversations c
+    wq = _get_wq(db.conn)
+    rows = wq.query_conversations_raw(f"""
+        SELECT ticket_id, subject, trc_code, status,
+               csat_score, created_at, thread_preview, full_thread
+        FROM {{table}}
         WHERE {where}
-        ORDER BY c.created_at DESC
-    """
+        ORDER BY created_at DESC
+    """, params)
 
-    rows = db.conn.execute(query, params).fetchall()
+    # Convert tuples to dicts
+    _cols = ["ticket_id", "subject", "trc_code", "status", "csat_score", "created_at", "thread_preview", "full_thread"]
+    conv_rows = [dict(zip(_cols, r)) for r in rows]
 
     # For multi-word terms, check that ALL words appear in the thread
     term_lower = term.lower().strip()
     words = term_lower.split()
     matches = []
-    for r in rows:
+    for r in conv_rows:
         thread = (r["full_thread"] or "").lower()
         if len(words) <= 1:
-            # Single word: direct substring match
             if term_lower and term_lower in thread:
-                matches.append(dict(r))
+                matches.append(r)
         else:
-            # Multi-word: all words must appear in the thread
             if all(w in thread for w in words):
-                matches.append(dict(r))
+                matches.append(r)
         if len(matches) >= limit:
             break
 
@@ -1284,22 +1324,23 @@ def get_tickets_by_ids(db, ticket_ids, limit=50):
 
     ids = ticket_ids[:limit]
     placeholders = ",".join("?" * len(ids))
-    query = f"""
+    wq = _get_wq(db.conn)
+    rows = wq.query_conversations_raw(f"""
         SELECT ticket_id, subject, trc_code, status,
                csat_score, created_at, thread_preview, full_thread
-        FROM conversations
+        FROM {{table}}
         WHERE ticket_id IN ({placeholders})
         ORDER BY created_at DESC
-    """
-    rows = db.conn.execute(query, ids).fetchall()
-    return [dict(r) for r in rows]
+    """, ids)
+    _cols = ["ticket_id", "subject", "trc_code", "status", "csat_score", "created_at", "thread_preview", "full_thread"]
+    return [dict(zip(_cols, r)) for r in rows]
 
 
 # ═══════════════════════════════════════════
 #  SHARED HELPERS
 # ═══════════════════════════════════════════
 
-def _fetch_conversations(conn, date_start, date_end, trc_filter):
+def _fetch_conversations(conn, date_start, date_end, trc_filter, source_id=None):
     """Fetch conversations for the given date range and optional TRC filter."""
     conditions = ["created_at >= ?", "created_at <= ?"]
     params = [date_start, date_end]
@@ -1309,13 +1350,15 @@ def _fetch_conversations(conn, date_start, date_end, trc_filter):
         params.append(trc_filter)
 
     where = " AND ".join(conditions)
-    query = f"""
+    wq = _get_wq(conn)
+    rows = wq.query_conversations_raw(f"""
         SELECT ticket_id, subject, trc_code, status, csat_score, created_at, full_thread
-        FROM conversations
+        FROM {{table}}
         WHERE {where}
         ORDER BY created_at
-    """
-    return [dict(r) for r in conn.execute(query, params).fetchall()]
+    """, params, source_id=source_id)
+    _cols = ["ticket_id", "subject", "trc_code", "status", "csat_score", "created_at", "full_thread"]
+    return [dict(zip(_cols, r)) for r in rows]
 
 
 # ═══════════════════════════════════════════
@@ -1328,12 +1371,13 @@ def _empty_full_result():
         "sentiment": {},
         "terms": {"rising": [], "cooling": []},
         "topics": {"topics": [], "multi_topic_tickets": [], "method": "nmf"},
-        "correlations": {"correlations": [], "per_trc_series": {}},
+        "correlations": {"correlations": []},
     }
 
 
 def run_full_analysis(conn, date_start, date_end, trc_filter, window_size,
-                      topic_method="nmf", progress_callback=None, db=None):
+                      topic_method="nmf", progress_callback=None, db=None,
+                      source_id=None):
     """
     Run the complete analysis pipeline in one pass.
 
@@ -1374,7 +1418,7 @@ def run_full_analysis(conn, date_start, date_end, trc_filter, window_size,
 
     # ── Step 3: Fetch conversations (single query, shared) ──
     _progress(3, "Fetching conversations...")
-    conversations = _fetch_conversations(conn, date_start, date_end, trc_filter)
+    conversations = _fetch_conversations(conn, date_start, date_end, trc_filter, source_id=source_id)
     if not conversations:
         return _empty_full_result()
 
@@ -1434,15 +1478,19 @@ def run_full_analysis(conn, date_start, date_end, trc_filter, window_size,
     except Exception:
         pass  # Graceful degradation — embeddings are optional
 
-    # ── Step 6: Sentiment trends ──
+    # ── Step 6: Sentiment trends (pass pre-fetched conversations) ──
     _progress(6, "Analyzing sentiment trends...")
-    sentiment_result = compute_sentiment_trends(conn, date_start, date_end, trc_filter, window_size)
+    sentiment_result = compute_sentiment_trends(
+        conn, date_start, date_end, trc_filter, window_size,
+        conversations=conversations,
+    )
 
-    # ── Step 7: Rising/cooling terms (uses own per-window TF-IDF + feedback weights) ──
+    # ── Step 7: Rising/cooling terms (pass pre-fetched conversations) ──
     _progress(7, "Detecting rising & cooling terms...")
     terms = compute_rising_terms(
         conn, date_start, date_end, trc_filter, window_size,
         conn_for_feedback=conn if db is not None else None,
+        conversations=conversations,
     )
 
     # ── Step 8: Topic modeling (NMF or K-Means) ──
@@ -1454,7 +1502,10 @@ def run_full_analysis(conn, date_start, date_end, trc_filter, window_size,
             texts_meta=texts_meta,
         )
     else:
-        topics = compute_topic_clusters(conn, date_start, date_end, trc_filter)
+        topics = compute_topic_clusters(
+            conn, date_start, date_end, trc_filter,
+            conversations=conversations,
+        )
 
     # ── Step 9: Build per-TRC time series ──
     _progress(9, "Building cross-TRC time series...")
@@ -1546,18 +1597,18 @@ def _find_matching_tickets(conn, concepts, date_start, date_end) -> set:
     from src.data.concept_map import DOMAIN_CONCEPTS
 
     keyword_matches = set()
+    wq = _get_wq(conn)
     for concept in concepts:
         synonyms = DOMAIN_CONCEPTS.get(concept, {concept})
         for syn in synonyms:
             query = syn.replace("_", " ")
             try:
-                cursor = conn.cursor()
-                cursor.execute("""
-                    SELECT DISTINCT ticket_id FROM conversations
+                _rows = wq.query_conversations_raw("""
+                    SELECT DISTINCT ticket_id FROM {table}
                     WHERE (full_thread LIKE ? OR subject LIKE ?)
                       AND created_at >= ? AND created_at <= ?
                 """, (f"%{query}%", f"%{query}%", date_start, date_end))
-                for row in cursor.fetchall():
+                for row in _rows:
                     keyword_matches.add(row[0])
             except Exception:
                 pass
@@ -1566,14 +1617,12 @@ def _find_matching_tickets(conn, concepts, date_start, date_end) -> set:
         from src.data.embedding_engine import is_available as _emb_available
         if _emb_available():
             from src.data.embedding_engine import embed_texts, semantic_search
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT ticket_id, full_thread FROM conversations
+            rows = wq.query_conversations_raw("""
+                SELECT ticket_id, full_thread FROM {table}
                 WHERE created_at >= ? AND created_at <= ?
                   AND full_thread IS NOT NULL AND full_thread != ''
                 LIMIT 5000
             """, (date_start, date_end))
-            rows = cursor.fetchall()
             if rows:
                 ids = [r[0] for r in rows]
                 texts = [r[1] for r in rows]
@@ -1651,75 +1700,26 @@ def _score_evidence(concept_groups: dict, temporal: dict, correlation: dict, inc
     return "insufficient"
 
 
-def test_hypothesis(
-    conn,
-    hypothesis: str,
-    date_start: str,
-    date_end: str,
-    window_size: str = "weekly",
-    progress_callback=None,
-    gemini_client=None,
-) -> dict:
-    """
-    Test a user hypothesis against ticket data.
-
-    Args:
-        conn: SQLite connection (created in worker thread)
-        hypothesis: Free-text hypothesis string
-        date_start, date_end: Date range strings (YYYY-MM-DD)
-        window_size: Bucketing size for temporal analysis
-        progress_callback: callable(step, total, message)
-        gemini_client: Optional GeminiClient instance for AI synthesis
-
-    Returns a rich evidence dict with gemini_synthesis if Gemini is available.
-    """
-    _ensure_nltk_data()
-
-    def _prog(step, msg):
-        if progress_callback:
-            progress_callback(step, 8, msg)
-
-    # 1. Extract concepts
-    _prog(1, "Extracting concepts from hypothesis...")
-    concepts = _extract_concepts(hypothesis)
-
-    # 2. Find matching tickets
-    _prog(2, "Searching for matching tickets...")
-    matching_ids = _find_matching_tickets(conn, concepts, date_start, date_end)
-
-    if not matching_ids:
-        return {
-            "hypothesis": hypothesis,
-            "concepts_extracted": concepts,
-            "matching_tickets": [],
-            "concept_groups": {},
-            "temporal_pattern": {},
-            "correlation": {},
-            "incident_signals": {},
-            "sentiment_data": {},
-            "evidence_strength": "insufficient",
-            "gemini_synthesis": None,
-        }
-
-    # 3. Fetch matching conversations
-    _prog(3, "Analyzing matching conversations...")
+def _fetch_matching_conversations(conn, matching_ids):
+    """Fetch conversation details for matching ticket IDs."""
     placeholders = ",".join("?" * len(matching_ids))
-    cursor = conn.cursor()
-    cursor.execute(f"""
+    wq = _get_wq(conn)
+    rows = wq.query_conversations_raw(f"""
         SELECT ticket_id, subject, trc_code, full_thread, csat_score, created_at
-        FROM conversations
+        FROM {{table}}
         WHERE ticket_id IN ({placeholders})
     """, list(matching_ids))
-    matching_tickets = [
+    return [
         {
             "ticket_id": r[0], "subject": r[1] or "", "trc_code": r[2] or "",
             "full_thread": r[3] or "", "csat_score": r[4], "created_at": r[5] or "",
         }
-        for r in cursor.fetchall()
+        for r in rows
     ]
 
-    # 4. Build concept groups
-    _prog(4, "Building concept groups...")
+
+def _build_concept_groups(concepts, matching_tickets, window_size):
+    """Build concept groups with sentiment and volume by window."""
     from nltk.sentiment.vader import SentimentIntensityAnalyzer
     sia = SentimentIntensityAnalyzer()
     from src.data.concept_map import DOMAIN_CONCEPTS
@@ -1751,72 +1751,139 @@ def test_hypothesis(
                 "volume_by_window": sorted(volume_by_window.items()),
             }
 
-    # 5. Incident corroboration
-    _prog(5, "Checking incident flags...")
-    matching_trcs = {t["trc_code"] for t in matching_tickets if t.get("trc_code")}
-    incident_signals = _get_related_incidents(conn, matching_trcs)
+    return concept_groups
 
-    # 6. Temporal / correlation (simple inline computation)
-    _prog(6, "Analyzing temporal patterns...")
-    temporal_pattern = {}
-    correlation = {}
-    if len(concept_groups) >= 2:
-        group_keys = list(concept_groups.keys())[:2]
-        s1 = dict(concept_groups[group_keys[0]]["volume_by_window"])
-        s2 = dict(concept_groups[group_keys[1]]["volume_by_window"])
-        common_keys = sorted(set(s1) & set(s2))
-        if len(common_keys) >= 4:
-            v1 = [s1[k] for k in common_keys]
-            v2 = [s2[k] for k in common_keys]
-            try:
-                from scipy.stats import pearsonr
-                r, p = pearsonr(v1, v2)
-                correlation = {
-                    "pearson_r": float(r),
-                    "p_value": float(p),
-                    "interpretation": (
-                        f"When '{group_keys[0].replace('_', ' ')}' rises, "
-                        f"'{group_keys[1].replace('_', ' ')}' "
-                        f"{'also rises' if r > 0 else 'falls'} "
-                        f"(r={r:.2f}, p={p:.3f})"
-                    ),
-                }
-            except Exception:
-                pass
 
-    # 7. Sentiment summary
-    _prog(7, "Summarizing sentiment...")
+def _compute_concept_correlation(concept_groups):
+    """Compute correlation between top 2 concept groups' volume series."""
+    if len(concept_groups) < 2:
+        return {}
+
+    group_keys = list(concept_groups.keys())[:2]
+    s1 = dict(concept_groups[group_keys[0]]["volume_by_window"])
+    s2 = dict(concept_groups[group_keys[1]]["volume_by_window"])
+    common_keys = sorted(set(s1) & set(s2))
+    if len(common_keys) < 4:
+        return {}
+
+    v1 = [s1[k] for k in common_keys]
+    v2 = [s2[k] for k in common_keys]
+    try:
+        from scipy.stats import pearsonr
+        r, p = pearsonr(v1, v2)
+        return {
+            "pearson_r": float(r),
+            "p_value": float(p),
+            "interpretation": (
+                f"When '{group_keys[0].replace('_', ' ')}' rises, "
+                f"'{group_keys[1].replace('_', ' ')}' "
+                f"{'also rises' if r > 0 else 'falls'} "
+                f"(r={r:.2f}, p={p:.3f})"
+            ),
+        }
+    except Exception:
+        return {}
+
+
+def _summarize_sentiment(matching_tickets):
+    """Compute overall sentiment summary for matched tickets."""
+    from nltk.sentiment.vader import SentimentIntensityAnalyzer
+    sia = SentimentIntensityAnalyzer()
+
     all_sentiments = []
     for t in matching_tickets:
         if t.get("full_thread"):
             s = sia.polarity_scores(t["full_thread"])["compound"]
             all_sentiments.append(s)
-    sentiment_data = {}
-    if all_sentiments:
-        avg = float(np.mean(all_sentiments))
-        sentiment_data = {
-            "avg_compound": avg,
-            "trend": "negative" if avg < -0.1 else "positive" if avg > 0.1 else "neutral",
-        }
 
-    # 8. Evidence strength + optional Gemini synthesis
+    if not all_sentiments:
+        return {}
+
+    avg = float(np.mean(all_sentiments))
+    return {
+        "avg_compound": avg,
+        "trend": "negative" if avg < -0.1 else "positive" if avg > 0.1 else "neutral",
+    }
+
+
+def _run_gemini_synthesis(gemini_client, hypothesis, matching_tickets,
+                          temporal_pattern, correlation, incident_signals):
+    """Run optional Gemini AI synthesis on hypothesis evidence."""
+    try:
+        from src.gemini.prompts import build_hypothesis_prompt, SYSTEM_PROMPT
+        evidence_for_prompt = {
+            "matching_tickets": matching_tickets[:15],
+            "temporal_pattern": temporal_pattern,
+            "correlation": correlation,
+            "incident_signals": incident_signals,
+        }
+        prompt = build_hypothesis_prompt(hypothesis, evidence_for_prompt)
+        return gemini_client.generate(prompt, system_prompt=SYSTEM_PROMPT)
+    except Exception as e:
+        return f"[AI synthesis unavailable: {e}]"
+
+
+def test_hypothesis(
+    conn,
+    hypothesis: str,
+    date_start: str,
+    date_end: str,
+    window_size: str = "weekly",
+    progress_callback=None,
+    gemini_client=None,
+) -> dict:
+    """
+    Test a user hypothesis against ticket data.
+
+    Returns a rich evidence dict with gemini_synthesis if Gemini is available.
+    """
+    _ensure_nltk_data()
+    _empty_result = {
+        "hypothesis": hypothesis, "concepts_extracted": [], "matching_tickets": [],
+        "concept_groups": {}, "temporal_pattern": {}, "correlation": {},
+        "incident_signals": {}, "sentiment_data": {}, "evidence_strength": "insufficient",
+        "gemini_synthesis": None,
+    }
+
+    def _prog(step, msg):
+        if progress_callback:
+            progress_callback(step, 8, msg)
+
+    _prog(1, "Extracting concepts from hypothesis...")
+    concepts = _extract_concepts(hypothesis)
+    _empty_result["concepts_extracted"] = concepts
+
+    _prog(2, "Searching for matching tickets...")
+    matching_ids = _find_matching_tickets(conn, concepts, date_start, date_end)
+    if not matching_ids:
+        return _empty_result
+
+    _prog(3, "Analyzing matching conversations...")
+    matching_tickets = _fetch_matching_conversations(conn, matching_ids)
+
+    _prog(4, "Building concept groups...")
+    concept_groups = _build_concept_groups(concepts, matching_tickets, window_size)
+
+    _prog(5, "Checking incident flags...")
+    matching_trcs = {t["trc_code"] for t in matching_tickets if t.get("trc_code")}
+    incident_signals = _get_related_incidents(conn, matching_trcs)
+
+    _prog(6, "Analyzing temporal patterns...")
+    temporal_pattern = {}
+    correlation = _compute_concept_correlation(concept_groups)
+
+    _prog(7, "Summarizing sentiment...")
+    sentiment_data = _summarize_sentiment(matching_tickets)
+
     _prog(8, "Scoring evidence...")
     evidence_strength = _score_evidence(concept_groups, temporal_pattern, correlation, incident_signals)
 
     gemini_synthesis = None
     if gemini_client is not None:
-        try:
-            from src.gemini.prompts import build_hypothesis_prompt, SYSTEM_PROMPT
-            evidence_for_prompt = {
-                "matching_tickets": matching_tickets[:15],
-                "temporal_pattern": temporal_pattern,
-                "correlation": correlation,
-                "incident_signals": incident_signals,
-            }
-            prompt = build_hypothesis_prompt(hypothesis, evidence_for_prompt)
-            gemini_synthesis = gemini_client.generate(prompt, system_prompt=SYSTEM_PROMPT)
-        except Exception as e:
-            gemini_synthesis = f"[AI synthesis unavailable: {e}]"
+        gemini_synthesis = _run_gemini_synthesis(
+            gemini_client, hypothesis, matching_tickets,
+            temporal_pattern, correlation, incident_signals
+        )
 
     return {
         "hypothesis": hypothesis,

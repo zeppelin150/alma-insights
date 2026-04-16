@@ -1,46 +1,65 @@
-name: Build Release
+name: Build Bundles
 
+# Runs on PRs + manual trigger. Tag pushes are handled by release.yml
+# (which reuses the same bundle build step but adds signing + publish).
 on:
-  workflow_dispatch:       # Manual trigger from GitHub UI
-  push:
-    tags:
-      - 'v*'              # Auto-trigger on version tags (v1.0.0, etc.)
+  pull_request:
+    paths:
+      - 'installer/**'
+      - 'requirements*.txt'
+      - 'requirements.lock'
+      - 'src/**'
+      - 'main.py'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: '3.12'
 
 jobs:
-  build-windows:
-    runs-on: windows-latest
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows
+            artifact: AlmaInsights-win64.zip
+          - os: macos-14
+            platform: macos
+            artifact: AlmaInsights-macOS-arm64.zip
+          - os: macos-13
+            platform: macos
+            artifact: AlmaInsights-macOS-x64.zip
+
+    runs-on: ${{ matrix.os }}
+
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Build Windows distribution
-        run: python installer/build_release.py --platform windows
+      # Cache the heavy downloads — Python embeddable / python-build-standalone,
+      # the Node.js tarball, and the HuggingFace model snapshot. Keyed on the
+      # build script + pinned-version files so invalidation is precise.
+      - name: Cache build downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            installer/cache
+            ~/.cache/huggingface
+          key: build-${{ matrix.platform }}-${{ hashFiles('installer/build_release.py', 'requirements.txt', 'requirements.lock') }}
+          restore-keys: |
+            build-${{ matrix.platform }}-
 
-      - name: Upload Windows artifact
+      - name: Build bundle
+        run: python installer/build_release.py --platform ${{ matrix.platform }}
+
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: AlmaInsights-win64
-          path: dist/AlmaInsights-win64.zip
-          retention-days: 30
-
-  build-macos:
-    runs-on: macos-14          # Apple Silicon (M1/M2/M3)
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Build macOS distribution
-        run: python3 installer/build_release.py --platform macos
-
-      - name: Upload macOS artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: AlmaInsights-macOS-arm64
-          path: dist/AlmaInsights-macOS-arm64.zip
-          retention-days: 30
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}
+          retention-days: 14

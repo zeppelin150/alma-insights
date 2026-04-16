@@ -18,6 +18,13 @@ TYPEFORM_URL = "https://YOUR_WORKSPACE.typeform.com/to/YOUR_FORM_ID"  # Replace 
 
 
 class HelpDialog(QDialog):
+    """Modal help dialog with documentation links, feedback form, and tool overview.
+
+    Opened from the top bar "Help & Docs" button. Provides quick-access
+    links to Guru documentation, a Typeform feedback link, and a summary
+    of the app's feature set.
+    """
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Help & Feedback — Alma Insights")

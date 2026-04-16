@@ -17,6 +17,15 @@ DEFAULT_MATCH_THRESHOLD = 0.3
 
 
 class NgramMatcher:
+    """Fast pre-scan ticket classifier using n-gram fingerprint matching.
+
+    Matches a ticket's text against cached sub_pattern_ngrams to produce
+    a provisional classification without an LLM call. Used to skip LLM
+    classification for tickets that clearly match an existing pattern.
+
+    The weighted score must exceed `match_threshold` (default: loaded
+    from sub_patterns config) to return a match.
+    """
 
     def __init__(self, db, match_threshold=None):
         self.db = db

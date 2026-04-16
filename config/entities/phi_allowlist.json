@@ -1,0 +1,34 @@
+{
+    "insurance_names": [
+        "UHC", "United Healthcare", "UnitedHealthcare", "United Health",
+        "Oscar", "Oscar Health",
+        "Aetna",
+        "BlueCross", "Blue Cross", "Blue Cross Blue Shield", "BCBS", "BlueShield",
+        "Cigna", "Evernorth",
+        "Humana",
+        "Kaiser", "Kaiser Permanente",
+        "Anthem",
+        "Molina", "Molina Healthcare",
+        "Centene",
+        "WellCare",
+        "Ambetter",
+        "Medicaid", "Medicare",
+        "Tricare", "TRICARE",
+        "Bright Health", "BrightHealth",
+        "Alignment Healthcare",
+        "CareSource",
+        "Friday Health",
+        "Clover Health",
+        "Devoted Health"
+    ],
+    "business_acronyms": [
+        "TRC", "CSAT", "NLP", "RCM", "EOB", "CPT", "ICD", "NPI", "EIN",
+        "PHI", "PII", "HIPAA", "SLA", "KPI", "API", "CRM", "EHR", "EMR",
+        "VOC", "VOB", "ERA", "EDI", "CMS", "HMO", "PPO", "POS", "EPO",
+        "FSA", "HSA", "HRA", "COBRA", "ACA", "OON", "INN", "DRG", "SNF"
+    ],
+    "preserve_patterns": [
+        "policy#", "claim#", "auth#", "case#", "ticket#", "ref#",
+        "TRC-", "CSAT-", "NPI-"
+    ]
+}

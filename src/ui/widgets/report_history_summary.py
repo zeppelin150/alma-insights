@@ -41,7 +41,7 @@ class ReportHistorySummary(QFrame):
         self.setStyleSheet(f"""
             ReportHistorySummary {{
                 background: {ALMA_BG_ELEVATED};
-                border: 1px solid {ALMA_BORDER_LIGHT};
+                border: none;
                 border-radius: 8px;
             }}
             ReportHistorySummary:hover {{
@@ -94,6 +94,30 @@ class ReportHistorySummary(QFrame):
 
     def refresh(self):
         """Update count and last run time from DB."""
+        # AI Reports page uses analysis_runs table (Build 11.0)
+        if self.page_key == "ai_reports":
+            count = self.db.get_report_run_count()
+            if count == 0:
+                self._summary_label.setText("No reports yet")
+                self._view_btn.setEnabled(False)
+                return
+            runs = self.db.get_latest_report_runs(limit=1)
+            if runs:
+                run_at = runs[0].get("run_date", "")
+                try:
+                    dt = datetime.fromisoformat(run_at)
+                    time_str = dt.strftime("%b %d, %Y %I:%M %p")
+                except (ValueError, TypeError):
+                    time_str = run_at
+                self._summary_label.setText(
+                    f"{count} report{'s' if count != 1 else ''} \u00b7 Last: {time_str}"
+                )
+            else:
+                self._summary_label.setText(f"{count} report{'s' if count != 1 else ''}")
+            self._view_btn.setEnabled(True)
+            return
+
+        # Legacy pages use analysis_reports table
         count = self.db.get_report_count(self.page_key)
         if count == 0:
             self._summary_label.setText("No reports yet")

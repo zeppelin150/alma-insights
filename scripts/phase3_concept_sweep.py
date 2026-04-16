@@ -17,6 +17,7 @@ Plan reference: phase-5-7-session-kernel.md (Phase 7 — the recall fix).
 from __future__ import annotations
 
 import argparse
+import os
 import logging
 import time
 from pathlib import Path
@@ -40,8 +41,11 @@ def main() -> int:
     )
     parser.add_argument(
         "--golden",
-        default="C:/Users/Chris/Downloads/alma_test_10000_1_golden_set.csv",
-        help="Golden-set CSV path.",
+        default=os.environ.get(
+            "ALMA_GOLDEN_SET_CSV",
+            "data/test_fixtures/alma_test_10000_1_golden_set.csv",
+        ),
+        help="Golden-set CSV path (or set ALMA_GOLDEN_SET_CSV env var).",
     )
     parser.add_argument(
         "--skip-llm", action="store_true",

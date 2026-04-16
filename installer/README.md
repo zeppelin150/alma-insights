@@ -20,10 +20,10 @@ Output appears in `dist/`.
 ## Requirements (build machine only)
 
 - Python 3.10+
-- Internet access (downloads ~200-400 MB of Python + packages)
-- ~2 GB free disk space for staging
+- Internet access (downloads Python, Node.js, npm packages, ML model)
+- ~3 GB free disk space for staging
 
-**End users do NOT need Python installed.** The distribution bundles everything.
+**End users do NOT need Python or Node.js installed.** The distribution bundles everything.
 
 ## What the build produces
 
@@ -34,8 +34,16 @@ AlmaInsights/
   Install Alma Insights.bat     <- User runs this
   AlmaInsights.bat              <- Direct launcher (post-install)
   _installer/install.py         <- Console installer script
-  python/                       <- Embeddable Python 3.12 + dependencies
+  python/                       <- Embeddable Python 3.12 + all dependencies
+  node/                         <- Standalone Node.js 22.x + Gemini CLI
   app/                          <- Application source
+    main.py
+    src/
+    config/
+    assets/
+    migrations/
+    data/
+      models/                   <- Pre-downloaded ML model (offline use)
 ```
 
 ### macOS: `dist/AlmaInsights-macOS-arm64.zip`
@@ -45,8 +53,9 @@ AlmaInsights/
   Install Alma Insights.command <- User runs this
   AlmaInsights.command          <- Direct launcher (post-install)
   _installer/install.py         <- Console installer script
-  python/                       <- Standalone Python 3.12 + dependencies
-  app/                          <- Application source
+  python/                       <- Standalone Python 3.12 + all dependencies
+  node/                         <- Standalone Node.js 22.x + Gemini CLI
+  app/                          <- Application source (same as Windows)
 ```
 
 ## End-user installation flow
@@ -55,7 +64,12 @@ AlmaInsights/
 2. Extract the zip
 3. Double-click `Install Alma Insights` (.bat on Windows, .command on macOS)
 4. The console installer asks for an install location (defaults to user-space)
-5. Files are copied, shortcuts are created, and the app is ready
+5. Files are copied (Python, Node.js, app) with progress bars
+6. Database is initialized and schema migrations applied
+7. Settings are migrated if upgrading from an older install
+8. Gemini CLI is verified/installed via bundled npm
+9. Desktop and Start Menu shortcuts are created
+10. User can launch immediately
 
 ### Install locations (defaults, no admin needed)
 
@@ -69,16 +83,30 @@ AlmaInsights/
 
 ## Updating
 
-Run the installer again over an existing installation. It preserves the user's database (`data/` directory) and replaces everything else.
+Run the installer again over an existing installation. It preserves:
+- User database (`data/alma_insights.db`)
+- User settings (`data/settings.yaml`)
+- Export history (`data/exports/`)
+
+Everything else (code, config, migrations, runtimes) is replaced.
 
 ## Estimated sizes
 
 | Platform | Zip size | Installed size |
 |----------|----------|---------------|
-| Windows  | ~150-250 MB | ~350-500 MB |
-| macOS    | ~180-280 MB | ~400-550 MB |
+| Windows  | ~250-400 MB | ~500-700 MB |
+| macOS    | ~280-420 MB | ~550-750 MB |
 
-Most of the size comes from PySide6 (Qt framework) and scikit-learn (numpy/scipy).
+Size breakdown: PySide6 (~150MB), scikit-learn/scipy/numpy (~80MB),
+sentence-transformers model (~80MB), Node.js + Gemini CLI (~50MB), app source (~5MB).
+
+## Bundled runtimes
+
+| Runtime | Version | Purpose |
+|---------|---------|---------|
+| Python 3.12 | Embeddable (Win) / python-build-standalone (macOS) | App runtime |
+| Node.js 22.x | Standalone binary | Gemini bridge process |
+| Gemini CLI | `@google/gemini-cli` via npm | Google Gemini API access |
 
 ## Files in this directory
 
@@ -90,3 +118,4 @@ Most of the size comes from PySide6 (Qt framework) and scikit-learn (numpy/scipy
 | `install_mac.command` | macOS entry point — launches install.py with bundled Python |
 | `launcher_win.bat` | Windows direct launcher template |
 | `launcher_mac.command` | macOS direct launcher template |
+| `README_IT_SECURITY.md` | IT security review documentation |

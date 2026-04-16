@@ -94,7 +94,7 @@ class JobOverlay(QWidget):
         self._job_list_frame.setStyleSheet(
             "background: rgba(255, 255, 255, 0.06);"
             " border-radius: 10px;"
-            " border: 1px solid rgba(255, 255, 255, 0.10);"
+            " border: none;"
         )
         self._job_list_frame.setMaximumWidth(420)
         self._job_list_layout = QVBoxLayout(self._job_list_frame)

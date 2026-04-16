@@ -16,11 +16,14 @@ the bridge (blocking mode), parses the structured response, and
 stores results to the analyst_reports table.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import random
-import sqlite3
 from datetime import datetime
+
+from src.data.connection_factory import get_connection
 
 logger = logging.getLogger("alma.analyst")
 
@@ -51,8 +54,7 @@ class AnalystAgent:
     @property
     def conn(self):
         if self._conn is None:
-            self._conn = sqlite3.connect(self.db_path)
-            self._conn.row_factory = sqlite3.Row
+            self._conn = get_connection(self.db_path)
         return self._conn
 
     # ──────────────────────────────────────────────────────────────────────
@@ -178,14 +180,10 @@ Output ONLY valid JSON. No markdown. No preamble."""
                        c.sentiment_intensity, c.sentiment_polarity,
                        c.anomaly_flag, c.summary,
                        c.sub_cluster_confidence, c.is_novel,
-                       conv.thread_text as thread_sample
+                       conv.full_thread as thread_sample
                 FROM nlp_ticket_classifications c
-                LEFT JOIN (
-                    SELECT ticket_id,
-                           GROUP_CONCAT(full_thread, ' | ') as thread_text
-                    FROM conversations
-                    GROUP BY ticket_id
-                ) conv ON conv.ticket_id = c.ticket_id
+                LEFT JOIN conversations conv
+                    ON conv.ticket_id = c.ticket_id
                 WHERE c.scan_id = ?
             """, (scan_id,)).fetchall()
         except Exception as e:
@@ -262,14 +260,22 @@ Output ONLY valid JSON."""
     # 3. Novelty Validation
     # ──────────────────────────────────────────────────────────────────────
 
-    def run_novelty_validation(self, scan_id):
+    def run_novelty_validation(self, scan_id, input_budget=None):
         """
         Validate that patterns marked as novel are genuinely new
         and not duplicates of existing patterns.
+
+        Batches novel tickets to avoid exceeding model input limits.
+        Returns aggregated validation results across all batches.
+
+        Args:
+            scan_id: Scan identifier
+            input_budget: Max input chars per bridge call (default: 100_000)
         """
         logger.info(f"Analyst: running novelty validation for {scan_id}")
+        budget = input_budget or 100_000
 
-        # Load novel classifications
+        # Load ALL novel classifications (no truncation)
         try:
             novels = self.conn.execute("""
                 SELECT ticket_id, trc, sub_cluster, key_phrases,
@@ -283,10 +289,18 @@ Output ONLY valid JSON."""
             return None
 
         if not novels:
-            logger.info(f"Analyst: no novel patterns to validate")
-            return {"validated": 0, "rejected": 0, "merged": 0}
+            logger.info("Analyst: no novel patterns to validate")
+            empty = {
+                "validations": [],
+                "summary": {"validated": 0, "rejected": 0, "merged": 0},
+            }
+            self._store_report(scan_id, "novelty", json.dumps(empty), {
+                "total_novels": 0, "validated": 0,
+                "rejected": 0, "merged": 0,
+            })
+            return empty
 
-        # Load existing patterns for comparison
+        # Load existing patterns for comparison context
         try:
             existing = self.conn.execute("""
                 SELECT trc, label, description, friction_type
@@ -303,25 +317,60 @@ Output ONLY valid JSON."""
             f"{e['trc']}: {e['label']} ({e['friction_type']})"
             for e in existing
         ]
+        existing_block = chr(10).join(existing_list)
+        existing_block_chars = len(existing_block)
 
-        novel_list = []
+        # Build per-novel text items
+        novel_items = []
         for n in novels:
             kp = n["key_phrases"] or "[]"
-            novel_list.append(
+            item_text = (
                 f"ticket_id: {n['ticket_id']}\n"
                 f"  trc: {n['trc']}\n"
                 f"  sub_cluster: {n['sub_cluster']}\n"
                 f"  key_phrases: {kp}\n"
                 f"  root_cause: {n['root_cause_hint']}"
             )
+            novel_items.append(item_text)
 
-        prompt = f"""You are validating novel sub-pattern classifications.
+        # Prompt overhead: instructions + existing patterns + JSON template
+        prompt_overhead = 500 + existing_block_chars + 400
+
+        # Batch novels so each prompt stays within input budget
+        batches = []
+        current_batch = []
+        current_chars = prompt_overhead
+        for item in novel_items:
+            item_chars = len(item) + 1  # +1 for newline separator
+            if current_batch and (current_chars + item_chars) > budget:
+                batches.append(current_batch)
+                current_batch = [item]
+                current_chars = prompt_overhead + item_chars
+            else:
+                current_batch.append(item)
+                current_chars += item_chars
+        if current_batch:
+            batches.append(current_batch)
+
+        logger.info(
+            f"Analyst: novelty validation: {len(novels)} novels "
+            f"in {len(batches)} batch(es)"
+        )
+
+        # Process each batch
+        all_validations = []
+        total_validated = 0
+        total_rejected = 0
+        total_merged = 0
+
+        for batch_idx, batch in enumerate(batches):
+            prompt = f"""You are validating novel sub-pattern classifications.
 
 EXISTING PATTERNS ({len(existing_list)}):
-{chr(10).join(existing_list[:30])}
+{existing_block}
 
-NOVEL CLASSIFICATIONS ({len(novels)} tickets):
-{chr(10).join(novel_list[:30])}
+NOVEL CLASSIFICATIONS ({len(batch)} tickets, batch {batch_idx + 1}/{len(batches)}):
+{chr(10).join(batch)}
 
 For each novel classification, determine:
 - VALID: Genuinely new pattern not covered by existing ones
@@ -347,19 +396,107 @@ Output a JSON object:
 
 Output ONLY valid JSON."""
 
-        result = self._call_bridge(prompt, f"analyst_novelty_{scan_id}")
-        if not result:
-            return None
+            result = self._call_bridge(
+                prompt,
+                f"analyst_novelty_{scan_id}_b{batch_idx}"
+            )
+            if not result:
+                logger.warning(
+                    f"Analyst: novelty batch {batch_idx + 1}/{len(batches)} "
+                    f"failed — skipping"
+                )
+                continue
 
-        parsed = self._parse_json_response(result)
-        summary = parsed.get("summary", {}) if parsed else {}
-        self._store_report(scan_id, "novelty", result, {
+            parsed = self._parse_json_response(result)
+            if parsed:
+                batch_validations = parsed.get("validations", [])
+                all_validations.extend(batch_validations)
+                summary = parsed.get("summary", {})
+                total_validated += summary.get("validated", 0)
+                total_rejected += summary.get("rejected", 0)
+                total_merged += summary.get("merged", 0)
+
+        # Aggregate result
+        aggregated = {
+            "validations": all_validations,
+            "summary": {
+                "validated": total_validated,
+                "rejected": total_rejected,
+                "merged": total_merged,
+            },
+        }
+
+        self._store_report(scan_id, "novelty", json.dumps(aggregated), {
             "total_novels": len(novels),
-            "validated": summary.get("validated", 0),
-            "rejected": summary.get("rejected", 0),
+            "batches": len(batches),
+            "validated": total_validated,
+            "rejected": total_rejected,
+            "merged": total_merged,
         })
 
-        return parsed
+        return aggregated
+
+    def apply_novelty_verdicts(self, scan_id, validations):
+        """
+        Write DUPLICATE and MERGE verdicts to nlp_ticket_classifications
+        so the meta-analyzer can use them as advisory signals.
+
+        DUPLICATE verdicts set is_novel = 0 (not truly novel).
+        MERGE verdicts tag the ticket but keep is_novel = 1.
+        VALID verdicts require no update (default state).
+
+        Args:
+            scan_id: Scan identifier
+            validations: List of verdict dicts from run_novelty_validation()
+        """
+        if not validations:
+            return
+
+        dup_count = 0
+        merge_count = 0
+
+        for v in validations:
+            ticket_id = v.get("ticket_id")
+            verdict = (v.get("verdict") or "").upper()
+            existing_match = v.get("existing_match")
+
+            if not ticket_id:
+                continue
+
+            if verdict == "DUPLICATE":
+                try:
+                    self.conn.execute("""
+                        UPDATE nlp_ticket_classifications
+                        SET is_novel = 0,
+                            novelty_verdict = ?,
+                            novelty_match = ?
+                        WHERE scan_id = ? AND ticket_id = ?
+                    """, (verdict, existing_match, scan_id, ticket_id))
+                    dup_count += 1
+                except Exception as e:
+                    logger.warning(
+                        f"Analyst: verdict write failed for {ticket_id}: {e}"
+                    )
+
+            elif verdict == "MERGE":
+                try:
+                    self.conn.execute("""
+                        UPDATE nlp_ticket_classifications
+                        SET novelty_verdict = ?,
+                            novelty_match = ?
+                        WHERE scan_id = ? AND ticket_id = ?
+                    """, (verdict, existing_match, scan_id, ticket_id))
+                    merge_count += 1
+                except Exception as e:
+                    logger.warning(
+                        f"Analyst: verdict write failed for {ticket_id}: {e}"
+                    )
+
+        self.conn.commit()
+        logger.info(
+            f"Analyst: applied novelty verdicts for {scan_id} — "
+            f"{dup_count} duplicates downgraded, {merge_count} merges tagged"
+        )
 
     # ──────────────────────────────────────────────────────────────────────
     # 4. Pattern Merge

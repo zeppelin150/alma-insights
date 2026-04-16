@@ -353,15 +353,30 @@ class GenerationAnimationWidget(QWidget):
         """Visual prefix for each step: checkmark for completed, arrow for current."""
         return f"✓"  # All steps show checkmark once typed
 
+    # Maximum number of dynamic status lines before oldest are removed
+    _MAX_STATUS_LINES = 8
+
     def _inject_status_line(self, text: str):
-        """Add a dynamic status line during the waiting phase."""
+        """Add a dynamic status line during the waiting phase.
+
+        Caps visible status lines at _MAX_STATUS_LINES to prevent
+        the layout from overflowing and garbling text.
+        """
+        # Evict oldest dynamic status labels beyond the cap
+        boot_count = min(len(BOOT_STEPS), self._boot_index)
+        dynamic_labels = self._all_labels[boot_count:]
+        while len(dynamic_labels) >= self._MAX_STATUS_LINES:
+            old = dynamic_labels.pop(0)
+            old.stop()
+            self._step_area.removeWidget(old)
+            old.deleteLater()
+            self._all_labels.remove(old)
+
         lbl = TypewriterLabel(self)
         lbl.setStyleSheet(
             f"font-size: 12px; color: {ALMA_TEXT_MID}; font-weight: 400;"
             " background: transparent; border: none;"
         )
-        # Insert before the spinner
-        idx = self._step_area.count()
         self._step_area.addWidget(lbl)
         self._all_labels.append(lbl)
         lbl.type_text(text, char_delay_ms=15)

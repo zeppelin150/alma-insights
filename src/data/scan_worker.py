@@ -10,6 +10,8 @@ Usage:
                                    [--worker <worker_id>]
 """
 
+from __future__ import annotations
+
 import sys
 import os
 import json
@@ -26,6 +28,7 @@ from collections import Counter
 # Add project root to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
+from src.data.connection_factory import get_connection
 from src.gemini.gemini_client import GeminiClient
 
 logger = logging.getLogger("alma.scan_worker")
@@ -35,8 +38,14 @@ MAX_TICKETS_CLI_MODE = 50_000
 
 
 class ScanWorker:
+    """Legacy subprocess-per-batch scan worker.
 
-    def __init__(self, db_path, scan_id, worker_id=0):
+    Superseded by the persistent-worker model in `src.agents.WorkerAgent`,
+    which boots the Gemini bridge once and stays alive across batches.
+    Retained here for backward-compatibility and fallback scenarios.
+    """
+
+    def __init__(self, db_path: str, scan_id: str, worker_id: int = 0) -> None:
         self.db_path = str(Path(db_path).resolve())
         self.scan_id = scan_id
         self.worker_id = worker_id
@@ -69,12 +78,9 @@ class ScanWorker:
     def _open_conn(self):
         """Open a SQLite connection with WAL mode and busy timeout."""
         logger.info(f"Connecting to DB: {self.db_path}")
-        self.conn = sqlite3.connect(self.db_path)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA journal_mode = WAL")
-        self.conn.execute("PRAGMA busy_timeout = 30000")
+        self.conn = get_connection(self.db_path)
 
-    def run(self):
+    def run(self) -> None:
         """
         Main loop. Process batches until:
         - All batches complete
@@ -348,7 +354,7 @@ class ScanWorker:
 
         system_prompt = (
             "You are classifying support tickets for an RCM "
-            "healthcare platform. Output ONLY valid JSON arrays. "
+            "healthcare platform. Output ONLY structured tool_call blocks. "
             "No markdown. No explanation."
         )
 
@@ -845,53 +851,58 @@ class ScanWorker:
             except (json.JSONDecodeError, TypeError):
                 pass
 
+        from src.data.source_registry import SourceRegistry
+        from src.data.warehouse_query import WarehouseQuery
+        _sw_reg = SourceRegistry(self.conn)
+        _sw_wq = WarehouseQuery(self.conn, _sw_reg)
+        _sw_cols = ["ticket_id", "subject", "trc_code", "trc_label", "csat_score",
+                    "created_at", "full_thread", "message_count", "client_messages", "agent_messages"]
+
         if trc_list:
-            # Mixed batch: query multiple TRCs in one go
             all_rows = []
             for t in trc_list:
                 if t == '(untagged)':
-                    rows = self.conn.execute("""
+                    _raw = _sw_wq.query_conversations_raw("""
                         SELECT ticket_id, subject, trc_code, trc_label,
                                csat_score, created_at, full_thread,
                                message_count, client_messages, agent_messages
-                        FROM conversations
+                        FROM {table}
                         WHERE (trc_code IS NULL OR trc_code = '')
                           AND created_at >= ? AND created_at <= ?
                         ORDER BY created_at ASC
-                    """, (date_start, date_end + ' 23:59:59')).fetchall()
+                    """, (date_start, date_end + ' 23:59:59'))
                 else:
-                    rows = self.conn.execute("""
+                    _raw = _sw_wq.query_conversations_raw("""
                         SELECT ticket_id, subject, trc_code, trc_label,
                                csat_score, created_at, full_thread,
                                message_count, client_messages, agent_messages
-                        FROM conversations
-                        WHERE trc_code = ? AND created_at >= ?
-                          AND created_at <= ?
+                        FROM {table}
+                        WHERE trc_code = ? AND created_at >= ? AND created_at <= ?
                         ORDER BY created_at ASC
-                    """, (t, date_start, date_end + ' 23:59:59')).fetchall()
-                all_rows.extend(rows)
-            tickets = [dict(r) for r in all_rows]
+                    """, (t, date_start, date_end + ' 23:59:59'))
+                all_rows.extend(_raw)
+            tickets = [dict(zip(_sw_cols, r)) for r in all_rows]
         elif trc == '(untagged)':
-            rows = self.conn.execute("""
+            _raw = _sw_wq.query_conversations_raw("""
                 SELECT ticket_id, subject, trc_code, trc_label,
                        csat_score, created_at, full_thread,
                        message_count, client_messages, agent_messages
-                FROM conversations
+                FROM {table}
                 WHERE (trc_code IS NULL OR trc_code = '')
                   AND created_at >= ? AND created_at <= ?
                 ORDER BY created_at ASC
-            """, (date_start, date_end + ' 23:59:59')).fetchall()
-            tickets = [dict(r) for r in rows]
+            """, (date_start, date_end + ' 23:59:59'))
+            tickets = [dict(zip(_sw_cols, r)) for r in _raw]
         else:
-            rows = self.conn.execute("""
+            _raw = _sw_wq.query_conversations_raw("""
                 SELECT ticket_id, subject, trc_code, trc_label,
                        csat_score, created_at, full_thread,
                        message_count, client_messages, agent_messages
-                FROM conversations
+                FROM {table}
                 WHERE trc_code = ? AND created_at >= ? AND created_at <= ?
                 ORDER BY created_at ASC
-            """, (trc, date_start, date_end + ' 23:59:59')).fetchall()
-            tickets = [dict(r) for r in rows]
+            """, (trc, date_start, date_end + ' 23:59:59'))
+            tickets = [dict(zip(_sw_cols, r)) for r in _raw]
 
         # For multi-chunk TRCs, slice to this chunk's portion.
         # chunk_size must match MAX_BATCH_TICKETS in scan_worker_manager

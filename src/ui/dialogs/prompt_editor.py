@@ -196,7 +196,7 @@ class PromptEditorDialog(QDialog):
         var_group.setStyleSheet(f"""
             QGroupBox {{
                 font-size: 11px; font-weight: 600; color: {ALMA_TEXT_MID};
-                border: 1px solid {ALMA_BORDER_LIGHT}; border-radius: 6px;
+                border: none;
                 padding: 12px; padding-top: 20px; margin-top: 6px;
             }}
             QGroupBox::title {{

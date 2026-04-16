@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QComboBox, QFrame, QScrollArea, QTextEdit,
     QFileDialog, QSizePolicy, QMessageBox,
 )
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
 
 from src.ui.theme import (
     ALMA_GREEN_DARK, ALMA_GREEN_MID, ALMA_GREEN_LIGHT,
@@ -22,6 +22,8 @@ from src.ui.theme import (
 )
 from src.ui.widgets.chat_widget import ReportChatWidget
 from src.ui.widgets.report_history_summary import ReportHistorySummary
+from src.ui.widgets.markdown_viewer import MarkdownViewer
+from src.ui.widgets.collapsible_section import CollapsibleSection
 
 
 def _load_prompt_text(filename):
@@ -32,20 +34,9 @@ def _load_prompt_text(filename):
 
 
 def _build_gemini_client():
-    import yaml
-    from src.gemini.gemini_client import GeminiClient
-    config_path = Path(__file__).parent.parent.parent.parent / "config" / "settings.yaml"
-    gemini_cfg = {}
-    if config_path.exists():
-        with open(config_path, encoding="utf-8") as f:
-            cfg = yaml.safe_load(f) or {}
-        gemini_cfg = cfg.get("gemini", {})
-    return GeminiClient(
-        cli_path=gemini_cfg.get("cli_path", ""),
-        model=gemini_cfg.get("model", "gemini-2.5-flash"),
-        temperature=gemini_cfg.get("temperature", 0.2),
-        pii_redaction=gemini_cfg.get("pii_redaction", True),
-    )
+    """Create LLM client for A/B comparison via task-routed factory."""
+    from src.gemini.client_factory import build_client_for_task
+    return build_client_for_task("ab_comparison")
 
 
 class ABCompareWorker(QThread):
@@ -117,7 +108,49 @@ class ABCompareWorker(QThread):
             self.error.emit(traceback.format_exc())
 
 
+class ABPipelineWorker(QThread):
+    """Background thread using ABReportPipeline (Phase 5.5B)."""
+    progress = Signal(str)
+    finished = Signal(dict)  # full pipeline result dict
+    error = Signal(str)
+
+    def __init__(self, db_path, prompt_data, config, gemini_client):
+        super().__init__()
+        self.db_path = db_path
+        self.prompt_data = prompt_data
+        self.config = config
+        self.gemini_client = gemini_client
+
+    def run(self):
+        try:
+            from src.data.db_manager import DatabaseManager
+            from src.data.ab_report_pipeline import ABReportPipeline
+
+            db = DatabaseManager(self.db_path)
+            db.initialize()
+
+            pipeline = ABReportPipeline(
+                db,
+                gemini_client=self.gemini_client,
+                progress_cb=self.progress.emit,
+            )
+            result = pipeline.run(self.prompt_data, self.config)
+            db.close()
+            self.finished.emit(result)
+        except Exception as e:
+            import traceback
+            self.error.emit(traceback.format_exc())
+
+
 class ABComparePage(QWidget):
+    """A/B dataset comparison page.
+
+    Loads two CSV datasets (A and B) and runs statistical tests
+    (chi-squared, Mann-Whitney U, t-test, TF-IDF rank comparison)
+    via `src.data.ab_analysis`. Optionally generates a Gemini
+    narrative via `ABReportPipeline`. Uses `ABCompareWorker` for
+    statistical-only runs and `ABPipelineWorker` for full reports.
+    """
 
     def __init__(self, db_manager, parent=None):
         super().__init__(parent)
@@ -359,11 +392,9 @@ class ABComparePage(QWidget):
 
         ol.addLayout(out_row)
 
-        self._ab_output = QTextEdit()
-        self._ab_output.setReadOnly(True)
-        self._ab_output.setPlaceholderText("Comparison results will appear here...")
+        self._ab_output = MarkdownViewer()
         self._ab_output.setStyleSheet(f"""
-            QTextEdit {{
+            QTextBrowser {{
                 background: {ALMA_CREAM}; color: {ALMA_TEXT_DARK};
                 border: 1px solid {ALMA_BORDER_LIGHT}; border-radius: 8px;
                 padding: 12px; font-size: 13px;
@@ -372,9 +403,46 @@ class ABComparePage(QWidget):
         self._ab_output.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._ab_output.setMinimumHeight(400)
         ol.addWidget(self._ab_output, 1)
+
+        # ── Action buttons row (Phase 5.5B) ──
+        action_row = QHBoxLayout()
+        action_row.setSpacing(8)
+
+        self._save_md_btn = QPushButton("Save .md")
+        self._save_md_btn.setEnabled(False)
+        self._save_md_btn.setCursor(Qt.PointingHandCursor)
+        self._save_md_btn.setStyleSheet(btn_style)
+        self._save_md_btn.clicked.connect(self._save_report_md)
+        action_row.addWidget(self._save_md_btn)
+
+        self._save_history_btn = QPushButton("Save to History")
+        self._save_history_btn.setEnabled(False)
+        self._save_history_btn.setCursor(Qt.PointingHandCursor)
+        self._save_history_btn.setStyleSheet(btn_style)
+        self._save_history_btn.clicked.connect(self._save_to_history)
+        action_row.addWidget(self._save_history_btn)
+
+        action_row.addStretch()
+        ol.addLayout(action_row)
+
         layout.addWidget(output_card, 1)
 
-        layout.addStretch()
+        # ── Collapsible: Technical Summary (Phase 5.5B) ──
+        self._tech_section = CollapsibleSection(
+            "Technical Process Summary", initially_collapsed=True,
+            section_key="ab_compare.tech_summary",
+            show_expand_button=True,
+        )
+        self._tech_viewer = MarkdownViewer()
+        self._tech_viewer.setMinimumHeight(100)
+        self._tech_section.add_widget(self._tech_viewer)
+        self._tech_section.setVisible(False)
+        layout.addWidget(self._tech_section)
+
+        # ── Report History (Phase 5.5B) ──
+        self.report_summary = ReportHistorySummary(self.db, "ab_compare")
+        self.report_summary.view_all_clicked.connect(self._open_report_history)
+        layout.addWidget(self.report_summary)
         scroll.setWidget(content)
         outer.addWidget(scroll)
 
@@ -447,7 +515,7 @@ class ABComparePage(QWidget):
         try:
             gc = _build_gemini_client()
         except Exception as e:
-            self._ab_output.setPlainText(f"Gemini error: {e}")
+            self._ab_output.set_markdown(f"**Gemini error:** {e}")
             self._ab_run_btn.setEnabled(True)
             self._ab_run_btn.setText("  Run Comparison  ")
             self._progress_lbl.setVisible(False)
@@ -471,7 +539,7 @@ class ABComparePage(QWidget):
         self._chat_widget.set_gemini_client(gc)
         self._chat_widget.clear()
 
-        self._ab_worker = ABCompareWorker(
+        self._ab_worker = ABPipelineWorker(
             self.db.db_path, prompt_data,
             {
                 "dataset_a_id": self._ab_dataset_a_id,
@@ -480,7 +548,7 @@ class ABComparePage(QWidget):
             gc,
         )
         self._ab_worker.progress.connect(self._on_progress)
-        self._ab_worker.finished.connect(self._on_ab_finished)
+        self._ab_worker.finished.connect(self._on_ab_pipeline_finished)
         self._ab_worker.error.connect(self._on_ab_error)
         self._ab_worker.start()
 
@@ -488,27 +556,76 @@ class ABComparePage(QWidget):
         self._progress_lbl.setText(msg)
 
     def _on_ab_error(self, trace):
-        self._ab_output.setPlainText(f"Error:\n{trace}")
+        self._ab_output.set_markdown(f"## Error\n\n```\n{trace}\n```")
         self._ab_run_btn.setEnabled(True)
         self._ab_run_btn.setText("  Run Comparison  ")
         self._progress_lbl.setVisible(False)
 
-    def _on_ab_finished(self, text, data_block_text):
-        self._ab_output.setPlainText(text)
-        self._current_report_text = text
-        self._current_data_block = data_block_text
+    def _on_ab_pipeline_finished(self, result):
+        """Callback for ABPipelineWorker (Phase 5.5B)."""
+        report_md = result.get("report_md", "")
+        data_block = result.get("data_block", "")
+
+        self._ab_output.set_markdown(report_md)
+        self._current_report_text = report_md
+        self._current_data_block = data_block
+
+        # Technical Summary section
+        tech_md = result.get("tech_summary_md", "")
+        if tech_md:
+            self._tech_viewer.set_markdown(tech_md)
+            self._tech_section.setVisible(True)
+        else:
+            self._tech_section.setVisible(False)
+
         self._ab_run_btn.setEnabled(True)
         self._ab_run_btn.setText("  Run Comparison  ")
         self._progress_lbl.setVisible(False)
         self._copy_btn.setEnabled(True)
+        self._save_md_btn.setEnabled(True)
+        self._save_history_btn.setEnabled(True)
         self._chat_btn.setEnabled(True)
-        self._chat_widget.set_report_context(data_block_text, text)
+        self._chat_widget.set_report_context(data_block, report_md)
 
     def _copy_report(self):
         from PySide6.QtWidgets import QApplication
-        text = self._ab_output.toPlainText()
+        text = self._current_report_text or self._ab_output.toPlainText()
         if text:
             QApplication.clipboard().setText(text)
+
+    def _save_report_md(self):
+        """Save comparison report as .md file (Phase 5.5B)."""
+        text = self._current_report_text
+        if not text:
+            return
+        from PySide6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Report", "", "Markdown (*.md);;Text (*.txt)"
+        )
+        if path:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+
+    def _save_to_history(self):
+        """Save comparison to report history (Phase 5.5B)."""
+        if not self._current_report_text:
+            return
+        try:
+            self.db.save_report(
+                page="ab_compare",
+                parameters={
+                    "dataset_a": self._ab_dataset_a_id,
+                    "dataset_b": self._ab_dataset_b_id,
+                },
+                summary=self._current_report_text[:500],
+                full_results=json.dumps({"report_text": self._current_report_text}),
+                report_type="ab_comparison",
+            )
+            self.report_summary.refresh()
+            self._save_history_btn.setText("Saved!")
+            QTimer.singleShot(2000, lambda: self._save_history_btn.setText("Save to History"))
+        except Exception as e:
+            QMessageBox.warning(self, "Save Error", str(e))
 
     def _open_chat_drilldown(self):
         if self._drilldown and self._current_report_text:
@@ -517,6 +634,33 @@ class ABComparePage(QWidget):
                 "A/B Comparison",
                 self._chat_widget,
             )
+
+    def _open_report_history(self):
+        """Open DrilldownPanel with full A/B report history (Phase 5.5B)."""
+        if not self._drilldown:
+            return
+        reports = self.report_summary.get_reports_for_drilldown()
+        count = len(reports)
+        self._drilldown.show_reports(
+            "A/B Compare Reports",
+            f"{count} report{'s' if count != 1 else ''}",
+            reports,
+            detail_callback=self._render_report_detail_html,
+        )
+
+    def _render_report_detail_html(self, report_id):
+        """Render an A/B report as styled HTML for DrilldownPanel."""
+        from src.ui.widgets.markdown_viewer import md_to_html
+        report = self.db.get_full_report(report_id)
+        if not report:
+            return "<p>Report not found.</p>"
+        raw = report.get("full_results", "")
+        try:
+            data = json.loads(raw)
+            text = data.get("report_text", raw)
+        except (json.JSONDecodeError, TypeError):
+            text = raw
+        return md_to_html(text)
 
     # ── Public API ──
 

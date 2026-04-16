@@ -5,7 +5,7 @@ import sys, os, json, time, sqlite3, re
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from pathlib import Path
-from src.agents.gemini_bridge_wrapper import GeminiBridge
+from src.agents.acp_bridge import ACPBridge as GeminiBridge  # ACP migration
 
 DB_PATH = str(Path(__file__).parent.parent / "data" / "local_warehouse.db")
 

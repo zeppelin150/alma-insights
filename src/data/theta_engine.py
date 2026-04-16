@@ -16,9 +16,14 @@ The engine maintains rolling statistics (mean + std) using an exponentially
 weighted moving average (EWMA) so recent days have more influence on "normal".
 """
 
-import numpy as np
-from datetime import datetime, timedelta
+from __future__ import annotations
+
+import sqlite3
 from collections import defaultdict
+from collections.abc import Callable
+from datetime import datetime, timedelta
+
+import numpy as np
 
 
 # ── Configuration ──
@@ -30,7 +35,7 @@ THETA_2 = 2.0
 TOP_TERMS_TO_TRACK = 50
 
 
-def run_theta_scan(conn, target_date=None, progress_callback=None):
+def run_theta_scan(conn: sqlite3.Connection, target_date: str | None = None, progress_callback: Callable | None = None) -> dict:
     """
     Run the theta anomaly detection scan for a specific date.
 
@@ -117,7 +122,7 @@ def run_theta_scan(conn, target_date=None, progress_callback=None):
     }
 
 
-def run_theta_scan_range(conn, progress_callback=None):
+def run_theta_scan_range(conn: sqlite3.Connection, progress_callback: Callable | None = None) -> dict:
     """
     Run theta scan across the FULL date range in the conversations table.
 
@@ -132,12 +137,17 @@ def run_theta_scan_range(conn, progress_callback=None):
     Returns dict with combined flags, counts, date range, and scan metadata.
     """
     # Discover actual date range in the data
-    row = conn.execute("""
-        SELECT MIN(substr(created_at, 1, 10)) AS min_d,
-               MAX(substr(created_at, 1, 10)) AS max_d
-        FROM conversations
-        WHERE trc_code != ''
-    """).fetchone()
+    from src.data.source_registry import SourceRegistry
+    from src.data.warehouse_query import WarehouseQuery
+    _registry = SourceRegistry(conn)
+    _wq = WarehouseQuery(conn, _registry)
+    _date_rows = _wq.query_conversations_raw(
+        "SELECT MIN(substr(created_at, 1, 10)) AS min_d, MAX(substr(created_at, 1, 10)) AS max_d FROM {table} WHERE trc_code != ''"
+    )
+    # Aggregate min/max across all sources
+    _min_d = min((r[0] for r in _date_rows if r[0]), default=None)
+    _max_d = max((r[1] for r in _date_rows if r[1]), default=None)
+    row = (_min_d, _max_d) if _min_d and _max_d else None
 
     if not row:
         return {
@@ -214,11 +224,14 @@ def _compute_daily_metrics(conn, date):
     }
     """
     # Get conversations created on this date
-    rows = conn.execute("""
-        SELECT ticket_id, trc_code, full_thread, csat_score, created_at
-        FROM conversations
-        WHERE created_at LIKE ? AND trc_code != ''
-    """, (date + "%",)).fetchall()
+    from src.data.source_registry import SourceRegistry
+    from src.data.warehouse_query import WarehouseQuery
+    _registry = SourceRegistry(conn)
+    _wq = WarehouseQuery(conn, _registry)
+    rows = _wq.query_conversations_raw(
+        "SELECT ticket_id, trc_code, full_thread, csat_score, created_at FROM {table} WHERE created_at LIKE ? AND trc_code != ''",
+        (date + "%",),
+    )
 
     if not rows:
         return {}
@@ -494,7 +507,7 @@ def _persist_flags(conn, date, flags):
 
 # ─── Query functions for UI ───
 
-def get_open_flags(conn, theta_level=None, limit=100):
+def get_open_flags(conn: sqlite3.Connection, theta_level: int | None = None, limit: int = 100) -> list[dict]:
     """Get open anomaly flags, optionally filtered by theta level."""
     query = "SELECT * FROM anomaly_flags WHERE status = 'open'"
     params = []
@@ -506,7 +519,7 @@ def get_open_flags(conn, theta_level=None, limit=100):
     return [dict(r) for r in conn.execute(query, params).fetchall()]
 
 
-def get_flag_history(conn, trc_code=None, days=30, limit=200):
+def get_flag_history(conn: sqlite3.Connection, trc_code: str | None = None, days: int = 30, limit: int = 200) -> list[dict]:
     """Get anomaly flag history.
 
     Uses the most recent flag date as reference (not datetime.now()) so
@@ -533,7 +546,7 @@ def get_flag_history(conn, trc_code=None, days=30, limit=200):
     return [dict(r) for r in conn.execute(query, params).fetchall()]
 
 
-def acknowledge_flag(conn, flag_id, notes=""):
+def acknowledge_flag(conn: sqlite3.Connection, flag_id: int, notes: str = "") -> None:
     """Mark a flag as acknowledged."""
     conn.execute(
         "UPDATE anomaly_flags SET status = 'acknowledged', notes = ? WHERE flag_id = ?",
@@ -542,7 +555,7 @@ def acknowledge_flag(conn, flag_id, notes=""):
     conn.commit()
 
 
-def resolve_flag(conn, flag_id, notes=""):
+def resolve_flag(conn: sqlite3.Connection, flag_id: int, notes: str = "") -> None:
     """Mark a flag as resolved."""
     conn.execute(
         "UPDATE anomaly_flags SET status = 'resolved', resolved_at = ?, notes = ? WHERE flag_id = ?",
@@ -551,7 +564,7 @@ def resolve_flag(conn, flag_id, notes=""):
     conn.commit()
 
 
-def mark_false_positive(conn, flag_id, notes=""):
+def mark_false_positive(conn: sqlite3.Connection, flag_id: int, notes: str = "") -> None:
     """Mark a flag as a false positive."""
     conn.execute(
         "UPDATE anomaly_flags SET status = 'false_positive', notes = ? WHERE flag_id = ?",
@@ -564,7 +577,7 @@ def mark_false_positive(conn, flag_id, notes=""):
 #  SUB-PATTERN SHARE TRACKING (Pass 4.0)
 # ═══════════════════════════════════════════
 
-def compute_sub_pattern_shares(conn, date):
+def compute_sub_pattern_shares(conn: sqlite3.Connection, date: str) -> list[dict]:
     """
     For each active sub-pattern, compute daily share of parent TRC
     and feed to θ-EWMA as metric_type='sub_pattern_share'.
@@ -598,31 +611,36 @@ def compute_sub_pattern_shares(conn, date):
         pattern_count = 0
 
         # Confirmed classifications
-        row = conn.execute("""
-            SELECT COUNT(*) FROM nlp_ticket_classifications tc
-            JOIN conversations c ON tc.ticket_id = c.ticket_id
-            WHERE tc.trc = ? AND tc.sub_cluster = ?
-              AND SUBSTR(c.created_at, 1, 10) = ?
-        """, (trc, label, date)).fetchone()
-        if row:
-            pattern_count += row[0]
+        from src.data.source_registry import SourceRegistry
+        from src.data.warehouse_query import WarehouseQuery
+        _reg = SourceRegistry(conn)
+        _wq2 = WarehouseQuery(conn, _reg)
+
+        _rows_tc = _wq2.query_conversations_raw(
+            "SELECT COUNT(*) FROM nlp_ticket_classifications tc JOIN {table} c ON tc.ticket_id = c.ticket_id "
+            "WHERE tc.trc = ? AND tc.sub_cluster = ? AND SUBSTR(c.created_at, 1, 10) = ?",
+            (trc, label, date),
+        )
+        for _r in _rows_tc:
+            if _r and _r[0]:
+                pattern_count += _r[0]
 
         # Provisional classifications
-        row = conn.execute("""
-            SELECT COUNT(*) FROM provisional_classifications pc
-            JOIN conversations c ON pc.ticket_id = c.ticket_id
-            WHERE pc.matched_pattern_id = ? AND pc.is_confirmed = 0
-              AND SUBSTR(c.created_at, 1, 10) = ?
-        """, (pid, date)).fetchone()
-        if row:
-            pattern_count += row[0]
+        _rows_pc = _wq2.query_conversations_raw(
+            "SELECT COUNT(*) FROM provisional_classifications pc JOIN {table} c ON pc.ticket_id = c.ticket_id "
+            "WHERE pc.matched_pattern_id = ? AND pc.is_confirmed = 0 AND SUBSTR(c.created_at, 1, 10) = ?",
+            (pid, date),
+        )
+        for _r in _rows_pc:
+            if _r and _r[0]:
+                pattern_count += _r[0]
 
         # Total tickets for parent TRC on this date
-        total_row = conn.execute("""
-            SELECT COUNT(*) FROM conversations
-            WHERE trc_code = ? AND SUBSTR(created_at, 1, 10) = ?
-        """, (trc, date)).fetchone()
-        total_trc = total_row[0] if total_row else 0
+        _rows_total = _wq2.query_conversations_raw(
+            "SELECT COUNT(*) FROM {table} WHERE trc_code = ? AND SUBSTR(created_at, 1, 10) = ?",
+            (trc, date),
+        )
+        total_trc = sum(r[0] for r in _rows_total if r and r[0])
 
         if total_trc == 0:
             continue

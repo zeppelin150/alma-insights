@@ -1,0 +1,127 @@
+name: Release
+
+# Fires on any tag that looks like a version (v9.3.0, v9.3.0-rc1, etc.)
+# Also runnable manually from the Actions tab for dry runs.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v9.3.0)'
+        required: true
+        default: 'v0.0.0-test'
+
+permissions:
+  contents: write  # needed by softprops/action-gh-release
+
+env:
+  PYTHON_VERSION: '3.12'
+
+jobs:
+  # ─────────────────────────────────────────────────────────────
+  # 1. Build bundles in parallel for the three supported platforms
+  # ─────────────────────────────────────────────────────────────
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows
+            artifact: AlmaInsights-win64.zip
+          - os: macos-14          # Apple Silicon
+            platform: macos
+            artifact: AlmaInsights-macOS-arm64.zip
+          - os: macos-13          # Last Intel runner
+            platform: macos
+            artifact: AlmaInsights-macOS-x64.zip
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      # Cache the downloads that build_release.py pulls every run —
+      # Python embeddable, Node.js tarball, the HuggingFace model snapshot.
+      - name: Cache build downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            installer/cache
+            ~/.cache/huggingface
+          key: bundle-${{ matrix.platform }}-${{ hashFiles('installer/build_release.py', 'requirements.txt', 'requirements.lock') }}
+          restore-keys: |
+            bundle-${{ matrix.platform }}-
+
+      - name: Build bundle
+        run: python installer/build_release.py --platform ${{ matrix.platform }}
+
+      # ── macOS signing + notarization (only runs when secrets are present) ──
+      - name: Sign + notarize (macOS)
+        if: startsWith(matrix.os, 'macos') && env.APPLE_ID != ''
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          bash installer/ci/sign_macos.sh "dist/${{ matrix.artifact }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}
+          retention-days: 7
+
+  # ─────────────────────────────────────────────────────────────
+  # 2. Aggregate artifacts, build the manifest, publish a Release
+  # ─────────────────────────────────────────────────────────────
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Resolve release tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF##*/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build release manifest
+        run: |
+          python scripts/make_release_manifest.py \
+            --version "${{ steps.tag.outputs.tag }}" \
+            --artifacts dist \
+            --output dist/release_manifest.json \
+            --notes-url "https://github.com/${{ github.repository }}/releases/tag/${{ steps.tag.outputs.tag }}"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          files: |
+            dist/AlmaInsights-*.zip
+            dist/release_manifest.json
+          generate_release_notes: true
+          fail_on_unmatched_files: true

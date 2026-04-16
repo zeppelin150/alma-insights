@@ -272,6 +272,8 @@ class MockHTTPClient:
 
 
 class _MockHTTPError(Exception):
+    """Internal HTTP error raised by the mock Lightdash client for failure-mode tests."""
+
     def __init__(self, code, body):
         self.code = code
         self.body = body

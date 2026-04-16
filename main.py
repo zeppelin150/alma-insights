@@ -18,6 +18,18 @@ for root, dirs, files in os.walk(os.path.join(os.path.dirname(__file__), "src"))
         shutil.rmtree(os.path.join(root, "__pycache__"), ignore_errors=True)
         dirs.remove("__pycache__")
 
+# ── EAGER: air-gap env vars must be set BEFORE any HF/torch import ──
+# The HF stack reads HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE etc. exactly
+# once at import time; setting them after PySide6/sentence_transformers
+# have loaded is a silent no-op. Keep this block above every other import.
+from src.startup.env_guard import enforce as _enforce_env
+_enforce_env()
+
+# ── Global Python crash handler (before QApplication so background-thread
+#    exceptions outside Qt slots get recorded too) ──
+from src.core.crash_handler import install as _install_crash_handler
+_install_crash_handler()
+
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QIcon
@@ -66,9 +78,15 @@ def main():
         # Re-import after file swap to pick up new code
         importlib.invalidate_caches()
 
-    # Migrate settings from config/ → data/ (one-time, survives auto-updates)
-    from src.data.settings_manager import get_settings_path
-    get_settings_path()
+    # Rollback guard: if the newly applied update crash-looped (≥3 crashes
+    # within its grace window) the previous version is restored here.
+    from src.updater.rollback import needs_rollback, perform_rollback
+    should_rollback, reason = needs_rollback()
+    if should_rollback:
+        ok, message = perform_rollback()
+        print(f"[startup] Auto-rollback ({reason}): {message}")
+        if ok:
+            importlib.invalidate_caches()
 
     # WAL health check: auto-checkpoint if WAL grew beyond threshold while app
     # was closed (e.g. after an aborted scan). Bounded, non-blocking.
@@ -82,6 +100,27 @@ def main():
     except Exception as exc:  # noqa: BLE001 — non-fatal at startup
         print(f"[startup] WAL health check failed: {exc}")
 
+    # ── First-run EULA (before the splash, after QApplication exists) ──
+    # Uses the native QDialog so modality works correctly on both platforms.
+    # If the user declines, we exit with status 1.
+    from src.ui.dialogs.eula_dialog import ensure_accepted as ensure_eula_accepted
+    if not ensure_eula_accepted():
+        print("[startup] EULA declined; exiting.")
+        sys.exit(1)
+
+    # ── Startup splash with 10 health checks ──
+    # --no-splash skips the UI (dev convenience: straight to MainWindow)
+    if "--no-splash" in sys.argv:
+        sys.argv.remove("--no-splash")
+        ok = _run_checks_headless(app.applicationVersion())
+        if not ok:
+            print("[startup] Critical check failed; aborting (see output above).")
+            sys.exit(1)
+    else:
+        if not _run_splash(app):
+            # User closed splash without Continue, or a critical check blocked it
+            sys.exit(1)
+
     # Launch main window
     window = MainWindow()
     window.show()
@@ -90,7 +129,43 @@ def main():
     if hasattr(window, 'qt_error_label'):
         guard.attach_to_status_bar(window.qt_error_label)
 
+    # Once MainWindow is up, schedule a rollback-state cleanup after the
+    # grace window expires. If the app hasn't crashed by then, the update
+    # is considered stable and the _*_previous directories are removed.
+    from PySide6.QtCore import QTimer
+    from src.updater.rollback import clear_state_if_stable
+    QTimer.singleShot(65_000, lambda: clear_state_if_stable())
+
     sys.exit(app.exec())
+
+
+def _run_splash(app) -> bool:
+    """Show the splash, run all checks, return True if user clicked Continue."""
+    from src.startup.checker import Checker
+    from src.startup.checks import DEFAULT_CHECKS
+    from src.startup.splash_window import SplashWindow
+    from PySide6.QtWidgets import QDialog
+
+    splash = SplashWindow(app_version=app.applicationVersion())
+    splash.show()
+    app.processEvents()  # force first paint before any check runs
+
+    checker = Checker(DEFAULT_CHECKS)
+    splash.run(checker)
+
+    return splash.exec() == QDialog.Accepted
+
+
+def _run_checks_headless(app_version: str) -> bool:
+    """Run checks synchronously; print results; return passed_critical."""
+    from src.startup.checker import Checker
+    from src.startup.checks import DEFAULT_CHECKS
+
+    checker = Checker(DEFAULT_CHECKS)
+    for result in checker.run_all():
+        icon = {"pass": "OK", "warn": "!!", "fail": "XX"}[result.status]
+        print(f"[{icon}] {result.name}: {result.message}")
+    return checker.passed_critical
 
 
 if __name__ == "__main__":

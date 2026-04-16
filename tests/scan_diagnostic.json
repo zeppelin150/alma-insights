@@ -1,0 +1,71 @@
+{
+  "scan_id": "43256fa2-4b81-4e7d-84da-85d72594cf12",
+  "status": "running",
+  "total_batches": 51,
+  "completed_batches": 30,
+  "actual_cost_usd": 0.093367,
+  "classifications": 1194,
+  "dropped_tickets": 514,
+  "batch_stats": [
+    {
+      "status": "completed",
+      "n": 30,
+      "avg_lat": 168055.66666666666,
+      "max_lat": 303480,
+      "retries": 9
+    },
+    {
+      "status": "queued",
+      "n": 2,
+      "avg_lat": 0.0,
+      "max_lat": 0,
+      "retries": 3
+    },
+    {
+      "status": "running",
+      "n": 19,
+      "avg_lat": 0.0,
+      "max_lat": 0,
+      "retries": 15
+    }
+  ],
+  "events": [
+    {
+      "event_type": "batch_start",
+      "status": "running",
+      "n": 65
+    },
+    {
+      "event_type": "batch_complete",
+      "status": "complete",
+      "n": 30
+    },
+    {
+      "event_type": "batch_retry",
+      "status": "running",
+      "n": 27
+    },
+    {
+      "event_type": "preflight",
+      "status": "complete",
+      "n": 22
+    },
+    {
+      "event_type": "preflight",
+      "status": "running",
+      "n": 2
+    },
+    {
+      "event_type": "info",
+      "status": "complete",
+      "n": 1
+    },
+    {
+      "event_type": "preflight",
+      "status": "info",
+      "n": 1
+    }
+  ],
+  "errors": [],
+  "total_wall_s": 1803.4
+}

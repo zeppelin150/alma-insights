@@ -304,6 +304,11 @@ class WorkerAgent:
             "response_chars": result.get("response_chars", 0) if result else 0,
             "input_tokens": result.get("input_tokens", 0) if result else 0,
             "output_tokens": result.get("output_tokens", 0) if result else 0,
+            # Delivery accounting — propagated from _run_classification
+            # so the orchestrator can detect partial batches.
+            "requested_ids": result.get("requested_ids", []) if result else [],
+            "delivered_ids": result.get("delivered_ids", []) if result else [],
+            "dropped_ids": result.get("dropped_ids", []) if result else [],
         }
 
     def _run_classification(self, prompt, batch_id, trc, tickets, attempt):
@@ -508,36 +513,60 @@ class WorkerAgent:
                         self.avg_confidence * 0.7 + batch_avg * 0.3
                     )
 
-        # ── DB truth check: query DB for authoritative classified count
-        # to catch any edge cases where in-memory tracking diverges. ──
+        # ── DB-verified delivery set (authoritative) ──
+        # Replaces the old "DB count check" that padded classified_ids
+        # with fake `__db_recovered_N` strings when DB > stream. That
+        # inflated counts (e.g. "15/9 classified") and masked real
+        # delivery lies where DB < stream (tool_call observed but row
+        # never persisted). Now we take DB as the single source of
+        # truth for what actually landed — in BOTH directions.
+        requested_ids = [t["ticket_id"] for t in tickets]
+        delivered_ids: set[str] = set()
         try:
             scan_id = self.tool_registry._context.get("scan_id", "")
-            if scan_id:
+            if scan_id and requested_ids:
                 db_conn = get_connection(self.tool_registry.db_path)
-                db_count = db_conn.execute(
-                    "SELECT COUNT(*) FROM nlp_ticket_classifications "
-                    "WHERE scan_id = ? AND batch_id = ?",
-                    (scan_id, batch_id)
-                ).fetchone()[0]
+                # Intersect with requested so we don't pick up stale
+                # classifications from prior scans / other batches.
+                placeholders = ",".join("?" * len(requested_ids))
+                rows = db_conn.execute(
+                    f"SELECT ticket_id FROM nlp_ticket_classifications "
+                    f"WHERE scan_id = ? AND ticket_id IN ({placeholders})",
+                    (scan_id, *requested_ids),
+                ).fetchall()
                 db_conn.close()
-                if db_count > len(classified_ids):
-                    logger.info(
-                        "Worker %s: DB count %d > stream count %d "
-                        "— using DB as truth",
-                        self.agent_id, db_count, len(classified_ids),
-                    )
-                    # Update classified_ids count to match DB reality
-                    # We can't recover individual IDs cheaply but the
-                    # count is what matters for metrics and retry logic.
-                    classified_ids.update(
-                        f"__db_recovered_{i}" for i in range(
-                            db_count - len(classified_ids)
-                        )
-                    )
+                delivered_ids = {r[0] for r in rows}
         except Exception as e:
-            logger.debug("DB count check failed (non-fatal): %s", e)
+            # DB lookup failed — fall back to stream-observed set.
+            # This is rare and should be investigated; fail-open keeps
+            # the scan progressing rather than breaking on transient
+            # sqlite lock contention.
+            logger.warning(
+                "Worker %s: delivery verification failed "
+                "(falling back to stream count): %s",
+                self.agent_id, e,
+            )
+            delivered_ids = {
+                tid for tid in classified_ids
+                if not tid.startswith("__")  # safety: ignore old fake ids
+            }
 
-        failed = len(tickets) - len(classified_ids)
+        # Compute drops: requested but not delivered
+        dropped_ids = [
+            tid for tid in requested_ids if tid not in delivered_ids
+        ]
+        if dropped_ids:
+            logger.warning(
+                "Worker %s: batch %s delivery-lie — stream reported %d, "
+                "DB has %d, %d dropped: %s",
+                self.agent_id, batch_id[:8], len(classified_ids),
+                len(delivered_ids), len(dropped_ids),
+                dropped_ids[:5],  # log first 5 for diagnosis
+            )
+
+        # Authoritative count from DB
+        classified_ids = delivered_ids  # reassign for downstream metrics
+        failed = len(dropped_ids)
 
         # Log which parse path was used (5.2 diagnostics)
         if classified_ids and not classifications:
@@ -566,6 +595,11 @@ class WorkerAgent:
             "response_chars": len(result.get("full_text", "")),
             "input_tokens": result.get("input_tokens", 0),
             "output_tokens": result.get("output_tokens", 0),
+            # Delivery accounting (verify-on-commit) — orchestrator
+            # uses these to detect partial batches and emit drop events.
+            "requested_ids": requested_ids,
+            "delivered_ids": list(delivered_ids),
+            "dropped_ids": dropped_ids,
         }
 
     def _handle_parsed_event(self, parsed, classified_ids, classifications):

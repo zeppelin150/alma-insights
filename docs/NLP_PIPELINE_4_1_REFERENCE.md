@@ -443,7 +443,8 @@ nlp_scan:
 
 # Gemini settings used by scan_worker
 gemini:
-  cli_path: C:\Users\Chris\AppData\Roaming\npm\gemini.CMD
+  cli_path: <path-to-gemini-cli>   # e.g. %APPDATA%\npm\gemini.CMD on Windows,
+                                    # or /usr/local/bin/gemini on macOS
   model: gemini-2.0-flash
   pii_redaction: true
   temperature: 0.2

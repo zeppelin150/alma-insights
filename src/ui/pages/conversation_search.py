@@ -75,6 +75,24 @@ class ConversationSearchPage(QWidget):
         """)
         controls_row.addWidget(self.data_source_badge)
 
+        # Import target source selector (Session 5: multi-source)
+        from src.ui.widgets.source_selector import SourceSelector
+        import_lbl = QLabel("Importing to:")
+        import_lbl.setStyleSheet(
+            f"font-size: 11px; font-weight: 600; color: {ALMA_TEXT_LIGHT};"
+        )
+        controls_row.addWidget(import_lbl)
+        self._import_source_selector = SourceSelector(self)
+        self._import_source_selector.setFixedWidth(160)
+        controls_row.addWidget(self._import_source_selector)
+        try:
+            from src.data.connection_factory import get_connection
+            conn = get_connection(self.db.db_path)
+            self._import_source_selector.refresh_sources(conn)
+            conn.close()
+        except Exception:
+            pass
+
         # Dataset selector dropdown
         self.dataset_combo = QComboBox()
         self.dataset_combo.setMinimumWidth(200)
@@ -224,7 +242,7 @@ class ConversationSearchPage(QWidget):
         # ── Filter Chip Bar (Build 10.0: T14) ──
         self._chip_bar = FilterChipBar()
         self._chip_bar.filter_removed.connect(self._on_chip_removed)
-        self._chip_bar.all_cleared.connect(self.clear_filters)
+        self._chip_bar.all_cleared.connect(self._reset_filters)
         layout.addWidget(self._chip_bar)
         layout.addSpacing(8)
 
@@ -242,7 +260,7 @@ class ConversationSearchPage(QWidget):
             description="Try adjusting your filters or date range",
             action_label="Clear Filters",
         )
-        self._empty_state.action_clicked.connect(self.clear_filters)
+        self._empty_state.action_clicked.connect(self._reset_filters)
         self._empty_state.setVisible(False)
         layout.addWidget(self._empty_state)
 
@@ -370,7 +388,7 @@ class ConversationSearchPage(QWidget):
             return
         # Clear existing search and show these tickets
         try:
-            self.search_box.clear()
+            self.keyword_input.clear()
             # Build a results list for these specific tickets
             results = []
             for tid in ticket_ids[:200]:  # Cap at 200
@@ -593,6 +611,9 @@ class ConversationSearchPage(QWidget):
         db_path = self.db.db_path
         queue = main_win._job_queue
 
+        import_source_id = self._import_source_selector.selected_source_id() if hasattr(self, '_import_source_selector') else None
+        source_config = {"source_id": import_source_id} if import_source_id else None
+
         def create_worker():
             def do_import():
                 from src.data.db_manager import DatabaseManager
@@ -605,6 +626,7 @@ class ConversationSearchPage(QWidget):
                         progress_callback=lambda msg, pct:
                             queue.job_progress.emit("csv_import", msg, pct or -1),
                         column_override=column_override,
+                        source_config=source_config,
                     )
                 finally:
                     db.close()
@@ -691,7 +713,9 @@ class ConversationSearchPage(QWidget):
 
         try:
             from src.data.csv_ingestion import ingest_csv
-            stats = ingest_csv(file_path, self.db, progress_callback=on_progress)
+            import_source_id = self._import_source_selector.selected_source_id() if hasattr(self, '_import_source_selector') else None
+            source_config = {"source_id": import_source_id} if import_source_id else None
+            stats = ingest_csv(file_path, self.db, progress_callback=on_progress, source_config=source_config)
             progress.setValue(100)
             progress.close()
 
@@ -784,6 +808,51 @@ class ConversationSearchPage(QWidget):
         )
 
     def clear_filters(self):
+        """Clear ephemeral conversation data from the database.
+
+        Conversations are ephemeral (hot-tier ingestion buffer).  The Data
+        Warehouse holds the permanent copy.  This mirrors the "Clear & Close"
+        path in main_window.closeEvent but keeps the app open.
+        """
+        from PySide6.QtWidgets import QMessageBox
+
+        count = self.db.get_ticket_count()
+        if count == 0:
+            # Nothing to clear — just reset the form
+            self._reset_filters()
+            return
+
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Clear Conversations")
+        msg.setText(f"Clear {count} conversations from the session?")
+        msg.setInformativeText(
+            "Conversation text will be removed.\n"
+            "All tickets, enrichments, and reports are preserved in the Data Warehouse.\n\n"
+            "You can re-import data at any time."
+        )
+        msg.setStandardButtons(QMessageBox.Yes | QMessageBox.Cancel)
+        msg.setDefaultButton(QMessageBox.Yes)
+        msg.button(QMessageBox.Yes).setText("Clear")
+
+        if msg.exec() != QMessageBox.Yes:
+            return
+
+        try:
+            from src.services.clear_session import clear_session_data
+            clear_session_data(str(self.db.db_path))
+        except Exception as e:
+            import logging
+            logging.getLogger("alma.conversation_search").warning(
+                "Session clear failed: %s", e
+            )
+
+        # Reset the UI to reflect empty state
+        self._reset_filters()
+        self.set_data_source_label("0 conversations")
+        self.populate_trc_filter()
+
+    def _reset_filters(self):
+        """Reset search form to defaults without touching the database."""
         self.keyword_input.clear()
         self.trc_combo.setCurrentIndex(0)
         self.date_from.setDate(QDate(2020, 1, 1))

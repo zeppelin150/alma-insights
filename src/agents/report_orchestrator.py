@@ -24,9 +24,12 @@ Thread safety:  All methods are safe to call from any thread.  The bridge
 pool is shared; the RateGovernor serializes API calls to avoid quota issues.
 """
 
+from __future__ import annotations
+
 import logging
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from queue import PriorityQueue, Empty
 from pathlib import Path
@@ -42,7 +45,7 @@ class ReportOrchestrator:
     RETRY_BUDGET_QUOTA = 6
     RETRY_BUDGET_OTHER = 1
 
-    def __init__(self, db_path, model="gemini-2.5-flash", num_bridges=4,
+    def __init__(self, db_path, model="gemini-2.5-flash", num_bridges=8,
                  min_rate_interval=25.0):
         """
         Args:
@@ -61,7 +64,10 @@ class ReportOrchestrator:
         self._adaptive_call_timeout = 300  # 8.5 T1: updated by canary probes
 
         from src.agents.rate_governor import RateGovernor
-        self._rate_governor = RateGovernor(min_interval=min_rate_interval)
+        self._rate_governor = RateGovernor(
+            max_concurrent=num_bridges,
+            burst_delay=max(0.5, min_rate_interval / 10.0),
+        )
 
     # ═══════════════════════════════════════════════════════════════
     #  LIFECYCLE
@@ -72,7 +78,7 @@ class ReportOrchestrator:
         if self._booted:
             return
 
-        from src.agents.gemini_bridge_wrapper import GeminiBridge
+        from src.agents.acp_bridge import ACPBridge
 
         logger.info(
             "ReportOrchestrator: booting %d bridges (model=%s)",
@@ -80,7 +86,7 @@ class ReportOrchestrator:
         )
 
         for i in range(self._num_bridges):
-            bridge = GeminiBridge(model=self._model)
+            bridge = ACPBridge(model=self._model)
             bridge.ensure_running()
             self._bridges.append(bridge)
             logger.info("ReportOrchestrator: bridge_%d ready", i)
@@ -244,27 +250,31 @@ class ReportOrchestrator:
 
             bridge = self._bridges[bridge_idx]
 
-            try:
-                # 8.5 T2: Pre-call health check
-                if not bridge.is_alive():
-                    logger.warning(
-                        "ReportOrchestrator: bridge_%d dead pre-call, "
-                        "restarting...", bridge_idx,
+            # 8.5 T2: Pre-call health check
+            if not bridge.is_alive():
+                logger.warning(
+                    "ReportOrchestrator: bridge_%d dead pre-call, "
+                    "restarting...", bridge_idx,
+                )
+                try:
+                    bridge.restart()
+                    time.sleep(3)
+                except Exception as re:
+                    logger.error(
+                        "ReportOrchestrator: bridge_%d restart failed: %s",
+                        bridge_idx, re,
                     )
-                    try:
-                        bridge.restart()
-                        time.sleep(3)
-                    except Exception as re:
-                        logger.error(
-                            "ReportOrchestrator: bridge_%d restart failed: %s",
-                            bridge_idx, re,
-                        )
-                        return task_id, "[Error: bridge_restart_failed]"
+                    return task_id, "[Error: bridge_restart_failed]"
 
-                # Rate governor: wait for slot
-                if not self._rate_governor.acquire(timeout=60):
-                    return task_id, "[Error: rate_governor_timeout]"
+            # Rate governor: wait for slot
+            if not self._rate_governor.acquire(timeout=60):
+                return task_id, "[Error: rate_governor_timeout]"
 
+            _elapsed = 0.0
+            _success = False
+            _rate_limited = False
+
+            try:
                 if is_cancelled():
                     return task_id, "[Cancelled]"
 
@@ -276,21 +286,20 @@ class ReportOrchestrator:
                 response = bridge.call_blocking(
                     prompt, request_id, timeout=timeout
                 )
-                duration = time.time() - t0
-
-                # Report success to rate governor + bridge health (8.5 T2)
-                self._rate_governor.report_success(duration)
+                _elapsed = time.time() - t0
+                _success = True
                 bridge.record_success()
 
                 logger.info(
                     "ReportOrchestrator: task=%s done (%.1fs, %d chars)",
-                    task_id[:40], duration, len(response or ""),
+                    task_id[:40], _elapsed, len(response or ""),
                 )
 
                 return task_id, response
 
             except RuntimeError as e:
                 err_str = str(e)
+                _elapsed = time.time() - t0 if 't0' in dir() else 0.0
 
                 # 8.5 T2: Track stalls for escalation
                 if "stall_timeout" in err_str:
@@ -309,11 +318,11 @@ class ReportOrchestrator:
                                 "restart failed: %s", bridge_idx, re,
                             )
 
-                if "rate_limit" in err_str.lower() or "429" in err_str \
-                        or "capacity" in err_str.lower():
-                    self._rate_governor.report_rate_limit()
-                else:
-                    self._rate_governor.report_error()
+                _rate_limited = (
+                    "rate_limit" in err_str.lower()
+                    or "429" in err_str
+                    or "capacity" in err_str.lower()
+                )
 
                 logger.error(
                     "ReportOrchestrator: task=%s failed: %s",
@@ -322,12 +331,18 @@ class ReportOrchestrator:
                 return task_id, f"[Error: {err_str[:200]}]"
 
             except Exception as e:
-                self._rate_governor.report_error()
                 logger.error(
                     "ReportOrchestrator: task=%s exception: %s",
                     task_id[:40], e,
                 )
                 return task_id, f"[Error: {e}]"
+
+            finally:
+                self._rate_governor.release(
+                    duration=_elapsed if _elapsed > 0 else None,
+                    success=_success,
+                    rate_limited=_rate_limited,
+                )
 
         def _classify_retry_budget(err_str):
             """8.5 T3: Return max retries based on error category."""

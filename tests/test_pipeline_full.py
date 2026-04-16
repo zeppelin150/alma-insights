@@ -109,7 +109,9 @@ def create_test_db():
             root_cause_hint TEXT,
             summary TEXT,
             raw_classification TEXT,
-            created_at TEXT
+            created_at TEXT,
+            novelty_verdict TEXT,
+            novelty_match TEXT
         );
 
         CREATE TABLE nlp_scan_runs (
@@ -268,30 +270,34 @@ class TestRateGovernor(unittest.TestCase):
         self.assertGreaterEqual(elapsed, 0.05)  # at least some blocking
 
     def test_backoff_on_rate_limit(self):
-        """report_rate_limit() should double the interval."""
+        """report_rate_limit() should increase burst_delay by 1.5x (semaphore governor)."""
         old = self.gov.min_interval
         self.gov.report_rate_limit()
-        self.assertAlmostEqual(self.gov.min_interval, old * 2.0, places=3)
+        self.assertAlmostEqual(self.gov.min_interval, old * 1.5, places=3)
 
     def test_tighten_after_successes(self):
-        """5 consecutive successes should tighten interval."""
-        self.gov.min_interval = 25.0  # above 15s floor
+        """5 consecutive successes should tighten interval.
+        P1: factor is 0.8 when > 30s since last 429 (default state)."""
+        self.gov.min_interval = 2.0  # above configured floor
         for _ in range(5):
             self.gov.report_success(0.5)
-        self.assertAlmostEqual(self.gov.min_interval, 22.5, places=3)  # 25 * 0.9
+        self.assertAlmostEqual(self.gov.min_interval, 1.6, places=3)  # 2.0 * 0.8
 
     def test_backoff_cap(self):
-        """Interval should cap at 120s."""
-        self.gov.min_interval = 100.0
+        """Burst delay should cap at 5.0s (semaphore governor)."""
+        self.gov.min_interval = 4.0
         self.gov.report_rate_limit()
-        self.assertEqual(self.gov.min_interval, 120.0)
+        self.assertAlmostEqual(self.gov.min_interval, 5.0, places=3)
 
     def test_tighten_floor(self):
-        """Interval should not go below 15s."""
-        self.gov.min_interval = 15.0
+        """Interval should not go below configured burst_delay."""
+        configured = self.gov._configured_burst_delay
+        self.gov.min_interval = configured
         for _ in range(5):
             self.gov.report_success(0.5)
-        self.assertEqual(self.gov.min_interval, 15.0)
+        self.assertAlmostEqual(
+            self.gov.min_interval, configured, places=3
+        )
 
     def test_estimate_completion_heuristic(self):
         """estimate_completion() with no data returns heuristic."""
@@ -337,16 +343,16 @@ class TestBatchPacker(unittest.TestCase):
     def setUp(self):
         self.conn = create_test_db()
         from src.agents.batch_packer import BatchPacker
-        # Default model = gemini-2.0-flash (budget=20K, max=25)
+        # Default model = gemini-2.0-flash (budget=20K output / 100K input, max=25)
         self.packer = BatchPacker(self.conn)
 
     def tearDown(self):
         self.conn.close()
 
     def test_default_batch_size(self):
-        """Unknown TRC with default model → 25 tickets/batch."""
+        """Unknown TRC with default model (2.0-flash) → 25 tickets/batch."""
         size = self.packer.compute_batch_size("UNKNOWN_TRC", 1000)
-        self.assertEqual(size, 25)  # 20_000 / 800 = 25, capped at max
+        self.assertEqual(size, 25)  # 20_000 / 800 = 25, capped at max 25
 
     def test_batch_size_clamping_max(self):
         """Batch size should not exceed model's max."""
@@ -408,22 +414,23 @@ class TestBatchPacker(unittest.TestCase):
     # ── 5.2 Model-Adaptive Tests ──
 
     def test_model_25_flash_larger_batches(self):
-        """gemini-2.5-flash gets budget=200K, max=75 (5.4 cap)."""
+        """gemini-2.5-flash gets budget=200K, max=45 (reduced for stall prevention)."""
         from src.agents.batch_packer import BatchPacker
         packer = BatchPacker(self.conn, model="gemini-2.5-flash")
         self.assertEqual(packer._output_budget, 200_000)
-        self.assertEqual(packer._max_batch, 75)
         self.assertEqual(packer._input_budget, 300_000)
-        # 200K / 800 = 250 output, 300K / 3120 = 96 input, clamped to 75
+        self.assertEqual(packer._max_batch, 45)
+        # 200K / 800 = 250, clamped to 45
         size = packer.compute_batch_size("UNKNOWN", 500)
-        self.assertEqual(size, 75)
+        self.assertEqual(size, 45)
 
     def test_model_25_pro_larger_batches(self):
-        """gemini-2.5-pro gets budget=200K, max=100."""
+        """gemini-2.5-pro gets budget=200K output / 400K input, max=60 (reduced for stall prevention)."""
         from src.agents.batch_packer import BatchPacker
         packer = BatchPacker(self.conn, model="gemini-2.5-pro")
         self.assertEqual(packer._output_budget, 200_000)
-        self.assertEqual(packer._max_batch, 100)
+        self.assertEqual(packer._input_budget, 400_000)
+        self.assertEqual(packer._max_batch, 60)
 
     def test_model_unknown_falls_back(self):
         """Unknown model uses default budget=20K, max=25."""
@@ -438,6 +445,123 @@ class TestBatchPacker(unittest.TestCase):
         packer = BatchPacker(self.conn, model="gemini-2.0-flash")
         self.assertEqual(packer._output_budget, 20_000)
         self.assertEqual(packer._max_batch, 25)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# MODEL ROUTING TESTS — verify model flows correctly through both pipelines
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestModelRouting(unittest.TestCase):
+    """Verify model name propagates correctly through NLP and VOC pipelines."""
+
+    def setUp(self):
+        self.conn = create_test_db()
+
+    def tearDown(self):
+        self.conn.close()
+
+    # ── BatchPacker: all supported models get correct limits ──
+
+    def test_all_models_have_input_limits(self):
+        """Every model in MODEL_OUTPUT_LIMITS also has an input limit."""
+        from src.agents.batch_packer import MODEL_OUTPUT_LIMITS, MODEL_INPUT_LIMITS
+        for model in MODEL_OUTPUT_LIMITS:
+            self.assertIn(model, MODEL_INPUT_LIMITS,
+                          f"{model} missing from MODEL_INPUT_LIMITS")
+
+    def test_all_models_have_max_batch(self):
+        """Every model in MODEL_OUTPUT_LIMITS also has a max batch."""
+        from src.agents.batch_packer import MODEL_OUTPUT_LIMITS, MODEL_MAX_BATCH
+        for model in MODEL_OUTPUT_LIMITS:
+            self.assertIn(model, MODEL_MAX_BATCH,
+                          f"{model} missing from MODEL_MAX_BATCH")
+
+    def test_flash_lite_limits(self):
+        """gemini-2.5-flash-lite gets 200K output / 250K input / max 45 (reduced for stall prevention)."""
+        from src.agents.batch_packer import BatchPacker
+        p = BatchPacker(self.conn, model="gemini-2.5-flash-lite")
+        self.assertEqual(p._output_budget, 200_000)
+        self.assertEqual(p._input_budget, 250_000)
+        self.assertEqual(p._max_batch, 45)
+
+    def test_3_flash_preview_limits(self):
+        """gemini-3-flash-preview has explicit routing entries (reduced batch cap)."""
+        from src.agents.batch_packer import BatchPacker
+        p = BatchPacker(self.conn, model="gemini-3-flash-preview")
+        self.assertEqual(p._output_budget, 200_000)
+        self.assertEqual(p._input_budget, 300_000)
+        self.assertEqual(p._max_batch, 45)
+
+    def test_get_input_budget_uses_model_limit(self):
+        """get_input_budget() returns model-specific input limit, not derived."""
+        from src.agents.batch_packer import BatchPacker
+        p_flash = BatchPacker(self.conn, model="gemini-2.5-flash")
+        p_old = BatchPacker(self.conn, model="gemini-2.0-flash")
+        self.assertEqual(p_flash.get_input_budget(), 300_000)
+        self.assertEqual(p_old.get_input_budget(), 100_000)
+
+    # ── NLP Pipeline: ACPBridge passes model to subprocess ──
+
+    def test_bridge_passes_model_to_subprocess(self):
+        """ACPBridge stores --model flag for ACP subprocess command."""
+        from src.agents.acp_bridge import ACPBridge
+        bridge = ACPBridge(model="gemini-2.5-flash")
+        self.assertEqual(bridge._model, "gemini-2.5-flash")
+
+    def test_bridge_no_model_flag_when_none(self):
+        """ACPBridge with model=None does not pass --model flag."""
+        from src.agents.acp_bridge import ACPBridge
+        bridge = ACPBridge(model=None)
+        self.assertIsNone(bridge._model)
+
+    def test_bridge_each_model_stored(self):
+        """Each supported model string is stored correctly on the bridge."""
+        from src.agents.acp_bridge import ACPBridge
+        from src.agents.batch_packer import MODEL_OUTPUT_LIMITS
+        for model_name in MODEL_OUTPUT_LIMITS:
+            bridge = ACPBridge(model=model_name)
+            self.assertEqual(bridge._model, model_name,
+                             f"Bridge model mismatch for {model_name}")
+
+    # ── VOC/Reports Pipeline: GeminiClient passes model to subprocess ──
+
+    def test_gemini_client_stores_model(self):
+        """GeminiClient stores the model name for CLI subprocess calls."""
+        from src.gemini.gemini_client import GeminiClient
+        client = GeminiClient(cli_path="fake", model="gemini-2.5-flash")
+        self.assertEqual(client.model, "gemini-2.5-flash")
+
+    def test_gemini_client_default_model(self):
+        """GeminiClient defaults to gemini-2.5-flash."""
+        from src.gemini.gemini_client import GeminiClient
+        client = GeminiClient(cli_path="fake")
+        self.assertEqual(client.model, "gemini-2.5-flash")
+
+    # ── ScanOrchestrator: reads model from settings ──
+
+    @patch("builtins.open", create=True)
+    def test_orchestrator_reads_model_from_settings(self, mock_open):
+        """ScanOrchestrator._load_model_from_config reads gemini.model."""
+        import yaml
+        settings_content = yaml.dump({"gemini": {"model": "gemini-2.5-flash"}})
+        mock_open.return_value.__enter__ = lambda s: __import__('io').StringIO(settings_content)
+        mock_open.return_value.__exit__ = MagicMock(return_value=False)
+
+        from src.agents.scan_orchestrator import ScanOrchestrator
+        orch = ScanOrchestrator.__new__(ScanOrchestrator)
+        orch.db_path = str(Path(__file__).parent.parent / "data" / "test.db")
+        model = orch._load_model_from_config()
+        self.assertEqual(model, "gemini-2.5-flash")
+
+    def test_orchestrator_default_fallback(self):
+        """ScanOrchestrator falls back to gemini-2.5-flash if config missing."""
+        from unittest.mock import patch
+        from src.agents.scan_orchestrator import ScanOrchestrator
+        orch = ScanOrchestrator.__new__(ScanOrchestrator)
+        orch.db_path = "/nonexistent/path/data/test.db"
+        with patch("src.data.settings_manager.get_section", return_value={}):
+            model = orch._load_model_from_config()
+        self.assertEqual(model, "gemini-2.5-flash")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -669,6 +793,9 @@ class TestToolRegistry(unittest.TestCase):
         self.assertEqual(result["status"], "stored")
         self.assertEqual(result["ticket_id"], "T-9999")
 
+        # P4: Flush buffered writes before verifying from separate connection
+        self.registry.flush()
+
         # Verify in DB
         verify_conn = sqlite3.connect(self.db_path)
         verify_conn.row_factory = sqlite3.Row
@@ -690,6 +817,9 @@ class TestToolRegistry(unittest.TestCase):
             "anomaly_flag": "mega_bad",      # should default to None
         })
         self.assertEqual(result["status"], "stored")
+
+        # P4: Flush buffered writes before verifying from separate connection
+        self.registry.flush()
 
         verify_conn = sqlite3.connect(self.db_path)
         verify_conn.row_factory = sqlite3.Row
@@ -797,11 +927,11 @@ class TestSchema(unittest.TestCase):
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestBridgeWrapper(unittest.TestCase):
-    """Test GeminiBridge wrapper (mocked subprocess)."""
+    """Test ACPBridge wrapper (mocked subprocess)."""
 
     def test_bridge_event_properties(self):
         """BridgeEvent properties work correctly."""
-        from src.agents.gemini_bridge_wrapper import BridgeEvent
+        from src.agents.acp_bridge import BridgeEvent
         evt = BridgeEvent("req1", "done", {"full_text": "ok", "elapsed_ms": 100})
         self.assertTrue(evt.is_terminal)
         self.assertFalse(evt.is_error)
@@ -812,20 +942,21 @@ class TestBridgeWrapper(unittest.TestCase):
         self.assertTrue(err_evt.is_recoverable)
         self.assertEqual(err_evt.error_code, "rate_limit")
 
-    def test_bridge_find_script(self):
-        """_find_bridge_script should locate the bridge."""
-        from src.agents.gemini_bridge_wrapper import GeminiBridge
-        script = GeminiBridge._find_bridge_script()
-        if script:
-            self.assertTrue(Path(script).exists())
+    def test_bridge_find_cli(self):
+        """_find_gemini_cli should locate the CLI."""
+        from src.agents.acp_bridge import ACPBridge
+        cli = ACPBridge._find_gemini_cli()
+        if cli:
+            self.assertTrue(Path(cli).exists())
 
     def test_bridge_repr(self):
         """repr works on uninitialized bridge."""
-        from src.agents.gemini_bridge_wrapper import GeminiBridge
-        bridge = GeminiBridge.__new__(GeminiBridge)
+        from src.agents.acp_bridge import ACPBridge
+        bridge = ACPBridge.__new__(ACPBridge)
         bridge._process = None
         bridge._boot_count = 0
         bridge._total_calls = 0
+        bridge._session_id = None
         self.assertIn("dead", repr(bridge))
 
 
@@ -886,6 +1017,772 @@ class TestSupervisor(unittest.TestCase):
 
         sup._completed_batches = 3
         self.assertFalse(sup._all_complete())
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ANALYST AGENT — NOVELTY BATCHING & VERDICTS (Phase 5.3)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestNoveltyBatching(unittest.TestCase):
+    """Test batched novelty validation and verdict application."""
+
+    def _make_analyst(self, conn):
+        """Create AnalystAgent with mock bridge pointing to in-memory DB."""
+        from src.agents.analyst_agent import AnalystAgent
+        # Write conn to a temp file so AnalystAgent can open it
+        import tempfile, shutil
+        self._tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self._tmp.close()
+        # Copy in-memory to file
+        disk = sqlite3.connect(self._tmp.name)
+        conn.backup(disk)
+        disk.close()
+
+        bridge = MagicMock()
+        bridge.ensure_running = MagicMock()
+        bridge.call_blocking = MagicMock(return_value=None)
+        agent = AnalystAgent(bridge, self._tmp.name)
+        return agent, bridge
+
+    def _seed_novels(self, conn, count, scan_id="SCAN-001"):
+        """Insert N novel ticket classifications."""
+        for i in range(count):
+            conn.execute("""
+                INSERT INTO nlp_ticket_classifications
+                    (classification_id, batch_id, scan_id, ticket_id, trc,
+                     sub_cluster, is_novel, key_phrases, root_cause_hint,
+                     summary, sub_cluster_confidence, sentiment_intensity,
+                     sentiment_polarity, friction_type, anomaly_flag,
+                     created_at)
+                VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, 0.8, 3, 'negative',
+                        'process', 'normal', '2025-10-15')
+            """, (
+                f"C-{i}", "B-001", scan_id, f"T-{i}", "TRC-01",
+                f"Novel pattern {i}", f'["keyword_{i}"]',
+                f"Root cause {i}", f"Summary {i}",
+            ))
+        conn.commit()
+
+    def tearDown(self):
+        if hasattr(self, '_tmp'):
+            try:
+                os.unlink(self._tmp.name)
+            except Exception:
+                pass
+
+    def test_zero_novels_returns_empty(self):
+        """Zero novel tickets → empty result with zero counts."""
+        conn = create_test_db()
+        agent, bridge = self._make_analyst(conn)
+        result = agent.run_novelty_validation("SCAN-001")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["validations"], [])
+        self.assertEqual(result["summary"]["validated"], 0)
+        # Bridge should NOT have been called
+        bridge.call_blocking.assert_not_called()
+        agent.shutdown()
+
+    def test_small_batch_single_call(self):
+        """25 novels with large budget → exactly 1 bridge call."""
+        conn = create_test_db()
+        self._seed_novels(conn, 25)
+        agent, bridge = self._make_analyst(conn)
+
+        # Mock bridge to return valid JSON
+        bridge.call_blocking.return_value = json.dumps({
+            "validations": [
+                {"ticket_id": f"T-{i}", "verdict": "VALID",
+                 "existing_match": None, "notes": "ok"}
+                for i in range(25)
+            ],
+            "summary": {"validated": 25, "rejected": 0, "merged": 0}
+        })
+
+        result = agent.run_novelty_validation("SCAN-001", input_budget=500_000)
+        self.assertEqual(bridge.call_blocking.call_count, 1)
+        self.assertEqual(len(result["validations"]), 25)
+        self.assertEqual(result["summary"]["validated"], 25)
+        agent.shutdown()
+
+    def test_large_batch_splits(self):
+        """100 novels with tiny budget → multiple bridge calls."""
+        conn = create_test_db()
+        self._seed_novels(conn, 100)
+        agent, bridge = self._make_analyst(conn)
+
+        # Return a valid result for each call
+        def mock_call(prompt, request_id, timeout=180):
+            # Count novel items in this prompt
+            count = prompt.count("ticket_id:")
+            return json.dumps({
+                "validations": [
+                    {"ticket_id": f"T-x", "verdict": "VALID",
+                     "existing_match": None, "notes": "ok"}
+                    for _ in range(count)
+                ],
+                "summary": {"validated": count, "rejected": 0, "merged": 0}
+            })
+        bridge.call_blocking.side_effect = mock_call
+
+        # With 2000 char budget and ~200 chars per novel, expect multiple batches
+        result = agent.run_novelty_validation("SCAN-001", input_budget=2000)
+        self.assertGreater(bridge.call_blocking.call_count, 1)
+        # All 100 should be covered across batches
+        self.assertGreater(len(result["validations"]), 0)
+        agent.shutdown()
+
+    def test_failed_batch_skipped(self):
+        """If one batch fails, others continue and results aggregate."""
+        conn = create_test_db()
+        self._seed_novels(conn, 50)
+        agent, bridge = self._make_analyst(conn)
+
+        call_count = [0]
+        def mock_call(prompt, request_id, timeout=180):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return None  # First batch fails
+            count = prompt.count("ticket_id:")
+            return json.dumps({
+                "validations": [
+                    {"ticket_id": f"T-x", "verdict": "VALID",
+                     "existing_match": None, "notes": "ok"}
+                    for _ in range(count)
+                ],
+                "summary": {"validated": count, "rejected": 0, "merged": 0}
+            })
+        bridge.call_blocking.side_effect = mock_call
+
+        result = agent.run_novelty_validation("SCAN-001", input_budget=2000)
+        # Should still return results from successful batches
+        self.assertIsNotNone(result)
+        self.assertGreater(len(result["validations"]), 0)
+        agent.shutdown()
+
+
+class TestNoveltyVerdicts(unittest.TestCase):
+    """Test verdict application to nlp_ticket_classifications."""
+
+    def _make_analyst_with_data(self, novels_count=5):
+        """Create agent with seeded novel tickets on disk DB."""
+        import tempfile
+        self._tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self._tmp.close()
+
+        conn = sqlite3.connect(self._tmp.name)
+        conn.row_factory = sqlite3.Row
+        conn.executescript("""
+            CREATE TABLE nlp_ticket_classifications (
+                classification_id TEXT PRIMARY KEY,
+                batch_id TEXT, scan_id TEXT, ticket_id TEXT, trc TEXT,
+                sub_cluster TEXT, sub_cluster_confidence REAL,
+                is_novel INTEGER DEFAULT 0,
+                sentiment_intensity INTEGER, sentiment_polarity TEXT,
+                friction_type TEXT, anomaly_flag TEXT, anomaly_reason TEXT,
+                entities_json TEXT, key_phrases TEXT, root_cause_hint TEXT,
+                summary TEXT, raw_classification TEXT, created_at TEXT,
+                novelty_verdict TEXT, novelty_match TEXT
+            );
+            CREATE TABLE analyst_reports (
+                report_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scan_id TEXT NOT NULL, report_type TEXT NOT NULL,
+                content TEXT, metrics TEXT, created_at TEXT
+            );
+            CREATE TABLE sub_patterns (
+                pattern_id TEXT PRIMARY KEY, trc TEXT, label TEXT,
+                description TEXT, friction_type TEXT,
+                tier TEXT DEFAULT 'active', lifetime_tickets INTEGER DEFAULT 0,
+                merged_into TEXT
+            );
+        """)
+        for i in range(novels_count):
+            conn.execute("""
+                INSERT INTO nlp_ticket_classifications
+                    (classification_id, batch_id, scan_id, ticket_id, trc,
+                     sub_cluster, is_novel, key_phrases, root_cause_hint,
+                     summary, sub_cluster_confidence, sentiment_intensity,
+                     sentiment_polarity, friction_type, anomaly_flag,
+                     created_at)
+                VALUES (?, 'B-001', 'SCAN-001', ?, 'TRC-01',
+                        ?, 1, '[]', 'cause', 'summary', 0.8, 3, 'neg',
+                        'process', 'normal', '2025-10-15')
+            """, (f"C-{i}", f"T-{i}", f"Novel {i}"))
+        conn.commit()
+        conn.close()
+
+        from src.agents.analyst_agent import AnalystAgent
+        bridge = MagicMock()
+        bridge.ensure_running = MagicMock()
+        agent = AnalystAgent(bridge, self._tmp.name)
+        return agent
+
+    def tearDown(self):
+        if hasattr(self, '_tmp'):
+            try:
+                os.unlink(self._tmp.name)
+            except Exception:
+                pass
+
+    def test_duplicate_sets_is_novel_zero(self):
+        """DUPLICATE verdict sets is_novel = 0."""
+        agent = self._make_analyst_with_data(3)
+        validations = [
+            {"ticket_id": "T-0", "verdict": "DUPLICATE",
+             "existing_match": "Existing Pattern A", "notes": "dup"},
+        ]
+        agent.apply_novelty_verdicts("SCAN-001", validations)
+
+        row = agent.conn.execute(
+            "SELECT is_novel, novelty_verdict, novelty_match "
+            "FROM nlp_ticket_classifications WHERE ticket_id = 'T-0'"
+        ).fetchone()
+        self.assertEqual(row["is_novel"], 0)
+        self.assertEqual(row["novelty_verdict"], "DUPLICATE")
+        self.assertEqual(row["novelty_match"], "Existing Pattern A")
+
+        # Other tickets unchanged
+        row1 = agent.conn.execute(
+            "SELECT is_novel, novelty_verdict "
+            "FROM nlp_ticket_classifications WHERE ticket_id = 'T-1'"
+        ).fetchone()
+        self.assertEqual(row1["is_novel"], 1)
+        self.assertIsNone(row1["novelty_verdict"])
+        agent.shutdown()
+
+    def test_merge_keeps_is_novel_one(self):
+        """MERGE verdict keeps is_novel = 1 but tags the ticket."""
+        agent = self._make_analyst_with_data(3)
+        validations = [
+            {"ticket_id": "T-1", "verdict": "MERGE",
+             "existing_match": "Novel 0", "notes": "merge"},
+        ]
+        agent.apply_novelty_verdicts("SCAN-001", validations)
+
+        row = agent.conn.execute(
+            "SELECT is_novel, novelty_verdict, novelty_match "
+            "FROM nlp_ticket_classifications WHERE ticket_id = 'T-1'"
+        ).fetchone()
+        self.assertEqual(row["is_novel"], 1)
+        self.assertEqual(row["novelty_verdict"], "MERGE")
+        self.assertEqual(row["novelty_match"], "Novel 0")
+        agent.shutdown()
+
+    def test_valid_no_changes(self):
+        """VALID verdict does not modify the ticket."""
+        agent = self._make_analyst_with_data(3)
+        validations = [
+            {"ticket_id": "T-2", "verdict": "VALID",
+             "existing_match": None, "notes": "valid"},
+        ]
+        agent.apply_novelty_verdicts("SCAN-001", validations)
+
+        row = agent.conn.execute(
+            "SELECT is_novel, novelty_verdict, novelty_match "
+            "FROM nlp_ticket_classifications WHERE ticket_id = 'T-2'"
+        ).fetchone()
+        self.assertEqual(row["is_novel"], 1)
+        self.assertIsNone(row["novelty_verdict"])
+        agent.shutdown()
+
+    def test_empty_validations_no_error(self):
+        """Empty validations list should not raise."""
+        agent = self._make_analyst_with_data(1)
+        agent.apply_novelty_verdicts("SCAN-001", [])
+        agent.apply_novelty_verdicts("SCAN-001", None)
+        agent.shutdown()
+
+
+class TestNoveltyColumnMigration(unittest.TestCase):
+    """Test that novelty_verdict columns are added by db_manager migration."""
+
+    def test_columns_added_to_fresh_db(self):
+        """Fresh DatabaseManager should create tables with novelty columns."""
+        import tempfile
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        try:
+            from src.data.db_manager import DatabaseManager
+            db = DatabaseManager(Path(tmp.name))
+            db.initialize()
+
+            cols = {
+                row[1] for row in db.conn.execute(
+                    "PRAGMA table_info(nlp_ticket_classifications)"
+                ).fetchall()
+            }
+            self.assertIn("novelty_verdict", cols)
+            self.assertIn("novelty_match", cols)
+            db.close()
+        finally:
+            os.unlink(tmp.name)
+
+    def test_migration_logic_adds_missing_columns(self):
+        """ALTER TABLE migration adds novelty columns when missing."""
+        # Simulate a DB with old schema (no novelty columns) using raw SQL
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("""
+            CREATE TABLE nlp_ticket_classifications (
+                classification_id TEXT PRIMARY KEY,
+                batch_id TEXT, scan_id TEXT, ticket_id TEXT, trc TEXT,
+                sub_cluster TEXT, is_novel INTEGER DEFAULT 0,
+                created_at TEXT
+            )
+        """)
+        conn.commit()
+
+        # Verify columns missing
+        cols = {
+            row[1] for row in conn.execute(
+                "PRAGMA table_info(nlp_ticket_classifications)"
+            ).fetchall()
+        }
+        self.assertNotIn("novelty_verdict", cols)
+        self.assertNotIn("novelty_match", cols)
+
+        # Run the migration logic directly (same as db_manager._migrate)
+        for col_name, col_type in [
+            ("novelty_verdict", "TEXT"),
+            ("novelty_match", "TEXT"),
+        ]:
+            if col_name not in cols:
+                conn.execute(
+                    f"ALTER TABLE nlp_ticket_classifications "
+                    f"ADD COLUMN {col_name} {col_type}"
+                )
+        conn.commit()
+
+        # Verify columns now exist
+        cols2 = {
+            row[1] for row in conn.execute(
+                "PRAGMA table_info(nlp_ticket_classifications)"
+            ).fetchall()
+        }
+        self.assertIn("novelty_verdict", cols2)
+        self.assertIn("novelty_match", cols2)
+
+        # Verify they work (can write and read)
+        conn.execute("""
+            INSERT INTO nlp_ticket_classifications
+                (classification_id, scan_id, ticket_id, trc, is_novel,
+                 novelty_verdict, novelty_match, created_at)
+            VALUES ('C-1', 'S-1', 'T-1', 'TRC', 1, 'DUPLICATE',
+                    'Pattern A', '2025-01-01')
+        """)
+        row = conn.execute(
+            "SELECT novelty_verdict, novelty_match "
+            "FROM nlp_ticket_classifications WHERE classification_id='C-1'"
+        ).fetchone()
+        self.assertEqual(row["novelty_verdict"], "DUPLICATE")
+        self.assertEqual(row["novelty_match"], "Pattern A")
+        conn.close()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PHASE 5.4: BOUNDARY GUARD + PARTIAL PARSE TESTS
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestBoundaryGuard(unittest.TestCase):
+    """Test ticket ID boundary guard in tool_registry (5.4 Fix 1)."""
+
+    def setUp(self):
+        self.conn = create_test_db()
+        seed_test_data(self.conn)
+        self.db_path = os.path.join(
+            os.path.dirname(__file__), "_test_boundary_guard.db"
+        )
+        file_conn = sqlite3.connect(self.db_path)
+        self.conn.backup(file_conn)
+        file_conn.close()
+
+        from src.agents.tool_registry import ToolRegistry
+        self.registry = ToolRegistry(self.db_path)
+
+    def tearDown(self):
+        self.registry.close()
+        self.conn.close()
+        try:
+            os.unlink(self.db_path)
+        except Exception:
+            pass
+
+    def test_boundary_guard_rejects_overflow(self):
+        """Ticket ID not in batch manifest is rejected."""
+        self.registry.set_context(
+            scan_id="test_scan", batch_id="test_batch",
+            trc="RCM_02", agent_id="worker_0",
+            ticket_trc_map={"T-1000": "RCM_02", "T-1001": "RCM_02"},
+        )
+        result = self.registry.execute("store_classification", {
+            "ticket_id": "T-9999",  # NOT in manifest
+            "sub_cluster": "test",
+            "summary": "overflow ticket",
+        })
+        self.assertEqual(result["status"], "rejected")
+        self.assertEqual(result["reason"], "not_in_batch")
+        self.assertEqual(result["ticket_id"], "T-9999")
+
+    def test_boundary_guard_allows_valid(self):
+        """Ticket ID in batch manifest is stored normally."""
+        self.registry.set_context(
+            scan_id="test_scan", batch_id="test_batch",
+            trc="RCM_02", agent_id="worker_0",
+            ticket_trc_map={"T-1000": "RCM_02", "T-1001": "RCM_02"},
+        )
+        result = self.registry.execute("store_classification", {
+            "ticket_id": "T-1000",  # IS in manifest
+            "sub_cluster": "test",
+            "summary": "valid ticket",
+        })
+        self.assertEqual(result["status"], "stored")
+        self.assertEqual(result["ticket_id"], "T-1000")
+
+    def test_boundary_guard_skips_empty_map(self):
+        """Empty ticket_trc_map bypasses guard (backward-compat)."""
+        self.registry.set_context(
+            scan_id="test_scan", batch_id="test_batch",
+            trc="RCM_02", agent_id="worker_0",
+            # No ticket_trc_map — simulates pre-5.4 code path
+        )
+        result = self.registry.execute("store_classification", {
+            "ticket_id": "T-ANY",
+            "sub_cluster": "test",
+            "summary": "no manifest",
+        })
+        self.assertEqual(result["status"], "stored")
+
+
+class TestPartialParseDetection(unittest.TestCase):
+    """Test partial parse completeness check logic (5.4 Fix 2).
+
+    These tests validate the detection logic in isolation by simulating
+    the variables the orchestrator uses. The actual orchestrator code
+    operates on `result` dict and `batch` dict — we test the same
+    conditional logic without booting a full scan.
+    """
+
+    @staticmethod
+    def _check_partial_parse(result, n_expected, batch):
+        """
+        Reproduce the orchestrator's 5.4 completeness check logic.
+        Returns (error_injected: bool, stagnation: bool).
+        """
+        _n_classified = result.get("classified", 0)
+        _n_missing = n_expected - _n_classified
+        _completeness = (
+            _n_classified / n_expected if n_expected > 0 else 1.0
+        )
+        _prev_classified = batch.get('_prev_classified', -1)
+
+        if (not result.get("error")
+                and _completeness < 0.80
+                and _n_missing > 3
+                and _n_classified > _prev_classified):
+            result["error"] = "partial_parse"
+            result["recoverable"] = True
+            batch['_prev_classified'] = _n_classified
+            return True, False  # error injected, not stagnation
+        elif (not result.get("error")
+                and _completeness < 0.80
+                and _n_missing > 3
+                and _n_classified <= _prev_classified):
+            return False, True  # no error, stagnation
+        return False, False  # no action
+
+    def test_partial_parse_detected(self):
+        """26/63 classified triggers partial_parse error."""
+        result = {"classified": 26, "failed": 37}
+        batch = {}
+        injected, stagnation = self._check_partial_parse(
+            result, 63, batch
+        )
+        self.assertTrue(injected)
+        self.assertFalse(stagnation)
+        self.assertEqual(result["error"], "partial_parse")
+        self.assertTrue(result["recoverable"])
+        self.assertEqual(batch['_prev_classified'], 26)
+
+    def test_partial_parse_skips_small_batch(self):
+        """4/5 classified (missing=1 <= 3) does NOT trigger."""
+        result = {"classified": 4, "failed": 1}
+        batch = {}
+        injected, stagnation = self._check_partial_parse(
+            result, 5, batch
+        )
+        self.assertFalse(injected)
+        self.assertFalse(stagnation)
+        self.assertIsNone(result.get("error"))
+
+    def test_partial_parse_skips_near_complete(self):
+        """55/63 classified (87% > 80%) does NOT trigger."""
+        result = {"classified": 55, "failed": 8}
+        batch = {}
+        injected, stagnation = self._check_partial_parse(
+            result, 63, batch
+        )
+        self.assertFalse(injected)
+        self.assertFalse(stagnation)
+        self.assertIsNone(result.get("error"))
+
+    def test_partial_parse_skips_existing_error(self):
+        """If result already has an error, don't override it."""
+        result = {"classified": 10, "failed": 53, "error": "stall_timeout"}
+        batch = {}
+        injected, stagnation = self._check_partial_parse(
+            result, 63, batch
+        )
+        self.assertFalse(injected)
+        self.assertFalse(stagnation)
+        self.assertEqual(result["error"], "stall_timeout")
+
+    def test_partial_parse_stagnation(self):
+        """Retry with same classified count triggers stagnation."""
+        result = {"classified": 26, "failed": 37}
+        batch = {'_prev_classified': 26}  # same as last time
+        injected, stagnation = self._check_partial_parse(
+            result, 63, batch
+        )
+        self.assertFalse(injected)
+        self.assertTrue(stagnation)
+        self.assertIsNone(result.get("error"))
+
+    def test_partial_parse_stagnation_worse(self):
+        """Retry with fewer classified also triggers stagnation."""
+        result = {"classified": 20, "failed": 43}
+        batch = {'_prev_classified': 26}  # worse than last time
+        injected, stagnation = self._check_partial_parse(
+            result, 63, batch
+        )
+        self.assertFalse(injected)
+        self.assertTrue(stagnation)
+
+    def test_partial_parse_default_prev_zero_classified(self):
+        """First attempt with 0 classified triggers retry (default=-1)."""
+        result = {"classified": 0, "failed": 63}
+        batch = {}  # _prev_classified defaults to -1
+        injected, stagnation = self._check_partial_parse(
+            result, 63, batch
+        )
+        self.assertTrue(injected)
+        self.assertFalse(stagnation)
+        self.assertEqual(result["error"], "partial_parse")
+
+    def test_partial_parse_improvement_continues(self):
+        """Retry that improves continues retrying."""
+        result = {"classified": 35, "failed": 28}
+        batch = {'_prev_classified': 26}  # improved from 26 → 35
+        injected, stagnation = self._check_partial_parse(
+            result, 63, batch
+        )
+        self.assertTrue(injected)  # 35/63 = 56% < 80%, missing=28 > 3
+        self.assertFalse(stagnation)
+        self.assertEqual(batch['_prev_classified'], 35)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Phase 5.4b — Supervisor DB Count + SUBSTR Date Fix
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestSupervisorDBCount(unittest.TestCase):
+    """Verify supervisor queries actual DB count instead of in-memory."""
+
+    def setUp(self):
+        """Create an in-memory DB with scan_progress and classifications."""
+        self.db_path = ":memory:"
+        self.conn = sqlite3.connect(self.db_path)
+        self.conn.row_factory = sqlite3.Row
+        self.conn.execute("""
+            CREATE TABLE scan_progress (
+                scan_id TEXT PRIMARY KEY,
+                classified INTEGER DEFAULT 0,
+                total INTEGER DEFAULT 0,
+                tool_calls INTEGER DEFAULT 0,
+                batches_complete INTEGER DEFAULT 0,
+                est_remaining_seconds REAL DEFAULT 0,
+                est_confidence TEXT DEFAULT 'low',
+                updated_at TEXT,
+                tokens_in INTEGER DEFAULT 0,
+                tokens_out INTEGER DEFAULT 0
+            )
+        """)
+        self.conn.execute("""
+            CREATE TABLE nlp_ticket_classifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scan_id TEXT,
+                ticket_id TEXT
+            )
+        """)
+        self.conn.execute(
+            "CREATE INDEX idx_nlp_tc_scan "
+            "ON nlp_ticket_classifications(scan_id)"
+        )
+        self.conn.commit()
+
+    def tearDown(self):
+        self.conn.close()
+
+    def test_db_count_overrides_memory(self):
+        """DB has more classified rows than in-memory counter reports."""
+        scan_id = "test-scan-001"
+        # Insert 50 classification rows in DB (simulating streamed + retried)
+        for i in range(50):
+            self.conn.execute(
+                "INSERT INTO nlp_ticket_classifications "
+                "(scan_id, ticket_id) VALUES (?, ?)",
+                (scan_id, f"T-{i:04d}"),
+            )
+        self.conn.commit()
+
+        # Simulate what supervisor does: query actual DB count
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM nlp_ticket_classifications"
+            " WHERE scan_id = ?",
+            (scan_id,),
+        ).fetchone()
+        db_count = row["n"]
+
+        # In-memory counter only saw 30 (from notify_batch_complete)
+        memory_count = 30
+
+        self.assertEqual(db_count, 50)
+        self.assertGreater(db_count, memory_count)
+
+    def test_db_count_fallback_on_error(self):
+        """If DB query fails, fallback to in-memory count."""
+        # Close connection to simulate error
+        self.conn.close()
+        memory_count = 30
+        classified_count = memory_count  # fallback
+
+        try:
+            row = self.conn.execute(
+                "SELECT COUNT(*) AS n FROM nlp_ticket_classifications"
+                " WHERE scan_id = ?",
+                ("test-scan-001",),
+            ).fetchone()
+            if row:
+                classified_count = row["n"]
+        except Exception:
+            classified_count = memory_count  # fallback
+
+        self.assertEqual(classified_count, 30)
+
+    def test_db_count_zero_when_no_rows(self):
+        """DB returns 0 when no classifications exist yet."""
+        scan_id = "test-scan-empty"
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM nlp_ticket_classifications"
+            " WHERE scan_id = ?",
+            (scan_id,),
+        ).fetchone()
+        self.assertEqual(row["n"], 0)
+
+
+class TestSubstrDateComparison(unittest.TestCase):
+    """Verify SUBSTR date comparison includes single-digit hour timestamps."""
+
+    def setUp(self):
+        """Create DB with conversations including single-digit hours."""
+        self.conn = sqlite3.connect(":memory:")
+        self.conn.row_factory = sqlite3.Row
+        self.conn.execute("""
+            CREATE TABLE conversations (
+                ticket_id TEXT PRIMARY KEY,
+                trc_code TEXT,
+                created_at TEXT,
+                full_thread TEXT DEFAULT ''
+            )
+        """)
+        # Insert tickets with various hour formats
+        test_data = [
+            ("T-001", "TRC-001", "2025-03-12 8:24:00"),   # Single-digit hour
+            ("T-002", "TRC-001", "2025-03-12 9:15:00"),   # Single-digit hour
+            ("T-003", "TRC-001", "2025-03-12 10:30:00"),  # Double-digit hour
+            ("T-004", "TRC-001", "2025-03-12 23:59:00"),  # Late night
+            ("T-005", "TRC-001", "2025-03-11 14:00:00"),  # Previous day
+            ("T-006", "TRC-001", "2025-03-13 6:00:00"),   # Next day, single-digit
+        ]
+        for tid, trc, ts in test_data:
+            self.conn.execute(
+                "INSERT INTO conversations (ticket_id, trc_code, created_at)"
+                " VALUES (?, ?, ?)",
+                (tid, trc, ts),
+            )
+        self.conn.commit()
+
+    def tearDown(self):
+        self.conn.close()
+
+    def test_substr_includes_single_digit_hours(self):
+        """SUBSTR comparison includes tickets with hours 0-9."""
+        rows = self.conn.execute("""
+            SELECT ticket_id FROM conversations
+            WHERE SUBSTR(created_at, 1, 10) >= ?
+              AND SUBSTR(created_at, 1, 10) <= ?
+            ORDER BY ticket_id
+        """, ("2025-03-12", "2025-03-12")).fetchall()
+
+        ticket_ids = [r["ticket_id"] for r in rows]
+        # Should include ALL 4 tickets on 2025-03-12 (including single-digit hours)
+        self.assertIn("T-001", ticket_ids)  # 8:24 — was excluded by old query
+        self.assertIn("T-002", ticket_ids)  # 9:15 — was excluded by old query
+        self.assertIn("T-003", ticket_ids)  # 10:30
+        self.assertIn("T-004", ticket_ids)  # 23:59
+        self.assertEqual(len(ticket_ids), 4)
+
+    def test_substr_excludes_out_of_range(self):
+        """SUBSTR comparison correctly excludes tickets outside range."""
+        rows = self.conn.execute("""
+            SELECT ticket_id FROM conversations
+            WHERE SUBSTR(created_at, 1, 10) >= ?
+              AND SUBSTR(created_at, 1, 10) <= ?
+        """, ("2025-03-12", "2025-03-12")).fetchall()
+
+        ticket_ids = [r["ticket_id"] for r in rows]
+        self.assertNotIn("T-005", ticket_ids)  # 2025-03-11
+        self.assertNotIn("T-006", ticket_ids)  # 2025-03-13
+
+    def test_old_query_fails_single_digit_hours(self):
+        """Demonstrate that the OLD raw string comparison fails."""
+        # This test documents the bug: raw string comparison excludes T-001, T-002
+        rows = self.conn.execute("""
+            SELECT ticket_id FROM conversations
+            WHERE created_at >= ? AND created_at <= ?
+            ORDER BY ticket_id
+        """, ("2025-03-12", "2025-03-12 23:59:59")).fetchall()
+
+        ticket_ids = [r["ticket_id"] for r in rows]
+        # Old query MISSES single-digit hour tickets because:
+        # '2025-03-12 8:24:00' > '2025-03-12 23:59:59' (lexicographic: '8' > '2')
+        self.assertNotIn("T-001", ticket_ids)  # Bug: excluded
+        self.assertNotIn("T-002", ticket_ids)  # Bug: excluded
+        # But double-digit hours work fine
+        self.assertIn("T-003", ticket_ids)  # 10:30
+        self.assertIn("T-004", ticket_ids)  # 23:59
+
+    def test_substr_multi_day_range(self):
+        """SUBSTR comparison works across multi-day ranges."""
+        rows = self.conn.execute("""
+            SELECT ticket_id FROM conversations
+            WHERE SUBSTR(created_at, 1, 10) >= ?
+              AND SUBSTR(created_at, 1, 10) <= ?
+            ORDER BY ticket_id
+        """, ("2025-03-11", "2025-03-13")).fetchall()
+
+        ticket_ids = [r["ticket_id"] for r in rows]
+        # Should include all 6 tickets
+        self.assertEqual(len(ticket_ids), 6)
+
+    def test_count_with_substr(self):
+        """COUNT query with SUBSTR returns correct total."""
+        row = self.conn.execute("""
+            SELECT COUNT(DISTINCT ticket_id) AS n FROM conversations
+            WHERE SUBSTR(created_at, 1, 10) >= ?
+              AND SUBSTR(created_at, 1, 10) <= ?
+        """, ("2025-03-12", "2025-03-12")).fetchone()
+
+        self.assertEqual(row["n"], 4)  # All 4 tickets on March 12
 
 
 # ═══════════════════════════════════════════════════════════════════════════

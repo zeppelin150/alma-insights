@@ -10,6 +10,8 @@ High PMI → words strongly associate (e.g., "prior authorization")
 Low PMI  → words just happen to be near each other (e.g., "the claim")
 """
 
+from __future__ import annotations
+
 import re
 import math
 from collections import Counter
@@ -53,11 +55,11 @@ def _tokenize_for_discovery(text):
 
 
 def discover_compounds(
-    conversations,
-    existing_compounds=None,
-    min_cooccurrence=5,
-    min_pmi=3.0,
-):
+    conversations: list[dict],
+    existing_compounds: set[str] | None = None,
+    min_cooccurrence: int = 5,
+    min_pmi: float = 3.0,
+) -> list[dict]:
     """
     Discover statistically significant multi-word phrases from conversation text.
 
@@ -169,7 +171,7 @@ def discover_compounds(
     return candidates[:50]
 
 
-def persist_discoveries(db, candidates):
+def persist_discoveries(db: object, candidates: list[dict]) -> None:
     """
     Save discovered compounds to the database.
     New candidates get status='candidate'. Existing ones get frequency/last_seen updated.
@@ -180,7 +182,7 @@ def persist_discoveries(db, candidates):
         )
 
 
-def get_active_compounds(db):
+def get_active_compounds(db: object) -> dict[str, str]:
     """
     Return merged dict of hardcoded COMPOUND_TERMS + user-approved discovered compounds.
 

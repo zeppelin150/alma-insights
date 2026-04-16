@@ -8,9 +8,11 @@ import webbrowser
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QFrame, QScrollArea, QSizePolicy, QMessageBox,
-    QComboBox, QFileDialog, QTextEdit, QTabWidget,
+    QComboBox, QFileDialog, QTextEdit, QTabWidget, QProgressBar,
 )
 from PySide6.QtCore import Qt, Signal, QThread
+from src.data.settings_manager import load_settings, save_settings, get_section, set_section
+from src.data.connection_factory import get_connection
 from src.ui.theme import *
 
 # Maps page → { human title: yaml_key } for behavior toggles
@@ -91,7 +93,7 @@ class DatasetRow(QFrame):
         super().__init__(parent)
         self.setStyleSheet(f"""
             QFrame {{
-                background: {ALMA_BG_ELEVATED}; border: 1px solid rgba(214, 210, 202, 0.45);
+                background: {ALMA_BG_ELEVATED}; border: none;
                 border-radius: 10px; padding: 4px;
             }}
         """)
@@ -137,6 +139,26 @@ class DatasetRow(QFrame):
 # ═══════════════════════════════════════════
 #  GEMINI SETUP WORKER
 # ═══════════════════════════════════════════
+
+class EmbeddingRebuildWorker(QThread):
+    """Background worker for rebuilding the semantic search index."""
+    finished = Signal(int)   # count of embeddings written
+    error    = Signal(str)   # human-readable error
+
+    def __init__(self, db_path: str):
+        super().__init__()
+        self.db_path = db_path
+
+    def run(self):
+        try:
+            from src.data.embedding.builder import build_embeddings
+            conn = get_connection(self.db_path)
+            count = build_embeddings(conn, force=True)
+            conn.close()
+            self.finished.emit(count)
+        except Exception as e:
+            self.error.emit(str(e))
+
 
 class GeminiSetupWorker(QThread):
     """Background worker for Gemini CLI detection, installation, and auth verification."""
@@ -232,94 +254,657 @@ class SettingsPage(QWidget):
         self._load_persisted_settings()
         self._loading = False
 
-    def _build_ui(self):
-        # Outer scroll area
+    def _make_tab_scroll(self):
+        """Create a scroll area + inner widget + layout for a settings tab.
+        Returns (scroll_area, inner_layout)."""
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
-
         inner = QWidget()
-        self.layout_inner = QVBoxLayout(inner)
-        self.layout_inner.setContentsMargins(28, 24, 28, 40)
-        self.layout_inner.setSpacing(0)
+        layout = QVBoxLayout(inner)
+        layout.setContentsMargins(28, 24, 28, 40)
+        layout.setSpacing(0)
+        scroll.setWidget(inner)
+        return scroll, layout
 
-        # Page header
-        header = QLabel("Settings")
-        header.setObjectName("PageHeader")
-        self.layout_inner.addWidget(header)
+    def _build_ui(self):
+        # ── QTabWidget ──
+        self._tab_widget = QTabWidget()
+        self._tab_widget.setObjectName("SettingsTab")
+        self._tab_widget.setDocumentMode(True)
 
-        sub = QLabel("Configure data sources, API connections, and display preferences")
-        sub.setObjectName("PageSubheader")
-        self.layout_inner.addWidget(sub)
-        self.layout_inner.addSpacing(28)
+        # Page header (shared reference for backward compat)
+        # Each tab is self-contained; no shared header needed.
 
         # ════════════════════════════════════
-        #  SECTION 1: Test Data
+        #  TAB 1: AI Provider
         # ════════════════════════════════════
-        self.layout_inner.addWidget(self._section_label("DEVELOPMENT"))
-        self.layout_inner.addSpacing(8)
+        ai_scroll, ai_layout = self._make_tab_scroll()
 
-        test_card = self._card()
-        test_layout = QVBoxLayout(test_card)
-        test_layout.setContentsMargins(20, 18, 20, 18)
-        test_layout.setSpacing(10)
+        # State machine vars — set before _build_gemini_section()
+        self._gemini_state = "NOT_CONFIGURED"
+        self._gemini_cli_path = ""
+        self._gemini_setup_worker = None
+        self._gemini_api_key_mode = False
 
-        # Toggle row
-        test_row = QHBoxLayout()
-        test_lbl_col = QVBoxLayout()
-        test_lbl_col.setSpacing(2)
-        test_title = QLabel("Use Test / Demo Data")
-        test_title.setStyleSheet(f"font-size: 14px; font-weight: 600; color: {ALMA_TEXT_DARK};")
-        test_desc = QLabel(
-            "When ON, the app loads synthetic demo conversations for testing. "
-            "Turn OFF for live data mode."
+        # Claude danger-zone state
+        self._claude_pending = False
+        self._claude_checks = {"baa": False, "hipaa": False, "legal": False}
+
+        self.layout_inner = ai_layout
+        self._build_ai_provider_tab(ai_layout)
+        self._tab_widget.addTab(ai_scroll, "AI Provider")
+
+        # ════════════════════════════════════
+        #  TAB 2: Integrations
+        # ════════════════════════════════════
+        int_scroll, int_layout = self._make_tab_scroll()
+        self.layout_inner = int_layout
+        self._build_integrations_tab(int_layout)
+        self._tab_widget.addTab(int_scroll, "Integrations")
+
+        # ════════════════════════════════════
+        #  TAB 3: Updates
+        # ════════════════════════════════════
+        updates_scroll, updates_layout = self._make_tab_scroll()
+        self._build_updates_tab(updates_layout)
+        self._tab_widget.addTab(updates_scroll, "Updates")
+
+        # ════════════════════════════════════
+        #  TAB 4: Display
+        # ════════════════════════════════════
+        display_scroll, display_layout = self._make_tab_scroll()
+        self.layout_inner = display_layout
+        self._build_display_tab(display_layout)
+        self._tab_widget.addTab(display_scroll, "Display")
+
+        # ════════════════════════════════════
+        #  TAB 5: Scanning Costs
+        # ════════════════════════════════════
+        self._cost_placeholder = QLabel("Scanning Costs will appear after data loads.")
+        self._cost_placeholder.setAlignment(Qt.AlignCenter)
+        self._cost_placeholder.setStyleSheet(
+            f"font-size: 13px; color: {ALMA_TEXT_LIGHT}; padding: 40px;"
         )
-        test_desc.setStyleSheet(f"font-size: 12px; color: {ALMA_TEXT_LIGHT};")
-        test_desc.setWordWrap(True)
-        test_lbl_col.addWidget(test_title)
-        test_lbl_col.addWidget(test_desc)
-        test_row.addLayout(test_lbl_col, 1)
+        self._tab_widget.addTab(self._cost_placeholder, "Scanning Costs")
 
-        self.test_data_toggle = ToggleSwitch(checked=True)
-        test_row.addWidget(self.test_data_toggle)
-        test_layout.addLayout(test_row)
+        # Outer layout
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self._tab_widget)
 
-        # Debug canary toggle
-        debug_row = QHBoxLayout()
-        debug_lbl_col = QVBoxLayout()
-        debug_lbl_col.setSpacing(2)
-        debug_title = QLabel("Debug / Canary Mode")
-        debug_title.setStyleSheet(f"font-size: 14px; font-weight: 600; color: {ALMA_TEXT_DARK};")
-        debug_desc = QLabel(
-            "When ON, Pull Data shows a diagnostic popup before each action "
-            "with combo state, PAT status, and test-mode flag. Useful for troubleshooting."
+    # ═══════════════════════════════════════════
+    #  TAB 1: AI PROVIDER
+    # ═══════════════════════════════════════════
+
+    def _build_ai_provider_tab(self, lay):
+        """Build the AI Provider tab: active model, Gemini config, Claude config."""
+        # ── Active Model selector ──
+        lay.addWidget(self._section_label("ACTIVE MODEL"))
+        lay.addSpacing(8)
+
+        model_card = self._card()
+        model_card_layout = QVBoxLayout(model_card)
+        model_card_layout.setContentsMargins(20, 18, 20, 18)
+        model_card_layout.setSpacing(10)
+
+        model_desc = QLabel(
+            "Select the LLM model used for AI Reports, NLP scans, and hypothesis testing."
         )
-        debug_desc.setStyleSheet(f"font-size: 12px; color: {ALMA_TEXT_LIGHT};")
-        debug_desc.setWordWrap(True)
-        debug_lbl_col.addWidget(debug_title)
-        debug_lbl_col.addWidget(debug_desc)
-        debug_row.addLayout(debug_lbl_col, 1)
+        model_desc.setStyleSheet(f"font-size: 12px; color: {ALMA_TEXT_LIGHT};")
+        model_desc.setWordWrap(True)
+        model_card_layout.addWidget(model_desc)
 
-        self.debug_toggle = ToggleSwitch(checked=False)
-        debug_row.addWidget(self.debug_toggle)
-        test_layout.addLayout(debug_row)
+        model_row = QHBoxLayout()
+        model_lbl = QLabel("Model")
+        model_lbl.setStyleSheet(f"font-size: 12px; font-weight: 600; color: {ALMA_TEXT_MID};")
+        model_row.addWidget(model_lbl)
 
-        self.layout_inner.addWidget(test_card)
-        self.layout_inner.addSpacing(24)
+        self._active_model_combo = QComboBox()
+        self._active_model_combo.setStyleSheet(f"""
+            QComboBox {{
+                color: {ALMA_TEXT_DARK}; background: {ALMA_WHITE};
+                border: 1px solid {ALMA_BORDER}; border-radius: 8px;
+                padding: 8px 12px; font-size: 13px; min-width: 220px;
+            }}
+        """)
+        model_row.addWidget(self._active_model_combo, 1)
+        model_card_layout.addLayout(model_row)
 
-        # ════════════════════════════════════
-        #  SECTION 2: Lightdash Connection
-        # ════════════════════════════════════
-        self.layout_inner.addWidget(self._section_label("LIGHTDASH CONNECTION"))
-        self.layout_inner.addSpacing(8)
+        # PII toggle (shared across providers)
+        pii_row = QHBoxLayout()
+        pii_lbl_col = QVBoxLayout()
+        pii_lbl_col.setSpacing(2)
+        pii_title = QLabel("PII Redaction")
+        pii_title.setStyleSheet(f"font-size: 14px; font-weight: 600; color: {ALMA_TEXT_DARK};")
+        pii_desc = QLabel("Aggressive name redaction (base redaction always on)")
+        pii_desc.setStyleSheet(f"font-size: 12px; color: {ALMA_TEXT_LIGHT};")
+        pii_desc.setWordWrap(True)
+        pii_lbl_col.addWidget(pii_title)
+        pii_lbl_col.addWidget(pii_desc)
+        pii_row.addLayout(pii_lbl_col, 1)
+        self.pii_toggle = ToggleSwitch(checked=True)
+        self.pii_toggle.toggled.connect(self._persist_gemini_settings)
+        pii_row.addWidget(self.pii_toggle)
+        model_card_layout.addLayout(pii_row)
+
+        lay.addWidget(model_card)
+        lay.addSpacing(24)
+
+        # ── Gemini Configuration ──
+        lay.addWidget(self._section_label("GEMINI CONFIGURATION"))
+        lay.addSpacing(8)
+        self._build_gemini_section()
+        lay.addSpacing(24)
+
+        # ── Claude Configuration ──
+        lay.addWidget(self._section_label("CLAUDE CONFIGURATION"))
+        lay.addSpacing(8)
+        self._build_claude_section(lay)
+        lay.addSpacing(24)
+
+        # ── Task Routing ──
+        lay.addWidget(self._section_label("TASK ROUTING"))
+        lay.addSpacing(8)
+        self._build_task_routing_section(lay)
+
+        lay.addStretch()
+
+        # Populate model dropdown from registry
+        self._refresh_model_combo()
+        self._active_model_combo.currentIndexChanged.connect(self._on_active_model_changed)
+
+    def _refresh_model_combo(self):
+        """Populate active model dropdown from ModelRegistry."""
+        try:
+            from src.llm.model_registry import ModelRegistry
+            registry = ModelRegistry.instance()
+            available = registry.available()
+            active = registry.active()
+        except Exception:
+            available = []
+            active = None
+
+        self._active_model_combo.blockSignals(True)
+        self._active_model_combo.clear()
+        for m in available:
+            self._active_model_combo.addItem(m.display_name, m.id)
+        if active:
+            idx = self._active_model_combo.findData(active.id)
+            if idx >= 0:
+                self._active_model_combo.setCurrentIndex(idx)
+        self._active_model_combo.blockSignals(False)
+
+    def _on_active_model_changed(self, idx):
+        if self._loading or idx < 0:
+            return
+        model_id = self._active_model_combo.currentData()
+        if not model_id:
+            return
+        try:
+            from src.llm.model_registry import ModelRegistry
+            registry = ModelRegistry.instance()
+            registry.set_active(model_id)
+        except Exception:
+            pass
+        self._persist_gemini_settings()
+        self.settings_changed.emit({"model_changed": True})
+
+    # ── Claude section ──
+
+    def _build_claude_section(self, lay):
+        """Build Claude provider card with HIPAA danger zone."""
+        self._claude_card = self._card()
+        self._claude_inner = QVBoxLayout(self._claude_card)
+        self._claude_inner.setContentsMargins(20, 18, 20, 18)
+        self._claude_inner.setSpacing(12)
+        lay.addWidget(self._claude_card)
+
+        self._render_claude_state()
+
+    def _render_claude_state(self):
+        """Render Claude section based on current state."""
+        # Clear existing
+        while self._claude_inner.count():
+            item = self._claude_inner.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+            elif item.layout():
+                self._clear_layout_recursive(item.layout())
+
+        from src.data.pat_store import load_setting
+        has_key = bool(load_setting("anthropic_api_key", ""))
+
+        if has_key:
+            self._render_claude_connected()
+        elif self._claude_pending:
+            self._render_claude_danger_zone()
+        else:
+            self._render_claude_not_configured()
+
+    def _render_claude_not_configured(self):
+        """Show 'Connect Claude' prompt."""
+        title = QLabel("Connect Claude")
+        title.setStyleSheet(f"font-size: 14px; font-weight: 700; color: {ALMA_TEXT_DARK}; border: none;")
+        self._claude_inner.addWidget(title)
+
+        desc = QLabel(
+            "Add Anthropic Claude as an AI provider. Requires a valid API key "
+            "and a Business Associate Agreement (BAA) for HIPAA compliance."
+        )
+        desc.setStyleSheet(f"font-size: 12px; color: {ALMA_TEXT_LIGHT}; border: none;")
+        desc.setWordWrap(True)
+        self._claude_inner.addWidget(desc)
+
+        btn = QPushButton("Enable Claude")
+        btn.setStyleSheet(self._primary_btn_style())
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.clicked.connect(self._on_claude_enable_clicked)
+        self._claude_inner.addWidget(btn)
+
+    def _on_claude_enable_clicked(self):
+        self._claude_pending = True
+        self._claude_checks = {"baa": False, "hipaa": False, "legal": False}
+        self._render_claude_state()
+
+    def _render_claude_danger_zone(self):
+        """Show HIPAA compliance danger zone with 3 checkboxes."""
+        # Danger header
+        header_row = QHBoxLayout()
+
+        icon_frame = QFrame()
+        icon_frame.setFixedSize(30, 30)
+        icon_frame.setStyleSheet(f"""
+            QFrame {{
+                background: #fef2f2;
+                border: none;
+                border-radius: 4px;
+            }}
+        """)
+        icon_lbl = QLabel("⚠")
+        icon_lbl.setAlignment(Qt.AlignCenter)
+        icon_lbl.setStyleSheet("font-size: 16px; border: none;")
+        icon_lay = QVBoxLayout(icon_frame)
+        icon_lay.setContentsMargins(0, 0, 0, 0)
+        icon_lay.addWidget(icon_lbl)
+        header_row.addWidget(icon_frame)
+
+        header_text_col = QVBoxLayout()
+        header_text_col.setSpacing(4)
+        danger_title = QLabel("Compliance Warning — HIPAA")
+        danger_title.setStyleSheet(f"font-size: 14px; font-weight: 700; color: {ALMA_ERROR}; border: none;")
+        header_text_col.addWidget(danger_title)
+
+        danger_desc = QLabel(
+            "Switching to Claude routes ticket and support data through Anthropic's "
+            "infrastructure. This data may include PHI-adjacent fields. A valid "
+            "Business Associate Agreement (BAA) between your organization and "
+            "Anthropic is required.\n\n"
+            "Enabling Claude without a BAA in place may constitute a HIPAA violation. "
+            "Confirm with your compliance or legal team before proceeding."
+        )
+        danger_desc.setStyleSheet(f"font-size: 12px; color: {ALMA_TEXT_MID}; border: none; line-height: 1.6;")
+        danger_desc.setWordWrap(True)
+        header_text_col.addWidget(danger_desc)
+        header_row.addLayout(header_text_col, 1)
+        self._claude_inner.addLayout(header_row)
+
+        # Divider
+        div = QFrame()
+        div.setFixedHeight(1)
+        div.setStyleSheet(f"background: {ALMA_ERROR}; border: none;")
+        self._claude_inner.addWidget(div)
+
+        # Acknowledgment checkboxes
+        ack_label = QLabel("REQUIRED ACKNOWLEDGMENTS")
+        ack_label.setStyleSheet(
+            f"font-size: 10px; font-weight: 700; color: {ALMA_TEXT_LIGHT}; "
+            f"letter-spacing: 1.2px; border: none;"
+        )
+        self._claude_inner.addWidget(ack_label)
+
+        from PySide6.QtWidgets import QCheckBox
+        self._claude_check_widgets = {}
+        checks = [
+            ("baa", "A signed BAA is in place between my organization and Anthropic"),
+            ("hipaa", "I understand enabling Claude without a BAA may violate HIPAA"),
+            ("legal", "I have confirmed this configuration with my compliance or legal team"),
+        ]
+        for key, text in checks:
+            cb = QCheckBox(text)
+            cb.setChecked(self._claude_checks.get(key, False))
+            cb.setStyleSheet(f"""
+                QCheckBox {{
+                    font-size: 13px; color: {ALMA_TEXT_MID}; spacing: 10px; border: none;
+                    padding: 4px 0;
+                }}
+                QCheckBox::indicator {{ width: 14px; height: 14px; }}
+            """)
+            cb.toggled.connect(lambda checked, k=key: self._on_claude_check_changed(k, checked))
+            self._claude_check_widgets[key] = cb
+            self._claude_inner.addWidget(cb)
+
+        all_checked = all(self._claude_checks.values())
+
+        if not all_checked:
+            hint = QLabel("All acknowledgments must be checked before connecting.")
+            hint.setStyleSheet(f"font-size: 12px; color: {ALMA_TEXT_LIGHT}; font-style: italic; border: none;")
+            self._claude_inner.addWidget(hint)
+
+        if all_checked:
+            # Show API key input
+            connect_card = QFrame()
+            connect_card.setStyleSheet(f"""
+                QFrame {{
+                    background: {ALMA_BG_ELEVATED};
+                    border: none;
+                    border-radius: 5px;
+                    padding: 14px 16px;
+                }}
+            """)
+            connect_layout = QVBoxLayout(connect_card)
+            connect_layout.setContentsMargins(14, 14, 14, 14)
+            connect_layout.setSpacing(8)
+
+            connect_title = QLabel("Connect Claude")
+            connect_title.setStyleSheet(f"font-size: 13px; font-weight: 600; color: {ALMA_TEXT_DARK}; border: none;")
+            connect_layout.addWidget(connect_title)
+
+            connect_desc = QLabel("Enter your Anthropic API key to enable Claude models.")
+            connect_desc.setStyleSheet(f"font-size: 12px; color: {ALMA_TEXT_LIGHT}; border: none;")
+            connect_layout.addWidget(connect_desc)
+
+            key_row = QHBoxLayout()
+            self._claude_key_input = QLineEdit()
+            self._claude_key_input.setEchoMode(QLineEdit.Password)
+            self._claude_key_input.setPlaceholderText("sk-ant-api03-...")
+            self._claude_key_input.setStyleSheet(f"""
+                QLineEdit {{
+                    color: {ALMA_TEXT_DARK}; background: {ALMA_WHITE};
+                    border: 1px solid {ALMA_BORDER}; border-radius: 8px;
+                    padding: 8px 12px; font-size: 13px;
+                }}
+            """)
+            key_row.addWidget(self._claude_key_input, 1)
+
+            save_btn = QPushButton("Save API Key")
+            save_btn.setStyleSheet(self._primary_btn_style())
+            save_btn.setCursor(Qt.PointingHandCursor)
+            save_btn.clicked.connect(self._on_claude_save_key)
+            key_row.addWidget(save_btn)
+            connect_layout.addLayout(key_row)
+
+            self._claude_inner.addWidget(connect_card)
+
+        # Cancel button
+        cancel_btn = QPushButton("← Cancel")
+        cancel_btn.setFlat(True)
+        cancel_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {ALMA_TEXT_MID};
+                border: none; font-size: 11px; padding: 4px 0;
+            }}
+            QPushButton:hover {{ color: {ALMA_TEXT_DARK}; }}
+        """)
+        cancel_btn.setCursor(Qt.PointingHandCursor)
+        cancel_btn.clicked.connect(self._on_claude_cancel)
+        self._claude_inner.addWidget(cancel_btn)
+
+    def _on_claude_check_changed(self, key, checked):
+        self._claude_checks[key] = checked
+        self._render_claude_state()
+
+    def _on_claude_cancel(self):
+        self._claude_pending = False
+        self._claude_checks = {"baa": False, "hipaa": False, "legal": False}
+        self._render_claude_state()
+
+    def _on_claude_save_key(self):
+        key = self._claude_key_input.text().strip()
+        if not key:
+            return
+        from src.data.pat_store import save_setting
+        save_setting("anthropic_api_key", key)
+
+        # Enable all Claude models in registry
+        try:
+            from src.llm.model_registry import ModelRegistry
+            registry = ModelRegistry.instance()
+            for m in registry.all_models():
+                if m.provider == "claude":
+                    registry.enable(m.id)
+        except Exception:
+            pass
+
+        self._claude_pending = False
+        self._render_claude_state()
+        self._refresh_model_combo()
+        self.settings_changed.emit({"claude_connected": True})
+
+    def _render_claude_connected(self):
+        """Show connected state with disconnect option."""
+        status_row = QHBoxLayout()
+        status_lbl = QLabel("🟢  Claude connected — API key configured")
+        status_lbl.setStyleSheet(f"font-size: 13px; font-weight: 700; color: {ALMA_SUCCESS}; border: none;")
+        status_row.addWidget(status_lbl, 1)
+
+        disconnect_btn = QPushButton("Disconnect")
+        disconnect_btn.setStyleSheet(self._ghost_btn_style())
+        disconnect_btn.setCursor(Qt.PointingHandCursor)
+        disconnect_btn.clicked.connect(self._on_claude_disconnect)
+        status_row.addWidget(disconnect_btn)
+        self._claude_inner.addLayout(status_row)
+
+        # Show available Claude models
+        try:
+            from src.llm.model_registry import ModelRegistry
+            registry = ModelRegistry.instance()
+            claude_models = [m for m in registry.all_models() if m.provider == "claude"]
+        except Exception:
+            claude_models = []
+
+        if claude_models:
+            models_lbl = QLabel("Available Claude models:")
+            models_lbl.setStyleSheet(f"font-size: 12px; color: {ALMA_TEXT_MID}; border: none;")
+            self._claude_inner.addWidget(models_lbl)
+
+            for m in claude_models:
+                m_lbl = QLabel(f"  • {m.display_name}")
+                m_lbl.setStyleSheet(f"font-size: 12px; color: {ALMA_TEXT_LIGHT}; border: none;")
+                self._claude_inner.addWidget(m_lbl)
+
+    def _on_claude_disconnect(self):
+        reply = QMessageBox.question(
+            self, "Disconnect Claude",
+            "This will remove your Anthropic API key and disable all Claude models. Continue?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        from src.data.pat_store import save_setting
+        save_setting("anthropic_api_key", "")
+
+        # Disable Claude models in registry
+        try:
+            from src.llm.model_registry import ModelRegistry
+            registry = ModelRegistry.instance()
+            for m in registry.all_models():
+                if m.provider == "claude":
+                    registry.disable(m.id)
+        except Exception:
+            pass
+
+        self._render_claude_state()
+        self._refresh_model_combo()
+        self.settings_changed.emit({"claude_disconnected": True})
+
+    # ── Task Routing section ──
+
+    def _build_task_routing_section(self, lay):
+        """Build Task Routing card: per-task provider mapping + override toggle."""
+        from src.gemini.client_factory import get_task_routing, _DEFAULT_ROUTES
+
+        card = self._card()
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(20, 18, 20, 18)
+        card_layout.setSpacing(12)
+
+        desc = QLabel(
+            "Route AI tasks to the optimal provider. PHI-bearing tasks "
+            "(NLP classification, VOC analysis) are locked to Gemini. "
+            "Ops tasks can be routed to Claude when configured."
+        )
+        desc.setStyleSheet(f"font-size: 12px; color: {ALMA_TEXT_LIGHT};")
+        desc.setWordWrap(True)
+        card_layout.addWidget(desc)
+
+        # Override All toggle
+        override_row = QHBoxLayout()
+        override_lbl_col = QVBoxLayout()
+        override_lbl_col.setSpacing(2)
+        override_title = QLabel("Override All")
+        override_title.setStyleSheet(
+            f"font-size: 14px; font-weight: 600; color: {ALMA_TEXT_DARK};"
+        )
+        override_desc = QLabel("Force all tasks to a single provider (for single-provider environments)")
+        override_desc.setStyleSheet(f"font-size: 12px; color: {ALMA_TEXT_LIGHT};")
+        override_desc.setWordWrap(True)
+        override_lbl_col.addWidget(override_title)
+        override_lbl_col.addWidget(override_desc)
+        override_row.addLayout(override_lbl_col, 1)
+
+        self._override_combo = QComboBox()
+        self._override_combo.addItem("Disabled", "")
+        self._override_combo.addItem("Gemini Only", "gemini")
+        self._override_combo.addItem("Claude Only", "claude")
+        self._override_combo.setStyleSheet(f"""
+            QComboBox {{
+                color: {ALMA_TEXT_DARK}; background: {ALMA_WHITE};
+                border: 1px solid {ALMA_BORDER}; border-radius: 8px;
+                padding: 6px 10px; font-size: 12px; min-width: 130px;
+            }}
+        """)
+        override_row.addWidget(self._override_combo)
+        card_layout.addLayout(override_row)
+
+        # Divider
+        div = QFrame()
+        div.setStyleSheet(
+            f"background: {ALMA_BORDER_LIGHT}; min-height: 1px; max-height: 1px; margin: 4px 0;"
+        )
+        card_layout.addWidget(div)
+
+        # Task routing table
+        # PHI tasks (locked to Gemini)
+        _PHI_TASKS = {"nlp_classification", "voc_analysis", "report_generation"}
+        _TASK_LABELS = {
+            "nlp_classification": "NLP Classification",
+            "voc_analysis": "VOC Analysis",
+            "report_generation": "Report Generation",
+            "guru_analysis": "Guru Analysis",
+            "guru_content_generation": "Guru Content Generation",
+            "watchlist_triage": "Watchlist Triage",
+            "meta_analytics": "Meta Analytics",
+            "ab_comparison": "A/B Comparison",
+        }
+
+        routing = get_task_routing()
+        routes = routing.get("routes", dict(_DEFAULT_ROUTES))
+
+        self._route_combos = {}
+
+        for task_type in _DEFAULT_ROUTES:
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 2, 0, 2)
+
+            label_text = _TASK_LABELS.get(task_type, task_type)
+            is_phi = task_type in _PHI_TASKS
+
+            lbl = QLabel(label_text)
+            lbl.setStyleSheet(
+                f"font-size: 13px; color: {ALMA_TEXT_DARK}; font-weight: 500;"
+            )
+            row.addWidget(lbl, 1)
+
+            if is_phi:
+                # PHI lock indicator
+                lock_lbl = QLabel("Gemini (PHI)")
+                lock_lbl.setStyleSheet(
+                    f"font-size: 12px; color: {ALMA_SUCCESS}; font-weight: 600;"
+                )
+                row.addWidget(lock_lbl)
+            else:
+                combo = QComboBox()
+                combo.addItem("Gemini", "gemini")
+                combo.addItem("Claude", "claude")
+                combo.setStyleSheet(f"""
+                    QComboBox {{
+                        color: {ALMA_TEXT_DARK}; background: {ALMA_WHITE};
+                        border: 1px solid {ALMA_BORDER}; border-radius: 6px;
+                        padding: 4px 8px; font-size: 12px; min-width: 100px;
+                    }}
+                """)
+                current = routes.get(task_type, _DEFAULT_ROUTES[task_type])
+                idx = combo.findData(current)
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+                combo.currentIndexChanged.connect(self._on_task_route_changed)
+                self._route_combos[task_type] = combo
+                row.addWidget(combo)
+
+            card_layout.addLayout(row)
+
+        # Load override combo state
+        override_val = routing.get("override_all", "")
+        oidx = self._override_combo.findData(override_val)
+        if oidx >= 0:
+            self._override_combo.setCurrentIndex(oidx)
+        self._override_combo.currentIndexChanged.connect(self._on_task_route_changed)
+
+        lay.addWidget(card)
+
+    def _on_task_route_changed(self, _idx=None):
+        """Persist task routing changes to settings."""
+        if self._loading:
+            return
+        from src.gemini.client_factory import _DEFAULT_ROUTES
+
+        routes = {}
+        for task_type in _DEFAULT_ROUTES:
+            if task_type in self._route_combos:
+                routes[task_type] = self._route_combos[task_type].currentData()
+            else:
+                routes[task_type] = _DEFAULT_ROUTES[task_type]
+
+        override_all = self._override_combo.currentData() or ""
+
+        from src.data.settings_manager import load_settings, save_settings
+        cfg = load_settings()
+        if "ai" not in cfg:
+            cfg["ai"] = {}
+        cfg["ai"]["task_routing"] = {
+            "override_all": override_all,
+            "routes": routes,
+        }
+        save_settings(cfg)
+
+    # ═══════════════════════════════════════════
+    #  TAB 2: INTEGRATIONS
+    # ═══════════════════════════════════════════
+
+    def _build_integrations_tab(self, lay):
+        """Build Integrations tab: Lightdash, Datasets, Google Drive, Interventions."""
+
+        # ── Lightdash Connection ──
+        lay.addWidget(self._section_label("LIGHTDASH CONNECTION"))
+        lay.addSpacing(8)
 
         lh_card = self._card()
         lh_layout = QVBoxLayout(lh_card)
         lh_layout.setContentsMargins(20, 18, 20, 18)
         lh_layout.setSpacing(16)
 
-        # PAT field
         pat_label = QLabel("Personal Access Token (PAT)")
         pat_label.setStyleSheet(f"font-size: 12px; font-weight: 600; color: {ALMA_TEXT_MID};")
 
@@ -348,7 +933,7 @@ class SettingsPage(QWidget):
         self.pat_status_label.setStyleSheet(f"font-size: 11px; color: {ALMA_TEXT_LIGHT};")
 
         pat_hint = QLabel(
-            "Generate a PAT from your Lightdash profile → Personal Access Tokens. "
+            "Generate a PAT from your Lightdash profile. "
             "Use the lowest-privilege token possible (viewer access is sufficient)."
         )
         pat_hint.setStyleSheet(f"font-size: 11px; color: {ALMA_TEXT_LIGHT};")
@@ -358,12 +943,10 @@ class SettingsPage(QWidget):
         lh_layout.addWidget(self.pat_status_label)
         lh_layout.addWidget(pat_hint)
 
-        # Divider
         div = QFrame()
         div.setStyleSheet(f"background: {ALMA_BORDER_LIGHT}; min-height: 1px; max-height: 1px; margin: 4px 0;")
         lh_layout.addWidget(div)
 
-        # API toggle row
         api_row = QHBoxLayout()
         api_lbl_col = QVBoxLayout()
         api_lbl_col.setSpacing(2)
@@ -383,28 +966,12 @@ class SettingsPage(QWidget):
         api_row.addWidget(self.api_toggle)
         lh_layout.addLayout(api_row)
 
-        self.layout_inner.addWidget(lh_card)
-        self.layout_inner.addSpacing(24)
+        lay.addWidget(lh_card)
+        lay.addSpacing(24)
 
-        # ════════════════════════════════════
-        #  SECTION 3: Gemini Configuration
-        # ════════════════════════════════════
-        self.layout_inner.addWidget(self._section_label("GEMINI CONFIGURATION"))
-        self.layout_inner.addSpacing(8)
-
-        # State machine vars — set before _build_gemini_section() calls _render_gemini_state()
-        self._gemini_state = "NOT_CONFIGURED"
-        self._gemini_cli_path = ""
-        self._gemini_setup_worker = None
-        self._gemini_api_key_mode = False
-
-        self._build_gemini_section()
-
-        # ════════════════════════════════════
-        #  SECTION 4: Dataset List
-        # ════════════════════════════════════
-        self.layout_inner.addWidget(self._section_label("DATASETS"))
-        self.layout_inner.addSpacing(8)
+        # ── Datasets ──
+        lay.addWidget(self._section_label("DATASETS"))
+        lay.addSpacing(8)
 
         dataset_card = self._card()
         self.dataset_card_layout = QVBoxLayout(dataset_card)
@@ -419,14 +986,12 @@ class SettingsPage(QWidget):
         ds_desc.setWordWrap(True)
         self.dataset_card_layout.addWidget(ds_desc)
 
-        # Container for dataset rows
         self.dataset_list_widget = QWidget()
         self.dataset_list_layout = QVBoxLayout(self.dataset_list_widget)
         self.dataset_list_layout.setContentsMargins(0, 0, 0, 0)
         self.dataset_list_layout.setSpacing(6)
         self.dataset_card_layout.addWidget(self.dataset_list_widget)
 
-        # Add button row
         add_row = QHBoxLayout()
         self.add_dataset_btn = QPushButton("+  Add Dataset")
         self.add_dataset_btn.setObjectName("SecondaryButton")
@@ -440,14 +1005,12 @@ class SettingsPage(QWidget):
         add_row.addWidget(self.dataset_count_label)
         self.dataset_card_layout.addLayout(add_row)
 
-        self.layout_inner.addWidget(dataset_card)
-        self.layout_inner.addSpacing(24)
+        lay.addWidget(dataset_card)
+        lay.addSpacing(24)
 
-        # ════════════════════════════════════
-        #  SECTION 5: Google Drive Export
-        # ════════════════════════════════════
-        self.layout_inner.addWidget(self._section_label("GOOGLE DRIVE EXPORT"))
-        self.layout_inner.addSpacing(8)
+        # ── Google Drive Export ──
+        lay.addWidget(self._section_label("GOOGLE DRIVE EXPORT"))
+        lay.addSpacing(8)
 
         gdrive_card = self._card()
         gdrive_layout = QVBoxLayout(gdrive_card)
@@ -462,7 +1025,6 @@ class SettingsPage(QWidget):
         gdrive_desc.setWordWrap(True)
         gdrive_layout.addWidget(gdrive_desc)
 
-        # Credentials path
         cred_row = QHBoxLayout()
         cred_lbl = QLabel("Credentials JSON")
         cred_lbl.setStyleSheet(f"font-size: 12px; font-weight: 600; color: {ALMA_TEXT_MID};")
@@ -484,7 +1046,6 @@ class SettingsPage(QWidget):
         cred_row.addWidget(cred_browse)
         gdrive_layout.addLayout(cred_row)
 
-        # Folder ID
         folder_row = QHBoxLayout()
         folder_lbl = QLabel("Folder ID")
         folder_lbl.setStyleSheet(f"font-size: 12px; font-weight: 600; color: {ALMA_TEXT_MID};")
@@ -495,7 +1056,6 @@ class SettingsPage(QWidget):
         folder_row.addWidget(self._gdrive_folder_input, 1)
         gdrive_layout.addLayout(folder_row)
 
-        # Save + Test row
         gdrive_btn_row = QHBoxLayout()
         gdrive_save_btn = QPushButton("Save")
         gdrive_save_btn.setCursor(Qt.PointingHandCursor)
@@ -515,14 +1075,12 @@ class SettingsPage(QWidget):
         gdrive_btn_row.addStretch()
         gdrive_layout.addLayout(gdrive_btn_row)
 
-        self.layout_inner.addWidget(gdrive_card)
-        self.layout_inner.addSpacing(24)
+        lay.addWidget(gdrive_card)
+        lay.addSpacing(24)
 
-        # ════════════════════════════════════
-        #  SECTION 6: Intervention Manager
-        # ════════════════════════════════════
-        self.layout_inner.addWidget(self._section_label("INTERVENTION MANAGER"))
-        self.layout_inner.addSpacing(8)
+        # ── Intervention Manager ──
+        lay.addWidget(self._section_label("INTERVENTION MANAGER"))
+        lay.addSpacing(8)
 
         iv_card = self._card()
         iv_layout = QVBoxLayout(iv_card)
@@ -537,7 +1095,6 @@ class SettingsPage(QWidget):
         iv_desc.setWordWrap(True)
         iv_layout.addWidget(iv_desc)
 
-        # Intervention list placeholder
         self._iv_container = QVBoxLayout()
         self._iv_container.setSpacing(6)
         iv_layout.addLayout(self._iv_container)
@@ -547,7 +1104,6 @@ class SettingsPage(QWidget):
         self._iv_empty_label.setAlignment(Qt.AlignCenter)
         self._iv_container.addWidget(self._iv_empty_label)
 
-        # Add intervention button
         iv_btn_row = QHBoxLayout()
         self._add_iv_btn = QPushButton("+  Add Intervention")
         self._add_iv_btn.setCursor(Qt.PointingHandCursor)
@@ -557,28 +1113,747 @@ class SettingsPage(QWidget):
         iv_btn_row.addStretch()
         iv_layout.addLayout(iv_btn_row)
 
-        self.layout_inner.addWidget(iv_card)
-        self.layout_inner.addSpacing(24)
+        lay.addWidget(iv_card)
+        lay.addSpacing(24)
 
-        # ════════════════════════════════════
-        #  SECTION 7: AI Enhancements
-        # ════════════════════════════════════
-        self.layout_inner.addWidget(self._section_label("AI ENHANCEMENTS"))
-        self.layout_inner.addSpacing(8)
+        # ── Disabled state overlay ──
+        self._update_api_state(False)
+
+        lay.addSpacing(24)
+
+        # ── Search Index ──
+        lay.addWidget(self._section_label("SEARCH INDEX"))
+        lay.addSpacing(8)
+
+        si_card = self._card()
+        si_layout = QVBoxLayout(si_card)
+        si_layout.setContentsMargins(20, 18, 20, 18)
+        si_layout.setSpacing(12)
+
+        si_desc = QLabel(
+            "Rebuild the semantic search index used by Gemini Chat. "
+            "This runs automatically after each NLP scan."
+        )
+        si_desc.setWordWrap(True)
+        si_desc.setStyleSheet(
+            f"font-size: 12px; color: {ALMA_TEXT_MID}; line-height: 18px;"
+        )
+        si_layout.addWidget(si_desc)
+
+        si_btn_row = QHBoxLayout()
+        si_btn_row.setSpacing(12)
+
+        self._rebuild_index_btn = QPushButton("Rebuild Search Index")
+        self._rebuild_index_btn.setStyleSheet(self._ghost_btn_style())
+        self._rebuild_index_btn.setCursor(Qt.PointingHandCursor)
+        self._rebuild_index_btn.clicked.connect(self._on_rebuild_search_index)
+        si_btn_row.addWidget(self._rebuild_index_btn)
+
+        self._rebuild_status_label = QLabel("")
+        self._rebuild_status_label.setStyleSheet(
+            f"font-size: 11px; color: {ALMA_TEXT_LIGHT};"
+        )
+        si_btn_row.addWidget(self._rebuild_status_label)
+        si_btn_row.addStretch()
+        si_layout.addLayout(si_btn_row)
+
+        lay.addWidget(si_card)
+        lay.addSpacing(24)
+
+        self._load_rebuild_status()
+
+        # ── Data Sources ──
+        lay.addWidget(self._section_label("DATA SOURCES"))
+        lay.addSpacing(8)
+
+        ds_card = self._card()
+        ds_layout = QVBoxLayout(ds_card)
+        ds_layout.setContentsMargins(20, 18, 20, 18)
+        ds_layout.setSpacing(10)
+
+        ds_title_row = QHBoxLayout()
+        ds_title_col = QVBoxLayout()
+        ds_title_col.setSpacing(2)
+        ds_title = QLabel("Registered Sources")
+        ds_title.setStyleSheet(f"font-size: 14px; font-weight: 600; color: {ALMA_TEXT_DARK};")
+        ds_desc = QLabel(
+            "Data sources feed tickets into the warehouse. "
+            "Each source has its own tables and import history."
+        )
+        ds_desc.setStyleSheet(f"font-size: 12px; color: {ALMA_TEXT_LIGHT};")
+        ds_desc.setWordWrap(True)
+        ds_title_col.addWidget(ds_title)
+        ds_title_col.addWidget(ds_desc)
+        ds_title_row.addLayout(ds_title_col, 1)
+        ds_layout.addLayout(ds_title_row)
+
+        # Source list container (populated dynamically)
+        self._source_list_container = QVBoxLayout()
+        ds_layout.addLayout(self._source_list_container)
+
+        # Refresh button
+        refresh_btn = QPushButton("Refresh")
+        refresh_btn.setCursor(Qt.PointingHandCursor)
+        refresh_btn.setFixedHeight(28)
+        refresh_btn.setFixedWidth(90)
+        refresh_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {ALMA_TEXT_MID};
+                border: 1px solid {ALMA_BORDER}; border-radius: 6px;
+                padding: 4px 12px; font-size: 11px; font-weight: 500;
+            }}
+            QPushButton:hover {{ background: {ALMA_HOVER_LIGHT}; }}
+        """)
+        refresh_btn.clicked.connect(self._refresh_source_list)
+        ds_layout.addWidget(refresh_btn)
+
+        lay.addWidget(ds_card)
+        lay.addSpacing(24)
+
+        lay.addStretch()
+
+    def _refresh_source_list(self):
+        """Populate the source list from the source_registry table."""
+        # Clear existing items
+        while self._source_list_container.count():
+            item = self._source_list_container.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        try:
+            from src.data.source_registry import SourceRegistry
+            registry = SourceRegistry(self._db.conn)
+            sources = registry.list_sources()
+
+            if not sources:
+                lbl = QLabel("No sources registered. Import data to auto-register.")
+                lbl.setStyleSheet(f"font-size: 12px; color: {ALMA_TEXT_LIGHT}; padding: 8px 0;")
+                self._source_list_container.addWidget(lbl)
+                return
+
+            for src in sources:
+                row = QHBoxLayout()
+                name_lbl = QLabel(f"{src['source_name']}")
+                name_lbl.setStyleSheet(f"font-size: 13px; font-weight: 600; color: {ALMA_TEXT_DARK};")
+                row.addWidget(name_lbl)
+
+                type_lbl = QLabel(f"({src['source_type']})")
+                type_lbl.setStyleSheet(f"font-size: 11px; color: {ALMA_TEXT_LIGHT};")
+                row.addWidget(type_lbl)
+
+                count_lbl = QLabel(f"{src.get('ticket_count', 0):,} tickets")
+                count_lbl.setStyleSheet(f"font-size: 11px; color: {ALMA_TEXT_MID};")
+                row.addWidget(count_lbl)
+
+                if src.get("is_default"):
+                    default_badge = QLabel("DEFAULT")
+                    default_badge.setStyleSheet(
+                        f"font-size: 9px; font-weight: 700; color: {ALMA_GREEN_DARK}; "
+                        f"padding: 2px 6px; border: 1px solid {ALMA_GREEN_DARK}; border-radius: 3px;"
+                    )
+                    row.addWidget(default_badge)
+
+                row.addStretch()
+                container = QWidget()
+                container.setLayout(row)
+                self._source_list_container.addWidget(container)
+
+        except Exception as e:
+            lbl = QLabel(f"Could not load sources: {e}")
+            lbl.setStyleSheet(f"font-size: 12px; color: {ALMA_ERROR};")
+            self._source_list_container.addWidget(lbl)
+
+    # ═══════════════════════════════════════════
+    #  TAB 3: UPDATES
+    # ═══════════════════════════════════════════
+
+    def _build_updates_tab(self, lay):
+        """Build Updates tab — auto-update status + GitHub repo config."""
+        from src import VERSION
+
+        # ── Auto-Update Status ──
+        lay.addWidget(self._section_label("AUTO-UPDATE"))
+        lay.addSpacing(8)
+
+        card = self._card()
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(20, 18, 20, 18)
+        card_layout.setSpacing(10)
+
+        status_row = QHBoxLayout()
+        info_col = QVBoxLayout()
+        info_col.setSpacing(4)
+        title = QLabel("Auto-Update")
+        title.setStyleSheet(f"font-size: 14px; font-weight: 700; color: {ALMA_TEXT_DARK};")
+        desc = QLabel(
+            "Updates replace src/ and config/ only. "
+            "Your database and credentials are never modified."
+        )
+        desc.setStyleSheet(f"font-size: 12px; color: {ALMA_TEXT_LIGHT};")
+        desc.setWordWrap(True)
+        info_col.addWidget(title)
+        info_col.addWidget(desc)
+        status_row.addLayout(info_col, 1)
+
+        self._update_status_pill = QLabel("Up to date")
+        self._update_status_pill.setStyleSheet(f"""
+            font-size: 11px; font-weight: 600; color: {ALMA_SUCCESS};
+            background: rgba(22,163,74,0.1); border-radius: 10px;
+            padding: 3px 10px;
+        """)
+        status_row.addWidget(self._update_status_pill)
+        card_layout.addLayout(status_row)
+
+        # Version info
+        version_frame = QFrame()
+        version_frame.setStyleSheet(f"""
+            QFrame {{
+                background: {ALMA_CREAM}; border-radius: 5px;
+                padding: 10px 14px;
+            }}
+        """)
+        version_layout = QHBoxLayout(version_frame)
+        version_layout.setContentsMargins(14, 10, 14, 10)
+
+        v_col = QVBoxLayout()
+        v_label = QLabel("Current version")
+        v_label.setStyleSheet(f"font-size: 11px; color: {ALMA_TEXT_LIGHT}; border: none;")
+        v_value = QLabel(f"v{VERSION}")
+        v_value.setStyleSheet(f"font-size: 14px; font-weight: 700; font-family: monospace; color: {ALMA_TEXT_DARK}; border: none;")
+        v_col.addWidget(v_label)
+        v_col.addWidget(v_value)
+        version_layout.addLayout(v_col)
+        version_layout.addStretch()
+
+        card_layout.addWidget(version_frame)
+
+        # Update status message (hidden by default)
+        self._update_msg = QLabel("")
+        self._update_msg.setStyleSheet(f"font-size: 12px; color: {ALMA_TEXT_MID};")
+        self._update_msg.setWordWrap(True)
+        self._update_msg.setVisible(False)
+        card_layout.addWidget(self._update_msg)
+
+        btn_row = QHBoxLayout()
+        self._check_updates_btn = QPushButton("Check for Updates")
+        self._check_updates_btn.setStyleSheet(self._ghost_btn_style())
+        self._check_updates_btn.setCursor(Qt.PointingHandCursor)
+        self._check_updates_btn.clicked.connect(self._on_check_updates)
+        btn_row.addWidget(self._check_updates_btn)
+
+        self._release_notes_btn = QPushButton("View Release Notes")
+        self._release_notes_btn.setStyleSheet(self._ghost_btn_style())
+        self._release_notes_btn.setCursor(Qt.PointingHandCursor)
+        self._release_notes_btn.setEnabled(False)
+        self._release_notes_btn.clicked.connect(self._on_view_release_notes)
+        btn_row.addWidget(self._release_notes_btn)
+
+        self._install_btn = QPushButton("Install Now")
+        self._install_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {ALMA_GREEN_DARK}; color: {ALMA_CREAM};
+                border: none; border-radius: 8px; padding: 8px 20px;
+                font-weight: 600; font-size: 13px;
+            }}
+            QPushButton:hover {{ background: {ALMA_GREEN_MID}; }}
+            QPushButton:disabled {{ background: {ALMA_BORDER}; color: {ALMA_TEXT_LIGHT}; }}
+        """)
+        self._install_btn.setCursor(Qt.PointingHandCursor)
+        self._install_btn.setVisible(False)
+        self._install_btn.clicked.connect(self._on_install_update)
+        btn_row.addWidget(self._install_btn)
+
+        btn_row.addStretch()
+        card_layout.addLayout(btn_row)
+
+        # Progress bar (hidden until download starts)
+        self._update_progress = QProgressBar()
+        self._update_progress.setRange(0, 100)
+        self._update_progress.setValue(0)
+        self._update_progress.setVisible(False)
+        self._update_progress.setStyleSheet(f"""
+            QProgressBar {{
+                background: {ALMA_CREAM}; border: 1px solid {ALMA_BORDER};
+                border-radius: 6px; height: 18px; text-align: center;
+                font-size: 11px; color: {ALMA_TEXT_DARK};
+            }}
+            QProgressBar::chunk {{
+                background: {ALMA_GREEN_DARK}; border-radius: 5px;
+            }}
+        """)
+        card_layout.addWidget(self._update_progress)
+
+        self._progress_label = QLabel("")
+        self._progress_label.setStyleSheet(f"font-size: 11px; color: {ALMA_TEXT_MID};")
+        self._progress_label.setVisible(False)
+        card_layout.addWidget(self._progress_label)
+
+        # Restart button (shown after staging completes)
+        self._restart_btn = QPushButton("Restart Now")
+        self._restart_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {ALMA_GREEN_DARK}; color: {ALMA_CREAM};
+                border: none; border-radius: 8px; padding: 10px 28px;
+                font-weight: 700; font-size: 14px;
+            }}
+            QPushButton:hover {{ background: {ALMA_GREEN_MID}; }}
+        """)
+        self._restart_btn.setCursor(Qt.PointingHandCursor)
+        self._restart_btn.setVisible(False)
+        self._restart_btn.clicked.connect(self._on_restart_app)
+        card_layout.addWidget(self._restart_btn)
+
+        # Last-checked timestamp
+        self._last_checked_label = QLabel("")
+        self._last_checked_label.setStyleSheet(
+            f"font-size: 11px; color: {ALMA_TEXT_LIGHT};"
+        )
+        card_layout.addWidget(self._last_checked_label)
+        self._load_last_checked()
+
+        lay.addWidget(card)
+        lay.addSpacing(24)
+
+        # ── GitHub Repository Configuration ──
+        lay.addWidget(self._section_label("GITHUB REPOSITORY"))
+        lay.addSpacing(8)
+
+        repo_card = self._card()
+        repo_layout = QVBoxLayout(repo_card)
+        repo_layout.setContentsMargins(20, 18, 20, 18)
+        repo_layout.setSpacing(10)
+
+        repo_desc = QLabel(
+            "Configure the GitHub repository for update checks. "
+            "For private repositories, provide a Personal Access Token (PAT) "
+            "with read-only repo access."
+        )
+        repo_desc.setStyleSheet(f"font-size: 12px; color: {ALMA_TEXT_LIGHT};")
+        repo_desc.setWordWrap(True)
+        repo_layout.addWidget(repo_desc)
+
+        fields_row = QHBoxLayout()
+        fields_row.setSpacing(16)
+
+        lbl_style = f"font-size: 11px; font-weight: 600; color: {ALMA_TEXT_MID}; letter-spacing: 0.5px;"
+        field_style = f"""
+            QLineEdit {{
+                background: {ALMA_WHITE}; border: 1px solid {ALMA_BORDER};
+                border-radius: 8px; padding: 8px 12px; font-size: 13px;
+                color: {ALMA_TEXT_DARK};
+            }}
+        """
+
+        col = QVBoxLayout()
+        col.setSpacing(4)
+        lbl = QLabel("REPO URL")
+        lbl.setStyleSheet(lbl_style)
+        col.addWidget(lbl)
+        self._github_repo_input = QLineEdit()
+        self._github_repo_input.setPlaceholderText("owner/repo  (e.g. alma-health/alma-insights)")
+        self._github_repo_input.setStyleSheet(field_style)
+        col.addWidget(self._github_repo_input)
+        fields_row.addLayout(col, 2)
+
+        col = QVBoxLayout()
+        col.setSpacing(4)
+        lbl = QLabel("GITHUB PAT (optional — for private repos)")
+        lbl.setStyleSheet(lbl_style)
+        col.addWidget(lbl)
+        self._github_pat_input = QLineEdit()
+        self._github_pat_input.setPlaceholderText("ghp_xxxxxxxxxxxxxxxxxxxx")
+        self._github_pat_input.setEchoMode(QLineEdit.Password)
+        self._github_pat_input.setStyleSheet(field_style)
+        col.addWidget(self._github_pat_input)
+        fields_row.addLayout(col, 2)
+
+        repo_layout.addLayout(fields_row)
+
+        save_row = QHBoxLayout()
+        save_btn = QPushButton("Save Repository Settings")
+        save_btn.setStyleSheet(self._ghost_btn_style())
+        save_btn.setCursor(Qt.PointingHandCursor)
+        save_btn.clicked.connect(self._on_save_github_settings)
+        save_row.addWidget(save_btn)
+
+        self._github_status = QLabel("")
+        self._github_status.setStyleSheet(f"font-size: 11px; color: {ALMA_TEXT_MID};")
+        save_row.addWidget(self._github_status, 1)
+        save_row.addStretch()
+        repo_layout.addLayout(save_row)
+
+        lay.addWidget(repo_card)
+        lay.addSpacing(24)
+
+        self._build_support_and_recovery(lay)
+        lay.addStretch()
+
+    # ═══════════════════════════════════════════
+    #  SUPPORT & RECOVERY  (Phase 5)
+    # ═══════════════════════════════════════════
+
+    def _build_support_and_recovery(self, lay):
+        """Export crash reports + rollback to previous version."""
+        from src.updater.rollback import current_state
+
+        lay.addWidget(self._section_label("SUPPORT & RECOVERY"))
+        lay.addSpacing(8)
+
+        card = self._card()
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(20, 18, 20, 18)
+        card_layout.setSpacing(10)
+
+        desc = QLabel(
+            "Export the last 20 crash reports as a zip for a support ticket, "
+            "or roll back the app to the previous installed version."
+        )
+        desc.setStyleSheet(f"font-size: 12px; color: {ALMA_TEXT_LIGHT};")
+        desc.setWordWrap(True)
+        card_layout.addWidget(desc)
+
+        btn_row = QHBoxLayout()
+
+        self._export_crash_btn = QPushButton("Export Crash Reports")
+        self._export_crash_btn.setStyleSheet(self._ghost_btn_style())
+        self._export_crash_btn.setCursor(Qt.PointingHandCursor)
+        self._export_crash_btn.clicked.connect(self._on_export_crash_reports)
+        btn_row.addWidget(self._export_crash_btn)
+
+        self._rollback_btn = QPushButton("Rollback to Previous Version")
+        self._rollback_btn.setStyleSheet(self._ghost_btn_style())
+        self._rollback_btn.setCursor(Qt.PointingHandCursor)
+        self._rollback_btn.clicked.connect(self._on_manual_rollback)
+        state = current_state()
+        self._rollback_btn.setEnabled(state is not None)
+        btn_row.addWidget(self._rollback_btn)
+
+        btn_row.addStretch()
+        card_layout.addLayout(btn_row)
+
+        self._support_status = QLabel("")
+        self._support_status.setStyleSheet(f"font-size: 12px; color: {ALMA_TEXT_MID};")
+        self._support_status.setWordWrap(True)
+        card_layout.addWidget(self._support_status)
+
+        lay.addWidget(card)
+
+    def _on_export_crash_reports(self):
+        """Zip the last 20 crash reports and let the user save them."""
+        from datetime import datetime
+        from src.core import crash_handler
+
+        reports = crash_handler.list_reports(limit=20)
+        if not reports:
+            self._support_status.setText("No crash reports found — nothing to export.")
+            return
+
+        suggested = f"alma-crash-reports-{datetime.now():%Y%m%d-%H%M%S}.zip"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export crash reports", suggested, "Zip archive (*.zip)"
+        )
+        if not path:
+            return
+
+        try:
+            from pathlib import Path
+            crash_handler.export_bundle(Path(path), limit=20)
+            self._support_status.setText(
+                f"Exported {len(reports)} report(s) to {path}"
+            )
+        except OSError as exc:
+            self._support_status.setText(f"Export failed: {exc}")
+
+    def _on_manual_rollback(self):
+        """Confirm + perform a user-initiated rollback to the previous version."""
+        from src.updater.rollback import current_state, perform_rollback
+
+        state = current_state()
+        if state is None:
+            self._support_status.setText("No previous version on disk.")
+            self._rollback_btn.setEnabled(False)
+            return
+
+        previous = state.get("previous", "unknown")
+        reply = QMessageBox.question(
+            self,
+            "Rollback to previous version",
+            f"Restore the previous installed version (v{previous})?\n\n"
+            "The app will need to restart after rollback.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        ok, message = perform_rollback()
+        self._support_status.setText(message)
+        if ok:
+            self._rollback_btn.setEnabled(False)
+            QMessageBox.information(
+                self, "Rollback complete",
+                "Restart Alma Insights for the change to take effect.",
+            )
+
+        # Load saved values
+        self._load_github_settings()
+
+    # ── Updates tab helpers ──
+
+    def _load_github_settings(self):
+        """Load GitHub repo + PAT from settings/credentials."""
+        try:
+            update_cfg = get_section("updates", {})
+            repo = update_cfg.get("github_repo", "")
+            self._github_repo_input.setText(repo)
+        except Exception:
+            pass
+        try:
+            from src.data.pat_store import load_setting
+            pat = load_setting("github_pat", "")
+            if pat:
+                self._github_pat_input.setText(pat)
+                self._github_status.setText("✓ PAT configured")
+        except Exception:
+            pass
+
+    def _on_save_github_settings(self):
+        """Save GitHub repo URL and PAT."""
+        repo = self._github_repo_input.text().strip()
+        pat = self._github_pat_input.text().strip()
+        try:
+            set_section("updates", {"github_repo": repo})
+            if pat:
+                from src.data.pat_store import save_setting
+                save_setting("github_pat", pat)
+            self._github_status.setText("✓ Saved")
+        except Exception as e:
+            self._github_status.setText(f"Error: {e}")
+
+    def _on_check_updates(self):
+        """Launch UpdateChecker in background."""
+        self._check_updates_btn.setEnabled(False)
+        self._check_updates_btn.setText("Checking…")
+        self._update_msg.setVisible(False)
+
+        # Build releases URL from saved repo or use default
+        releases_url = None
+        try:
+            update_cfg = get_section("updates", {})
+            repo = update_cfg.get("github_repo", "").strip()
+            if repo:
+                releases_url = f"https://api.github.com/repos/{repo}/releases/latest"
+        except Exception:
+            pass
+
+        # Load PAT for auth header
+        github_pat = None
+        try:
+            from src.data.pat_store import load_setting
+            github_pat = load_setting("github_pat", "")
+        except Exception:
+            pass
+
+        from src.updater.update_checker import UpdateChecker
+        self._update_checker = UpdateChecker(
+            parent=self, releases_url=releases_url, github_pat=github_pat
+        )
+        self._update_checker.update_available.connect(self._on_update_available)
+        self._update_checker.up_to_date.connect(self._on_up_to_date)
+        self._update_checker.check_failed.connect(self._on_check_failed)
+        self._update_checker.check()
+
+    def _on_update_available(self, current, new_ver, url):
+        self._save_last_checked()
+        self._check_updates_btn.setEnabled(True)
+        self._check_updates_btn.setText("Check for Updates")
+        self._update_status_pill.setText(f"v{new_ver} available")
+        self._update_status_pill.setStyleSheet(f"""
+            font-size: 11px; font-weight: 600; color: {ALMA_WARNING};
+            background: rgba(245,158,11,0.1); border-radius: 10px;
+            padding: 3px 10px;
+        """)
+        self._update_msg.setText(
+            f"Version {new_ver} is available (you have v{current})."
+        )
+        self._update_msg.setVisible(True)
+        self._latest_release_url = url
+        self._latest_new_version = new_ver
+        self._release_notes_btn.setEnabled(bool(url))
+        # Build download URL from release page URL
+        # GitHub pattern: html_url ends with /releases/tag/vX.Y.Z
+        # Download: /releases/download/vX.Y.Z/alma-insights-vX.Y.Z.zip
+        self._latest_download_url = ""
+        if url and "github.com" in url:
+            # Construct asset download URL
+            base = url.rsplit("/releases/", 1)[0] if "/releases/" in url else ""
+            if base:
+                tag = f"v{new_ver}"
+                self._latest_download_url = (
+                    f"{base}/releases/download/{tag}/"
+                    f"alma-insights-{tag}.zip"
+                )
+        self._install_btn.setVisible(bool(self._latest_download_url))
+
+    def _on_up_to_date(self):
+        self._check_updates_btn.setEnabled(True)
+        self._check_updates_btn.setText("Check for Updates")
+        self._update_status_pill.setText("Up to date")
+        self._update_status_pill.setStyleSheet(f"""
+            font-size: 11px; font-weight: 600; color: {ALMA_SUCCESS};
+            background: rgba(22,163,74,0.1); border-radius: 10px;
+            padding: 3px 10px;
+        """)
+        self._update_msg.setText("You are running the latest version.")
+        self._update_msg.setVisible(True)
+        self._save_last_checked()
+
+    def _on_check_failed(self, error_msg):
+        self._check_updates_btn.setEnabled(True)
+        self._check_updates_btn.setText("Check for Updates")
+        self._update_status_pill.setText("Check failed")
+        self._update_status_pill.setStyleSheet(f"""
+            font-size: 11px; font-weight: 600; color: {ALMA_ERROR};
+            background: rgba(220,38,38,0.1); border-radius: 10px;
+            padding: 3px 10px;
+        """)
+        self._update_msg.setText(error_msg)
+        self._update_msg.setVisible(True)
+        self._save_last_checked()
+
+    def _on_view_release_notes(self):
+        url = getattr(self, "_latest_release_url", "")
+        if url:
+            from PySide6.QtGui import QDesktopServices
+            from PySide6.QtCore import QUrl
+            QDesktopServices.openUrl(QUrl(url))
+
+    def _on_install_update(self):
+        """Download and stage the update."""
+        url = getattr(self, "_latest_download_url", "")
+        if not url:
+            return
+        from src.updater.updater import Updater
+        self._updater = Updater(parent=self)
+        self._updater.progress.connect(self._on_update_progress)
+        self._updater.complete.connect(self._on_update_complete)
+        self._updater.failed.connect(self._on_update_failed)
+        # Show progress, hide install button
+        self._install_btn.setVisible(False)
+        self._update_progress.setValue(0)
+        self._update_progress.setVisible(True)
+        self._progress_label.setText("Starting download...")
+        self._progress_label.setVisible(True)
+        new_ver = getattr(self, "_latest_new_version", "")
+        self._updater.stage(url, new_version=new_ver)
+
+    def _on_update_progress(self, pct, msg):
+        self._update_progress.setValue(pct)
+        self._progress_label.setText(msg)
+
+    def _on_update_complete(self):
+        self._update_progress.setVisible(False)
+        self._progress_label.setText("Update staged. Restart to apply.")
+        self._restart_btn.setVisible(True)
+
+    def _on_update_failed(self, msg):
+        self._update_progress.setVisible(False)
+        self._progress_label.setVisible(False)
+        self._update_msg.setText(f"Update failed: {msg}")
+        self._update_msg.setVisible(True)
+        self._install_btn.setVisible(True)
+
+    def _on_restart_app(self):
+        """Restart the application to apply the staged update."""
+        import sys
+        from PySide6.QtWidgets import QApplication
+        QApplication.quit()
+
+    def _save_last_checked(self):
+        from datetime import datetime
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+        set_section("updates", {"last_checked": ts})
+        self._last_checked_label.setText(f"Last checked: {ts}")
+
+    def _load_last_checked(self):
+        section = get_section("updates")
+        ts = section.get("last_checked", "")
+        if ts:
+            self._last_checked_label.setText(f"Last checked: {ts}")
+
+    # ═══════════════════════════════════════════
+    #  TAB 4: DISPLAY
+    # ═══════════════════════════════════════════
+
+    def _build_display_tab(self, lay):
+        """Build Display tab: test data, display prefs, AI enhancements, behavior settings."""
+
+        # ── Development ──
+        lay.addWidget(self._section_label("DEVELOPMENT"))
+        lay.addSpacing(8)
+
+        test_card = self._card()
+        test_layout = QVBoxLayout(test_card)
+        test_layout.setContentsMargins(20, 18, 20, 18)
+        test_layout.setSpacing(10)
+
+        test_row = QHBoxLayout()
+        test_lbl_col = QVBoxLayout()
+        test_lbl_col.setSpacing(2)
+        test_title = QLabel("Use Test / Demo Data")
+        test_title.setStyleSheet(f"font-size: 14px; font-weight: 600; color: {ALMA_TEXT_DARK};")
+        test_desc = QLabel(
+            "When ON, the app loads synthetic demo conversations for testing. "
+            "Turn OFF for live data mode."
+        )
+        test_desc.setStyleSheet(f"font-size: 12px; color: {ALMA_TEXT_LIGHT};")
+        test_desc.setWordWrap(True)
+        test_lbl_col.addWidget(test_title)
+        test_lbl_col.addWidget(test_desc)
+        test_row.addLayout(test_lbl_col, 1)
+
+        self.test_data_toggle = ToggleSwitch(checked=True)
+        test_row.addWidget(self.test_data_toggle)
+        test_layout.addLayout(test_row)
+
+        debug_row = QHBoxLayout()
+        debug_lbl_col = QVBoxLayout()
+        debug_lbl_col.setSpacing(2)
+        debug_title = QLabel("Debug / Canary Mode")
+        debug_title.setStyleSheet(f"font-size: 14px; font-weight: 600; color: {ALMA_TEXT_DARK};")
+        debug_desc = QLabel(
+            "When ON, Pull Data shows a diagnostic popup before each action "
+            "with combo state, PAT status, and test-mode flag. Useful for troubleshooting."
+        )
+        debug_desc.setStyleSheet(f"font-size: 12px; color: {ALMA_TEXT_LIGHT};")
+        debug_desc.setWordWrap(True)
+        debug_lbl_col.addWidget(debug_title)
+        debug_lbl_col.addWidget(debug_desc)
+        debug_row.addLayout(debug_lbl_col, 1)
+
+        self.debug_toggle = ToggleSwitch(checked=False)
+        debug_row.addWidget(self.debug_toggle)
+        test_layout.addLayout(debug_row)
+
+        lay.addWidget(test_card)
+        lay.addSpacing(24)
+
+        # ── AI Enhancements ──
+        lay.addWidget(self._section_label("AI ENHANCEMENTS"))
+        lay.addSpacing(8)
 
         ai_card = self._card()
         ai_layout = QVBoxLayout(ai_card)
         ai_layout.setContentsMargins(20, 18, 20, 18)
         ai_layout.setSpacing(10)
 
-        # AI Smoothing toggle
         smooth_row = QHBoxLayout()
         smooth_lbl_col = QVBoxLayout()
         smooth_lbl_col.setSpacing(2)
         smooth_title = QLabel("AI Cluster Smoothing")
         smooth_title.setStyleSheet(f"font-size: 14px; font-weight: 600; color: {ALMA_TEXT_DARK};")
         smooth_desc = QLabel(
-            "Use Gemini to refine NMF topic cluster labels. Requires configured Gemini."
+            "Use the active model to refine NMF topic cluster labels. Requires configured AI provider."
         )
         smooth_desc.setStyleSheet(f"font-size: 12px; color: {ALMA_TEXT_LIGHT};")
         smooth_desc.setWordWrap(True)
@@ -590,7 +1865,6 @@ class SettingsPage(QWidget):
         smooth_row.addWidget(self.ai_smoothing_toggle)
         ai_layout.addLayout(smooth_row)
 
-        # AI Keywords toggle
         kw_row = QHBoxLayout()
         kw_lbl_col = QVBoxLayout()
         kw_lbl_col.setSpacing(2)
@@ -609,21 +1883,18 @@ class SettingsPage(QWidget):
         kw_row.addWidget(self.ai_keywords_toggle)
         ai_layout.addLayout(kw_row)
 
-        self.layout_inner.addWidget(ai_card)
-        self.layout_inner.addSpacing(24)
+        lay.addWidget(ai_card)
+        lay.addSpacing(24)
 
-        # ════════════════════════════════════
-        #  SECTION 8: Display Preferences
-        # ════════════════════════════════════
-        self.layout_inner.addWidget(self._section_label("DISPLAY PREFERENCES"))
-        self.layout_inner.addSpacing(8)
+        # ── Display Preferences ──
+        lay.addWidget(self._section_label("DISPLAY PREFERENCES"))
+        lay.addSpacing(8)
 
         display_card = self._card()
         display_layout = QVBoxLayout(display_card)
         display_layout.setContentsMargins(20, 18, 20, 18)
         display_layout.setSpacing(10)
 
-        # Layman Mode toggle
         layman_row = QHBoxLayout()
         layman_lbl_col = QVBoxLayout()
         layman_lbl_col.setSpacing(2)
@@ -644,61 +1915,20 @@ class SettingsPage(QWidget):
         layman_row.addWidget(self.layman_mode_toggle)
         display_layout.addLayout(layman_row)
 
-        self.layout_inner.addWidget(display_card)
-        self.layout_inner.addSpacing(24)
+        lay.addWidget(display_card)
+        lay.addSpacing(24)
 
-        # ════════════════════════════════════
-        #  SECTION 9: Auto-Analysis on Import
-        # ════════════════════════════════════
+        # ── Behavior sections (use self.layout_inner trick) ──
         self._build_auto_analysis_section()
-
-        # ════════════════════════════════════
-        #  SECTION 10: Calendar Sync
-        # ════════════════════════════════════
         self._build_calendar_sync_section()
-
-        # ════════════════════════════════════
-        #  SECTION 11: Source Sync
-        # ════════════════════════════════════
         self._build_source_sync_section()
-
-        # ════════════════════════════════════
-        #  SECTION 12: Section Defaults
-        # ════════════════════════════════════
         self._build_section_defaults_section()
-
-        # ════════════════════════════════════
-        #  SECTION 13: Memory Diagnostics
-        # ════════════════════════════════════
         self._build_memory_debug_section()
 
-        # ════════════════════════════════════
-        #  Disabled state overlay
-        # ════════════════════════════════════
-        self._update_api_state(False)
+        # ── Data Management (Danger Zone) ──
+        self._build_data_management_section()
 
-        self.layout_inner.addStretch()
-
-        scroll.setWidget(inner)
-
-        # ── QTabWidget wrapper ──
-        self._tab_widget = QTabWidget()
-        self._tab_widget.setObjectName("SettingsTab")
-        self._tab_widget.setDocumentMode(True)
-        self._tab_widget.addTab(scroll, "General")
-
-        # Scanning Costs placeholder (populated when db_manager is set)
-        self._cost_placeholder = QLabel("Scanning Costs will appear after data loads.")
-        self._cost_placeholder.setAlignment(Qt.AlignCenter)
-        self._cost_placeholder.setStyleSheet(
-            f"font-size: 13px; color: {ALMA_TEXT_LIGHT}; padding: 40px;"
-        )
-        self._tab_widget.addTab(self._cost_placeholder, "Scanning Costs")
-
-        # Outer layout
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.addWidget(self._tab_widget)
+        lay.addStretch()
 
     def _connect_signals(self):
         self.add_dataset_btn.clicked.connect(lambda: self._add_dataset_row())
@@ -724,7 +1954,7 @@ class SettingsPage(QWidget):
         card = QFrame()
         card.setStyleSheet(f"""
             QFrame {{
-                background: {ALMA_BG_ELEVATED}; border: 1px solid rgba(214, 210, 202, 0.45);
+                background: {ALMA_BG_ELEVATED}; border: none;
                 border-radius: 12px;
             }}
         """)
@@ -926,6 +2156,73 @@ class SettingsPage(QWidget):
         # Save all rows (including empty ones) to preserve row count
         all_rows = [r.get_data() for r in self._dataset_rows]
         save_setting("datasets", all_rows)
+
+    # ── Search Index Rebuild ──
+
+    def _load_rebuild_status(self):
+        """Show last-rebuilt timestamp from embedding metadata."""
+        try:
+            from src.data.db_manager import DatabaseManager
+            conn = DatabaseManager().conn
+            row = conn.execute(
+                "SELECT COUNT(*), MAX(created_at) FROM ticket_embeddings"
+            ).fetchone()
+            if row and row[0]:
+                self._rebuild_status_label.setText(
+                    f"Last rebuilt: {row[1][:16]} · {row[0]} tickets indexed"
+                )
+            else:
+                self._rebuild_status_label.setText("No search index built yet")
+        except Exception:
+            self._rebuild_status_label.setText("")
+
+    def _on_rebuild_search_index(self):
+        """Start background embedding rebuild."""
+        from src.data.db_manager import DatabaseManager
+        db_mgr = DatabaseManager()
+        db_path = str(db_mgr.db_path)
+
+        # Estimate time: ~0.7s per ticket on CPU (based on 888 tickets / ~10 min)
+        try:
+            ticket_count = db_mgr.conn.execute(
+                "SELECT COUNT(*) FROM ticket_index"
+            ).fetchone()[0]
+            est_min = max(1, round(ticket_count * 0.7 / 60))
+            est_text = f"Indexing {ticket_count} tickets \u2014 ~{est_min} min"
+        except Exception:
+            est_text = "Indexing tickets..."
+
+        self._rebuild_index_btn.setEnabled(False)
+        self._rebuild_index_btn.setText("Rebuilding\u2026")
+        self._rebuild_status_label.setText(est_text)
+        self._rebuild_status_label.setStyleSheet(
+            f"font-size: 11px; color: {ALMA_TEXT_MID};"
+        )
+
+        self._embed_worker = EmbeddingRebuildWorker(db_path)
+        self._embed_worker.finished.connect(self._on_rebuild_finished)
+        self._embed_worker.error.connect(self._on_rebuild_error)
+        self._embed_worker.start()
+
+    def _on_rebuild_finished(self, count: int):
+        """Handle successful embedding rebuild."""
+        self._rebuild_index_btn.setEnabled(True)
+        self._rebuild_index_btn.setText("Rebuild Search Index")
+        self._rebuild_status_label.setText(
+            f"\u2713 Rebuilt {count} tickets \u00b7 just now"
+        )
+        self._rebuild_status_label.setStyleSheet(
+            f"font-size: 11px; color: {ALMA_GREEN_DARK};"
+        )
+
+    def _on_rebuild_error(self, msg: str):
+        """Handle embedding rebuild failure."""
+        self._rebuild_index_btn.setEnabled(True)
+        self._rebuild_index_btn.setText("Rebuild Search Index")
+        self._rebuild_status_label.setText(f"Error: {msg[:80]}")
+        self._rebuild_status_label.setStyleSheet(
+            f"font-size: 11px; color: #c0392b;"
+        )
 
     # ── Public API ──
 
@@ -1318,77 +2615,21 @@ class SettingsPage(QWidget):
         status_row.addWidget(reconfig_btn)
         self._gemini_inner.addLayout(status_row)
 
-        # Divider
-        div = QFrame()
-        div.setFrameShape(QFrame.HLine)
-        div.setStyleSheet(f"background: {ALMA_BORDER_LIGHT}; max-height: 1px; border: none;")
-        self._gemini_inner.addWidget(div)
+        # Note: Model selector and PII toggle live in the unified Active Model
+        # card at the top of the AI Provider tab (not duplicated here).
+        # Gemini model string is derived from the Active Model dropdown.
 
-        # Model selector
-        options_row = QHBoxLayout()
-        options_row.setSpacing(24)
-
-        model_col = QVBoxLayout()
-        model_col.setSpacing(4)
-        model_lbl = QLabel("Model")
-        model_lbl.setStyleSheet(lbl_mid)
-        model_col.addWidget(model_lbl)
-        self.gemini_model_combo = QComboBox()
-        self.gemini_model_combo.addItem("gemini-2.5-flash", "gemini-2.5-flash")
-        self.gemini_model_combo.addItem("gemini-2.5-flash-lite", "gemini-2.5-flash-lite")
-        self.gemini_model_combo.addItem("gemini-2.5-pro", "gemini-2.5-pro")
-        self.gemini_model_combo.addItem("gemini-2.0-flash", "gemini-2.0-flash")
-        self.gemini_model_combo.setStyleSheet(f"""
-            QComboBox {{
-                color: {ALMA_TEXT_DARK}; background: {ALMA_WHITE};
-                border: 1px solid {ALMA_BORDER}; border-radius: 8px;
-                padding: 8px 12px; font-size: 13px; min-width: 180px;
-            }}
-        """)
-        self.gemini_model_combo.currentIndexChanged.connect(self._persist_gemini_settings)
-        model_col.addWidget(self.gemini_model_combo)
-        options_row.addLayout(model_col)
-
-        # PII toggle
-        pii_col = QVBoxLayout()
-        pii_col.setSpacing(6)
-        pii_title_row = QHBoxLayout()
-        pii_lbl = QLabel("PII Redaction")
-        pii_lbl.setStyleSheet(lbl_mid)
-        pii_title_row.addWidget(pii_lbl)
-        pii_title_row.addStretch()
-        self.pii_toggle = ToggleSwitch(checked=True)
-        self.pii_toggle.toggled.connect(self._persist_gemini_settings)
-        pii_title_row.addWidget(self.pii_toggle)
-        pii_col.addLayout(pii_title_row)
-        pii_desc = QLabel("Aggressive name redaction (base redaction always on)")
-        pii_desc.setStyleSheet(lbl_light)
-        pii_col.addWidget(pii_desc)
-        options_row.addLayout(pii_col, 1)
-
-        self._gemini_inner.addLayout(options_row)
-
-        # Restore saved model/PII from yaml
+        # Restore saved PII state to the unified toggle
         self._restore_model_pii()
 
     def _restore_model_pii(self):
-        """Re-apply saved model + PII settings after READY renders."""
-        import yaml
-        from pathlib import Path
-        config_path = Path(__file__).parent.parent.parent.parent / "config" / "settings.yaml"
-        if not config_path.exists():
-            return
+        """Re-apply saved PII setting to the unified toggle."""
         try:
-            with open(config_path, encoding="utf-8") as f:
-                cfg = yaml.safe_load(f) or {}
-            gemini_cfg = cfg.get("gemini", {})
-            model = gemini_cfg.get("model", "gemini-2.5-flash")
+            gemini_cfg = get_section("gemini", {})
             pii = gemini_cfg.get("pii_redaction", True)
-            idx = self.gemini_model_combo.findData(model)
-            if idx >= 0:
-                self.gemini_model_combo.setCurrentIndex(idx)
-            self.pii_toggle._checked = pii
-            self.pii_toggle.update()
+            if hasattr(self, "pii_toggle"):
+                self.pii_toggle._checked = pii
+                self.pii_toggle.update()
         except Exception:
             pass
 
@@ -1487,31 +2728,23 @@ class SettingsPage(QWidget):
     def _persist_gemini_settings(self, *args):
         if self._loading:
             return
-        import yaml
-        from pathlib import Path
-        config_path = Path(__file__).parent.parent.parent.parent / "config" / "settings.yaml"
         try:
-            if config_path.exists():
-                with open(config_path, encoding="utf-8") as f:
-                    cfg = yaml.safe_load(f) or {}
-            else:
-                cfg = {}
+            cfg = load_settings()
             cfg.setdefault("gemini", {})
             cfg["gemini"]["cli_path"] = self._gemini_cli_path
-            if self._gemini_state == "READY" and hasattr(self, "gemini_model_combo"):
-                cfg["gemini"]["model"] = self.gemini_model_combo.currentData() or "gemini-2.5-flash"
-            if self._gemini_state == "READY" and hasattr(self, "pii_toggle"):
+            # Model string comes from the unified Active Model dropdown
+            if hasattr(self, "_active_model_combo") and self._active_model_combo.currentData():
+                cfg["gemini"]["model"] = self._active_model_combo.currentData()
+            # PII toggle is the unified one in the Active Model card
+            if hasattr(self, "pii_toggle"):
                 cfg["gemini"]["pii_redaction"] = self.pii_toggle.checked
-            with open(config_path, "w", encoding="utf-8") as f:
-                yaml.dump(cfg, f, default_flow_style=False)
+            save_settings(cfg)
             self.settings_changed.emit({"gemini_updated": True})
         except Exception:
             pass
 
     def _load_gemini_settings(self):
         """Load Gemini settings and determine initial state."""
-        import yaml
-        from pathlib import Path
         from src.data.gemini_setup import find_gemini_cli, verify_gemini_auth
         from src.data.pat_store import load_setting
 
@@ -1520,25 +2753,14 @@ class SettingsPage(QWidget):
         if api_key:
             self._gemini_cli_path = ""
             self._render_gemini_state("READY")
-            if hasattr(self, "gemini_model_combo"):
-                self._restore_model_pii()
+            self._restore_model_pii()
             return
 
-        # Try saved CLI path from yaml
-        config_path = Path(__file__).parent.parent.parent.parent / "config" / "settings.yaml"
-        saved_cli = ""
-        saved_model = "gemini-2.5-flash"
-        saved_pii = True
-        if config_path.exists():
-            try:
-                with open(config_path, encoding="utf-8") as f:
-                    cfg = yaml.safe_load(f) or {}
-                g = cfg.get("gemini", {})
-                saved_cli = g.get("cli_path", "")
-                saved_model = g.get("model", "gemini-2.5-flash")
-                saved_pii = g.get("pii_redaction", True)
-            except Exception:
-                pass
+        # Try saved CLI path from settings
+        g = get_section("gemini", {})
+        saved_cli = g.get("cli_path", "")
+        saved_model = g.get("model", "gemini-2.5-flash")
+        saved_pii = g.get("pii_redaction", True)
 
         # Auto-detect if saved path is empty
         cli_path = saved_cli or find_gemini_cli() or ""
@@ -1570,23 +2792,15 @@ class SettingsPage(QWidget):
             self._gdrive_cred_input.setText(path)
 
     def _save_gdrive_settings(self):
-        import yaml
-        from pathlib import Path
-        config_path = Path(__file__).parent.parent.parent.parent / "config" / "settings.yaml"
         try:
-            if config_path.exists():
-                with open(config_path, encoding="utf-8") as f:
-                    cfg = yaml.safe_load(f) or {}
-            else:
-                cfg = {}
+            cfg = load_settings()
             cfg.setdefault("export", {}).setdefault("google_drive", {})
             cfg["export"]["google_drive"]["credentials_path"] = self._gdrive_cred_input.text().strip()
             cfg["export"]["google_drive"]["folder_id"] = self._gdrive_folder_input.text().strip()
             cfg["export"]["google_drive"]["enabled"] = bool(
                 self._gdrive_cred_input.text().strip() and self._gdrive_folder_input.text().strip()
             )
-            with open(config_path, "w", encoding="utf-8") as f:
-                yaml.dump(cfg, f, default_flow_style=False)
+            save_settings(cfg)
             self._gdrive_status.setText("Saved")
             self._gdrive_status.setStyleSheet(f"font-size: 11px; color: {ALMA_SUCCESS};")
         except Exception as e:
@@ -1618,16 +2832,10 @@ class SettingsPage(QWidget):
             self._gdrive_status.setStyleSheet(f"font-size: 11px; color: {ALMA_ERROR};")
 
     def _load_gdrive_settings(self):
-        """Restore Google Drive settings from yaml."""
-        import yaml
-        from pathlib import Path
-        config_path = Path(__file__).parent.parent.parent.parent / "config" / "settings.yaml"
-        if not config_path.exists():
-            return
+        """Restore Google Drive settings from settings manager."""
         try:
-            with open(config_path, encoding="utf-8") as f:
-                cfg = yaml.safe_load(f) or {}
-            gdrive = cfg.get("export", {}).get("google_drive", {})
+            export = get_section("export", {})
+            gdrive = export.get("google_drive", {})
             self._gdrive_cred_input.setText(gdrive.get("credentials_path", ""))
             self._gdrive_folder_input.setText(gdrive.get("folder_id", ""))
         except Exception:
@@ -1783,41 +2991,26 @@ class SettingsPage(QWidget):
     def _persist_ai_settings(self, *args):
         if self._loading:
             return
-        import yaml
-        from pathlib import Path
-        config_path = Path(__file__).parent.parent.parent.parent / "config" / "settings.yaml"
         try:
-            if config_path.exists():
-                with open(config_path, encoding="utf-8") as f:
-                    cfg = yaml.safe_load(f) or {}
-            else:
-                cfg = {}
+            cfg = load_settings()
             cfg.setdefault("ai_enhancements", {})
             cfg["ai_enhancements"]["smoothing"] = self.ai_smoothing_toggle.checked
             cfg["ai_enhancements"]["keywords"] = self.ai_keywords_toggle.checked
-            with open(config_path, "w", encoding="utf-8") as f:
-                yaml.dump(cfg, f, default_flow_style=False)
+            save_settings(cfg)
             self.settings_changed.emit({"ai_enhancements_updated": True})
         except Exception:
             pass
 
     def _load_ai_settings(self):
-        """Restore AI enhancement toggles from yaml."""
-        import yaml
-        from pathlib import Path
-        config_path = Path(__file__).parent.parent.parent.parent / "config" / "settings.yaml"
-        if not config_path.exists():
-            return
+        """Restore AI enhancement toggles from settings manager."""
         try:
-            with open(config_path, encoding="utf-8") as f:
-                cfg = yaml.safe_load(f) or {}
-            ai = cfg.get("ai_enhancements", {})
+            ai = get_section("ai_enhancements", {})
             self.ai_smoothing_toggle._checked = ai.get("smoothing", False)
             self.ai_smoothing_toggle.update()
             self.ai_keywords_toggle._checked = ai.get("keywords", False)
             self.ai_keywords_toggle.update()
             # Restore display preferences
-            display = cfg.get("display", {})
+            display = get_section("display", {})
             self.layman_mode_toggle._checked = display.get("layman_mode", False)
             self.layman_mode_toggle.update()
         except Exception:
@@ -1830,19 +3023,11 @@ class SettingsPage(QWidget):
     def _persist_display_settings(self, *args):
         if self._loading:
             return
-        import yaml
-        from pathlib import Path
-        config_path = Path(__file__).parent.parent.parent.parent / "config" / "settings.yaml"
         try:
-            if config_path.exists():
-                with open(config_path, encoding="utf-8") as f:
-                    cfg = yaml.safe_load(f) or {}
-            else:
-                cfg = {}
+            cfg = load_settings()
             cfg.setdefault("display", {})
             cfg["display"]["layman_mode"] = self.layman_mode_toggle.checked
-            with open(config_path, "w", encoding="utf-8") as f:
-                yaml.dump(cfg, f, default_flow_style=False)
+            save_settings(cfg)
             self.settings_changed.emit({"layman_mode_updated": True})
         except Exception:
             pass
@@ -2182,6 +3367,8 @@ class SettingsPage(QWidget):
 
         try:
             from src.data.memory_profiler import MemoryProfiler
+            if not MemoryProfiler.is_started():
+                MemoryProfiler.start()
             report = MemoryProfiler.snapshot()
             text = MemoryProfiler.format_report(report)
 
@@ -2247,22 +3434,92 @@ class SettingsPage(QWidget):
         )
 
     # ═══════════════════════════════════════════
+    #  SECTION 14: DATA MANAGEMENT (DANGER ZONE)
+    # ═══════════════════════════════════════════
+
+    def _build_data_management_section(self):
+        """Full Database Reset — danger zone in Display tab."""
+        self.layout_inner.addWidget(self._section_label("DATA MANAGEMENT"))
+        self.layout_inner.addSpacing(8)
+
+        card = self._card()
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(20, 18, 20, 18)
+        card_layout.setSpacing(10)
+
+        title_row = QHBoxLayout()
+        title_col = QVBoxLayout()
+        title_col.setSpacing(2)
+        title = QLabel("Full Database Reset")
+        title.setStyleSheet(f"font-size: 14px; font-weight: 700; color: {ALMA_ERROR};")
+        desc = QLabel(
+            "Permanently delete ALL data — tickets, conversations, NLP results, "
+            "reports, and enrichments. This cannot be undone."
+        )
+        desc.setStyleSheet(f"font-size: 12px; color: {ALMA_TEXT_LIGHT};")
+        desc.setWordWrap(True)
+        title_col.addWidget(title)
+        title_col.addWidget(desc)
+        title_row.addLayout(title_col, 1)
+
+        reset_btn = QPushButton("Full Database Reset")
+        reset_btn.setCursor(Qt.PointingHandCursor)
+        reset_btn.setFixedHeight(32)
+        reset_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {ALMA_ERROR}; color: {ALMA_WHITE};
+                border: none; border-radius: 8px;
+                padding: 6px 18px; font-size: 12px; font-weight: 600;
+            }}
+            QPushButton:hover {{ background: #B71C1C; }}
+        """)
+        reset_btn.setToolTip("Permanently delete ALL data and start fresh. This cannot be undone.")
+        reset_btn.clicked.connect(self._full_database_reset)
+        title_row.addWidget(reset_btn)
+
+        card_layout.addLayout(title_row)
+        self.layout_inner.addWidget(card)
+        self.layout_inner.addSpacing(24)
+
+    def _full_database_reset(self):
+        """Confirm and execute full database reset."""
+        from PySide6.QtWidgets import QMessageBox, QInputDialog
+
+        confirm, ok = QInputDialog.getText(
+            self,
+            "Full Database Reset",
+            'This will permanently delete ALL data.\n\n'
+            'Type "DELETE" to confirm:',
+        )
+        if not ok or confirm.strip() != "DELETE":
+            return
+
+        try:
+            main_window = self.window()
+            if hasattr(main_window, '_clear_all_data'):
+                main_window._clear_all_data()
+            if hasattr(main_window, 'ticket_count_label'):
+                main_window.ticket_count_label.setText("0 tickets in database")
+            QMessageBox.information(
+                self, "Reset Complete",
+                "All data has been deleted. The database is now empty."
+            )
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Reset Failed",
+                f"Database reset failed: {e}"
+            )
+
+    # ═══════════════════════════════════════════
     #  BEHAVIOR SETTINGS PERSISTENCE
     # ═══════════════════════════════════════════
 
     def _persist_behavior_settings(self, *args):
-        """Write all behavior toggles to config/settings.yaml."""
+        """Write all behavior toggles via settings manager."""
         if self._loading:
             return
-        import yaml
-        from pathlib import Path
-        config_path = Path(__file__).parent.parent.parent.parent / "config" / "settings.yaml"
         try:
-            if config_path.exists():
-                with open(config_path, encoding="utf-8") as f:
-                    cfg = yaml.safe_load(f) or {}
-            else:
-                cfg = {}
+            cfg = load_settings()
 
             beh = cfg.setdefault("behavior", {})
 
@@ -2301,24 +3558,16 @@ class SettingsPage(QWidget):
                     if toggle:
                         page_custom[yaml_key] = toggle.checked
 
-            with open(config_path, "w", encoding="utf-8") as f:
-                yaml.dump(cfg, f, default_flow_style=False)
+            save_settings(cfg)
 
             self.settings_changed.emit({"behavior_updated": True})
         except Exception:
             pass
 
     def _load_behavior_settings(self):
-        """Restore behavior toggle states from config/settings.yaml."""
-        import yaml
-        from pathlib import Path
-        config_path = Path(__file__).parent.parent.parent.parent / "config" / "settings.yaml"
-        if not config_path.exists():
-            return
+        """Restore behavior toggle states from settings manager."""
         try:
-            with open(config_path, encoding="utf-8") as f:
-                cfg = yaml.safe_load(f) or {}
-            beh = cfg.get("behavior", {})
+            beh = get_section("behavior", {})
 
             # ── Auto-Analysis ──
             aa = beh.get("auto_analysis", {})

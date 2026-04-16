@@ -16,7 +16,7 @@ logging.basicConfig(
 
 def test_mixed_batch():
     """Test classification of a small mixed-TRC batch."""
-    from src.agents.gemini_bridge_wrapper import GeminiBridge
+    from src.agents.acp_bridge import ACPBridge as GeminiBridge  # ACP migration
     from src.agents.worker_agent import WorkerAgent
 
     # Pick 3 small TRCs that appear in the mixed batches

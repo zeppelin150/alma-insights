@@ -1,0 +1,1073 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Alma Insights — UI Mockup Reference Sheet</title>
+<style>
+  :root {
+    --alma-green-dark: #1B4332;
+    --alma-green-mid: #2D6A4F;
+    --alma-cream: #F5F1EB;
+    --alma-white: #FFFFFF;
+    --danger: #D32F2F;
+    --danger-dark: #C62828;
+    --text-primary: #1A1A1A;
+    --text-secondary: #666666;
+    --border: #E0D8CC;
+    --success-bg: #E8F5E9;
+    --success-text: #1B5E20;
+    --error-bg: #FFEBEE;
+    --error-text: #C62828;
+    --info-bg: #E3F2FD;
+    --info-text: #1565C0;
+    --table-header-bg: #F5F1EB;
+    --table-hover: #EDE8E0;
+    --table-selected: #D4E6DC;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    background: #E8E4DE;
+    color: var(--text-primary);
+    padding: 40px;
+  }
+
+  /* --- Reference sheet chrome --- */
+  .sheet-title {
+    font-size: 28px; font-weight: 700; color: var(--alma-green-dark);
+    margin-bottom: 4px;
+  }
+  .sheet-subtitle {
+    font-size: 13px; color: var(--text-secondary); margin-bottom: 40px;
+  }
+  .stage-header {
+    font-size: 20px; font-weight: 700; color: var(--alma-green-dark);
+    border-bottom: 3px solid var(--alma-green-dark);
+    padding-bottom: 6px; margin: 48px 0 24px;
+  }
+  .mockup-group {
+    margin-bottom: 40px;
+  }
+  .mockup-label {
+    font-size: 11px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 1.2px; color: var(--text-secondary);
+    margin-bottom: 10px;
+  }
+  .mockup-row {
+    display: flex; gap: 24px; flex-wrap: wrap; align-items: flex-start;
+  }
+  .mockup-card {
+    background: var(--alma-cream);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+  }
+  .state-label {
+    font-size: 10px; font-weight: 600; color: var(--alma-green-mid);
+    text-transform: uppercase; letter-spacing: 0.8px;
+    margin: 6px 0 4px 4px;
+  }
+
+  /* --- Alma component styles (used inside mockups) --- */
+  .alma-dialog {
+    background: var(--alma-white);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.15);
+    width: 440px;
+    overflow: hidden;
+  }
+  .alma-dialog-title {
+    font-size: 14px; font-weight: 700;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    background: var(--table-header-bg);
+  }
+  .alma-dialog-body {
+    padding: 20px;
+    font-size: 13px; line-height: 1.55;
+  }
+  .alma-dialog-actions {
+    display: flex; gap: 8px; padding: 0 20px 20px;
+  }
+  .alma-btn {
+    font-family: inherit; font-size: 13px; font-weight: 600;
+    padding: 8px 16px; border-radius: 4px; border: 1px solid var(--border);
+    cursor: default; display: inline-flex; align-items: center; gap: 6px;
+  }
+  .alma-btn-primary {
+    background: var(--alma-green-dark); color: #fff; border-color: var(--alma-green-dark);
+  }
+  .alma-btn-danger {
+    background: var(--danger); color: #fff; border-color: var(--danger);
+  }
+  .alma-btn-danger-disabled {
+    background: #E0A0A0; color: #fff; border-color: #E0A0A0; opacity: 0.65;
+  }
+  .alma-btn-default {
+    background: var(--alma-white); color: var(--text-primary);
+  }
+  .alma-status-chip {
+    font-family: inherit; font-size: 12px; font-weight: 600;
+    padding: 8px 16px; border-radius: 4px;
+    background: var(--alma-green-dark); color: #fff;
+    display: inline-flex; align-items: center; gap: 6px;
+    white-space: nowrap;
+  }
+  .alma-input {
+    font-family: inherit; font-size: 13px;
+    padding: 8px; border-radius: 4px; border: 1px solid var(--border);
+    width: 100%; background: var(--alma-white);
+  }
+  .alma-select {
+    font-family: inherit; font-size: 13px;
+    padding: 8px 28px 8px 8px; border-radius: 4px; border: 1px solid var(--border);
+    background: var(--alma-white) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23666'/%3E%3C/svg%3E") no-repeat right 8px center;
+    appearance: none; cursor: default;
+  }
+  .alma-card {
+    background: var(--alma-white);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+  }
+  .alma-section-title {
+    font-size: 14px; font-weight: 700; margin-bottom: 12px;
+  }
+  .alma-secondary {
+    font-size: 12px; color: var(--text-secondary);
+  }
+  .alma-badge {
+    display: inline-block; padding: 3px 10px; border-radius: 99px;
+    font-size: 11px; font-weight: 600;
+  }
+
+  /* Banner styles */
+  .alma-banner {
+    padding: 12px 16px; border-radius: 6px; font-size: 13px;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .alma-banner-success { background: var(--success-bg); color: var(--success-text); }
+  .alma-banner-error { background: var(--error-bg); color: var(--error-text); }
+  .alma-banner-info { background: var(--info-bg); color: var(--info-text); }
+  .alma-banner .dismiss { cursor: default; font-weight: 600; margin-left: 16px; opacity: 0.7; }
+
+  /* Danger zone */
+  .danger-zone {
+    border: 2px dashed var(--danger); border-radius: 8px; padding: 20px;
+  }
+  .danger-zone-label {
+    font-size: 13px; font-weight: 700; color: var(--danger); margin-bottom: 12px;
+  }
+
+  /* Table */
+  .alma-table {
+    width: 100%; border-collapse: collapse; font-size: 12px;
+  }
+  .alma-table th {
+    background: var(--table-header-bg); font-weight: 700; text-align: left;
+    padding: 8px 10px; border-bottom: 1px solid var(--border);
+  }
+  .alma-table td {
+    padding: 8px 10px; border-bottom: 1px solid var(--border);
+  }
+  .alma-table tr.selected td { background: var(--table-selected); }
+  .alma-table tr:hover td { background: var(--table-hover); }
+
+  /* Sidebar */
+  .alma-sidebar {
+    background: var(--alma-green-dark); color: #fff; width: 180px;
+    border-radius: 8px; overflow: hidden; font-size: 13px;
+  }
+  .alma-sidebar-item {
+    padding: 10px 14px; display: flex; align-items: center; gap: 8px;
+    cursor: default;
+  }
+  .alma-sidebar-item:hover { background: var(--alma-green-mid); }
+  .alma-sidebar-item.new-item { background: rgba(255,255,255,0.08); }
+  .alma-sidebar-item.alma-sidebar-active { background: var(--alma-green-mid); border-radius: 6px; margin: 0 6px; padding: 10px 8px; }
+  .alma-sidebar-icon { font-size: 14px; width: 20px; text-align: center; }
+  .alma-sidebar-section-label {
+    font-size: 10px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 1.2px; padding: 14px 14px 4px; opacity: 0.5;
+  }
+  .alma-sidebar-footer {
+    padding: 14px; font-size: 12px; opacity: 0.7; border-top: 1px solid rgba(255,255,255,0.1); margin-top: 8px;
+  }
+
+  /* Stats row */
+  .stats-row {
+    display: flex; gap: 0; font-size: 12px;
+    border: 1px solid var(--border); border-radius: 6px; overflow: hidden;
+  }
+  .stat-cell {
+    padding: 10px 14px; border-right: 1px solid var(--border);
+    background: var(--alma-white);
+  }
+  .stat-cell:last-child { border-right: none; }
+  .stat-val { font-weight: 700; }
+
+  /* Filter bar */
+  .filter-bar {
+    background: var(--alma-white); border: 1px solid var(--border);
+    border-radius: 8px; padding: 14px 16px;
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+    font-size: 12px;
+  }
+  .filter-bar label { font-weight: 600; font-size: 12px; }
+
+  /* Source list */
+  .source-item {
+    padding: 14px 16px; border-bottom: 1px solid var(--border);
+  }
+  .source-item:last-child { border-bottom: none; }
+  .source-name { font-size: 13px; font-weight: 600; }
+  .source-meta { font-size: 12px; color: var(--text-secondary); margin-top: 4px; }
+  .source-actions { margin-top: 8px; display: flex; gap: 8px; }
+  .source-actions a {
+    font-size: 12px; color: var(--alma-green-mid); text-decoration: underline; cursor: default;
+  }
+
+  /* Dropdown overlay */
+  .dropdown-overlay {
+    background: var(--alma-white); border: 1px solid var(--border);
+    border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+    padding: 4px 0; font-size: 13px; width: 220px;
+  }
+  .dropdown-item {
+    padding: 8px 14px; cursor: default;
+  }
+  .dropdown-item:hover { background: var(--table-hover); }
+  .dropdown-item.active { font-weight: 600; }
+  .dropdown-divider { border-top: 1px solid var(--border); margin: 4px 0; }
+
+  /* Column mapping table */
+  .mapping-table { width: 100%; font-size: 12px; border-collapse: collapse; }
+  .mapping-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  .mapping-table td:first-child { font-weight: 600; width: 160px; }
+
+  /* Radio / toggle */
+  .radio-group { display: flex; gap: 16px; font-size: 13px; align-items: center; }
+  .radio-dot { display: inline-block; width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--border); margin-right: 4px; vertical-align: middle; }
+  .radio-dot.active { border-color: var(--alma-green-dark); background: var(--alma-green-dark); box-shadow: inset 0 0 0 3px #fff; }
+
+  /* Mini chart placeholder */
+  .mini-chart {
+    font-size: 18px; letter-spacing: 2px; color: var(--alma-green-mid);
+    font-family: monospace;
+  }
+  .bar-chart-row {
+    display: flex; align-items: center; gap: 8px; font-size: 12px; margin-bottom: 4px;
+  }
+  .bar-fill {
+    height: 14px; background: var(--alma-green-mid); border-radius: 2px;
+  }
+
+  /* Page frame for full-page mockups */
+  .page-frame {
+    background: var(--alma-cream); border: 1px solid var(--border);
+    border-radius: 8px; overflow: hidden;
+  }
+  .page-header {
+    padding: 20px 24px 0;
+  }
+  .page-title {
+    font-size: 18px; font-weight: 700;
+  }
+  .page-desc {
+    font-size: 12px; color: var(--text-secondary); margin-top: 2px;
+  }
+  .page-body {
+    padding: 16px 24px 24px;
+  }
+
+  .ticket-count-badge {
+    float: right; font-size: 12px; font-weight: 600;
+    background: var(--alma-green-dark); color: #fff;
+    padding: 4px 12px; border-radius: 99px;
+  }
+
+  /* Detail panel */
+  .detail-panel {
+    background: var(--alma-white); border: 1px solid var(--border);
+    border-radius: 8px; padding: 16px; font-size: 12px;
+  }
+  .detail-tabs {
+    display: flex; gap: 0; margin-bottom: 14px;
+    border-bottom: 2px solid var(--border);
+  }
+  .detail-tab {
+    padding: 8px 16px; cursor: default; font-size: 12px; font-weight: 600;
+    border-bottom: 2px solid transparent; margin-bottom: -2px;
+  }
+  .detail-tab.active { border-bottom-color: var(--alma-green-dark); color: var(--alma-green-dark); }
+  .detail-grid {
+    display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px 16px;
+  }
+  .detail-grid .dg-label { font-weight: 600; color: var(--text-secondary); }
+  .detail-grid .dg-val { margin-bottom: 6px; }
+
+  .trc-history {
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 16px; background: var(--alma-white); margin-top: 12px;
+  }
+  .trc-history-title { font-size: 13px; font-weight: 700; margin-bottom: 10px; }
+  .trend-row { display: flex; gap: 24px; font-size: 12px; margin-top: 6px; }
+  .trend-item { display: flex; gap: 6px; }
+  .trend-up { color: #D32F2F; }
+  .trend-down { color: var(--success-text); }
+  .trend-stable { color: var(--text-secondary); }
+
+  /* Utility */
+  .mb8 { margin-bottom: 8px; }
+  .mb12 { margin-bottom: 12px; }
+  .mb16 { margin-bottom: 16px; }
+  .mt12 { margin-top: 12px; }
+  .mt16 { margin-top: 16px; }
+  .flex-between { display: flex; justify-content: space-between; align-items: center; }
+  .gap8 { gap: 8px; }
+  .text-right { text-align: right; }
+</style>
+</head>
+<body>
+
+<div class="sheet-title">Alma Insights — UI Mockup Reference Sheet</div>
+<div class="sheet-subtitle">Static visual assets for optical regression testing &middot; Stages 1–3 &middot; Generated April 2026</div>
+
+<!-- ============================================================ -->
+<!-- STAGE 1 -->
+<!-- ============================================================ -->
+<div class="stage-header">Stage 1</div>
+
+<!-- 1.1 Clear & Close Dialog -->
+<div class="mockup-group">
+  <div class="mockup-label">1.1 — Updated "Clear &amp; Close" Dialog</div>
+  <div class="mockup-row">
+    <div class="mockup-card">
+      <div class="state-label">Default</div>
+      <div class="alma-dialog">
+        <div class="alma-dialog-title">Close Alma Insights</div>
+        <div class="alma-dialog-body">
+          <div style="font-weight:700;margin-bottom:8px;">Clear staging data?</div>
+          <p style="margin-bottom:10px;">Staging data (raw import rows) will be cleared. All tickets, enrichments, and reports are preserved in the database.</p>
+          <p style="margin-bottom:16px;">Choose "Keep &amp; Close" to retain everything as-is.</p>
+        </div>
+        <div class="alma-dialog-actions">
+          <div class="alma-btn alma-btn-primary">Clear &amp; Close</div>
+          <div class="alma-btn alma-btn-default">Keep &amp; Close</div>
+          <div class="alma-btn alma-btn-default">Cancel</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 1.2 Full Database Reset -->
+<div class="mockup-group">
+  <div class="mockup-label">1.2 — Full Database Reset (Settings Page)</div>
+  <div class="mockup-row">
+    <!-- Settings section -->
+    <div class="mockup-card">
+      <div class="state-label">Settings — Data Management Section</div>
+      <div style="background:var(--alma-cream);padding:24px;border-radius:6px;width:540px;">
+        <div class="alma-section-title">Data Management</div>
+        <div class="mb16">
+          <div class="alma-secondary mb8" style="font-weight:600;">Database Status</div>
+          <div class="stats-row">
+            <div class="stat-cell"><span class="stat-val">2,847</span><br><span class="alma-secondary">Tickets</span></div>
+            <div class="stat-cell"><span class="stat-val">1</span><br><span class="alma-secondary">Sources</span></div>
+            <div class="stat-cell"><span class="stat-val">04/03</span><br><span class="alma-secondary">Last Import</span></div>
+            <div class="stat-cell"><span class="stat-val">12</span><br><span class="alma-secondary">NLP Scans</span></div>
+            <div class="stat-cell"><span class="stat-val">8</span><br><span class="alma-secondary">Reports</span></div>
+            <div class="stat-cell"><span class="stat-val">142 MB</span><br><span class="alma-secondary">DB Size</span></div>
+          </div>
+        </div>
+        <div class="danger-zone">
+          <div class="danger-zone-label">⚠ Danger Zone</div>
+          <div style="font-size:14px;font-weight:700;margin-bottom:6px;">Full Database Reset</div>
+          <div style="font-size:13px;margin-bottom:4px;">Permanently delete ALL data including tickets, enrichments, reports, and chat history.</div>
+          <div style="font-size:13px;margin-bottom:14px;color:var(--danger);font-weight:600;">This cannot be undone.</div>
+          <div class="alma-btn alma-btn-danger">🔴 Full Database Reset</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Confirmation dialog — disabled -->
+    <div class="mockup-card">
+      <div class="state-label">Confirmation — Button Disabled</div>
+      <div class="alma-dialog" style="width:420px;">
+        <div class="alma-dialog-title">Confirm Full Database Reset</div>
+        <div class="alma-dialog-body">
+          <div style="color:var(--danger);font-weight:600;margin-bottom:10px;">⚠ This will permanently delete:</div>
+          <ul style="font-size:13px;margin:0 0 14px 18px;line-height:1.7;">
+            <li>2,847 tickets and conversations</li>
+            <li>12 NLP scan results</li>
+            <li>8 analysis reports</li>
+            <li>All chat history</li>
+          </ul>
+          <label style="font-size:13px;font-weight:600;display:block;margin-bottom:6px;">Type DELETE to confirm:</label>
+          <input class="alma-input" value="" placeholder="" readonly style="margin-bottom:14px;">
+        </div>
+        <div class="alma-dialog-actions">
+          <div class="alma-btn alma-btn-danger-disabled">🔴 Reset</div>
+          <div style="flex:1;"></div>
+          <div class="alma-btn alma-btn-default">Cancel</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Confirmation dialog — enabled -->
+    <div class="mockup-card">
+      <div class="state-label">Confirmation — Button Enabled</div>
+      <div class="alma-dialog" style="width:420px;">
+        <div class="alma-dialog-title">Confirm Full Database Reset</div>
+        <div class="alma-dialog-body">
+          <div style="color:var(--danger);font-weight:600;margin-bottom:10px;">⚠ This will permanently delete:</div>
+          <ul style="font-size:13px;margin:0 0 14px 18px;line-height:1.7;">
+            <li>2,847 tickets and conversations</li>
+            <li>12 NLP scan results</li>
+            <li>8 analysis reports</li>
+            <li>All chat history</li>
+          </ul>
+          <label style="font-size:13px;font-weight:600;display:block;margin-bottom:6px;">Type DELETE to confirm:</label>
+          <input class="alma-input" value="DELETE" readonly style="margin-bottom:14px;border-color:var(--danger);">
+        </div>
+        <div class="alma-dialog-actions">
+          <div class="alma-btn alma-btn-danger">🔴 Reset</div>
+          <div style="flex:1;"></div>
+          <div class="alma-btn alma-btn-default">Cancel</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 1.3 Import Status Banner -->
+<div class="mockup-group">
+  <div class="mockup-label">1.3 — Import Status Banner</div>
+  <div class="mockup-row" style="flex-direction:column;gap:10px;max-width:640px;">
+    <div class="mockup-card" style="width:100%;">
+      <div class="state-label">Success — New Tickets Added</div>
+      <div class="alma-banner alma-banner-success">
+        <span>✓ Import complete: 5 new tickets added (1,995 skipped — already in database). Total: 2,847 tickets in warehouse.</span>
+        <span class="dismiss">Dismiss ×</span>
+      </div>
+    </div>
+    <div class="mockup-card" style="width:100%;">
+      <div class="state-label">Success — All Skipped</div>
+      <div class="alma-banner alma-banner-info">
+        <span>ℹ Import complete: 0 new tickets (all 2,000 already in database).</span>
+        <span class="dismiss">Dismiss ×</span>
+      </div>
+    </div>
+    <div class="mockup-card" style="width:100%;">
+      <div class="state-label">Error</div>
+      <div class="alma-banner alma-banner-error">
+        <span>✗ Import failed: CSV file is missing required column "ticket_id".</span>
+        <span class="dismiss">Dismiss ×</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- STAGE 2 -->
+<!-- ============================================================ -->
+<div class="stage-header">Stage 2</div>
+
+<!-- 2.1 Source Management -->
+<div class="mockup-group">
+  <div class="mockup-label">2.1 — Source Management in Settings</div>
+  <div class="mockup-row">
+    <div class="mockup-card">
+      <div class="state-label">With Sources</div>
+      <div style="background:var(--alma-cream);padding:24px;border-radius:6px;width:540px;">
+        <div class="flex-between mb12">
+          <div class="alma-section-title" style="margin-bottom:0;">Data Sources</div>
+        </div>
+        <div class="flex-between mb12">
+          <div style="font-size:13px;font-weight:600;">Registered Sources</div>
+          <div class="alma-btn alma-btn-primary" style="font-size:12px;padding:6px 12px;">+ New Source</div>
+        </div>
+        <div class="alma-card">
+          <div class="source-item">
+            <div class="source-name">✓ Zendesk - RCM Support <span class="alma-badge" style="background:var(--success-bg);color:var(--success-text);font-size:10px;margin-left:6px;">default</span></div>
+            <div class="source-meta">Type: Zendesk &nbsp;│&nbsp; Tickets: 2,847 &nbsp;│&nbsp; Last import: 04/03</div>
+            <div class="source-actions"><a>Edit Mapping</a><a>View Data</a></div>
+          </div>
+          <div class="source-item">
+            <div class="source-name" style="color:var(--text-secondary);">○ Zendesk - Provider Group</div>
+            <div class="source-meta">Type: Zendesk &nbsp;│&nbsp; Tickets: 0 &nbsp;│&nbsp; Not yet imported</div>
+            <div class="source-actions"><a>Edit Mapping</a><a style="color:var(--danger);">Delete</a></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="mockup-card">
+      <div class="state-label">Empty State</div>
+      <div style="background:var(--alma-cream);padding:24px;border-radius:6px;width:400px;">
+        <div class="flex-between mb12">
+          <div class="alma-section-title" style="margin-bottom:0;">Data Sources</div>
+        </div>
+        <div class="flex-between mb12">
+          <div style="font-size:13px;font-weight:600;">Registered Sources</div>
+          <div class="alma-btn alma-btn-primary" style="font-size:12px;padding:6px 12px;">+ New Source</div>
+        </div>
+        <div class="alma-card" style="padding:32px;text-align:center;">
+          <div style="font-size:24px;margin-bottom:8px;">📡</div>
+          <div style="font-size:13px;font-weight:600;margin-bottom:4px;">No sources registered</div>
+          <div class="alma-secondary">Click "+ New Source" to configure your first data source.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 2.2 Create New Source Dialog -->
+<div class="mockup-group">
+  <div class="mockup-label">2.2 — Create New Source Dialog</div>
+  <div class="mockup-row">
+    <div class="mockup-card">
+      <div class="state-label">Zendesk Template</div>
+      <div class="alma-dialog" style="width:520px;">
+        <div class="alma-dialog-title">Create New Data Source</div>
+        <div class="alma-dialog-body" style="padding:20px;">
+          <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Source Name:</label>
+          <input class="alma-input mb12" value="Zendesk - Provider Group" readonly>
+
+          <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Source Type:</label>
+          <select class="alma-select mb16" style="width:200px;">
+            <option>Zendesk</option>
+          </select>
+          <div class="alma-secondary mb8">Options: Zendesk, Kodif (Stage 3), Custom</div>
+
+          <label style="font-size:12px;font-weight:600;display:block;margin-bottom:8px;">Column Mapping:</label>
+          <div class="alma-card mb16" style="overflow:hidden;">
+            <table class="mapping-table">
+              <tr><td>Ticket ID</td><td><select class="alma-select" style="width:160px;"><option>ticket_id</option></select></td></tr>
+              <tr><td>Subject</td><td><select class="alma-select" style="width:160px;"><option>subject</option></select></td></tr>
+              <tr><td>TRC Code</td><td><select class="alma-select" style="width:160px;"><option>trc_code</option></select></td></tr>
+              <tr><td>Created At</td><td><select class="alma-select" style="width:160px;"><option>created_at</option></select></td></tr>
+              <tr><td>Conversation Body</td><td><select class="alma-select" style="width:160px;"><option>description</option></select></td></tr>
+              <tr><td>Provider ID <span class="alma-secondary">(opt)</span></td><td><select class="alma-select" style="width:160px;color:var(--text-secondary);"><option>— not mapped —</option></select></td></tr>
+              <tr><td>Client ID <span class="alma-secondary">(opt)</span></td><td><select class="alma-select" style="width:160px;color:var(--text-secondary);"><option>— not mapped —</option></select></td></tr>
+            </table>
+          </div>
+
+          <label style="font-size:12px;font-weight:600;display:block;margin-bottom:8px;">Conversation Structure:</label>
+          <div style="font-size:13px;margin-bottom:6px;"><span class="radio-dot active"></span> Row per comment (needs rebuild) <span class="alma-secondary">← Zendesk default</span></div>
+          <div style="font-size:13px;margin-bottom:16px;"><span class="radio-dot"></span> Self-contained (single column) <span class="alma-secondary">← Kodif default</span></div>
+        </div>
+        <div class="alma-dialog-actions">
+          <div class="alma-btn alma-btn-primary">Create</div>
+          <div style="flex:1;"></div>
+          <div class="alma-btn alma-btn-default">Cancel</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 2.3 Source Selector on Conversations -->
+<div class="mockup-group">
+  <div class="mockup-label">2.3 — Source Selector on Conversation Search</div>
+  <div class="mockup-row">
+    <div class="mockup-card">
+      <div class="state-label">Dropdown Closed — Data Loaded</div>
+      <div style="background:var(--alma-cream);padding:20px;border-radius:6px;width:620px;">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px;">
+          <div>
+            <div class="page-title">Conversation Search</div>
+            <div class="alma-secondary">Search and browse rebuilt ticket conversations by keyword, TRC, date, or CSAT score</div>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <div class="alma-status-chip">CSV: alma_test_5000_1.csv</div>
+            <div class="alma-btn alma-btn-default" style="font-size:12px;padding:8px 14px;">📁 Import CSV…</div>
+            <div class="alma-btn alma-btn-primary" style="font-size:12px;padding:8px 14px;">Pull Data</div>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:14px;">
+          <span style="font-size:12px;font-weight:600;">Importing to:</span>
+          <select class="alma-select" style="width:210px;"><option>Zendesk - RCM Support</option></select>
+        </div>
+        <div class="filter-bar">
+          <label>Keyword</label><input class="alma-input" style="width:120px;" placeholder="Search ticket text, subjects, TRC labels...">
+          <label>TRC Code</label><select class="alma-select" style="width:110px;"><option>All TRCs</option></select>
+          <label>From</label><select class="alma-select" style="width:120px;"><option>Jan 1, 2020</option></select>
+          <label>To</label><select class="alma-select" style="width:120px;"><option>Apr 5, 2026</option></select>
+          <label>CSAT</label><select class="alma-select" style="width:60px;"><option>Any</option></select>
+          <div class="alma-btn alma-btn-primary" style="font-size:12px;padding:6px 12px;">Search</div>
+          <div class="alma-btn alma-btn-default" style="font-size:12px;padding:6px 12px;">Clear</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="mockup-card">
+      <div class="state-label">No Data Loaded</div>
+      <div style="background:var(--alma-cream);padding:20px;border-radius:6px;width:620px;">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;">
+          <div>
+            <div class="page-title">Conversation Search</div>
+            <div class="alma-secondary">Search and browse rebuilt ticket conversations by keyword, TRC, date, or CSAT score</div>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <div class="alma-status-chip">No data loaded</div>
+            <div class="alma-btn alma-btn-default" style="font-size:12px;padding:8px 14px;">📁 Import CSV…</div>
+            <div class="alma-btn alma-btn-primary" style="font-size:12px;padding:8px 14px;">Pull Data</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="mockup-card">
+      <div class="state-label">Source Dropdown Open</div>
+      <div style="background:var(--alma-cream);padding:20px;border-radius:6px;width:400px;position:relative;">
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:4px;">
+          <span style="font-size:12px;font-weight:600;">Importing to:</span>
+          <select class="alma-select" style="width:210px;border-color:var(--alma-green-dark);"><option>Zendesk - RCM Support</option></select>
+        </div>
+        <div class="dropdown-overlay" style="margin-top:2px;margin-left:80px;">
+          <div class="dropdown-item active">○ Zendesk - RCM Support</div>
+          <div class="dropdown-item">○ Zendesk - Provider Grp</div>
+          <div class="dropdown-divider"></div>
+          <div class="dropdown-item" style="color:var(--alma-green-mid);font-weight:600;">+ Create New Source…</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 2.4 Source Selector on Analytics -->
+<div class="mockup-group">
+  <div class="mockup-label">2.4 — Source Selector on Analytics Pages</div>
+  <div class="mockup-row">
+    <div class="mockup-card">
+      <div class="state-label">All Sources Selected</div>
+      <div class="filter-bar" style="width:480px;">
+        <label>Source:</label>
+        <select class="alma-select" style="width:210px;"><option>All Sources</option></select>
+        <label>From:</label><select class="alma-select" style="width:100px;"><option>Mar 1</option></select>
+        <label>To:</label><select class="alma-select" style="width:100px;"><option>Apr 5</option></select>
+      </div>
+    </div>
+    <div class="mockup-card">
+      <div class="state-label">Single Source Selected</div>
+      <div class="filter-bar" style="width:480px;">
+        <label>Source:</label>
+        <select class="alma-select" style="width:210px;"><option>Zendesk - RCM Support</option></select>
+        <label>From:</label><select class="alma-select" style="width:100px;"><option>Mar 1</option></select>
+        <label>To:</label><select class="alma-select" style="width:100px;"><option>Apr 5</option></select>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- STAGE 3 -->
+<!-- ============================================================ -->
+<div class="stage-header">Stage 3</div>
+
+<!-- 3.1 Data Warehouse Page -->
+<div class="mockup-group">
+  <div class="mockup-label">3.1 — Data Warehouse Page (Full)</div>
+
+  <!-- Populated + detail expanded -->
+  <div class="mockup-row" style="flex-direction:column;gap:16px;">
+    <div class="mockup-card" style="max-width:860px;">
+      <div class="state-label">Populated — Detail Expanded</div>
+      <div class="page-frame">
+        <div class="page-header">
+          <div class="flex-between">
+            <div>
+              <div class="page-title">Data Warehouse</div>
+              <div class="page-desc">Browse all stored data across all sources</div>
+            </div>
+            <div class="ticket-count-badge">2,847 tickets</div>
+          </div>
+        </div>
+        <div class="page-body">
+          <!-- Filter bar -->
+          <div class="filter-bar mb16">
+            <label>Source:</label><select class="alma-select" style="width:130px;"><option>All Sources</option></select>
+            <label>From:</label><select class="alma-select" style="width:110px;"><option>Jan 1, 2020</option></select>
+            <label>To:</label><select class="alma-select" style="width:100px;"><option>Apr 5</option></select>
+            <label>TRC:</label><select class="alma-select" style="width:100px;"><option>All TRCs</option></select>
+            <label>Client ID:</label><input class="alma-input" style="width:80px;">
+            <label>Provider ID:</label><input class="alma-input" style="width:80px;">
+            <label>Insurance:</label><select class="alma-select" style="width:70px;"><option>All</option></select>
+            <label>Keyword:</label><input class="alma-input" style="width:90px;">
+            <div class="alma-btn alma-btn-primary" style="font-size:12px;padding:6px 10px;">🔍 Search</div>
+          </div>
+
+          <!-- Results header -->
+          <div class="flex-between mb8" style="font-size:12px;">
+            <span>Results: <strong>2,847 tickets</strong> across 2 sources</span>
+            <div class="alma-btn alma-btn-default" style="font-size:11px;padding:4px 10px;">Export CSV ▼</div>
+          </div>
+
+          <!-- Table -->
+          <div class="alma-card mb16" style="overflow:hidden;">
+            <table class="alma-table">
+              <thead><tr><th>ID</th><th>Date</th><th>TRC</th><th>Subject</th><th>Source</th><th>Client</th></tr></thead>
+              <tbody>
+                <tr class="selected"><td>12345</td><td>03/15/26</td><td>AUTH-01</td><td>Prior auth delay</td><td>Zendesk</td><td>CLT-001</td></tr>
+                <tr><td>12346</td><td>03/15/26</td><td>BIL-03</td><td>Claim denied EOB</td><td>Zendesk</td><td>CLT-002</td></tr>
+                <tr><td>12347</td><td>03/14/26</td><td>AUTH-01</td><td>Auth turnaround</td><td>Zendesk</td><td>CLT-001</td></tr>
+                <tr><td>12348</td><td>03/14/26</td><td>ELG-02</td><td>Eligibility chk</td><td>Zendesk</td><td>CLT-045</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <!-- Detail panel -->
+          <div style="font-size:12px;font-weight:700;margin-bottom:6px;color:var(--text-secondary);">── Ticket Detail: #12345 ──</div>
+          <div class="detail-panel mb12">
+            <div class="detail-tabs">
+              <div class="detail-tab active">Overview</div>
+              <div class="detail-tab">NLP Data</div>
+              <div class="detail-tab">Timeline</div>
+              <div class="detail-tab">Related</div>
+            </div>
+            <div class="detail-grid">
+              <div><span class="dg-label">TRC:</span></div><div>AUTH-01</div><div><span class="dg-label">Client:</span> CLT-001</div>
+              <div><span class="dg-label">Classification:</span></div><div colspan="2">Prior Authorization Issue</div><div><span class="dg-label">Provider:</span> PRV-042</div>
+              <div><span class="dg-label">Sentiment:</span></div><div>Negative (-0.72)</div><div><span class="dg-label">Friction:</span> High</div>
+              <div><span class="dg-label">Ngrams:</span></div><div colspan="2">"prior auth", "peer review", "turnaround time"</div><div></div>
+              <div><span class="dg-label">Issue Types:</span></div>
+              <div>
+                <span class="alma-badge" style="background:var(--error-bg);color:var(--error-text);margin-right:4px;">Authorization Delay</span>
+                <span class="alma-badge" style="background:var(--info-bg);color:var(--info-text);">Peer Review Required</span>
+              </div>
+              <div></div>
+              <div><span class="dg-label">CSAT:</span></div><div>2.1</div><div><span class="dg-label">Priority:</span> High &nbsp;│&nbsp; <span class="dg-label">Status:</span> Closed</div>
+              <div><span class="dg-label">Insurance:</span></div><div>UHC</div><div><span class="dg-label">Policy:</span> UHC-987654</div>
+            </div>
+          </div>
+
+          <!-- TRC History -->
+          <div style="font-size:12px;font-weight:700;margin-bottom:6px;color:var(--text-secondary);">── TRC History: AUTH-01 ──</div>
+          <div class="trc-history">
+            <div style="display:flex;gap:24px;align-items:center;margin-bottom:12px;">
+              <div><span style="font-weight:600;">Volume (last 90 days):</span> <span class="mini-chart">▁▂▃▅▇▅▃▂▁</span></div>
+              <div class="alma-secondary">Total: <strong>342</strong> &nbsp;│&nbsp; Avg CSAT: <strong>2.8</strong> &nbsp;│&nbsp; Trend: <span class="trend-down">↓ declining</span></div>
+            </div>
+            <div style="font-weight:600;font-size:12px;margin-bottom:6px;">Top Issues:</div>
+            <div class="bar-chart-row"><div class="bar-fill" style="width:180px;"></div> Authorization Delay (42%)</div>
+            <div class="bar-chart-row"><div class="bar-fill" style="width:120px;"></div> Peer Review Required (28%)</div>
+            <div class="bar-chart-row"><div class="bar-fill" style="width:78px;"></div> Turnaround Time (18%)</div>
+            <div class="bar-chart-row"><div class="bar-fill" style="width:52px;"></div> Missing Documentation (12%)</div>
+            <div class="mt12" style="font-weight:600;font-size:12px;margin-bottom:4px;">Ngram Trends:</div>
+            <div class="trend-row">
+              <span class="trend-item">"prior auth" <span class="trend-up">↑ 15%</span> (rising)</span>
+              <span class="trend-item">"peer review" <span class="trend-stable">→ stable</span></span>
+              <span class="trend-item">"turnaround" <span class="trend-down">↓ 8%</span> (cooling)</span>
+              <span class="trend-item">"expedite" <span class="trend-up">↑ 22%</span> (rising)</span>
+            </div>
+            <div class="mt12 alma-secondary">Related TRCs: BIL-03 (co-occurrence: 34%), ELG-02 (18%)</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Empty state -->
+    <div class="mockup-card" style="max-width:860px;">
+      <div class="state-label">Empty State</div>
+      <div class="page-frame">
+        <div class="page-header">
+          <div class="page-title">Data Warehouse</div>
+          <div class="page-desc">Browse all stored data across all sources</div>
+        </div>
+        <div class="page-body" style="text-align:center;padding:60px 24px;">
+          <div style="font-size:36px;margin-bottom:12px;">🗄️</div>
+          <div style="font-size:14px;font-weight:600;margin-bottom:6px;">No data in warehouse</div>
+          <div class="alma-secondary">Import data via Conversation Search to get started.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Filtered state -->
+    <div class="mockup-card" style="max-width:860px;">
+      <div class="state-label">Filtered State</div>
+      <div class="page-frame">
+        <div class="page-header">
+          <div class="flex-between">
+            <div>
+              <div class="page-title">Data Warehouse</div>
+              <div class="page-desc">Browse all stored data across all sources</div>
+            </div>
+            <div class="ticket-count-badge">2,847 tickets</div>
+          </div>
+        </div>
+        <div class="page-body">
+          <div class="filter-bar mb16">
+            <label>Source:</label><select class="alma-select" style="width:130px;"><option>All Sources</option></select>
+            <label>TRC:</label><select class="alma-select" style="width:100px;border-color:var(--alma-green-dark);font-weight:600;"><option>AUTH-01</option></select>
+            <div class="alma-btn alma-btn-primary" style="font-size:12px;padding:6px 10px;">🔍 Search</div>
+            <div class="alma-btn alma-btn-default" style="font-size:12px;padding:6px 10px;">Clear</div>
+          </div>
+          <div class="flex-between mb8" style="font-size:12px;">
+            <span>Showing <strong>342 of 2,847</strong> tickets</span>
+            <div class="alma-btn alma-btn-default" style="font-size:11px;padding:4px 10px;">Export CSV ▼</div>
+          </div>
+          <div class="alma-card" style="overflow:hidden;">
+            <table class="alma-table">
+              <thead><tr><th>ID</th><th>Date</th><th>TRC</th><th>Subject</th><th>Source</th><th>Client</th></tr></thead>
+              <tbody>
+                <tr><td>12345</td><td>03/15/26</td><td>AUTH-01</td><td>Prior auth delay</td><td>Zendesk</td><td>CLT-001</td></tr>
+                <tr><td>12347</td><td>03/14/26</td><td>AUTH-01</td><td>Auth turnaround</td><td>Zendesk</td><td>CLT-001</td></tr>
+                <tr><td>12390</td><td>03/12/26</td><td>AUTH-01</td><td>Auth pending review</td><td>Zendesk</td><td>CLT-018</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 3.2 Sidebar -->
+<div class="mockup-group">
+  <div class="mockup-label">3.2 — Sidebar with Data Warehouse</div>
+  <div class="mockup-row">
+    <div class="mockup-card">
+      <div class="state-label">Current Sidebar</div>
+      <div class="alma-sidebar" style="width:200px;">
+        <div class="alma-sidebar-section-label">SOURCES</div>
+        <div class="alma-sidebar-item alma-sidebar-active"><span class="alma-sidebar-icon">●</span> Conversations</div>
+        <div class="alma-sidebar-item"><span class="alma-sidebar-icon">📡</span> Source Monitor</div>
+        <div class="alma-sidebar-item"><span class="alma-sidebar-icon">📒</span> Guru KB</div>
+        <div class="alma-sidebar-section-label">ANALYSIS</div>
+        <div class="alma-sidebar-item"><span class="alma-sidebar-icon">📊</span> TRC Analytics</div>
+        <div class="alma-sidebar-item"><span class="alma-sidebar-icon">📈</span> Trending Topics</div>
+        <div class="alma-sidebar-item"><span class="alma-sidebar-icon">🚨</span> Incidents</div>
+        <div class="alma-sidebar-section-label">REPORTS</div>
+        <div class="alma-sidebar-item"><span class="alma-sidebar-icon">🤖</span> AI Reports</div>
+        <div class="alma-sidebar-item"><span class="alma-sidebar-icon">⚡</span> Smart Reporting</div>
+        <div class="alma-sidebar-item"><span class="alma-sidebar-icon">💬</span> Gemini Chats</div>
+        <div class="alma-sidebar-section-label">SYSTEM</div>
+        <div class="alma-sidebar-item"><span class="alma-sidebar-icon">⚙️</span> Settings</div>
+        <div class="alma-sidebar-footer">
+          <span>◀ Collapse</span>
+          <div style="font-size:10px;margin-top:6px;opacity:0.5;">v1.0.0 — RCM Operations</div>
+        </div>
+      </div>
+    </div>
+    <div class="mockup-card">
+      <div class="state-label">New Sidebar — Data Warehouse Added</div>
+      <div class="alma-sidebar" style="width:200px;">
+        <div class="alma-sidebar-section-label">SOURCES</div>
+        <div class="alma-sidebar-item"><span class="alma-sidebar-icon">●</span> Conversations</div>
+        <div class="alma-sidebar-item"><span class="alma-sidebar-icon">📡</span> Source Monitor</div>
+        <div class="alma-sidebar-item"><span class="alma-sidebar-icon">📒</span> Guru KB</div>
+        <div class="alma-sidebar-section-label">ANALYSIS</div>
+        <div class="alma-sidebar-item"><span class="alma-sidebar-icon">📊</span> TRC Analytics</div>
+        <div class="alma-sidebar-item"><span class="alma-sidebar-icon">📈</span> Trending Topics</div>
+        <div class="alma-sidebar-item"><span class="alma-sidebar-icon">🚨</span> Incidents</div>
+        <div class="alma-sidebar-section-label">REPORTS</div>
+        <div class="alma-sidebar-item"><span class="alma-sidebar-icon">🤖</span> AI Reports</div>
+        <div class="alma-sidebar-item"><span class="alma-sidebar-icon">⚡</span> Smart Reporting</div>
+        <div class="alma-sidebar-item"><span class="alma-sidebar-icon">💬</span> Gemini Chats</div>
+        <div class="alma-sidebar-section-label">SYSTEM</div>
+        <div class="alma-sidebar-item new-item" style="border-left:3px solid #fff;"><span class="alma-sidebar-icon">🗄️</span> Data Warehouse</div>
+        <div class="alma-sidebar-item"><span class="alma-sidebar-icon">⚙️</span> Settings</div>
+        <div class="alma-sidebar-footer">
+          <span>◀ Collapse</span>
+          <div style="font-size:10px;margin-top:6px;opacity:0.5;">v1.0.0 — RCM Operations</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 3.3 Conversations with multi-source -->
+<div class="mockup-group">
+  <div class="mockup-label">3.3 — Conversations with Multi-Source Import</div>
+  <div class="mockup-row">
+    <div class="mockup-card">
+      <div class="state-label">Source Dropdown Open + "Create New"</div>
+      <div style="background:var(--alma-cream);padding:20px;border-radius:6px;width:640px;position:relative;">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px;">
+          <div>
+            <div class="page-title">Conversation Search</div>
+            <div class="alma-secondary">Search and browse rebuilt ticket conversations by keyword, TRC, date, or CSAT score</div>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <div class="alma-status-chip">CSV: alma_test_5000_1.csv</div>
+            <div class="alma-btn alma-btn-default" style="font-size:12px;padding:8px 14px;">📁 Import CSV…</div>
+            <div class="alma-btn alma-btn-primary" style="font-size:12px;padding:8px 14px;">Pull Data</div>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:flex-start;margin-bottom:14px;">
+          <div style="position:relative;">
+            <span style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Importing to:</span>
+            <select class="alma-select" style="width:210px;border-color:var(--alma-green-dark);"><option>Zendesk - RCM Support</option></select>
+            <div class="dropdown-overlay" style="position:absolute;top:100%;left:0;margin-top:2px;z-index:10;">
+              <div class="dropdown-item active">○ Zendesk - RCM Support</div>
+              <div class="dropdown-item">○ Zendesk - Provider Grp</div>
+              <div class="dropdown-item">○ Kodif - Member Chat</div>
+              <div class="dropdown-divider"></div>
+              <div class="dropdown-item" style="color:var(--alma-green-mid);font-weight:600;">+ Create New Source…</div>
+            </div>
+          </div>
+        </div>
+        <div class="filter-bar" style="margin-top:80px;">
+          <span style="font-weight:600;">Viewing: All Sources (2,847 tickets)</span>
+          <label>Keyword</label><input class="alma-input" style="width:90px;">
+          <label>TRC</label><select class="alma-select" style="width:100px;"><option>All TRCs</option></select>
+          <label>Source</label><select class="alma-select" style="width:70px;"><option>All</option></select>
+          <div class="alma-btn alma-btn-primary" style="font-size:12px;padding:6px 10px;">Search</div>
+          <div class="alma-btn alma-btn-default" style="font-size:12px;padding:6px 10px;">Clear</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 3.4 Analytics Combined Mode -->
+<div class="mockup-group">
+  <div class="mockup-label">3.4 — Analytics Combined Mode Toggle</div>
+  <div class="mockup-row">
+    <div class="mockup-card">
+      <div class="state-label">Per-Source Mode</div>
+      <div style="background:var(--alma-cream);padding:20px;border-radius:6px;width:580px;">
+        <div class="page-title mb12">Incidents Analysis</div>
+        <div class="filter-bar">
+          <label>Source:</label>
+          <select class="alma-select" style="width:190px;"><option>Zendesk - RCM Support</option></select>
+          <label>Mode:</label>
+          <div class="radio-group">
+            <span><span class="radio-dot active"></span> Per-Source</span>
+            <span><span class="radio-dot"></span> Combined</span>
+          </div>
+          <label>From:</label><select class="alma-select" style="width:80px;"><option>Mar 1</option></select>
+          <label>To:</label><select class="alma-select" style="width:80px;"><option>Apr 5</option></select>
+          <div class="alma-btn alma-btn-default" style="font-size:12px;padding:6px 10px;">🔄 Refresh</div>
+        </div>
+        <div class="alma-card mt12" style="padding:16px;font-size:12px;color:var(--text-secondary);">
+          Only the selected source's data is analyzed. No source column in results. Charts show single-source data.
+        </div>
+      </div>
+    </div>
+    <div class="mockup-card">
+      <div class="state-label">Combined Mode</div>
+      <div style="background:var(--alma-cream);padding:20px;border-radius:6px;width:580px;">
+        <div class="page-title mb12">Incidents Analysis</div>
+        <div class="filter-bar">
+          <label>Source:</label>
+          <select class="alma-select" style="width:190px;"><option>All Sources</option></select>
+          <label>Mode:</label>
+          <div class="radio-group">
+            <span><span class="radio-dot"></span> Per-Source</span>
+            <span><span class="radio-dot active"></span> Combined</span>
+          </div>
+          <label>From:</label><select class="alma-select" style="width:80px;"><option>Mar 1</option></select>
+          <label>To:</label><select class="alma-select" style="width:80px;"><option>Apr 5</option></select>
+          <div class="alma-btn alma-btn-default" style="font-size:12px;padding:6px 10px;">🔄 Refresh</div>
+        </div>
+        <div class="alma-card mt12" style="padding:16px;font-size:12px;color:var(--text-secondary);">
+          Results aggregate across all sources. Source column appears in results table. Charts show stacked bars by source.
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 3.5 Guru Source Selector -->
+<div class="mockup-group">
+  <div class="mockup-label">3.5 — Guru Page with Source Selector</div>
+  <div class="mockup-row">
+    <div class="mockup-card">
+      <div class="state-label">Default — All Sources</div>
+      <div style="background:var(--alma-cream);padding:20px;border-radius:6px;width:560px;">
+        <div class="page-title mb8">Guru Knowledge Base</div>
+        <div style="display:flex;gap:0;margin-bottom:16px;border-bottom:2px solid var(--border);">
+          <div class="detail-tab">Cards</div>
+          <div class="detail-tab active">Gap Analysis</div>
+          <div class="detail-tab">Drafts</div>
+          <div class="detail-tab">Effectiveness</div>
+          <div class="detail-tab">Connection</div>
+        </div>
+        <div class="alma-section-title">Friction Analysis</div>
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;font-size:13px;">
+          <span>Analyze friction for:</span>
+          <select class="alma-select" style="width:210px;"><option>All Sources (default)</option></select>
+        </div>
+        <div class="alma-secondary mb16">Scope: Friction scores reflect ticket volume from selected source(s).</div>
+        <div class="alma-btn alma-btn-primary">Analyze Friction</div>
+      </div>
+    </div>
+    <div class="mockup-card">
+      <div class="state-label">Filtered by Source</div>
+      <div style="background:var(--alma-cream);padding:20px;border-radius:6px;width:560px;">
+        <div class="page-title mb8">Guru Knowledge Base</div>
+        <div style="display:flex;gap:0;margin-bottom:16px;border-bottom:2px solid var(--border);">
+          <div class="detail-tab">Cards</div>
+          <div class="detail-tab active">Gap Analysis</div>
+          <div class="detail-tab">Drafts</div>
+          <div class="detail-tab">Effectiveness</div>
+          <div class="detail-tab">Connection</div>
+        </div>
+        <div class="alma-section-title">Friction Analysis</div>
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;font-size:13px;">
+          <span>Analyze friction for:</span>
+          <select class="alma-select" style="width:210px;border-color:var(--alma-green-dark);font-weight:600;"><option>Zendesk - RCM Support</option></select>
+        </div>
+        <div class="alma-secondary mb16">Scope: Friction scores reflect ticket volume from selected source(s).</div>
+        <div class="alma-btn alma-btn-primary">Analyze Friction</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Design Tokens Reference -->
+<div class="stage-header">Design Tokens Reference</div>
+<div class="mockup-group">
+  <div class="mockup-row" style="gap:16px;">
+    <div class="alma-card" style="padding:20px;width:320px;">
+      <div style="font-size:13px;font-weight:700;margin-bottom:12px;">Colors</div>
+      <div style="display:grid;grid-template-columns:28px 1fr;gap:6px;align-items:center;font-size:12px;">
+        <div style="width:28px;height:20px;background:#1B4332;border-radius:3px;"></div><span>ALMA_GREEN_DARK #1B4332</span>
+        <div style="width:28px;height:20px;background:#2D6A4F;border-radius:3px;"></div><span>ALMA_GREEN_MID #2D6A4F</span>
+        <div style="width:28px;height:20px;background:#F5F1EB;border-radius:3px;border:1px solid #ccc;"></div><span>ALMA_CREAM #F5F1EB</span>
+        <div style="width:28px;height:20px;background:#FFFFFF;border-radius:3px;border:1px solid #ccc;"></div><span>ALMA_WHITE #FFFFFF</span>
+        <div style="width:28px;height:20px;background:#D32F2F;border-radius:3px;"></div><span>Danger #D32F2F</span>
+        <div style="width:28px;height:20px;background:#E8F5E9;border-radius:3px;border:1px solid #ccc;"></div><span>Success BG #E8F5E9</span>
+        <div style="width:28px;height:20px;background:#FFEBEE;border-radius:3px;border:1px solid #ccc;"></div><span>Error BG #FFEBEE</span>
+        <div style="width:28px;height:20px;background:#E3F2FD;border-radius:3px;border:1px solid #ccc;"></div><span>Info BG #E3F2FD</span>
+        <div style="width:28px;height:20px;background:#E0D8CC;border-radius:3px;"></div><span>Border #E0D8CC</span>
+        <div style="width:28px;height:20px;background:#D4E6DC;border-radius:3px;"></div><span>Table Selected #D4E6DC</span>
+      </div>
+    </div>
+    <div class="alma-card" style="padding:20px;width:300px;">
+      <div style="font-size:13px;font-weight:700;margin-bottom:12px;">Typography</div>
+      <div style="font-size:18px;font-weight:700;margin-bottom:4px;">Page Title — 18px bold</div>
+      <div style="font-size:14px;font-weight:700;margin-bottom:4px;">Section Header — 14px bold</div>
+      <div style="font-size:13px;margin-bottom:4px;">Body text — 13px regular</div>
+      <div style="font-size:12px;color:#666;margin-bottom:4px;">Secondary — 12px #666</div>
+      <div style="font-size:12px;font-weight:700;margin-bottom:4px;">Table Header — 12px bold</div>
+      <div style="font-size:12px;">Table Cell — 12px regular</div>
+    </div>
+    <div class="alma-card" style="padding:20px;width:280px;">
+      <div style="font-size:13px;font-weight:700;margin-bottom:12px;">Components</div>
+      <div style="display:flex;flex-direction:column;gap:8px;">
+        <div class="alma-btn alma-btn-primary" style="width:fit-content;">Primary Button</div>
+        <div class="alma-btn alma-btn-danger" style="width:fit-content;">Danger Button</div>
+        <div class="alma-btn alma-btn-default" style="width:fit-content;">Default Button</div>
+        <input class="alma-input" value="Text Input" readonly style="width:200px;">
+        <select class="alma-select" style="width:200px;"><option>Dropdown</option></select>
+        <div class="alma-badge" style="background:var(--success-bg);color:var(--success-text);width:fit-content;">Status Badge</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div style="margin-top:48px;padding-top:16px;border-top:1px solid var(--border);font-size:11px;color:var(--text-secondary);">
+  Alma Insights UI Mockup Reference Sheet &middot; 12 mockups across 3 stages &middot; All design tokens applied &middot; For optical regression testing
+</div>
+
+</body>
+</html>

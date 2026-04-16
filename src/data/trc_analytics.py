@@ -36,21 +36,46 @@ def compute_trc_analytics(conn, date_start, date_end, trc_filter=None, status_fi
 
     where = " AND ".join(conditions)
 
-    # Query joining conversations + tickets for resolution times
-    query = f"""
-        SELECT c.ticket_id, c.trc_code, c.status, c.csat_score,
-               c.created_at, c.message_count, c.client_messages, c.agent_messages,
-               t.assignment_to_resolution_hours, t.total_resolution_hours, t.first_reply_hours
-        FROM conversations c
-        LEFT JOIN tickets t ON c.ticket_id = t.ticket_id
-        WHERE {where}
-    """
+    # Query joining conversations + tickets per source
+    from src.data.source_registry import SourceRegistry
+    from src.data.warehouse_query import WarehouseQuery
+    _reg = SourceRegistry(conn)
+    _wq = WarehouseQuery(conn, _reg)
 
-    rows = conn.execute(query, params).fetchall()
-    if not rows:
+    all_rows = []
+    if _wq._legacy_mode:
+        query = f"""
+            SELECT c.ticket_id, c.trc_code, c.status, c.csat_score,
+                   c.created_at, c.message_count, c.client_messages, c.agent_messages,
+                   t.assignment_to_resolution_hours, t.total_resolution_hours, t.first_reply_hours
+            FROM conversations c
+            LEFT JOIN tickets t ON c.ticket_id = t.ticket_id
+            WHERE {where}
+        """
+        all_rows = conn.execute(query, params).fetchall()
+    else:
+        for src in _reg.list_sources():
+            prefix = src["table_prefix"]
+            try:
+                _r = conn.execute(f"""
+                    SELECT c.ticket_id, c.trc_code, c.status, c.csat_score,
+                           c.created_at, c.message_count, c.client_messages, c.agent_messages,
+                           t.assignment_to_resolution_hours, t.total_resolution_hours, t.first_reply_hours
+                    FROM [{prefix}_conversations] c
+                    LEFT JOIN [{prefix}_tickets] t ON c.ticket_id = t.ticket_id
+                    WHERE {where}
+                """, params).fetchall()
+                all_rows.extend(_r)
+            except Exception:
+                pass
+
+    if not all_rows:
         return _empty_result()
 
-    df = pd.DataFrame([dict(r) for r in rows])
+    _cols = ["ticket_id", "trc_code", "status", "csat_score", "created_at",
+             "message_count", "client_messages", "agent_messages",
+             "assignment_to_resolution_hours", "total_resolution_hours", "first_reply_hours"]
+    df = pd.DataFrame([dict(zip(_cols, r)) if not hasattr(r, 'keys') else dict(r) for r in all_rows])
 
     # ── Summary KPIs ──
     total_tickets = len(df)

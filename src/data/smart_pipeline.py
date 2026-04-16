@@ -14,17 +14,24 @@ Exit codes:
     4 = export failure
 """
 
+from __future__ import annotations
+
 import sys
 import json
 import logging
 import time
+from collections.abc import Callable
 from datetime import datetime, timedelta
+
+from src.data.connection_factory import get_connection
 from pathlib import Path
+
+from src.data.settings_manager import get_section
 
 log = logging.getLogger(__name__)
 
 
-def run_pipeline(config=None, progress_cb=None):
+def run_pipeline(config: dict | None = None, progress_cb: Callable | None = None) -> dict:
     """Run the full smart reporting pipeline.
 
     Args:
@@ -149,15 +156,10 @@ def run_pipeline(config=None, progress_cb=None):
 
         # ── Step N+2: AI smoothing (if enabled) ──
         _prog(6 + step_offset, "Checking AI enhancements...")
-        import yaml
-        config_path = Path(__file__).parent.parent.parent / "config" / "settings.yaml"
         ai_smoothing = False
         try:
-            if config_path.exists():
-                with open(config_path, encoding="utf-8") as f:
-                    cfg = yaml.safe_load(f) or {}
-                ai_cfg = cfg.get("ai_enhancements", {})
-                ai_smoothing = ai_cfg.get("smoothing", False)
+            ai_cfg = get_section("ai_enhancements", {})
+            ai_smoothing = ai_cfg.get("smoothing", False)
         except Exception:
             pass
         result["steps_completed"] = 6 + step_offset
@@ -312,8 +314,7 @@ def _run_nlp_scan(config, db_path, date_start, date_end,
         max_polls = 4 * 60 * 6  # 4 hours at 10s intervals
         for i in range(max_polls):
             time.sleep(10)
-            conn = sqlite3.connect(db_path)
-            conn.row_factory = sqlite3.Row
+            conn = get_connection(db_path)
             row = conn.execute(
                 "SELECT status, completed_batches, total_batches "
                 "FROM nlp_scan_runs WHERE scan_id = ?",
@@ -356,28 +357,25 @@ def _run_meta_analysis(db, scan_id):
 
 def _get_latest_date(db):
     """Get the latest date with data."""
-    row = db.conn.execute(
-        "SELECT MAX(created_at) as max_d FROM conversations"
-    ).fetchone()
-    if row and row["max_d"]:
-        return row["max_d"][:10]
-    return None
+    from src.data.source_registry import SourceRegistry
+    from src.data.warehouse_query import WarehouseQuery
+    registry = SourceRegistry(db.conn)
+    wq = WarehouseQuery(db.conn, registry)
+    rows = wq.query_conversations_raw(
+        "SELECT MAX(created_at) as max_d FROM {table}"
+    )
+    best = None
+    for row in rows:
+        val = row[0] if row else None
+        if val and (best is None or val > best):
+            best = val
+    return best[:10] if best else None
 
 
 def _build_gemini_client():
     """Build a GeminiClient from settings."""
-    import yaml
-    from pathlib import Path
-
-    config_path = Path(__file__).parent.parent.parent / "config" / "settings.yaml"
     try:
-        if config_path.exists():
-            with open(config_path, encoding="utf-8") as f:
-                cfg = yaml.safe_load(f) or {}
-        else:
-            return None
-
-        gemini_cfg = cfg.get("gemini", {})
+        gemini_cfg = get_section("gemini", {})
         cli_path = gemini_cfg.get("cli_path", "")
         model = gemini_cfg.get("model", "gemini-2.5-flash")
         pii = gemini_cfg.get("pii_redaction", True)
@@ -422,7 +420,7 @@ def _export_to_drive(report_text, date_start, date_end, config_path):
 
 # ── CLI entry point ──
 
-def main():
+def main() -> None:
     """CLI entry point for smart pipeline."""
     import argparse
 

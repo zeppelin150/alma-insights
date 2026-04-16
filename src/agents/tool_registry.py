@@ -19,11 +19,15 @@ stored individually via store_classification. If a worker crashes mid-batch,
 already-classified tickets survive in SQLite.
 """
 
+from __future__ import annotations
+
 import json
 import logging
-import sqlite3
 import uuid
+from collections.abc import Callable
 from datetime import datetime
+
+from src.data.connection_factory import get_connection
 
 logger = logging.getLogger("alma.tools")
 
@@ -72,6 +76,9 @@ class ToolRegistry:
         result = registry.execute("query_taxonomy", {"trc": "RCM_02"})
     """
 
+    # P4: Buffered commits — commit every N inserts instead of per-ticket
+    _COMMIT_INTERVAL = 10
+
     def __init__(self, db_path):
         """
         Args:
@@ -82,21 +89,31 @@ class ToolRegistry:
         self._context = {}     # scan_id, batch_id, trc, agent_id
         self._tools = {}
         self._call_count = 0
+        self._write_buffer: list[str] = []  # P4: buffered ticket IDs
         self._register_tools()
 
     @property
     def conn(self):
         """Lazy SQLite connection (per-thread safety)."""
         if self._conn is None:
-            self._conn = sqlite3.connect(self.db_path)
-            self._conn.row_factory = sqlite3.Row
+            self._conn = get_connection(self.db_path)
         return self._conn
 
     def close(self):
         """Close the database connection."""
+        self.flush()
         if self._conn:
             self._conn.close()
             self._conn = None
+
+    def flush(self):
+        """P4: Commit any buffered writes. Call after each batch completes."""
+        if self._write_buffer and self._conn:
+            try:
+                self._conn.commit()
+            except Exception:
+                pass
+            self._write_buffer.clear()
 
     def set_context(self, **kwargs):
         """
@@ -474,9 +491,26 @@ class ToolRegistry:
         if not ticket_id:
             return {"error": "Missing ticket_id"}
 
+        # ── 5.4: Ticket ID boundary guard ──
+        # Reject classifications for tickets not in this batch's manifest.
+        # Prevents model overflow (classifying sequential IDs beyond batch
+        # boundary) which would assign the batch-level TRC fallback to
+        # wrong tickets.
+        ticket_trc_map = self._context.get("ticket_trc_map", {})
+        if ticket_trc_map and ticket_id not in ticket_trc_map:
+            logger.warning(
+                "Boundary guard: rejected ticket_id=%s "
+                "(not in batch manifest of %d tickets)",
+                ticket_id, len(ticket_trc_map),
+            )
+            return {
+                "status": "rejected",
+                "ticket_id": ticket_id,
+                "reason": "not_in_batch",
+            }
+
         # Resolve per-ticket TRC: prefer explicit arg, then per-ticket
         # lookup (mixed batch), then batch-level fallback (5.3 fix)
-        ticket_trc_map = self._context.get("ticket_trc_map", {})
         trc = (
             args.get("trc")
             or ticket_trc_map.get(ticket_id)
@@ -546,7 +580,38 @@ class ToolRegistry:
                 json.dumps(args),  # raw_classification
                 now,
             ))
-            self.conn.commit()
+
+            # ── Build 11.0: Write to persistent ticket_index ──
+            try:
+                from src.services.ticket_index_writer import upsert_ticket_index
+                upsert_ticket_index(
+                    ticket_id=ticket_id,
+                    scan_id=scan_id,
+                    classification={
+                        "summary": summary,
+                        "friction_type": friction_type,
+                        "sub_cluster": sub_cluster,
+                        "sub_cluster_confidence": sub_cluster_confidence,
+                        "sentiment_polarity": sentiment_polarity,
+                        "sentiment_intensity": sentiment_intensity,
+                        "anomaly_flag": anomaly_flag,
+                        "anomaly_reason": anomaly_reason,
+                        "root_cause_hint": root_cause_hint,
+                        "entities": entities,
+                        "key_phrases": key_phrases,
+                        "is_novel": is_novel,
+                    },
+                    ticket_meta={"trc": trc},
+                    conn=self.conn,
+                )
+            except Exception as ti_err:
+                logger.warning("ticket_index upsert failed: %s", ti_err)
+
+            # P4: Buffered commit — batch N inserts before fsync
+            self._write_buffer.append(ticket_id)
+            if len(self._write_buffer) >= self._COMMIT_INTERVAL:
+                self.conn.commit()
+                self._write_buffer.clear()
 
             return {
                 "status": "stored",
@@ -604,25 +669,28 @@ class ToolRegistry:
             return {"error": "Missing ticket_id"}
 
         try:
-            # First, try the full_thread column (primary schema)
-            row = self.conn.execute("""
-                SELECT full_thread, message_count, created_at
-                FROM conversations
-                WHERE ticket_id = ?
-            """, (ticket_id,)).fetchone()
+            # First, try the full_thread column (primary schema) via warehouse
+            from src.data.source_registry import SourceRegistry
+            from src.data.warehouse_query import WarehouseQuery
+            _wq = WarehouseQuery(self.conn, SourceRegistry(self.conn))
+            _rows = _wq.query_conversations_raw(
+                "SELECT full_thread, message_count, created_at FROM {table} WHERE ticket_id = ?",
+                (ticket_id,),
+            )
+            row = _rows[0] if _rows else None
 
-            if row and row["full_thread"]:
-                full_thread = row["full_thread"]
-                # Parse [Client]/[Agent] message blocks from full_thread
+            _full_thread = row[0] if row else None
+            _msg_count = row[1] if row else None
+            if row and _full_thread:
                 messages = []
-                for line in full_thread.split("\n"):
+                for line in _full_thread.split("\n"):
                     line = line.strip()
                     if line:
                         messages.append(line[:2000])
 
                 return {
                     "ticket_id": ticket_id,
-                    "message_count": row["message_count"] or len(messages),
+                    "message_count": _msg_count or len(messages),
                     "thread": messages[:50],
                 }
 
@@ -634,22 +702,20 @@ class ToolRegistry:
                     "note": "No conversation found for this ticket.",
                 }
 
-            # Fallback: try individual message rows if full_thread is empty
+            # Fallback: try individual comment rows if full_thread is empty
             try:
-                rows = self.conn.execute("""
-                    SELECT role, message, created_at
-                    FROM conversations
-                    WHERE ticket_id = ?
-                    ORDER BY created_at ASC
-                """, (ticket_id,)).fetchall()
+                _comment_rows = _wq.query_comments_raw(
+                    "SELECT author_role, body, created_at FROM {table} WHERE ticket_id = ? ORDER BY created_at ASC",
+                    (ticket_id,),
+                )
 
                 thread = [
                     {
-                        "role": r["role"],
-                        "message": r["message"][:2000],
-                        "timestamp": r["created_at"],
+                        "role": r[0],
+                        "message": (r[1] or "")[:2000],
+                        "timestamp": r[2],
                     }
-                    for r in rows
+                    for r in _comment_rows
                 ]
 
                 return {

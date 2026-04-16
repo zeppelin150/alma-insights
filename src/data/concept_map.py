@@ -3,6 +3,7 @@ Alma Insights — Concept Map
 Maps synonymous terms to canonical concept IDs.
 Used to normalize text before TF-IDF vectorization.
 """
+from __future__ import annotations
 
 # Key = canonical concept, Value = set of synonyms/variants
 # These take priority over any automatic synonym detection.
@@ -55,7 +56,7 @@ DOMAIN_CONCEPTS = {
 }
 
 
-def build_concept_index():
+def build_concept_index() -> dict[str, str]:
     """Build reverse lookup: token → canonical concept."""
     index = {}
     for concept, synonyms in DOMAIN_CONCEPTS.items():

@@ -19,8 +19,20 @@ from pathlib import Path
 
 
 APP_NAME = "Alma Insights"
-APP_VERSION = "1.0.0"
 APP_ID = "AlmaInsights"
+
+
+def _read_version(source_dir):
+    """Read version from app/src/__init__.py (single source of truth)."""
+    for candidate in [
+        source_dir / "app" / "src" / "__init__.py",  # installed layout
+        source_dir / "src" / "__init__.py",           # raw source layout
+    ]:
+        if candidate.exists():
+            for line in candidate.read_text().splitlines():
+                if line.startswith("VERSION"):
+                    return line.split("=", 1)[1].strip().strip("\"'")
+    return "1.0.0"  # fallback
 
 
 def get_source_dir():
@@ -44,11 +56,11 @@ def get_default_install_dir():
         return Path.home() / f".{APP_ID.lower()}"
 
 
-def print_header():
+def print_header(version):
     print()
     print("=" * 56)
     print(f"  {APP_NAME} -- Express Installation")
-    print(f"  Version {APP_VERSION}")
+    print(f"  Version {version}")
     print("=" * 56)
     print()
 
@@ -112,6 +124,36 @@ def copy_with_progress(src_dir, dest_dir, label):
     print()  # newline after progress
 
 
+def install_embedding_model(install_dir):
+    """Copy bundled embedding model to data/models/ with progress."""
+    src_models = install_dir / "app" / "data" / "models"
+    if not src_models.exists():
+        print("  [INFO] No bundled embedding model found — will download on first use")
+        return
+
+    model_dirs = [d for d in src_models.iterdir() if d.is_dir()]
+    if not model_dirs:
+        return
+
+    total_size = sum(
+        f.stat().st_size for d in model_dirs for f in d.rglob("*") if f.is_file()
+    )
+    print(f"  Embedding model: {total_size / (1024*1024):.0f} MB")
+
+
+def cleanup_old_models(install_dir):
+    """Remove legacy MiniLM model files if present."""
+    models_dir = install_dir / "app" / "data" / "models"
+    if not models_dir.exists():
+        return
+
+    legacy_name = "all-MiniLM-L6-v2"
+    for d in list(models_dir.iterdir()):
+        if d.is_dir() and legacy_name in d.name:
+            print(f"  Cleaning up legacy model: {d.name}")
+            shutil.rmtree(d, ignore_errors=True)
+
+
 def install_files(source_dir, install_dir):
     """Copy python/ and app/ from the distribution to the install directory."""
     print()
@@ -150,6 +192,13 @@ def install_files(source_dir, install_dir):
         print("  [ERROR] app/ directory not found in distribution!")
         sys.exit(1)
 
+    # Copy Node.js runtime (for Gemini bridge)
+    src_node = source_dir / "node"
+    if src_node.exists():
+        copy_with_progress(src_node, install_dir / "node", "Copying Node.js runtime")
+    else:
+        print("  [INFO] node/ not found — Gemini CLI must be configured manually")
+
     # Restore data backup if we had one
     if 'data_backup' in dir() and data_backup and data_backup.exists():
         dest_data = install_dir / "app" / "data"
@@ -160,6 +209,12 @@ def install_files(source_dir, install_dir):
 
     # Ensure data directory exists
     (install_dir / "app" / "data").mkdir(exist_ok=True)
+
+    # Install/update embedding model
+    install_embedding_model(install_dir)
+
+    # Clean up legacy MiniLM model
+    cleanup_old_models(install_dir)
 
     # Copy the direct launcher
     system = platform.system()
@@ -188,18 +243,22 @@ def create_launcher_script(install_dir):
         if not python_exe.exists():
             python_exe = install_dir / "python" / "python.exe"
         main_py = install_dir / "app" / "main.py"
+        node_dir = install_dir / "node"
 
         launcher.write_text(
             f'@echo off\r\n'
+            f'set "PATH={node_dir};%PATH%"\r\n'
             f'start "" "{python_exe}" "{main_py}"\r\n'
         )
     else:
         launcher = install_dir / "AlmaInsights.command"
         python_exe = install_dir / "python" / "bin" / "python3"
         main_py = install_dir / "app" / "main.py"
+        node_bin = install_dir / "node" / "bin"
 
         launcher.write_text(
             f'#!/bin/bash\n'
+            f'export PATH="{node_bin}:$PATH"\n'
             f'cd "$(dirname "$0")/app"\n'
             f'"{python_exe}" "{main_py}"\n'
         )
@@ -238,12 +297,186 @@ def init_database(install_dir):
             print(f"        {result.stderr[:200]}")
 
 
-def create_windows_shortcuts(install_dir):
-    """Create Desktop and Start Menu shortcuts on Windows."""
-    python_exe = install_dir / "python" / "pythonw.exe"
-    if not python_exe.exists():
+def run_migrations(install_dir):
+    """Apply pending database schema migrations."""
+    print("  Running schema migrations...", end="", flush=True)
+    system = platform.system()
+
+    if system == "Windows":
         python_exe = install_dir / "python" / "python.exe"
-    main_py = install_dir / "app" / "main.py"
+    else:
+        python_exe = install_dir / "python" / "bin" / "python3"
+
+    app_dir = install_dir / "app"
+    migrations_dir = app_dir / "migrations"
+
+    if not migrations_dir.exists() or not any(migrations_dir.glob("*.sql")):
+        print(" [SKIP] No migration files found")
+        return
+
+    result = subprocess.run(
+        [
+            str(python_exe), "-c",
+            "import sys; sys.path.insert(0, '.'); "
+            "from src.updater.schema_migrator import SchemaMigrator; "
+            "m = SchemaMigrator(); applied = m.apply_pending(); "
+            "print(f'{applied}')"
+        ],
+        cwd=str(app_dir),
+        capture_output=True, text=True, timeout=30,
+    )
+
+    if result.returncode == 0:
+        count = result.stdout.strip().split("\n")[-1]
+        print(f" [OK] {count} migration(s) applied")
+    else:
+        print(" [WARN] Will apply on first launch")
+        if result.stderr:
+            print(f"        {result.stderr[:200]}")
+
+
+def migrate_settings(install_dir):
+    """Migrate settings from config/ to data/ if needed (P0 migration)."""
+    app_dir = install_dir / "app"
+    data_settings = app_dir / "data" / "settings.yaml"
+    config_settings = app_dir / "config" / "settings.yaml"
+
+    if data_settings.exists():
+        return  # Already migrated
+
+    if config_settings.exists():
+        print("  Migrating settings to data directory...", end="", flush=True)
+        (app_dir / "data").mkdir(exist_ok=True)
+        shutil.copy2(config_settings, data_settings)
+        # Leave breadcrumb (matches runtime migration in settings_manager.py)
+        migrated_marker = app_dir / "config" / "settings.yaml.migrated"
+        if not migrated_marker.exists():
+            config_settings.rename(migrated_marker)
+        print(" [OK]")
+
+
+def setup_gemini_cli(install_dir):
+    """Verify or install the Gemini CLI using the bundled Node.js."""
+    print()
+    print("  Setting up Gemini CLI...", flush=True)
+
+    system = platform.system()
+    node_dir = install_dir / "node"
+
+    # Find bundled node
+    if system == "Windows":
+        node_exe = node_dir / "node.exe"
+        npm_cmd = node_dir / "npm.cmd"
+        if not npm_cmd.exists():
+            npm_cmd = node_dir / "npm"
+        gemini_candidates = [
+            node_dir / "gemini.cmd",
+            node_dir / "node_modules" / ".bin" / "gemini.cmd",
+            node_dir / "bin" / "gemini.cmd",
+        ]
+    else:
+        node_exe = node_dir / "bin" / "node"
+        npm_cmd = node_dir / "bin" / "npm"
+        gemini_candidates = [
+            node_dir / "bin" / "gemini",
+            node_dir / "lib" / "node_modules" / ".bin" / "gemini",
+        ]
+
+    if not node_exe.exists():
+        print("  [WARN] Bundled Node.js not found — Gemini CLI setup skipped")
+        print("         Configure the Gemini CLI path manually in Settings.")
+        return None
+
+    # Check if Gemini CLI already installed in bundled node
+    gemini_path = None
+    for candidate in gemini_candidates:
+        if candidate.exists():
+            gemini_path = candidate
+            break
+
+    if gemini_path:
+        print(f"  Gemini CLI found: {gemini_path.name}")
+    else:
+        # Install via bundled npm
+        print("  Installing Gemini CLI via npm...", flush=True)
+        if system == "Windows":
+            cmd = ["cmd.exe", "/c", str(npm_cmd), "install", "-g",
+                   "@google/gemini-cli", "--prefix", str(node_dir)]
+        else:
+            cmd = [str(npm_cmd), "install", "-g",
+                   "@google/gemini-cli", "--prefix", str(node_dir)]
+
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=300,
+            )
+            if result.returncode == 0:
+                print("  npm install complete")
+                # Re-check for the binary
+                for candidate in gemini_candidates:
+                    if candidate.exists():
+                        gemini_path = candidate
+                        break
+            else:
+                print("  [WARN] npm install failed — configure manually in Settings")
+                if result.stderr:
+                    print(f"         {result.stderr[:200]}")
+        except subprocess.TimeoutExpired:
+            print("  [WARN] npm install timed out")
+        except Exception as e:
+            print(f"  [WARN] npm install error: {e}")
+
+    if gemini_path:
+        print(f"  [OK] Gemini CLI ready")
+
+    return gemini_path
+
+
+def write_gemini_settings(install_dir, gemini_path):
+    """Write the Gemini CLI path into data/settings.yaml."""
+    if not gemini_path:
+        return
+
+    app_dir = install_dir / "app"
+    settings_file = app_dir / "data" / "settings.yaml"
+
+    if not settings_file.exists():
+        # Copy template from config if available
+        template = app_dir / "config" / "settings.yaml"
+        if template.exists():
+            (app_dir / "data").mkdir(exist_ok=True)
+            shutil.copy2(template, settings_file)
+
+    if settings_file.exists():
+        try:
+            content = settings_file.read_text(encoding="utf-8")
+            # Update the cli_path value if the key exists
+            lines = content.splitlines(keepends=True)
+            updated = False
+            for i, line in enumerate(lines):
+                stripped = line.lstrip()
+                if stripped.startswith("cli_path:"):
+                    indent = line[:len(line) - len(stripped)]
+                    # Use forward slashes to avoid YAML escape issues on Windows
+                    safe_path = str(gemini_path).replace("\\", "/")
+                    lines[i] = f"{indent}cli_path: \"{safe_path}\"\n"
+                    updated = True
+                    break
+
+            if updated:
+                settings_file.write_text("".join(lines), encoding="utf-8")
+                print("  Gemini CLI path saved to settings")
+        except Exception:
+            pass  # Non-critical — user can configure in Settings UI
+
+
+def create_windows_shortcuts(install_dir):
+    """Create Desktop and Start Menu shortcuts on Windows.
+
+    Points to AlmaInsights.bat (not pythonw.exe directly) so that
+    the bundled Node.js is on PATH when the app launches.
+    """
+    launcher_bat = install_dir / "AlmaInsights.bat"
     icon_path = install_dir / "app" / "assets" / "alma_insights.ico"
     working_dir = install_dir / "app"
 
@@ -262,20 +495,20 @@ $WshShell = New-Object -ComObject WScript.Shell
 
 # Desktop shortcut
 $Shortcut = $WshShell.CreateShortcut("{desktop_lnk}")
-$Shortcut.TargetPath = "{python_exe}"
-$Shortcut.Arguments = '"{main_py}"'
+$Shortcut.TargetPath = "{launcher_bat}"
 $Shortcut.WorkingDirectory = "{working_dir}"
 $Shortcut.Description = "{APP_NAME} -- RCM Issue Analysis"
 $Shortcut.IconLocation = "{icon_path},0"
+$Shortcut.WindowStyle = 7
 $Shortcut.Save()
 
 # Start Menu shortcut
 $Shortcut2 = $WshShell.CreateShortcut("{start_lnk}")
-$Shortcut2.TargetPath = "{python_exe}"
-$Shortcut2.Arguments = '"{main_py}"'
+$Shortcut2.TargetPath = "{launcher_bat}"
 $Shortcut2.WorkingDirectory = "{working_dir}"
 $Shortcut2.Description = "{APP_NAME} -- RCM Issue Analysis"
 $Shortcut2.IconLocation = "{icon_path},0"
+$Shortcut2.WindowStyle = 7
 $Shortcut2.Save()
 """
 
@@ -309,17 +542,22 @@ def _create_windows_bat_fallback(install_dir, desktop):
     if not python_exe.exists():
         python_exe = install_dir / "python" / "python.exe"
     main_py = install_dir / "app" / "main.py"
+    node_dir = install_dir / "node"
 
     bat_path = desktop / f"{APP_NAME}.bat"
     bat_path.write_text(
         f'@echo off\r\n'
+        f'set "PATH={node_dir};%PATH%"\r\n'
         f'start "" "{python_exe}" "{main_py}"\r\n'
     )
     print(f"  Created fallback launcher: {bat_path}")
 
 
-def create_macos_app_bundle(install_dir):
+def create_macos_app_bundle(install_dir, version=None):
     """Create a .app bundle in ~/Applications/."""
+    if version is None:
+        version = _read_version(install_dir)
+
     app_bundle = Path.home() / "Applications" / f"{APP_NAME}.app"
     contents = app_bundle / "Contents"
     macos_dir = contents / "MacOS"
@@ -330,6 +568,7 @@ def create_macos_app_bundle(install_dir):
 
     python_exe = install_dir / "python" / "bin" / "python3"
     main_py = install_dir / "app" / "main.py"
+    node_bin = install_dir / "node" / "bin"
     icon_src = install_dir / "app" / "assets" / "alma_insights.png"
 
     # Info.plist
@@ -346,9 +585,9 @@ def create_macos_app_bundle(install_dir):
     <key>CFBundleIdentifier</key>
     <string>com.alma.insights</string>
     <key>CFBundleVersion</key>
-    <string>{APP_VERSION}</string>
+    <string>{version}</string>
     <key>CFBundleShortVersionString</key>
-    <string>{APP_VERSION}</string>
+    <string>{version}</string>
     <key>CFBundleExecutable</key>
     <string>launch</string>
     <key>CFBundlePackageType</key>
@@ -361,11 +600,13 @@ def create_macos_app_bundle(install_dir):
 </plist>
 """)
 
-    # Launch script
+    # Launch script (includes bundled Node.js on PATH for Gemini bridge)
     launcher = macos_dir / "launch"
     launcher.write_text(
         f'#!/bin/bash\n'
+        f'export PATH="{node_bin}:$PATH"\n'
         f'xattr -rd com.apple.quarantine "{install_dir / "python"}" 2>/dev/null\n'
+        f'xattr -rd com.apple.quarantine "{install_dir / "node"}" 2>/dev/null\n'
         f'cd "{install_dir / "app"}"\n'
         f'exec "{python_exe}" "{main_py}"\n'
     )
@@ -401,6 +642,14 @@ def offer_launch(install_dir):
 
     if response in ("", "y", "yes"):
         print("  Launching...")
+        # Put bundled Node.js on PATH for Gemini bridge
+        env = os.environ.copy()
+        node_dir = install_dir / "node"
+        if system == "Windows" and node_dir.exists():
+            env["PATH"] = f"{node_dir};{env.get('PATH', '')}"
+        elif node_dir.exists():
+            env["PATH"] = f"{node_dir / 'bin'}:{env.get('PATH', '')}"
+
         if system == "Windows":
             python_exe = install_dir / "python" / "pythonw.exe"
             if not python_exe.exists():
@@ -409,6 +658,7 @@ def offer_launch(install_dir):
             subprocess.Popen(
                 [str(python_exe), str(main_py)],
                 cwd=str(install_dir / "app"),
+                env=env,
             )
         else:
             python_exe = install_dir / "python" / "bin" / "python3"
@@ -416,13 +666,14 @@ def offer_launch(install_dir):
             subprocess.Popen(
                 [str(python_exe), str(main_py)],
                 cwd=str(install_dir / "app"),
+                env=env,
             )
 
 
 def main():
-    print_header()
-
     source_dir = get_source_dir()
+    version = _read_version(source_dir)
+    print_header(version)
 
     # Verify we're in the right place
     if not (source_dir / "python").exists():
@@ -439,14 +690,24 @@ def main():
     # Prompt for install location
     install_dir = prompt_install_dir()
 
-    # Install
+    # Install files (python, app, node)
     install_files(source_dir, install_dir)
 
-    # Create launcher with absolute paths
+    # Create launcher with absolute paths (includes Node.js on PATH)
     create_launcher_script(install_dir)
 
     # Initialize database
     init_database(install_dir)
+
+    # Run schema migrations
+    run_migrations(install_dir)
+
+    # Migrate settings (config/ → data/) for upgrades
+    migrate_settings(install_dir)
+
+    # Set up Gemini CLI via bundled Node.js
+    gemini_path = setup_gemini_cli(install_dir)
+    write_gemini_settings(install_dir, gemini_path)
 
     # Platform-specific shortcuts
     print()
@@ -454,7 +715,7 @@ def main():
     if system == "Windows":
         create_windows_shortcuts(install_dir)
     elif system == "Darwin":
-        create_macos_app_bundle(install_dir)
+        create_macos_app_bundle(install_dir, version=version)
     else:
         print("  [INFO] Create a shortcut manually to:")
         print(f"    {install_dir / 'AlmaInsights.command'}")
@@ -462,7 +723,7 @@ def main():
     # Done!
     print()
     print("=" * 56)
-    print(f"  {APP_NAME} installation complete!")
+    print(f"  {APP_NAME} v{version} installation complete!")
     print()
     print(f"  Installed to: {install_dir}")
     print()

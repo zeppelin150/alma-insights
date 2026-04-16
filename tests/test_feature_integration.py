@@ -957,14 +957,13 @@ class TestCrossCutting_SettingsPersistence:
     """Verify settings infrastructure."""
 
     def test_settings_yaml_exists(self):
-        settings_path = Path("config/settings.yaml")
+        from src.data.settings_manager import get_settings_path
+        settings_path = get_settings_path()
         assert settings_path.exists(), "settings.yaml not found"
 
     def test_settings_yaml_parseable(self):
-        import yaml
-        settings_path = Path("config/settings.yaml")
-        with open(settings_path) as f:
-            cfg = yaml.safe_load(f)
+        from src.data.settings_manager import load_settings
+        cfg = load_settings()
         assert isinstance(cfg, dict)
         assert "gemini" in cfg or "display" in cfg or "behavior" in cfg
 

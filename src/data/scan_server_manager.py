@@ -10,6 +10,8 @@ HARDENING CONTROLS USED:
   H13: Secure API key handoff via temp file (never CLI arg)
 """
 
+from __future__ import annotations
+
 import os
 import sys
 import ssl
@@ -21,6 +23,8 @@ import logging
 from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import URLError
+
+from src.data.settings_manager import get_section
 
 logger = logging.getLogger("alma.scan_server")
 
@@ -35,7 +39,7 @@ class ScanServerManager:
     Starts/stops local Node scan server. Communicates via HTTPS REST.
     """
 
-    def __init__(self, db_path=None):
+    def __init__(self, db_path: str | None = None) -> None:
         self.db_path = db_path or str(_DATA_DIR / "local_warehouse.db")
         self.process = None
         self._port = None
@@ -178,17 +182,13 @@ class ScanServerManager:
     def _find_gemini_cli(self) -> str:
         """Find Gemini CLI path from settings or PATH."""
         import shutil
-        config_path = _PROJECT_ROOT / "config" / "settings.yaml"
-        if config_path.exists():
-            try:
-                import yaml
-                with open(config_path, encoding="utf-8") as f:
-                    config = yaml.safe_load(f)
-                path = config.get("gemini", {}).get("cli_path", "")
-                if path and Path(path).exists():
-                    return path
-            except Exception:
-                pass
+        try:
+            gemini_cfg = get_section("gemini", {})
+            path = gemini_cfg.get("cli_path", "")
+            if path and Path(path).exists():
+                return path
+        except Exception:
+            pass
         return shutil.which("gemini") or ""
 
     def _get_api_key(self) -> str:
@@ -248,8 +248,8 @@ class ScanServerManager:
             raise RuntimeError(f"Scan server request failed: {e}")
 
     def start_scan(self, date_start: str, date_end: str,
-                   trc_filter=None, batch_size=700,
-                   budget_cap=50.0, mode="full") -> dict:
+                   trc_filter: str | None = None, batch_size: int = 700,
+                   budget_cap: float = 50.0, mode: str = "full") -> dict:
         """POST /scan/start. Returns {scan_id, total_batches, estimated_cost}."""
         body = {
             "date_start": date_start,
@@ -270,7 +270,7 @@ class ScanServerManager:
         """POST /scan/{id}/pause."""
         return self._request("POST", f"/scan/{scan_id}/pause")
 
-    def resume_scan(self, scan_id: str, budget_cap=None) -> dict:
+    def resume_scan(self, scan_id: str, budget_cap: float | None = None) -> dict:
         """POST /scan/{id}/resume."""
         body = {}
         if budget_cap is not None:
@@ -281,6 +281,6 @@ class ScanServerManager:
         """POST /scan/{id}/cancel."""
         return self._request("POST", f"/scan/{scan_id}/cancel")
 
-    def get_history(self) -> list:
+    def get_history(self) -> list[dict]:
         """GET /scan/history."""
         return self._request("GET", "/scan/history")

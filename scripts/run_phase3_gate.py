@@ -30,9 +30,12 @@ log = logging.getLogger("phase3_gate")
 
 
 def _parse_args() -> argparse.Namespace:
+    import os
     p = argparse.ArgumentParser()
-    p.add_argument("--csv", default=r"C:/Users/Chris/Downloads/alma_test_10000_1_enriched.csv")
-    p.add_argument("--golden", default=r"C:/Users/Chris/Downloads/alma_test_10000_1_golden_set.csv")
+    p.add_argument("--csv", default=os.environ.get(
+        "ALMA_ENRICHED_CSV", "data/test_fixtures/alma_test_10000_1_enriched.csv"))
+    p.add_argument("--golden", default=os.environ.get(
+        "ALMA_GOLDEN_SET_CSV", "data/test_fixtures/alma_test_10000_1_golden_set.csv"))
     p.add_argument("--db", default=str(_ROOT / "data" / "phase3_gate_test.db"))
     p.add_argument("--precision-gate", type=float, default=0.80)
     p.add_argument("--recall-gate", type=float, default=0.80)

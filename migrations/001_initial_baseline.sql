@@ -1,0 +1,7 @@
+-- Migration 001: Initial baseline
+-- This is an empty migration that marks the starting point for
+-- the schema migration system.  All tables up to this point are
+-- created via db_manager.initialize() with CREATE TABLE IF NOT EXISTS.
+--
+-- Future migrations (002+) will use ALTER TABLE / CREATE TABLE to
+-- evolve the schema incrementally.

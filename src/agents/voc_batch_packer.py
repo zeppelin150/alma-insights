@@ -11,6 +11,8 @@ Imports MODEL_INPUT_LIMITS from batch_packer.py — single source of truth
 for model limits.
 """
 
+from __future__ import annotations
+
 import logging
 from math import ceil
 

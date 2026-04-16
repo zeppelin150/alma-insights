@@ -11,8 +11,8 @@ Refactored to use AnalysisPageBase building blocks with 4 tabs:
 
 import json
 import time
-import sqlite3
 from datetime import datetime
+from src.data.connection_factory import get_connection
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -50,15 +50,22 @@ from src.ui.layman_mode import (
 # ═══════════════════════════════════════════
 
 class IncidentWorker(QThread):
+    """Background thread that runs the Poisson incident scan.
+
+    Computes daily ticket counts per TRC, builds baselines, detects
+    spikes above theta-1/theta-2 thresholds, and writes to `incident_flags`.
+    """
+
     finished = Signal(dict)
     error = Signal(str)
     progress = Signal(str, int)  # message, percent
 
-    def __init__(self, db_path, target_date, date_from=None):
+    def __init__(self, db_path, target_date, date_from=None, source_id=None):
         super().__init__()
         self.db_path = db_path
         self.target_date = target_date
         self.date_from = date_from
+        self.source_id = source_id
 
     def run(self):
         try:
@@ -72,6 +79,7 @@ class IncidentWorker(QThread):
                 target_date=self.target_date,
                 date_from=self.date_from,
                 progress_callback=lambda msg, pct: self.progress.emit(msg, pct),
+                source_id=self.source_id,
             )
             db.close()
             self.finished.emit(result)
@@ -92,8 +100,7 @@ class ThetaWorker(QThread):
 
     def run(self):
         try:
-            conn = sqlite3.connect(str(self.db_path))
-            conn.row_factory = sqlite3.Row
+            conn = get_connection(self.db_path)
 
             from src.data.theta_engine import run_theta_scan_range
 
@@ -113,6 +120,12 @@ class ThetaWorker(QThread):
 # ═══════════════════════════════════════════
 
 class IncidentsPage(AnalysisPageBase):
+    """Incidents page: Poisson spike detection and theta anomaly flags.
+
+    Shows open incident flags with theta-1 (warning) and theta-2 (critical)
+    tiers, CUSUM drift detection, and per-TRC control charts. Users can
+    acknowledge, resolve, or mark flags as false positives.
+    """
 
     scan_complete = Signal(int)  # emits count of 2θ flags for sidebar badge
 
@@ -151,16 +164,29 @@ class IncidentsPage(AnalysisPageBase):
 
     def set_drilldown_panel(self, panel):
         super().set_drilldown_panel(panel)
-        self._reports_tab.set_drilldown_panel(panel)
+        self._reports_tab.set_drilldown_panel(
+            panel, detail_callback=self._render_report_detail_html)
 
     # ═══════════════════════════════════════════
     #  FILTER BAR SETUP
     # ═══════════════════════════════════════════
 
     def _setup_filters(self):
+        from src.ui.widgets.source_selector import SourceSelector
+        self._source_selector = SourceSelector(self)
+        self._source_selector.setFixedWidth(160)
+        self.filter_bar.add_custom_widget("Source", self._source_selector)
         self.filter_bar.add_date_range(date_from=QDate.currentDate().addDays(-30))
         self.filter_bar.add_combo_filter("trc", "TRC Code", ["All TRCs"])
         self.filter_bar.add_action_button("Run Scan")
+        # Refresh source list
+        try:
+            from src.data.connection_factory import get_connection
+            conn = get_connection(self.db.db_path)
+            self._source_selector.refresh_sources(conn)
+            conn.close()
+        except Exception:
+            pass
 
     # ═══════════════════════════════════════════
     #  ACTION / FILTER HOOKS
@@ -472,8 +498,9 @@ class IncidentsPage(AnalysisPageBase):
         """Run incident scan without the job queue (fallback)."""
         date_from = self.filter_bar.get_date_from().date().toString("yyyy-MM-dd")
         date_to = self.filter_bar.get_date_to().date().toString("yyyy-MM-dd")
+        source_id = self._source_selector.selected_source_id() if hasattr(self, '_source_selector') else None
         self._scan_start_time = time.time()
-        self._worker = IncidentWorker(self.db.db_path, date_to, date_from)
+        self._worker = IncidentWorker(self.db.db_path, date_to, date_from, source_id=source_id)
         self._worker.finished.connect(self._on_scan_results)
         self._worker.error.connect(self._on_scan_error)
         self._worker.start()
@@ -487,8 +514,9 @@ class IncidentsPage(AnalysisPageBase):
         if self._worker and self._worker.isRunning():
             return
 
+        source_id = self._source_selector.selected_source_id() if hasattr(self, '_source_selector') else None
         self._scan_start_time = time.time()
-        self._worker = IncidentWorker(self.db.db_path, date_to, date_from)
+        self._worker = IncidentWorker(self.db.db_path, date_to, date_from, source_id=source_id)
         self._worker.finished.connect(self._on_scan_results)
         self._worker.error.connect(self._on_scan_error)
         self._worker.start()
@@ -914,7 +942,7 @@ class IncidentsPage(AnalysisPageBase):
         card.setStyleSheet(f"""
             QFrame {{
                 background: {bg_tint};
-                border: 1px solid rgba(214, 210, 202, 0.45);
+                border: none;
                 border-left: 4px solid {border_color};
                 border-radius: 10px;
                 padding: 12px 16px;
@@ -1206,7 +1234,7 @@ class IncidentsPage(AnalysisPageBase):
         card.setStyleSheet(f"""
             QFrame {{
                 background: {ALMA_BG_ELEVATED};
-                border: 1px solid rgba(214, 210, 202, 0.45);
+                border: none;
                 border-left: 4px solid {border_color};
                 border-radius: 10px;
                 padding: 8px;
@@ -1336,8 +1364,7 @@ class IncidentsPage(AnalysisPageBase):
     def _acknowledge_theta_flag(self, flag):
         """Mark an EWMA theta flag as acknowledged."""
         try:
-            conn = sqlite3.connect(str(self.db.db_path))
-            conn.row_factory = sqlite3.Row
+            conn = get_connection(self.db.db_path)
             from src.data.theta_engine import acknowledge_flag
 
             row = conn.execute(
@@ -1356,8 +1383,7 @@ class IncidentsPage(AnalysisPageBase):
     def _false_positive_theta_flag(self, flag):
         """Mark an EWMA theta flag as false positive."""
         try:
-            conn = sqlite3.connect(str(self.db.db_path))
-            conn.row_factory = sqlite3.Row
+            conn = get_connection(self.db.db_path)
             from src.data.theta_engine import mark_false_positive
 
             row = conn.execute(
@@ -1376,8 +1402,7 @@ class IncidentsPage(AnalysisPageBase):
     def _toggle_theta_history(self):
         """Show a dialog with historical EWMA theta flags."""
         try:
-            conn = sqlite3.connect(str(self.db.db_path))
-            conn.row_factory = sqlite3.Row
+            conn = get_connection(self.db.db_path)
             from src.data.theta_engine import get_flag_history
 
             flags = get_flag_history(conn, days=30, limit=200)

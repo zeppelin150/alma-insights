@@ -615,7 +615,7 @@ class DrilldownPanel(QFrame):
         card.setStyleSheet(f"""
             QFrame {{
                 background: {ALMA_WHITE};
-                border: 1px solid {ALMA_BORDER_LIGHT};
+                border: none;
                 border-radius: 8px;
             }}
             QFrame:hover {{
@@ -722,7 +722,7 @@ class DrilldownPanel(QFrame):
         card.setStyleSheet(f"""
             QFrame {{
                 background: {ALMA_WHITE};
-                border: 1px solid {ALMA_BORDER_LIGHT};
+                border: none;
                 border-radius: 8px;
             }}
             QFrame:hover {{

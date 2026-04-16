@@ -6,6 +6,8 @@ In CLI mode: launches scan_worker.py as detached subprocess.
 In server mode: delegates to Node.js scan server (future).
 """
 
+from __future__ import annotations
+
 import sys
 import os
 import json
@@ -15,6 +17,9 @@ import sqlite3
 import logging
 from pathlib import Path
 from datetime import datetime
+
+from src.data.connection_factory import get_connection
+from src.data.settings_manager import get_section
 
 logger = logging.getLogger("alma.scan_worker_mgr")
 
@@ -27,8 +32,14 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 class ScanWorkerManager:
+    """Legacy coordinator for ScanWorker subprocesses.
 
-    def __init__(self, db_path=None):
+    Superseded by `src.agents.ScanOrchestrator`. Public API is
+    preserved so older call sites and UI glue continue to work.
+    New code should use ScanOrchestrator directly.
+    """
+
+    def __init__(self, db_path: str | None = None) -> None:
         # Always resolve to absolute path — detached workers may have
         # a different CWD and relative paths would resolve wrong.
         raw = str(db_path or (_PROJECT_ROOT / "data" / "local_warehouse.db"))
@@ -40,18 +51,14 @@ class ScanWorkerManager:
         if env in ('cli', 'server'):
             return env
         try:
-            import yaml
-            config_path = _PROJECT_ROOT / 'config' / 'settings.yaml'
-            with open(config_path, encoding='utf-8') as f:
-                cfg = yaml.safe_load(f)
-            return cfg.get('nlp_scan', {}).get('mode', 'cli')
+            return get_section('nlp_scan', {}).get('mode', 'cli')
         except Exception:
             return 'cli'
 
-    def start_scan(self, date_start, date_end,
-                   trc_filter=None, batch_size=700,
-                   budget_cap=50.0, parallel_workers=1,
-                   mode='full'):
+    def start_scan(self, date_start: str, date_end: str,
+                   trc_filter: list[str] | None = None, batch_size: int = 700,
+                   budget_cap: float = 50.0, parallel_workers: int = 1,
+                   mode: str = 'full') -> dict:
         """
         Create scan record, partition batches by TRC,
         launch worker subprocess(es).
@@ -68,21 +75,29 @@ class ScanWorkerManager:
         scan_id = str(uuid.uuid4())
 
         try:
-            # ── Query TRC distribution ──
-            trc_counts = conn.execute("""
+            # ── Query TRC distribution (via warehouse) ──
+            from src.data.source_registry import SourceRegistry
+            from src.data.warehouse_query import WarehouseQuery
+            _swm_reg = SourceRegistry(conn)
+            _swm_wq = WarehouseQuery(conn, _swm_reg)
+            _trc_raw = _swm_wq.query_conversations_raw("""
                 SELECT trc_code AS trc, COUNT(DISTINCT ticket_id) AS n
-                FROM conversations
+                FROM {table}
                 WHERE created_at >= ? AND created_at <= ?
                   AND trc_code IS NOT NULL AND trc_code != ''
                 GROUP BY trc_code ORDER BY n DESC
-            """, (date_start, date_end + ' 23:59:59')).fetchall()
+            """, (date_start, date_end + ' 23:59:59'))
+            _trc_agg = {}
+            for r in _trc_raw:
+                _trc_agg[r[0]] = _trc_agg.get(r[0], 0) + r[1]
+            trc_counts = [{"trc": t, "n": n} for t, n in sorted(_trc_agg.items(), key=lambda x: -x[1])]
 
-            # Also check untagged tickets
-            untagged_row = conn.execute("""
-                SELECT COUNT(DISTINCT ticket_id) AS n FROM conversations
+            _untag_raw = _swm_wq.query_conversations_raw("""
+                SELECT COUNT(DISTINCT ticket_id) AS n FROM {table}
                 WHERE created_at >= ? AND created_at <= ?
                   AND (trc_code IS NULL OR trc_code = '')
-            """, (date_start, date_end + ' 23:59:59')).fetchone()
+            """, (date_start, date_end + ' 23:59:59'))
+            untagged_row = {"n": sum(r[0] for r in _untag_raw if r and r[0])}
 
             # ── Partition into batches ──
             # Strategy:
@@ -300,7 +315,7 @@ class ScanWorkerManager:
         except Exception as e:
             logger.error(f"Failed to launch worker {worker_id}: {e}")
 
-    def get_status(self, scan_id):
+    def get_status(self, scan_id: str) -> dict:
         """Read scan progress directly from SQLite."""
         conn = self._get_conn()
         scan = conn.execute(
@@ -326,7 +341,7 @@ class ScanWorkerManager:
         conn.close()
         return result
 
-    def pause_scan(self, scan_id):
+    def pause_scan(self, scan_id: str) -> dict:
         """Set status to paused. Workers read this on next loop."""
         conn = self._get_conn()
         conn.execute(
@@ -336,7 +351,7 @@ class ScanWorkerManager:
         conn.close()
         return {'status': 'paused'}
 
-    def resume_scan(self, scan_id, budget_cap=None):
+    def resume_scan(self, scan_id: str, budget_cap: float | None = None) -> dict:
         """Set status to running, re-queue failed batches, relaunch workers."""
         conn = self._get_conn()
         scan = conn.execute(
@@ -385,7 +400,7 @@ class ScanWorkerManager:
 
         return {'status': 'running', 'requeued_batches': requeued + reset}
 
-    def cancel_scan(self, scan_id):
+    def cancel_scan(self, scan_id: str) -> dict:
         """Cancel scan. Workers exit on next loop."""
         conn = self._get_conn()
         conn.execute(
@@ -395,7 +410,7 @@ class ScanWorkerManager:
         conn.close()
         return {'status': 'cancelled'}
 
-    def get_history(self):
+    def get_history(self) -> list[dict]:
         conn = self._get_conn()
         rows = conn.execute("""
             SELECT scan_id, created_at, status, date_range_start,
@@ -407,8 +422,4 @@ class ScanWorkerManager:
         return [dict(r) for r in rows]
 
     def _get_conn(self):
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode = WAL")
-        conn.execute("PRAGMA busy_timeout = 30000")
-        return conn
+        return get_connection(self.db_path)

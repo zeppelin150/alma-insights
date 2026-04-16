@@ -1,0 +1,104 @@
+name: CI
+
+# Runs the unit + integration test suite on every push and PR.
+# Bundle builds live in build.yml (expensive), this job is the fast gate.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+env:
+  PYTHON_VERSION: '3.12'
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+          cache-dependency-path: requirements.lock
+
+      # Install pinned deps. requirements.lock is the source of truth;
+      # requirements.txt is a fallback for hash-less environments.
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.lock
+          pip install pytest pytest-qt
+
+      # Full test suite — split by phase so failures are easy to localize.
+      # The Phase 1 + 2 + 3 files cover ~350 tests in under a minute.
+      - name: Phase 1 tests (foundation)
+        run: |
+          pytest -x -q \
+            tests/test_pat_store_keyring.py \
+            tests/test_hardware_profile.py \
+            tests/test_crash_handler.py \
+            tests/test_env_guard.py \
+            tests/test_phase1_e2e.py
+
+      - name: Phase 2 tests (splash)
+        run: |
+          pytest -x -q \
+            tests/test_checker.py \
+            tests/test_startup_checks.py \
+            tests/test_splash.py \
+            tests/test_phase2_e2e.py
+
+      - name: Phase 3 tests (updater)
+        run: |
+          pytest -x -q \
+            tests/test_update_checker_phase3.py \
+            tests/test_updater_integrity.py \
+            tests/test_github_app_auth.py \
+            tests/test_release_manifest.py \
+            tests/test_updates_check_phase3.py \
+            tests/test_provision_update_token.py \
+            tests/test_phase3_e2e.py
+
+      - name: Phase 4 tests (build + integrity)
+        run: |
+          pytest -x -q \
+            tests/test_phase4_build.py \
+            tests/test_phase4_integrity.py \
+            tests/test_uninstaller.py
+
+      - name: Phase 5 tests (hardening)
+        run: |
+          pytest -x -q \
+            tests/test_rollback.py \
+            tests/test_eula_dialog.py \
+            tests/test_audit_secrets.py \
+            tests/test_offline_mode.py \
+            tests/test_phase5_e2e.py
+
+      - name: Regression gate (existing suites)
+        run: |
+          pytest -x -q \
+            tests/test_updater.py \
+            tests/test_source_monitor.py \
+            tests/test_guru_client.py \
+            tests/test_settings_manager.py
+
+  # Fast secret-leak scan — blocks PRs that accidentally commit a PAT.
+  # Uses scripts/audit_secrets.py so CI and dev environments share the
+  # same pattern list + skip rules.
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Audit secrets (working tree + git history)
+        run: python scripts/audit_secrets.py

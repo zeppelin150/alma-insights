@@ -9,11 +9,17 @@ import json
 from datetime import datetime
 
 
-def build_data_block(db, date_start, date_end, trc_filter=None, dataset_id=None):
+def build_data_block(db, date_start, date_end, trc_filter=None, dataset_id=None,
+                     source_id=None):
     """Pre-compute ALL analytics. Gemini gets structured results, not raw data.
 
     Returns dict with keys that map to prompt {variables}.
     """
+    from src.data.source_registry import SourceRegistry
+    from src.data.warehouse_query import WarehouseQuery
+    registry = SourceRegistry(db.conn)
+    wq = WarehouseQuery(db.conn, registry)
+
     block = {}
 
     # ── Topline stats ──
@@ -27,62 +33,102 @@ def build_data_block(db, date_start, date_end, trc_filter=None, dataset_id=None)
         params.append(dataset_id)
     where = " AND ".join(conditions)
 
-    row = db.conn.execute(
-        f"SELECT COUNT(*) as cnt FROM conversations WHERE {where}", params
-    ).fetchone()
-    block["ticket_count"] = row["cnt"]
+    cnt_rows = wq.query_conversations_raw(
+        f"SELECT COUNT(*) as cnt FROM {{table}} WHERE {where}", params,
+        source_id=source_id,
+    )
+    block["ticket_count"] = sum(r[0] for r in cnt_rows if r and r[0])
     block["date_range"] = f"{date_start} to {date_end}"
 
     # TRC distribution
-    trc_rows = db.conn.execute(f"""
+    trc_rows = wq.query_conversations_raw(f"""
         SELECT trc_code, COUNT(*) as cnt,
                AVG(csat_score) as avg_csat,
                AVG(message_count) as avg_msgs
-        FROM conversations
+        FROM {{table}}
         WHERE {where} AND trc_code != ''
         GROUP BY trc_code ORDER BY cnt DESC
-    """, params).fetchall()
-    block["trc_distribution"] = [
-        {"trc": r["trc_code"], "count": r["cnt"],
-         "avg_csat": round(r["avg_csat"], 2) if r["avg_csat"] else None,
-         "avg_messages": round(r["avg_msgs"], 1) if r["avg_msgs"] else None}
-        for r in trc_rows
-    ]
+    """, params, source_id=source_id)
+    # Aggregate TRC counts across sources
+    _trc_agg = {}
+    for r in trc_rows:
+        trc = r[0]
+        if trc not in _trc_agg:
+            _trc_agg[trc] = {"count": 0, "csat_sum": 0.0, "csat_n": 0, "msgs_sum": 0.0, "msgs_n": 0}
+        _trc_agg[trc]["count"] += r[1]
+        if r[2] is not None:
+            _trc_agg[trc]["csat_sum"] += r[2] * r[1]
+            _trc_agg[trc]["csat_n"] += r[1]
+        if r[3] is not None:
+            _trc_agg[trc]["msgs_sum"] += r[3] * r[1]
+            _trc_agg[trc]["msgs_n"] += r[1]
+    block["trc_distribution"] = sorted([
+        {"trc": t, "count": v["count"],
+         "avg_csat": round(v["csat_sum"] / v["csat_n"], 2) if v["csat_n"] else None,
+         "avg_messages": round(v["msgs_sum"] / v["msgs_n"], 1) if v["msgs_n"] else None}
+        for t, v in _trc_agg.items()
+    ], key=lambda x: x["count"], reverse=True)
 
     # CSAT summary
-    csat_row = db.conn.execute(f"""
+    csat_rows = wq.query_conversations_raw(f"""
         SELECT AVG(csat_score) as avg, MIN(csat_score) as min_c,
                MAX(csat_score) as max_c, COUNT(csat_score) as rated
-        FROM conversations
+        FROM {{table}}
         WHERE {where} AND csat_score IS NOT NULL
-    """, params).fetchone()
+    """, params, source_id=source_id)
+    _csat_total = 0.0
+    _csat_count = 0
+    _csat_min = None
+    _csat_max = None
+    _csat_rated = 0
+    for r in csat_rows:
+        if r[0] is not None and r[3]:
+            _csat_total += r[0] * r[3]
+            _csat_count += r[3]
+            _csat_min = r[1] if _csat_min is None else min(_csat_min, r[1])
+            _csat_max = r[2] if _csat_max is None else max(_csat_max, r[2])
+            _csat_rated += r[3]
     block["csat_summary"] = {
-        "average": round(csat_row["avg"], 2) if csat_row["avg"] else None,
-        "min": csat_row["min_c"], "max": csat_row["max_c"],
-        "rated_count": csat_row["rated"],
+        "average": round(_csat_total / _csat_count, 2) if _csat_count else None,
+        "min": _csat_min, "max": _csat_max,
+        "rated_count": _csat_rated,
     }
 
-    # Resolution times
-    res_row = db.conn.execute(f"""
-        SELECT AVG(t.assignment_to_resolution_hours) as avg_assign_res,
-               AVG(t.total_resolution_hours) as avg_total_res,
-               AVG(t.first_reply_hours) as avg_first_reply
-        FROM tickets t
-        JOIN conversations c ON t.ticket_id = c.ticket_id
-        WHERE {where.replace('created_at', 'c.created_at').replace('trc_code', 'c.trc_code').replace('dataset_id', 'c.dataset_id')}
-    """, params).fetchone()
+    # Resolution times — JOIN tickets and conversations per source
+    _c_where = where.replace('created_at', 'c.created_at').replace('trc_code', 'c.trc_code').replace('dataset_id', 'c.dataset_id')
+    # For resolution times, we need to join per-source tickets with conversations
+    # Use the tickets table routing since tickets have the resolution columns
+    _res_rows = []
+    for src in registry.list_sources():
+        prefix = src["table_prefix"]
+        try:
+            r = db.conn.execute(f"""
+                SELECT AVG(t.assignment_to_resolution_hours) as avg_assign_res,
+                       AVG(t.total_resolution_hours) as avg_total_res,
+                       AVG(t.first_reply_hours) as avg_first_reply
+                FROM [{prefix}_tickets] t
+                JOIN [{prefix}_conversations] c ON t.ticket_id = c.ticket_id
+                WHERE {_c_where}
+            """, params).fetchone()
+            if r:
+                _res_rows.append(r)
+        except Exception:
+            pass
+    # Aggregate resolution times
+    _assign_vals = [r[0] for r in _res_rows if r[0] is not None]
+    _total_vals = [r[1] for r in _res_rows if r[1] is not None]
+    _reply_vals = [r[2] for r in _res_rows if r[2] is not None]
     block["resolution_times"] = {
-        "avg_assignment_to_resolution": round(res_row["avg_assign_res"], 1) if res_row["avg_assign_res"] else None,
-        "avg_total_resolution": round(res_row["avg_total_res"], 1) if res_row["avg_total_res"] else None,
-        "avg_first_reply": round(res_row["avg_first_reply"], 1) if res_row["avg_first_reply"] else None,
+        "avg_assignment_to_resolution": round(sum(_assign_vals) / len(_assign_vals), 1) if _assign_vals else None,
+        "avg_total_resolution": round(sum(_total_vals) / len(_total_vals), 1) if _total_vals else None,
+        "avg_first_reply": round(sum(_reply_vals) / len(_reply_vals), 1) if _reply_vals else None,
     }
 
     # ── TF-IDF & Sentiment (via trending_engine) ──
     try:
         from src.data.trending_engine import run_full_analysis
-        import sqlite3
-        conn = sqlite3.connect(str(db.db_path))
-        conn.row_factory = sqlite3.Row
+        from src.data.connection_factory import get_connection
+        conn = get_connection(db.db_path)
         analysis = run_full_analysis(
             conn, date_start, date_end,
             trc_filter=trc_filter, window_size="Weekly",
@@ -151,15 +197,15 @@ def build_data_block(db, date_start, date_end, trc_filter=None, dataset_id=None)
     # ── Redacted samples ──
     try:
         from src.gemini.gemini_client import GeminiClient
-        samples = db.conn.execute(f"""
-            SELECT thread_preview FROM conversations
+        samples = wq.query_conversations_raw(f"""
+            SELECT thread_preview FROM {{table}}
             WHERE {where} AND thread_preview != ''
             ORDER BY RANDOM() LIMIT 10
-        """, params).fetchall()
+        """, params, source_id=source_id)
         redacted = []
         for s in samples:
-            text = GeminiClient._redact_base(None, s["thread_preview"])
-            redacted.append(text[:500])  # Truncate long previews
+            text = GeminiClient._redact_base(None, s[0] if not hasattr(s, 'keys') else s["thread_preview"])
+            redacted.append(text[:500])
         block["redacted_samples"] = redacted
     except Exception:
         block["redacted_samples"] = []
@@ -171,164 +217,275 @@ def build_data_block(db, date_start, date_end, trc_filter=None, dataset_id=None)
     except Exception:
         block["product_gap_flags"] = []
 
+    # ── Structured JSON output (Session 3) ──
+    block["structured_json"] = build_structured_output(block)
+
     return block
+
+
+def build_structured_output(block: dict) -> str:
+    """Build a structured JSON summary from the data block.
+
+    Returns a JSON string with standardized sections that
+    query_report can serve by section name.
+    """
+    import json
+
+    structured = {
+        "findings": _extract_findings(block),
+        "summary_stats": _extract_summary_stats(block),
+        "recommendations": _extract_recommendations(block),
+    }
+    return json.dumps(structured, default=str)
+
+
+def _extract_findings(block: dict) -> list[dict]:
+    """Extract findings from TRC distribution and incident flags."""
+    findings = []
+
+    for trc_item in block.get("trc_distribution", []):
+        findings.append({
+            "type": "trc_concentration",
+            "title": f"{trc_item.get('trc', 'Unknown')} tickets",
+            "count": trc_item.get("count", 0),
+            "percentage": trc_item.get("pct", 0),
+        })
+
+    for flag in block.get("incident_flags", []):
+        findings.append({
+            "type": "incident",
+            "title": f"{flag.get('trc', '')} — {flag.get('type', '')}",
+            "severity": flag.get("severity", "unknown"),
+            "observed": flag.get("observed", 0),
+        })
+
+    return findings
+
+
+def _extract_summary_stats(block: dict) -> dict:
+    """Extract key summary statistics."""
+    return {
+        "ticket_count": block.get("ticket_count", 0),
+        "date_range": block.get("date_range", ""),
+        "csat_summary": block.get("csat_summary", {}),
+        "resolution_times": block.get("resolution_times", {}),
+        "trc_count": len(block.get("trc_distribution", [])),
+        "incident_count": len(block.get("incident_flags", [])),
+    }
+
+
+def _extract_recommendations(block: dict) -> list[str]:
+    """Generate recommendations from data patterns."""
+    recs = []
+    csat = block.get("csat_summary", {})
+    if csat.get("average") and csat["average"] < 3.0:
+        recs.append("CSAT average is below 3.0 — investigate top complaint categories")
+
+    incidents = block.get("incident_flags", [])
+    critical = [f for f in incidents if f.get("severity") == "critical"]
+    if critical:
+        recs.append(f"{len(critical)} critical incidents detected — prioritize investigation")
+
+    gaps = block.get("product_gap_flags", [])
+    if gaps:
+        recs.append(f"{len(gaps)} product gap signals identified — review with product team")
+
+    if not recs:
+        recs.append("No critical issues detected — continue monitoring")
+
+    return recs
 
 
 def format_data_block_for_prompt(block):
     """Convert the data block dict into structured text for prompt injection."""
-    sections = []
+    sections = [
+        _fmt_topline(block),
+        _fmt_trc_distribution(block),
+        _fmt_csat_summary(block),
+        _fmt_resolution_times(block),
+        _fmt_top_terms(block),
+        _fmt_rising_terms(block),
+        _fmt_sentiment_by_trc(block),
+        _fmt_correlations(block),
+        _fmt_incident_flags(block),
+        _fmt_interventions(block),
+        _fmt_entity_distributions(block),
+        _fmt_product_gap_flags(block),
+        _fmt_redacted_samples(block),
+    ]
+    return "\n\n".join(s for s in sections if s)
 
-    # Topline
-    sections.append(f"TOPLINE: {block.get('ticket_count', 0)} tickets, "
-                    f"Date range: {block.get('date_range', 'N/A')}")
 
-    # TRC Distribution
+def _fmt_topline(block):
+    return (f"TOPLINE: {block.get('ticket_count', 0)} tickets, "
+            f"Date range: {block.get('date_range', 'N/A')}")
+
+
+def _fmt_trc_distribution(block):
     trc_dist = block.get("trc_distribution", [])
-    if trc_dist:
-        lines = ["TRC DISTRIBUTION:"]
-        for t in trc_dist[:15]:
-            csat = f", CSAT={t['avg_csat']}" if t.get('avg_csat') else ""
-            lines.append(f"  {t['trc']}: {t['count']} tickets{csat}")
-        sections.append("\n".join(lines))
+    if not trc_dist:
+        return ""
+    lines = ["TRC DISTRIBUTION:"]
+    for t in trc_dist[:15]:
+        csat = f", CSAT={t['avg_csat']}" if t.get('avg_csat') else ""
+        lines.append(f"  {t['trc']}: {t['count']} tickets{csat}")
+    return "\n".join(lines)
 
-    # CSAT Summary
+
+def _fmt_csat_summary(block):
     csat = block.get("csat_summary", {})
-    if csat.get("average"):
-        sections.append(
-            f"CSAT SUMMARY: avg={csat['average']}, "
+    if not csat.get("average"):
+        return ""
+    return (f"CSAT SUMMARY: avg={csat['average']}, "
             f"range={csat.get('min', 'N/A')}-{csat.get('max', 'N/A')}, "
-            f"rated={csat.get('rated_count', 0)} tickets"
-        )
+            f"rated={csat.get('rated_count', 0)} tickets")
 
-    # Resolution Times
+
+def _fmt_resolution_times(block):
     res = block.get("resolution_times", {})
-    if any(v for v in res.values() if v is not None):
-        sections.append(
-            f"RESOLUTION TIMES: "
+    if not any(v for v in res.values() if v is not None):
+        return ""
+    return (f"RESOLUTION TIMES: "
             f"assignment-to-resolution={res.get('avg_assignment_to_resolution', 'N/A')}h, "
             f"total={res.get('avg_total_resolution', 'N/A')}h, "
-            f"first-reply={res.get('avg_first_reply', 'N/A')}h"
-        )
+            f"first-reply={res.get('avg_first_reply', 'N/A')}h")
 
-    # Top Terms
+
+def _fmt_top_terms(block):
     top_terms = block.get("top_terms", [])
-    if top_terms:
-        lines = ["TOP TERMS (TF-IDF):"]
-        for t in top_terms[:30]:
-            if isinstance(t, dict):
-                lines.append(f"  {t.get('term', t.get('word', ''))}: "
-                           f"score={t.get('score', t.get('tfidf', 'N/A'))}")
-            elif isinstance(t, (list, tuple)) and len(t) >= 2:
-                lines.append(f"  {t[0]}: score={t[1]:.4f}")
-            else:
-                lines.append(f"  {t}")
-        sections.append("\n".join(lines))
+    if not top_terms:
+        return ""
+    lines = ["TOP TERMS (TF-IDF):"]
+    for t in top_terms[:30]:
+        if isinstance(t, dict):
+            lines.append(f"  {t.get('term', t.get('word', ''))}: "
+                       f"score={t.get('score', t.get('tfidf', 'N/A'))}")
+        elif isinstance(t, (list, tuple)) and len(t) >= 2:
+            lines.append(f"  {t[0]}: score={t[1]:.4f}")
+        else:
+            lines.append(f"  {t}")
+    return "\n".join(lines)
 
-    # Rising Terms
+
+def _fmt_rising_terms(block):
     rising = block.get("rising_terms", [])
-    if rising:
-        lines = ["RISING TERMS (velocity):"]
-        for t in rising[:15]:
-            if isinstance(t, dict):
-                lines.append(f"  {t.get('term', '')}: velocity={t.get('velocity', 'N/A')}")
-            elif isinstance(t, (list, tuple)) and len(t) >= 2:
-                lines.append(f"  {t[0]}: velocity={t[1]:.4f}")
-            else:
-                lines.append(f"  {t}")
-        sections.append("\n".join(lines))
+    if not rising:
+        return ""
+    lines = ["RISING TERMS (velocity):"]
+    for t in rising[:15]:
+        if isinstance(t, dict):
+            lines.append(f"  {t.get('term', '')}: velocity={t.get('velocity', 'N/A')}")
+        elif isinstance(t, (list, tuple)) and len(t) >= 2:
+            lines.append(f"  {t[0]}: velocity={t[1]:.4f}")
+        else:
+            lines.append(f"  {t}")
+    return "\n".join(lines)
 
-    # Sentiment by TRC
+
+def _fmt_sentiment_by_trc(block):
     sentiment = block.get("sentiment_by_trc", {})
-    if sentiment:
-        lines = ["SENTIMENT BY TRC:"]
-        for trc, data in sentiment.items():
-            if isinstance(data, list) and data:
-                # Average compound across windows
-                vals = [d[1] if isinstance(d, (list, tuple)) else d.get("compound", 0)
-                        for d in data if (isinstance(d, (list, tuple)) and len(d) >= 2)
-                        or isinstance(d, dict)]
-                avg = sum(vals) / len(vals) if vals else 0
-                lines.append(f"  {trc}: avg_compound={avg:.3f} ({len(data)} windows)")
-            elif isinstance(data, (int, float)):
-                lines.append(f"  {trc}: compound={data:.3f}")
-        sections.append("\n".join(lines))
+    if not sentiment:
+        return ""
+    lines = ["SENTIMENT BY TRC:"]
+    for trc, data in sentiment.items():
+        if isinstance(data, list) and data:
+            vals = [d[1] if isinstance(d, (list, tuple)) else d.get("compound", 0)
+                    for d in data if (isinstance(d, (list, tuple)) and len(d) >= 2)
+                    or isinstance(d, dict)]
+            avg = sum(vals) / len(vals) if vals else 0
+            lines.append(f"  {trc}: avg_compound={avg:.3f} ({len(data)} windows)")
+        elif isinstance(data, (int, float)):
+            lines.append(f"  {trc}: compound={data:.3f}")
+    return "\n".join(lines)
 
-    # Correlations
+
+def _fmt_correlations(block):
     corrs = block.get("correlations", [])
-    if corrs:
-        lines = ["CROSS-TRC CORRELATIONS:"]
-        for c in corrs[:10]:
-            if isinstance(c, dict):
-                lines.append(f"  {c.get('trc_a', '')} <-> {c.get('trc_b', '')}: "
-                           f"r={c.get('correlation', 'N/A')}")
-            elif isinstance(c, (list, tuple)) and len(c) >= 3:
-                lines.append(f"  {c[0]} <-> {c[1]}: r={c[2]:.3f}")
-        sections.append("\n".join(lines))
+    if not corrs:
+        return ""
+    lines = ["CROSS-TRC CORRELATIONS:"]
+    for c in corrs[:10]:
+        if isinstance(c, dict):
+            lines.append(f"  {c.get('trc_a', '')} <-> {c.get('trc_b', '')}: "
+                       f"r={c.get('correlation', 'N/A')}")
+        elif isinstance(c, (list, tuple)) and len(c) >= 3:
+            lines.append(f"  {c[0]} <-> {c[1]}: r={c[2]:.3f}")
+    return "\n".join(lines)
 
-    # Incident Flags
+
+def _fmt_incident_flags(block):
     flags = block.get("incident_flags", [])
-    if flags:
-        lines = ["INCIDENT FLAGS:"]
-        for f in flags:
-            pval = f"p={f['p_value']:.4f}" if f.get("p_value") else ""
-            lines.append(f"  {f['trc']}: {f['type']}, "
-                       f"observed={f['observed']}, expected={f['expected']} {pval}")
-        sections.append("\n".join(lines))
+    if not flags:
+        return ""
+    lines = ["INCIDENT FLAGS:"]
+    for f in flags:
+        pval = f"p={f['p_value']:.4f}" if f.get("p_value") else ""
+        lines.append(f"  {f['trc']}: {f['type']}, "
+                   f"observed={f['observed']}, expected={f['expected']} {pval}")
+    return "\n".join(lines)
 
-    # Interventions
+
+def _fmt_interventions(block):
     interventions = block.get("intervention_context", [])
-    if interventions:
-        lines = ["RECENT INTERVENTIONS:"]
-        for i in interventions:
-            trcs = i.get("affected_trcs", "")
-            if isinstance(trcs, str):
-                try:
-                    trcs = json.loads(trcs)
-                except (json.JSONDecodeError, TypeError):
-                    trcs = []
-            trc_str = ", ".join(trcs) if trcs else "all TRCs"
-            lines.append(f"  {i['event_date']}: {i['name']} ({i['category']}) "
-                       f"-- affects {trc_str}")
-        sections.append("\n".join(lines))
+    if not interventions:
+        return ""
+    lines = ["RECENT INTERVENTIONS:"]
+    for i in interventions:
+        trcs = i.get("affected_trcs", "")
+        if isinstance(trcs, str):
+            try:
+                trcs = json.loads(trcs)
+            except (json.JSONDecodeError, TypeError):
+                trcs = []
+        trc_str = ", ".join(trcs) if trcs else "all TRCs"
+        lines.append(f"  {i['event_date']}: {i['name']} ({i['category']}) "
+                   f"-- affects {trc_str}")
+    return "\n".join(lines)
 
-    # Entity distributions
+
+def _fmt_entity_distributions(block):
+    parts = []
     payers = block.get("payer_distribution", [])
     if payers:
         lines = ["PAYER DISTRIBUTION:"]
         for p in payers[:10]:
             lines.append(f"  {p['entity_value']}: {p['ticket_count']} tickets")
-        sections.append("\n".join(lines))
+        parts.append("\n".join(lines))
 
     products = block.get("product_area_distribution", [])
     if products:
         lines = ["PRODUCT AREA DISTRIBUTION:"]
         for p in products[:10]:
             lines.append(f"  {p['entity_value']}: {p['ticket_count']} tickets")
-        sections.append("\n".join(lines))
+        parts.append("\n".join(lines))
 
-    # Product gap flags
+    return "\n\n".join(parts)
+
+
+def _fmt_product_gap_flags(block):
     gaps = block.get("product_gap_flags", [])
-    if gaps:
-        lines = ["PRODUCT GAP FLAGS:"]
-        for g in gaps:
-            if g.get("is_flagged"):
-                lines.append(
-                    f"  {g['product_area']}: {g['trc_count']} TRCs, "
-                    f"volume velocity={g.get('volume_velocity', 0):+.0%}, "
-                    f"sentiment delta={g.get('sentiment_delta', 0):+.3f}, "
-                    f"gap_score={g.get('gap_score', 0):.1f} FLAGGED"
-                )
-        sections.append("\n".join(lines))
+    if not gaps:
+        return ""
+    lines = ["PRODUCT GAP FLAGS:"]
+    for g in gaps:
+        if g.get("is_flagged"):
+            lines.append(
+                f"  {g['product_area']}: {g['trc_count']} TRCs, "
+                f"volume velocity={g.get('volume_velocity', 0):+.0%}, "
+                f"sentiment delta={g.get('sentiment_delta', 0):+.3f}, "
+                f"gap_score={g.get('gap_score', 0):.1f} FLAGGED"
+            )
+    return "\n".join(lines) if len(lines) > 1 else ""
 
-    # Redacted samples
+
+def _fmt_redacted_samples(block):
     samples = block.get("redacted_samples", [])
-    if samples:
-        lines = ["SAMPLE CONVERSATIONS (redacted):"]
-        for i, s in enumerate(samples, 1):
-            lines.append(f"  [{i}] {s[:300]}")
-        sections.append("\n".join(lines))
-
-    return "\n\n".join(sections)
+    if not samples:
+        return ""
+    lines = ["SAMPLE CONVERSATIONS (redacted):"]
+    for i, s in enumerate(samples, 1):
+        lines.append(f"  [{i}] {s[:300]}")
+    return "\n".join(lines)
 
 
 def replace_prompt_variables(prompt_text, block, db=None):

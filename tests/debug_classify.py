@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from pathlib import Path
 from src.agents.worker_agent import WorkerAgent
-from src.agents.gemini_bridge_wrapper import GeminiBridge
+from src.agents.acp_bridge import ACPBridge as GeminiBridge  # ACP migration
 from src.agents.tool_registry import ToolRegistry
 from src.agents.stream_parser import StreamParser, StreamEvent
 

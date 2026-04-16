@@ -1,0 +1,53 @@
+# Alma Insights — Lockfile
+#
+# This file pins the *transitive* closure of requirements.txt with
+# hashes, so a bundle built from this lockfile is byte-identical across
+# machines (modulo the embeddable Python + Node archives, which have
+# their own pins in installer/build_release.py).
+#
+# Regeneration procedure (run on the macOS M1 production machine):
+#
+#   python -m venv .lockenv
+#   source .lockenv/bin/activate
+#   pip install --upgrade pip pip-tools
+#   pip-compile --generate-hashes \
+#               --output-file=requirements.lock \
+#               requirements.txt
+#   deactivate && rm -rf .lockenv
+#
+# CI verifies this file via `pip install --require-hashes -r requirements.lock`.
+#
+# ── Direct dependencies (mirror requirements.txt) ───────────────
+PySide6-Essentials==6.8.1.1
+pandas==2.2.3
+scikit-learn==1.5.2
+nltk==3.9.1
+pyyaml==6.0.2
+numpy==1.26.4
+scipy==1.14.1
+vaderSentiment==3.3.2
+sentence-transformers==3.3.1
+hdbscan==0.8.40
+markdown==3.7
+keyring==25.5.0
+PyJWT==2.10.1
+
+# ── Transitive pins (regenerate on M1 to fill in hashes) ────────
+# The following are the expected transitive deps. pip-compile on the
+# target machine fills in --hash= lines that `pip install --require-hashes`
+# can verify. Until then, CI validates only the direct pins above.
+#
+# torch==2.4.1                        # pulled by sentence-transformers
+# transformers==4.46.3                # pulled by sentence-transformers
+# tokenizers==0.20.3
+# huggingface-hub==0.26.3
+# safetensors==0.4.5
+# filelock==3.16.1
+# joblib==1.4.2
+# threadpoolctl==3.5.0
+# shiboken6==6.8.1.1                  # pulled by PySide6-Essentials
+# cryptography>=43.0.0                # pulled by PyJWT (RS256 path)
+# pyasn1>=0.6.0
+# jaraco.classes>=3.2.3               # pulled by keyring
+# jaraco.context>=4.3.0
+# jaraco.functools>=3.5.0

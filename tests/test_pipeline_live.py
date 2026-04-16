@@ -448,22 +448,22 @@ class TestLiveBridge(unittest.TestCase):
 
     def test_01_bridge_boot_and_ping(self):
         """Boot bridge, ping, verify alive, shutdown."""
-        from src.agents.gemini_bridge_wrapper import GeminiBridge
+        from src.agents.acp_bridge import ACPBridge as GeminiBridge  # ACP migration
 
         bridge = GeminiBridge(model=_get_model_from_settings())
         try:
             bridge.ensure_running()
             self.assertTrue(bridge.is_alive(), "Bridge should be alive after boot")
 
-            # Ping
+            # Ping (ACP returns synthetic status — no uptime_ms)
             ping = bridge.ping(timeout=30)
             self.assertIsNotNone(ping, "Ping should return a response")
-            self.assertEqual(ping.get("status"), "alive")
-            self.assertIn("uptime_ms", ping)
-            self.assertIn("boot_ms", ping)
+            self.assertEqual(ping.get("status"), "ok")
+            self.assertTrue(ping.get("alive"))
+            self.assertIn("session_id", ping)
 
-            print(f"\n  Bridge boot: {ping.get('boot_ms', '?')}ms")
-            print(f"  Bridge uptime: {ping.get('uptime_ms', '?')}ms")
+            print(f"\n  ACP bridge: protocol={ping.get('protocol_version', '?')}")
+            print(f"  Session: {ping.get('session_id', '?')}")
 
         finally:
             bridge.shutdown()
@@ -496,7 +496,7 @@ class TestLiveClassification(unittest.TestCase):
         cls.conn = create_live_test_db(cls.db_path)
 
         # Boot bridge with model from settings
-        from src.agents.gemini_bridge_wrapper import GeminiBridge
+        from src.agents.acp_bridge import ACPBridge as GeminiBridge  # ACP migration
         cls.bridge = GeminiBridge(model=_get_model_from_settings())
         try:
             cls.bridge.ensure_running()

@@ -29,6 +29,8 @@ import time
 import traceback
 import yaml
 from collections import defaultdict
+
+from src.data.settings_manager import get_section
 from datetime import datetime
 from math import ceil
 from pathlib import Path
@@ -36,7 +38,6 @@ from queue import PriorityQueue
 
 logger = logging.getLogger("alma.voc_builder")
 
-_CONFIG_PATH = Path(__file__).resolve().parent.parent.parent / "config" / "settings.yaml"
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent.parent / "config" / "prompts"
 
 
@@ -90,9 +91,7 @@ class VOCBuilder:
     def _load_config(self):
         """Read voc_report config from settings.yaml."""
         try:
-            with open(_CONFIG_PATH, encoding="utf-8") as f:
-                cfg = yaml.safe_load(f) or {}
-            voc_cfg = cfg.get("gemini", {}).get("voc_report", {})
+            voc_cfg = get_section("gemini", {}).get("voc_report", {})
             if voc_cfg:
                 self.SAMPLE_ALL_THRESHOLD = voc_cfg.get(
                     "sample_all_threshold", self.SAMPLE_ALL_THRESHOLD)
@@ -1638,9 +1637,25 @@ class VOCBuilder:
         except Exception:
             pass
 
+        # Trim ledger to last 2 rounds + summary to prevent duplication.
+        # The full ledger can be 6-8 rounds of verbose findings — the LLM
+        # tends to echo/repeat each round instead of synthesizing.
+        raw_ledger = accumulator_result.get("ledger", "(No ledger data)")
+        rounds_completed = accumulator_result.get("rounds_completed", 0)
+        if rounds_completed > 2 and "\n---\n" in raw_ledger:
+            ledger_parts = raw_ledger.split("\n---\n")
+            trimmed_ledger = (
+                f"[Accumulator ran {rounds_completed} rounds. "
+                f"Showing final {min(2, len(ledger_parts))} rounds "
+                f"(earlier rounds are incorporated into the running "
+                f"synthesis above).]\n\n"
+                + "\n---\n".join(ledger_parts[-2:])
+            )
+        else:
+            trimmed_ledger = raw_ledger
+
         prompt = template.replace(
-            "{accumulator_ledger}",
-            accumulator_result.get("ledger", "(No ledger data)"))
+            "{accumulator_ledger}", trimmed_ledger)
         prompt = prompt.replace(
             "{accumulator_synthesis}",
             accumulator_result.get("synthesis", "(No synthesis data)"))
@@ -2210,14 +2225,17 @@ class VOCBuilder:
     # ═══════════════════════════════════════════════════════════════
 
     def _get_trc_label(self, trc_code):
-        """Look up TRC label from conversations table."""
+        """Look up TRC label from warehouse tables."""
         try:
-            row = self.db.conn.execute("""
-                SELECT DISTINCT trc_label FROM conversations
-                WHERE trc_code = ? AND trc_label IS NOT NULL AND trc_label != ''
-                LIMIT 1
-            """, (trc_code,)).fetchone()
-            return row["trc_label"] if row else trc_code
+            from src.data.source_registry import SourceRegistry
+            from src.data.warehouse_query import WarehouseQuery
+            registry = SourceRegistry(self.db.conn)
+            wq = WarehouseQuery(self.db.conn, registry)
+            rows = wq.query_conversations_raw(
+                "SELECT DISTINCT trc_label FROM {table} WHERE trc_code = ? AND trc_label IS NOT NULL AND trc_label != '' LIMIT 1",
+                (trc_code,),
+            )
+            return rows[0][0] if rows and rows[0][0] else trc_code
         except Exception:
             return trc_code
 

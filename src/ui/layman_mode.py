@@ -4,19 +4,14 @@ Replaces technical metric labels with plain-language equivalents.
 Controlled by the 'Simplified Language Mode' toggle in Settings.
 """
 
-from pathlib import Path
-
-_SETTINGS_PATH = Path("config/settings.yaml")
+from src.data.settings_manager import get_section
 
 
 def is_layman_mode() -> bool:
-    """Check if Simplified Language Mode is enabled in settings.yaml."""
+    """Check if Simplified Language Mode is enabled in settings."""
     try:
-        import yaml
-        if _SETTINGS_PATH.exists():
-            with open(_SETTINGS_PATH) as f:
-                settings = yaml.safe_load(f) or {}
-            return bool(settings.get("display", {}).get("layman_mode", False))
+        display = get_section("display", {})
+        return bool(display.get("layman_mode", False))
     except Exception:
         pass
     return False

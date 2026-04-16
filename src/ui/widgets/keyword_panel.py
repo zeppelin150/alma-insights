@@ -151,7 +151,7 @@ class KeywordReviewPanel(QWidget):
         row = QFrame()
         row.setStyleSheet(f"""
             QFrame {{
-                background: {ALMA_WHITE}; border: 1px solid {ALMA_BORDER_LIGHT};
+                background: {ALMA_WHITE}; border: none;
                 border-radius: 6px; padding: 6px;
             }}
         """)

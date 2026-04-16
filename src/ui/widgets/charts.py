@@ -691,6 +691,13 @@ class HeatmapWidget(QWidget):
 # ═══════════════════════════════════════════
 
 class ChartMode(Enum):
+    """Rendering mode for LineChartWidget and related time-series charts.
+
+    LINE: smooth curve with subtle gradient area below.
+    AREA: smooth curve with opaque gradient area (emphasizes volume).
+    BAR:  vertical bars at each data point (discrete values).
+    """
+
     LINE = auto()      # Smooth line + subtle gradient area
     AREA = auto()      # Smooth line + opaque gradient area
     BAR = auto()       # Vertical bars at data points

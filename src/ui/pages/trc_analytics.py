@@ -51,6 +51,12 @@ logger = logging.getLogger("alma.trc_analytics")
 # ═══════════════════════════════════════════
 
 class AnalyticsWorker(QThread):
+    """Background thread that computes TRC dashboard analytics.
+
+    Queries ticket_index and conversations to produce volume, resolution
+    time, CSAT distribution, and metrics-by-TRC data for the UI charts.
+    """
+
     finished = Signal(dict)
     error = Signal(str)
 
@@ -83,6 +89,13 @@ class AnalyticsWorker(QThread):
 # ═══════════════════════════════════════════
 
 class TRCAnalyticsPage(AnalysisPageBase):
+    """TRC Analytics page: top-level dashboard and NLP scan trigger.
+
+    Tabs: Dashboard (volume, resolution, CSAT, metrics by TRC) and
+    NLP Scanner (taxonomy browser, scan monitor, cost dashboard).
+    Hosts the "Start Scan" button that launches the agentic NLP pipeline
+    via `ScanOrchestrator`.
+    """
 
     # NLP Scanner signals (forwarded from embedded widgets)
     scan_active_changed = Signal(bool)

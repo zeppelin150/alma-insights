@@ -70,8 +70,15 @@ def main() -> int:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    src_csv = Path(r"C:/Users/Chris/Downloads/alma_test_10000_1_enriched.csv")
-    golden = Path(r"C:/Users/Chris/Downloads/alma_test_10000_1_golden_set.csv")
+    import os
+    src_csv = Path(os.environ.get(
+        "ALMA_ENRICHED_CSV",
+        str(_ROOT / "data" / "test_fixtures" / "alma_test_10000_1_enriched.csv"),
+    ))
+    golden = Path(os.environ.get(
+        "ALMA_GOLDEN_SET_CSV",
+        str(_ROOT / "data" / "test_fixtures" / "alma_test_10000_1_golden_set.csv"),
+    ))
     db_path = _ROOT / "data" / "phase3_mini_test.db"
     if db_path.exists():
         db_path.unlink()

@@ -233,7 +233,7 @@ class IngestionDialog(QDialog):
         date_group.setStyleSheet(f"""
             QGroupBox {{
                 font-size: 12px; font-weight: 600; color: {ALMA_TEXT_MID};
-                border: 1px solid {ALMA_BORDER_LIGHT}; border-radius: 8px;
+                border: none;
                 margin-top: 8px; padding-top: 18px;
             }}
             QGroupBox::title {{ subcontrol-origin: margin; left: 12px; padding: 0 6px; }}

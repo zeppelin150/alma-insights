@@ -8,8 +8,12 @@ Learns optimal batch size per TRC from measured output characteristics.
 Persists learned profiles to trc_batch_profiles table.
 """
 
+from __future__ import annotations
+
 import logging
 from datetime import datetime
+
+from src.data.connection_factory import get_connection
 
 logger = logging.getLogger("alma.batch_packer")
 
@@ -19,12 +23,18 @@ MODEL_OUTPUT_LIMITS = {
     "gemini-2.5-flash":      200_000,    # ~65K output tokens ≈ 260K chars
     "gemini-2.5-flash-lite": 200_000,    # ~65K output tokens (same as 2.5-flash)
     "gemini-2.5-pro":        200_000,    # ~65K output tokens ≈ 260K chars
+    "gemini-3-flash-preview":      200_000,
+    "gemini-3.1-flash-lite-preview": 200_000,
+    "gemini-3.1-pro-preview":      200_000,
 }
 MODEL_MAX_BATCH = {
     "gemini-2.0-flash":       25,
-    "gemini-2.5-flash":       75,    # was 100 — reduced to prevent stalls (5.4)
-    "gemini-2.5-flash-lite":  75,    # conservative — faster but less capable
-    "gemini-2.5-pro":        100,
+    "gemini-2.5-flash":       45,    # was 75 — reduced further to stay under 150s stall threshold
+    "gemini-2.5-flash-lite":  45,    # aligned with 2.5-flash cap
+    "gemini-2.5-pro":         60,    # was 100 — pro is faster but still benefits from smaller batches
+    "gemini-3-flash-preview":       45,
+    "gemini-3.1-flash-lite-preview": 45,
+    "gemini-3.1-pro-preview":       60,
 }
 DEFAULT_OUTPUT_BUDGET = 20_000      # fallback for unknown models
 
@@ -36,6 +46,9 @@ MODEL_INPUT_LIMITS = {
     "gemini-2.5-flash":      300_000,   # 1M context, generous budget
     "gemini-2.5-flash-lite": 250_000,   # slightly conservative
     "gemini-2.5-pro":        400_000,   # largest effective budget
+    "gemini-3-flash-preview":      300_000,
+    "gemini-3.1-flash-lite-preview": 300_000,
+    "gemini-3.1-pro-preview":      400_000,
 }
 DEFAULT_INPUT_BUDGET = 100_000
 
@@ -214,8 +227,7 @@ class BatchPacker:
                 self.db.commit()
             else:
                 # File-based DB — use thread-local connection
-                import sqlite3
-                conn = sqlite3.connect(self._db_path)
+                conn = get_connection(self._db_path)
                 conn.execute("""
                     INSERT OR REPLACE INTO trc_batch_profiles
                         (trc, avg_chars_per_ticket, updated_at)

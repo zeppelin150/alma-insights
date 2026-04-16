@@ -45,7 +45,12 @@ from src.data.connection_factory import atomic, get_connection   # noqa: E402
 logger = logging.getLogger("alma.seed_incidents")
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 
-DEFAULT_MANIFEST = Path(r"C:\Users\Chris\Downloads\alma_test_10000_1_manifest.json")
+import os
+DEFAULT_MANIFEST = Path(os.environ.get(
+    "ALMA_TEST_MANIFEST",
+    str(Path(__file__).resolve().parent.parent
+        / "data" / "test_fixtures" / "alma_test_10000_1_manifest.json"),
+))
 DEFAULT_DB = Path(__file__).resolve().parent.parent / "data" / "local_warehouse.db"
 
 

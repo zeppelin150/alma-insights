@@ -87,8 +87,15 @@ class ScanOrchestrator:
         self._analyst = None
         # Semaphore rate governor: allows N concurrent in-flight calls
         # with burst protection between dispatches.
+        # NOTE: previously capped at 8 via `min(num_workers, 8)`, which
+        # permanently starved workers 9+ when the user configured 16
+        # parallel_workers (semaphore holders waited on Gemini while
+        # the other half timed out every 2 min on acquire).  The cap
+        # had no documented reason; Gemini API limits are enforced by
+        # Google's side and surfaced as 429s — we have backoff for that
+        # already.  Scale directly with worker count.
         self._rate_governor = RateGovernor(
-            max_concurrent=min(self.num_workers, 8),
+            max_concurrent=max(self.num_workers, 1),
             burst_delay=0.5,
         )
         self._batch_packer = None
@@ -130,6 +137,14 @@ class ScanOrchestrator:
         if parallel_workers is None:
             parallel_workers = DEFAULT_PARALLEL_WORKERS
         actual_workers = min(parallel_workers, MAX_PARALLEL_WORKERS)
+
+        # Fix #4: Reap interrupted scans from a previous process.  If
+        # any scans are still marked 'running' we know the prior app
+        # instance crashed / was force-closed / lost power — daemon
+        # worker threads died with it.  Flip to 'interrupted' so the UI
+        # history tab shows them truthfully.
+        self._reap_interrupted_scans()
+
         conn = self._get_conn()
         scan_id = str(uuid.uuid4())
 
@@ -675,15 +690,52 @@ class ScanOrchestrator:
             logger.debug(f"Failed to emit scan event: {e}")
 
     def _load_model_from_config(self):
-        """Read model from settings.yaml via centralized settings_manager."""
+        """Resolve the active Gemini model.
+
+        Priority: ModelRegistry.active() (what the user selected in
+        Settings) → legacy `gemini.model` key → loud last-resort.
+        This fixes a long-standing bug where `ai.active_model` was
+        ignored and scans always ran on the stale `gemini.model` value.
+        """
+        HARD_FALLBACK = "gemini-2.5-flash"
+
+        # 1) ModelRegistry (authoritative — what Settings UI writes)
+        try:
+            from src.llm.model_registry import ModelRegistry
+            cfg = ModelRegistry.instance().active()
+            if cfg and cfg.provider == "gemini" and cfg.enabled:
+                logger.info(
+                    f"ScanOrchestrator: using model '{cfg.model_string}' "
+                    f"from ModelRegistry (active)"
+                )
+                return cfg.model_string
+        except Exception as e:
+            logger.debug(f"ModelRegistry lookup failed: {e}")
+
+        # 2) Legacy gemini.model key
         try:
             from src.data.settings_manager import get_section
             gemini_cfg = get_section("gemini", {})
-            model = gemini_cfg.get("model", "gemini-2.5-flash")
-            logger.info(f"ScanOrchestrator: using model '{model}' from settings")
-            return model
-        except Exception:
-            return "gemini-2.5-flash"
+            model = gemini_cfg.get("model")
+            if model:
+                logger.warning(
+                    f"ScanOrchestrator: ModelRegistry unavailable; using "
+                    f"legacy gemini.model='{model}'. Check that "
+                    f"ai.active_model is set in settings.yaml."
+                )
+                return model
+        except Exception as e:
+            logger.debug(f"settings_manager lookup failed: {e}")
+
+        # 3) Hard fallback — should never happen in normal use.  Loud so
+        # it shows up in the diagnostic log if somehow both paths fail.
+        logger.error(
+            f"ScanOrchestrator: NEITHER ModelRegistry NOR gemini.model "
+            f"resolved a model. Falling back to hardcoded "
+            f"'{HARD_FALLBACK}'. This is a configuration error — "
+            f"check settings.yaml and src/llm/model_registry.py."
+        )
+        return HARD_FALLBACK
 
     def _load_scan_config(self):
         """Read nlp_scan settings from settings.yaml via centralized settings_manager."""
@@ -1517,11 +1569,31 @@ class ScanOrchestrator:
 
     def _record_batch_result(self, worker, conn, scan_id, batch, batch_num,
                              trc, tickets, result, elapsed, has_error):
-        """Write batch outcome to DB, emit events, notify supervisor."""
+        """Write batch outcome to DB, emit events, notify supervisor.
+
+        Delivery accounting (verify-on-commit): a batch is 'partial' if
+        the worker completed cleanly (no error) but the DB does not have
+        a classification row for every requested ticket. This is the
+        "delivery lie" failure mode where Gemini signals `done` but
+        didn't emit every store_classification. Partial batches are:
+          * not retried (retry wouldn't help — the stream was clean)
+          * counted toward scan progress (same as completed)
+          * flagged with a `delivery_drop` event carrying the drop list
+          * swept up automatically by the existing sweep query, which
+            does LEFT JOIN nlp_batch_tickets ⟂ nlp_ticket_classifications
+        """
         batch_id = batch['batch_id']
-        status = 'completed' if not has_error else 'failed'
         classified = result.get('classified', 0)
         elapsed_s = round(elapsed, 1)
+
+        # Determine status: failed > partial > completed
+        dropped_ids = result.get('dropped_ids') or []
+        if has_error:
+            status = 'failed'
+        elif dropped_ids:
+            status = 'partial'
+        else:
+            status = 'completed'
 
         try:
             _in_tok = result.get("input_tokens", 0)
@@ -1569,6 +1641,42 @@ class ScanOrchestrator:
                 metadata={'batch_id': batch_id, 'classified': classified,
                           'total': len(tickets), 'trc': trc}
             )
+        elif status == 'partial':
+            # Delivery lie: stream returned clean but DB is missing N
+            # tickets. Emit both batch_complete (progress) and a
+            # distinct delivery_drop event carrying the drop list so
+            # the UI and logs surface it loudly.
+            delivered = len(result.get('delivered_ids') or [])
+            requested = len(result.get('requested_ids') or tickets)
+            self._emit_event(
+                scan_id, 'batch_complete', 'warn',
+                f'Batch {batch_num} partial | {delivered}/{requested} '
+                f'delivered ({len(dropped_ids)} dropped) | {elapsed_s}s',
+                duration_ms=int(elapsed * 1000),
+                metadata={'batch_id': batch_id, 'classified': delivered,
+                          'total': requested, 'dropped': len(dropped_ids),
+                          'trc': trc}
+            )
+            self._emit_event(
+                scan_id, 'delivery_drop', 'warn',
+                f'Batch {batch_num}: Gemini signaled done but '
+                f'{len(dropped_ids)} tickets were not persisted — '
+                f'queued for sweep',
+                metadata={
+                    'batch_id': batch_id,
+                    'trc': trc,
+                    'dropped_count': len(dropped_ids),
+                    # Include a capped sample; full list is derivable
+                    # from nlp_batch_tickets LEFT JOIN classifications.
+                    'dropped_sample': dropped_ids[:20],
+                }
+            )
+            logger.warning(
+                "Batch %s partial delivery: %d/%d — %d orphans queued "
+                "for sweep (first 5: %s)",
+                batch_id[:8], delivered, requested, len(dropped_ids),
+                dropped_ids[:5],
+            )
         else:
             self._emit_event(
                 scan_id, 'batch_complete', 'error',
@@ -1584,12 +1692,19 @@ class ScanOrchestrator:
             )
 
     def _update_scan_progress(self, conn, scan_id):
-        """Update completed_batches count and running cost on scan record."""
+        """Update completed_batches count and running cost on scan record.
+
+        Partial batches (delivery-lie drops, swept later) count as
+        progress — the main pipeline is done with them and the sweep
+        will reclaim their orphans. Only 'failed' and in-flight states
+        are excluded.
+        """
         conn.execute("""
             UPDATE nlp_scan_runs SET
                 completed_batches = (
                     SELECT COUNT(*) FROM nlp_batches
-                    WHERE scan_id = ? AND status = 'completed'
+                    WHERE scan_id = ?
+                      AND status IN ('completed', 'partial')
                 ),
                 actual_cost_usd = COALESCE(
                     (SELECT SUM(cost_usd) FROM gemini_usage
@@ -1921,23 +2036,75 @@ class ScanOrchestrator:
                 f"ticket(s) across {len(unclassified_by_trc)} TRC(s)"
             )
             self._emit_event(
-                scan_id, 'info', 'running',
-                f'Sweep: reclassifying {total_unclassified} dropped ticket(s)'
+                scan_id, 'sweep_start', 'running',
+                f'Sweep: reclassifying {total_unclassified} dropped ticket(s) '
+                f'across {len(unclassified_by_trc)} TRC(s)'
             )
+
+            # ── Sweep budgets (hardening) ──────────────────────────
+            # The sweep used to run unbounded: one serial worker, 600s
+            # per-call timeout, swallowed exceptions, no heartbeat. It
+            # could hang the scan for 30+ min silently. Now:
+            #   * Total wall-clock bounded at SWEEP_TOTAL_TIMEOUT_S
+            #   * Per-chunk progress events (no silent gap > 1 chunk)
+            #   * Bridge restart on exception (one shot per chunk)
+            #   * Stop after SWEEP_MAX_CONSEC_FAILS in a row
+            #   * Each chunk gets a shorter call_timeout so a single
+            #     stuck chunk can't consume the whole budget.
+            SWEEP_TOTAL_TIMEOUT_S = 180  # 3 min hard cap
+            SWEEP_CHUNK_TIMEOUT_S = 60   # per-chunk call timeout
+            SWEEP_MAX_CONSEC_FAILS = 3
+            SWEEP_CHUNK_SIZE = 5
 
             # Boot one fresh worker
             self._boot_workers(1, scan_id=scan_id)
             worker = self._workers[0]
 
+            sweep_start = time.time()
             sweep_classified = 0
+            sweep_chunks_done = 0
+            sweep_chunks_failed = 0
+            consec_fails = 0
+            total_chunks = sum(
+                (len(t) + SWEEP_CHUNK_SIZE - 1) // SWEEP_CHUNK_SIZE
+                for t in unclassified_by_trc.values()
+            )
+
+            def _budget_exceeded() -> bool:
+                return (time.time() - sweep_start) > SWEEP_TOTAL_TIMEOUT_S
+
+            aborted_reason: str | None = None
             for trc, tickets in unclassified_by_trc.items():
-                # Process in micro-batches of 5
-                for i in range(0, len(tickets), 5):
+                if aborted_reason:
+                    break
+                # Process in micro-batches of SWEEP_CHUNK_SIZE
+                for i in range(0, len(tickets), SWEEP_CHUNK_SIZE):
                     if self._user_cancelled or self._stop_event.is_set():
+                        aborted_reason = 'user_cancel'
+                        break
+                    if _budget_exceeded():
+                        aborted_reason = (
+                            f'total_timeout ({SWEEP_TOTAL_TIMEOUT_S}s)'
+                        )
+                        break
+                    if consec_fails >= SWEEP_MAX_CONSEC_FAILS:
+                        aborted_reason = (
+                            f'{SWEEP_MAX_CONSEC_FAILS} consecutive chunks '
+                            f'failed'
+                        )
                         break
 
-                    chunk = tickets[i:i + 5]
+                    chunk = tickets[i:i + SWEEP_CHUNK_SIZE]
+                    chunk_num = sweep_chunks_done + sweep_chunks_failed + 1
                     batch_id = f"sweep_{scan_id[:8]}_{trc[:20]}_{i}"
+
+                    self._emit_event(
+                        scan_id, 'sweep_chunk', 'running',
+                        f'Sweep chunk {chunk_num}/{total_chunks} '
+                        f'({len(chunk)} tickets) | trc={trc[:40]}',
+                        metadata={'batch_id': batch_id,
+                                  'chunk_size': len(chunk)}
+                    )
 
                     payload = self._build_batch_payload(
                         worker, scan_id, batch_id, trc, chunk,
@@ -1945,34 +2112,142 @@ class ScanOrchestrator:
                          'trc_chunk': 1, 'trc_chunk_total': 1},
                         date_start, date_end,
                     )
+                    # Tight per-chunk timeout so one stuck call can't
+                    # eat the entire sweep budget.
+                    payload['call_timeout'] = SWEEP_CHUNK_TIMEOUT_S
 
+                    chunk_start = time.time()
                     try:
                         result = worker.classify_batch(payload)
-                        n = result.get("classified", 0)
-                        sweep_classified += n
-                        logger.info(
-                            "Sweep batch %s: %d/%d classified",
-                            batch_id, n, len(chunk),
-                        )
+                        chunk_elapsed = time.time() - chunk_start
+                        delivered = len(result.get('delivered_ids') or [])
+                        err = result.get('error')
+                        if err:
+                            sweep_chunks_failed += 1
+                            consec_fails += 1
+                            self._emit_event(
+                                scan_id, 'sweep_chunk', 'warn',
+                                f'Sweep chunk {chunk_num} failed: {err} '
+                                f'({chunk_elapsed:.1f}s)',
+                                metadata={'batch_id': batch_id,
+                                          'error': str(err)}
+                            )
+                            logger.warning(
+                                "Sweep chunk %s failed: %s",
+                                batch_id[:16], err,
+                            )
+                            # Try bridge restart — dead-bridge recovery
+                            try:
+                                worker.bridge.restart()
+                                time.sleep(2)
+                                logger.info(
+                                    "Sweep worker bridge restarted "
+                                    "after chunk failure"
+                                )
+                            except Exception as re:
+                                logger.warning(
+                                    "Sweep bridge restart failed: %s", re,
+                                )
+                        else:
+                            sweep_classified += delivered
+                            sweep_chunks_done += 1
+                            consec_fails = 0
+                            self._emit_event(
+                                scan_id, 'sweep_chunk', 'complete',
+                                f'Sweep chunk {chunk_num}/{total_chunks} '
+                                f'| {delivered}/{len(chunk)} recovered '
+                                f'({chunk_elapsed:.1f}s)',
+                                duration_ms=int(chunk_elapsed * 1000),
+                                metadata={'batch_id': batch_id,
+                                          'recovered': delivered,
+                                          'chunk_size': len(chunk)}
+                            )
                     except Exception as e:
-                        logger.warning(
-                            "Sweep batch %s failed: %s", batch_id, e
+                        chunk_elapsed = time.time() - chunk_start
+                        sweep_chunks_failed += 1
+                        consec_fails += 1
+                        self._emit_event(
+                            scan_id, 'sweep_chunk', 'error',
+                            f'Sweep chunk {chunk_num} exception: '
+                            f'{type(e).__name__}: {str(e)[:100]}',
+                            metadata={'batch_id': batch_id,
+                                      'error_type': type(e).__name__}
                         )
+                        logger.warning(
+                            "Sweep chunk %s exception: %s",
+                            batch_id[:16], e,
+                        )
+                        try:
+                            worker.bridge.restart()
+                            time.sleep(2)
+                        except Exception:
+                            pass
 
-            self._emit_event(
-                scan_id, 'info', 'complete',
-                f'Sweep complete: {sweep_classified}/{total_unclassified} '
-                f'recovered'
+            # Final sweep status event
+            elapsed = time.time() - sweep_start
+            recovery_rate = (
+                sweep_classified / total_unclassified * 100
+                if total_unclassified else 100.0
             )
+            if aborted_reason:
+                self._emit_event(
+                    scan_id, 'sweep_end', 'warn',
+                    f'Sweep aborted ({aborted_reason}): '
+                    f'{sweep_classified}/{total_unclassified} recovered '
+                    f'({recovery_rate:.1f}%) in {elapsed:.1f}s | '
+                    f'chunks={sweep_chunks_done}ok/{sweep_chunks_failed}fail',
+                    duration_ms=int(elapsed * 1000),
+                    metadata={'aborted': aborted_reason,
+                              'recovered': sweep_classified,
+                              'unclassified': total_unclassified,
+                              'chunks_done': sweep_chunks_done,
+                              'chunks_failed': sweep_chunks_failed}
+                )
+                logger.warning(
+                    "Sweep aborted (%s): %d/%d recovered, %d chunks ok, "
+                    "%d failed, %.1fs elapsed",
+                    aborted_reason, sweep_classified, total_unclassified,
+                    sweep_chunks_done, sweep_chunks_failed, elapsed,
+                )
+            else:
+                self._emit_event(
+                    scan_id, 'sweep_end', 'complete',
+                    f'Sweep complete: {sweep_classified}/'
+                    f'{total_unclassified} recovered ({recovery_rate:.1f}%) '
+                    f'in {elapsed:.1f}s | {sweep_chunks_done} chunks ok, '
+                    f'{sweep_chunks_failed} failed',
+                    duration_ms=int(elapsed * 1000),
+                    metadata={'recovered': sweep_classified,
+                              'unclassified': total_unclassified,
+                              'chunks_done': sweep_chunks_done,
+                              'chunks_failed': sweep_chunks_failed}
+                )
+                logger.info(
+                    "Sweep complete: %d/%d recovered, %d chunks ok, "
+                    "%d failed, %.1fs",
+                    sweep_classified, total_unclassified,
+                    sweep_chunks_done, sweep_chunks_failed, elapsed,
+                )
 
-            # Shutdown sweep worker
+            # Shutdown sweep worker (always, even on abort)
             try:
                 worker.bridge.shutdown()
             except Exception:
                 pass
 
         except Exception as e:
-            logger.warning(f"Classification sweep failed (non-fatal): {e}")
+            logger.error(
+                f"Classification sweep crashed (non-fatal to scan): {e}",
+                exc_info=True,
+            )
+            try:
+                self._emit_event(
+                    scan_id, 'sweep_end', 'error',
+                    f'Sweep crashed: {type(e).__name__}: {str(e)[:120]}',
+                    metadata={'error_type': type(e).__name__}
+                )
+            except Exception:
+                pass
         finally:
             conn.close()
 
@@ -2503,6 +2778,64 @@ class ScanOrchestrator:
         )
         return section
 
+    def _reap_interrupted_scans(self):
+        """Detect and close out scans left in 'running' from a prior
+        process.
+
+        When the desktop app is closed mid-scan (or crashes, or hits a
+        driver timeout) the orchestrator's worker threads — all daemon
+        threads — die silently with the process. The scan row keeps
+        status='running' forever, which poisons the UI history tab
+        and blocks the 'retry failed batches' code path (which only
+        accepts completed / completed_with_errors states).
+
+        This runs once at the top of start_scan(), before any new work
+        begins. It's safe because a new ScanOrchestrator instance in a
+        fresh process cannot own a 'running' scan from a past process.
+        """
+        try:
+            conn = self._get_conn()
+            stale = conn.execute("""
+                SELECT scan_id FROM nlp_scan_runs
+                WHERE status IN ('running', 'paused')
+            """).fetchall()
+            if not stale:
+                conn.close()
+                return
+
+            for row in stale:
+                sid = row['scan_id']
+                # Flip any in-flight batches to failed with a clear
+                # marker so the retry path can pick them up later.
+                conn.execute(
+                    "UPDATE nlp_batches SET status = 'failed', "
+                    "error_message = 'scan_interrupted' "
+                    "WHERE scan_id = ? AND status IN "
+                    "('running', 'claimed', 'queued')",
+                    (sid,)
+                )
+                conn.execute(
+                    "UPDATE nlp_scan_runs SET status = 'interrupted', "
+                    "completed_at = ? WHERE scan_id = ?",
+                    (datetime.utcnow().isoformat(), sid)
+                )
+                try:
+                    self._emit_event(
+                        sid, 'scan_interrupted', 'warn',
+                        'Scan marked interrupted: prior app process '
+                        'ended before scan completed',
+                    )
+                except Exception:
+                    pass
+                logger.warning(
+                    "Reaped interrupted scan %s (process died mid-scan)",
+                    sid[:8],
+                )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.warning(f"_reap_interrupted_scans failed: {e}")
+
     def _finalize_scan(self, scan_id):
         """Mark scan as completed (or completed_with_errors) in the database."""
         # D7: Snapshot rate governor state before closing
@@ -2538,15 +2871,78 @@ class ScanOrchestrator:
 
         conn = self._get_conn()
         try:
+            # Completed includes partial-delivery batches (drops are
+            # swept separately). Failed is exhausted-retry batches.
             completed_batches = conn.execute("""
                 SELECT COUNT(*) as n FROM nlp_batches
-                WHERE scan_id = ? AND status = 'completed'
+                WHERE scan_id = ? AND status IN ('completed', 'partial')
             """, (scan_id,)).fetchone()
 
             failed_batches = conn.execute("""
                 SELECT COUNT(*) as n FROM nlp_batches
                 WHERE scan_id = ? AND status = 'failed'
             """, (scan_id,)).fetchone()
+
+            # ── Fix #3: Scan-wide delivery audit ───────────────────
+            # After the sweep has had its chance, count orphans that
+            # STILL don't have a classification row. If any remain,
+            # the scan closes as completed_with_errors instead of
+            # silently reporting success.
+            orphan_row = conn.execute("""
+                SELECT COUNT(DISTINCT bt.ticket_id) AS n
+                FROM nlp_batch_tickets bt
+                LEFT JOIN nlp_ticket_classifications tc
+                  ON tc.ticket_id = bt.ticket_id
+                 AND tc.scan_id   = bt.scan_id
+                WHERE bt.scan_id = ?
+                  AND tc.ticket_id IS NULL
+            """, (scan_id,)).fetchone()
+            orphan_count = orphan_row['n'] if orphan_row else 0
+            requested_row = conn.execute(
+                "SELECT COUNT(DISTINCT ticket_id) AS n "
+                "FROM nlp_batch_tickets WHERE scan_id = ?",
+                (scan_id,),
+            ).fetchone()
+            requested_count = requested_row['n'] if requested_row else 0
+            delivered_count = max(requested_count - orphan_count, 0)
+
+            if orphan_count > 0:
+                # Loud event — this is the condition the app never
+                # previously surfaced: batches marked complete but
+                # tickets never landed in nlp_ticket_classifications.
+                logger.warning(
+                    "Scan audit: %d orphan ticket(s) — requested=%d, "
+                    "delivered=%d (sweep did not recover them)",
+                    orphan_count, requested_count, delivered_count,
+                )
+                try:
+                    self._emit_event(
+                        scan_id, 'scan_audit', 'warn',
+                        f'Scan audit: {orphan_count} tickets missing '
+                        f'classifications after sweep '
+                        f'({delivered_count}/{requested_count} delivered)',
+                        metadata={
+                            'orphan_count': orphan_count,
+                            'delivered': delivered_count,
+                            'requested': requested_count,
+                        }
+                    )
+                except Exception:
+                    pass
+            else:
+                try:
+                    self._emit_event(
+                        scan_id, 'scan_audit', 'complete',
+                        f'Scan audit: all {requested_count} tickets '
+                        f'classified (no orphans)',
+                        metadata={
+                            'orphan_count': 0,
+                            'delivered': delivered_count,
+                            'requested': requested_count,
+                        }
+                    )
+                except Exception:
+                    pass
 
             # Aggregate tokens from nlp_batches (authoritative source)
             token_row = conn.execute("""
@@ -2568,12 +2964,20 @@ class ScanOrchestrator:
                 actual_cost = usage_row['total_cost'] if usage_row else 0.0
 
             failed_n = failed_batches['n'] if failed_batches else 0
+            # completed_with_errors if either: a batch failed outright,
+            # OR the delivery audit found orphans the sweep couldn't
+            # recover. Both represent real data loss the user needs to
+            # see, not just a green "completed".
             final_status = (
-                'completed_with_errors' if failed_n > 0 else 'completed'
+                'completed_with_errors'
+                if (failed_n > 0 or orphan_count > 0)
+                else 'completed'
             )
 
-            # Build informative error_log from batch-level errors
+            # Build informative error_log from batch-level errors AND
+            # any orphan drops that remain after the sweep.
             error_log_text = None
+            parts = []
             if failed_n > 0:
                 error_reasons = conn.execute("""
                     SELECT error_message, COUNT(*) as cnt
@@ -2582,9 +2986,15 @@ class ScanOrchestrator:
                       AND error_message IS NOT NULL
                     GROUP BY error_message
                 """, (scan_id,)).fetchall()
-                parts = [f"{failed_n} batch(es) failed"]
+                parts.append(f"{failed_n} batch(es) failed")
                 for row in error_reasons:
                     parts.append(f"  {row['error_message']}: {row['cnt']}")
+            if orphan_count > 0:
+                parts.append(
+                    f"{orphan_count} ticket(s) orphaned (delivery-lie, "
+                    f"sweep did not recover)"
+                )
+            if parts:
                 error_log_text = "; ".join(parts)
 
             conn.execute("""

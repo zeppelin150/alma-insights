@@ -25,7 +25,10 @@ CUSUM (all TRCs): Cumulative sum drift detection
 Dependencies: scipy.stats.poisson, numpy
 """
 
+from __future__ import annotations
+
 import numpy as np
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from collections import defaultdict
 from scipy.stats import poisson
@@ -43,10 +46,11 @@ CUSUM_H_FACTOR = 5.0           # threshold as multiple of sqrt(λ)
 
 
 def run_incident_scan(
-    db,
-    target_date: str = None,
-    date_from: str = None,
-    progress_callback=None,
+    db: object,
+    target_date: str | None = None,
+    date_from: str | None = None,
+    progress_callback: Callable[[str, int], None] | None = None,
+    source_id: str | None = None,
 ) -> dict:
     """
     Full incident scan across the entire date range.
@@ -81,7 +85,7 @@ def run_incident_scan(
 
     # Get TRCs
     _prog("Loading TRC list...", 5)
-    trc_codes = [r["code"] for r in db.get_trc_codes()]
+    trc_codes = [r["code"] for r in db.get_trc_codes(source_id=source_id)]
     if not trc_codes:
         return {"scan_date": target_date, "date_from": date_from or target_date,
                 "trcs_scanned": 0,
@@ -124,8 +128,10 @@ def run_incident_scan(
             d += timedelta(days=1)
 
     # Reset CUSUM accumulators so the progressive scan is clean
-    db.conn.execute("DELETE FROM trc_baselines")
-    db.conn.commit()
+    from src.data.connection_factory import atomic
+
+    with atomic(db.conn):
+        db.conn.execute("DELETE FROM trc_baselines")
 
     new_flags = []
     trc_results = []  # will hold the *last* day's results per TRC
@@ -546,7 +552,7 @@ def _build_interpretation(result):
 
 # ─── Flag Management ───
 
-def get_open_flags(db, theta_level=None, flag_type=None, limit=100):
+def get_open_flags(db: object, theta_level: int | None = None, flag_type: str | None = None, limit: int = 100) -> list[dict]:
     """Get open incident flags, optionally filtered."""
     query = "SELECT * FROM incident_flags WHERE status IN ('open', 'acknowledged')"
     params = []
@@ -561,7 +567,7 @@ def get_open_flags(db, theta_level=None, flag_type=None, limit=100):
     return [dict(r) for r in db.conn.execute(query, params).fetchall()]
 
 
-def get_flag_history(db, trc_code=None, days=90, limit=300):
+def get_flag_history(db: object, trc_code: str | None = None, days: int = 90, limit: int = 300) -> list[dict]:
     """Get incident flag history."""
     # Use max flag date as reference so historical data is visible
     max_row = db.conn.execute(
@@ -584,28 +590,28 @@ def get_flag_history(db, trc_code=None, days=90, limit=300):
     return [dict(r) for r in db.conn.execute(query, params).fetchall()]
 
 
-def acknowledge_flag(db, flag_id, notes=""):
+def acknowledge_flag(db: object, flag_id: int, notes: str = "") -> None:
     db.conn.execute(
         "UPDATE incident_flags SET status = 'acknowledged', notes = ? WHERE flag_id = ?",
         (notes, flag_id))
     db.conn.commit()
 
 
-def resolve_flag(db, flag_id, notes=""):
+def resolve_flag(db: object, flag_id: int, notes: str = "") -> None:
     db.conn.execute(
         "UPDATE incident_flags SET status = 'resolved', resolved_at = ?, notes = ? WHERE flag_id = ?",
         (datetime.now().isoformat(), notes, flag_id))
     db.conn.commit()
 
 
-def mark_false_positive(db, flag_id, notes=""):
+def mark_false_positive(db: object, flag_id: int, notes: str = "") -> None:
     db.conn.execute(
         "UPDATE incident_flags SET status = 'false_positive', notes = ? WHERE flag_id = ?",
         (notes, flag_id))
     db.conn.commit()
 
 
-def correlate_flag_with_interventions(db, flag, lookback_days=14):
+def correlate_flag_with_interventions(db: object, flag: dict, lookback_days: int = 14) -> list[dict]:
     """Check if a flag correlates with a recent intervention.
 
     Queries interventions within `lookback_days` before the flag's trigger date.

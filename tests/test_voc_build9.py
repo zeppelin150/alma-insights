@@ -110,11 +110,13 @@ class TestSendRawLocking:
     """T1: Verify concurrent writes to stdin are serialized."""
 
     def test_concurrent_writes_serialized(self):
-        """Multiple threads writing to _send_raw don't interleave."""
-        from src.agents.gemini_bridge_wrapper import GeminiBridge
+        """Multiple threads writing via _send_jsonrpc don't interleave."""
+        from src.agents.acp_bridge import ACPBridge
 
-        wrapper = GeminiBridge.__new__(GeminiBridge)
+        wrapper = ACPBridge.__new__(ACPBridge)
         wrapper._send_lock = threading.Lock()
+        wrapper._msg_id = 0
+        wrapper._msg_id_lock = threading.Lock()
 
         # Track write order
         writes = []
@@ -136,10 +138,10 @@ class TestSendRawLocking:
 
         wrapper._process = FakeProcess()
 
-        def send(obj):
-            wrapper._send_raw(obj)
+        def send(method_name):
+            wrapper._send_jsonrpc(method_name, {"test": True})
 
-        threads = [threading.Thread(target=send, args=({"id": i},))
+        threads = [threading.Thread(target=send, args=(f"method_{i}",))
                    for i in range(10)]
         for t in threads:
             t.start()
@@ -147,10 +149,11 @@ class TestSendRawLocking:
             t.join()
 
         assert len(writes) == 10
-        # Each write should be a complete JSON line (no interleaving)
+        # Each write should be a complete JSON-RPC line (no interleaving)
         for w in writes:
             parsed = json.loads(w.strip())
-            assert "id" in parsed
+            assert "jsonrpc" in parsed
+            assert "method" in parsed
 
 
 # ═══════════════════════════════════════════════════════════════

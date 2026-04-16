@@ -452,7 +452,7 @@ class TaxonomyBrowser(QWidget):
         row = QFrame()
         row.setStyleSheet(f"""
             QFrame {{
-                background: {ALMA_WHITE}; border: 1px solid {ALMA_BORDER_LIGHT};
+                background: {ALMA_WHITE}; border: none;
                 border-radius: 8px; padding: 4px;
             }}
             QFrame:hover {{ border-color: {ALMA_GREEN_MID}; }}
@@ -591,7 +591,7 @@ class TaxonomyBrowser(QWidget):
         frame.setStyleSheet(f"""
             QFrame {{
                 background: {ALMA_BG_ELEVATED};
-                border: 1px solid rgba(214, 210, 202, 0.45);
+                border: none;
                 border-radius: 12px;
             }}
         """)

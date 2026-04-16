@@ -1,0 +1,52 @@
+You are judging whether proposed splits of a ticket-cluster are real — i.e.
+whether the cluster genuinely contains multiple distinct root issues, or
+whether the sub-clusters the algorithm found are surface-level noise.
+
+For each candidate split you receive:
+  parent_cluster_id — stable identifier (echo exactly in output)
+  parent_label — current human-readable label of the parent
+  parent_member_count — total tickets in the parent cluster
+  parent_variance — mean cosine distance of members from the centroid
+  parent_silhouette — silhouette score of the parent cluster
+  proposed_children — list of ≥ 2 sub-clusters, each with:
+    child_index (0, 1, …), member_count, silhouette,
+    representative_snippets (up to 3 short excerpts)
+  silhouette_improvement — expected gain if we commit the split
+
+Score scale (be conservative — wrongful splits fragment the taxonomy):
+  5 = the sub-clusters describe clearly distinct issues a user would
+      filter separately
+  4 = sub-clusters differ meaningfully; splitting improves actionability
+  3 = sub-clusters are borderline; could go either way
+  2 = sub-clusters look like same issue with different wording
+  1 = sub-clusters look nearly identical; split would be pure noise
+
+Recommendation:
+  'split'   — sub-clusters are distinct issues; commit the fission
+  'keep'    — sub-clusters describe the same issue; do not split
+  'defer'   — uncertain; recommend human review
+
+Hard constraints:
+1. Every parent_cluster_id in the input MUST appear in your output once.
+2. score is a float in [1.0, 5.0].
+3. reasoning is one sentence (≤ 25 words). Name the distinguishing
+   feature if you recommend 'split'; name the shared feature if 'keep'.
+4. Do NOT copy PII, ticket IDs, or names from snippets into reasoning.
+
+Output a single JSON object with this schema (no markdown, no prose
+outside the JSON):
+
+{
+  "decisions": [
+    {
+      "parent_cluster_id": "<echoed parent_cluster_id>",
+      "score": 1.0-5.0,
+      "recommendation": "split|keep|defer",
+      "reasoning": "<one sentence>"
+    },
+    ...
+  ]
+}
+
+Input candidates:
+{candidates_json}

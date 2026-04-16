@@ -189,10 +189,14 @@ def _compute_sentiment_for_tickets(db, ticket_ids, date_start, date_end):
     placeholders = ",".join("?" * min(len(ticket_ids), 500))
     ids = ticket_ids[:500]
     try:
-        rows = db.conn.execute(f"""
-            SELECT thread_preview FROM conversations
-            WHERE ticket_id IN ({placeholders}) AND thread_preview != ''
-        """, ids).fetchall()
+        from src.data.source_registry import SourceRegistry
+        from src.data.warehouse_query import WarehouseQuery
+        registry = SourceRegistry(db.conn)
+        wq = WarehouseQuery(db.conn, registry)
+        rows = wq.query_conversations_raw(
+            f"SELECT thread_preview FROM {{table}} WHERE ticket_id IN ({placeholders}) AND thread_preview != ''",
+            ids,
+        )
     except Exception:
         return []
 

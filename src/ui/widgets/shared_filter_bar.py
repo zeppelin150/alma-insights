@@ -41,7 +41,7 @@ class SharedFilterBar(QWidget):
         self.setObjectName("FilterBar")
         self.setStyleSheet(
             f"#FilterBar {{ background: {ALMA_BG_ELEVATED};"
-            f" border: 1px solid {ALMA_BORDER_LIGHT};"
+            f" border: none;"
             " border-radius: 10px; }"
             f" #FilterBar QPushButton {{"
             f"   background: {ALMA_GREEN_DARK}; color: {ALMA_TEXT_ON_DARK};"
@@ -144,6 +144,7 @@ class SharedFilterBar(QWidget):
         combo = QComboBox()
         combo.addItems(options)
         combo.setMinimumWidth(100)
+        combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         combo.currentTextChanged.connect(self._emit_change)
         self._combos[key] = combo
         self._layout.addWidget(combo)

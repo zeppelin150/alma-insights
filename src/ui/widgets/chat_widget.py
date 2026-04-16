@@ -194,20 +194,24 @@ class ChatWorker(QThread):
                 params.append(trc)
 
             where = " AND ".join(conditions)
-            rows = db.conn.execute(f"""
+            from src.data.source_registry import SourceRegistry
+            from src.data.warehouse_query import WarehouseQuery
+            _wq = WarehouseQuery(db.conn, SourceRegistry(db.conn))
+            rows = _wq.query_conversations_raw(f"""
                 SELECT ticket_id, trc_code, created_at, subject,
                        csat_score, thread_preview
-                FROM conversations
+                FROM {{table}}
                 WHERE {where} AND thread_preview != ''
                 ORDER BY RANDOM() LIMIT ?
-            """, params + [limit]).fetchall()
+            """, params + [limit])
 
             if not rows:
                 return None
 
+            _sample_cols = ["ticket_id", "trc_code", "created_at", "subject", "csat_score", "thread_preview"]
             lines = [f"SAMPLE TICKETS ({len(rows)} redacted examples):"]
             for r in rows:
-                row = dict(r)
+                row = dict(zip(_sample_cols, r)) if not isinstance(r, dict) else r
                 # PII redaction
                 subject = GeminiClient._redact_base(None, row.get("subject", ""))
                 subject = GeminiClient._redact_aggressive(None, subject)
@@ -264,7 +268,7 @@ class ChatBubble(QFrame):
             self.setStyleSheet(f"""
                 ChatBubble {{
                     background: {ALMA_CREAM}; border-radius: 10px;
-                    border: 1px solid {ALMA_BORDER_LIGHT};
+                    border: none;
                     margin-left: 4px; margin-right: 80px;
                 }}
                 QLabel {{
@@ -293,7 +297,7 @@ class ReportChatWidget(QWidget):
         self._data_block_text = ""
         self._report_text = ""
         self._gemini_client = None
-        self._worker = None
+        self._worker = None  # legacy: kept for FindingWorker path
 
         # Build 7.0: DB context for data-grounded drilldown
         self._db_path = None
@@ -303,6 +307,24 @@ class ReportChatWidget(QWidget):
         self._known_trcs = []   # cached list of {code, label} dicts
         self._trc_codes = set()  # lowercase codes for fast lookup
         self._trc_labels = {}    # lowercase label → code mapping
+
+        # ChatEngine — warm client path, custom packer + drilldown context
+        from src.services.chat_engine import ChatEngine
+        self._engine = ChatEngine(
+            system_prompt=(
+                "You are a Support Analytics engine in follow-up mode. "
+                "When DRILLDOWN DATA is provided, use it to give precise, "
+                "evidence-based answers with specific metrics and ticket examples. "
+                "Cite TRC codes, ticket counts, CSAT scores, and dates."
+            ),
+            task_type="report_generation",
+            context_provider=self._provide_drilldown_context,
+            history_packer=self._pack_followup_history,
+        )
+        self._engine.response_ready.connect(self._on_engine_response)
+        self._engine.error_occurred.connect(self._on_error)
+        self._engine.busy_changed.connect(self._on_engine_busy)
+        self._engine.status_update.connect(self._on_engine_status)
 
         self._build_ui()
 
@@ -331,7 +353,7 @@ class ReportChatWidget(QWidget):
         self._scroll.setMaximumHeight(400)
         self._scroll.setStyleSheet(f"""
             QScrollArea {{
-                background: {ALMA_WHITE}; border: 1px solid {ALMA_BORDER_LIGHT};
+                background: {ALMA_WHITE}; border: none;
                 border-radius: 8px;
             }}
         """)
@@ -385,8 +407,9 @@ class ReportChatWidget(QWidget):
     # ─── Public API ───────────────────────────────────────
 
     def set_gemini_client(self, client):
-        """Set the Gemini client for chat calls."""
+        """Set the Gemini client for chat calls (warm path)."""
         self._gemini_client = client
+        self._engine.set_client(client)
 
     def set_report_context(self, data_block_text, report_text):
         """Initialize context after report generation."""
@@ -396,6 +419,7 @@ class ReportChatWidget(QWidget):
             {"role": "system", "content": data_block_text},
             {"role": "assistant", "content": report_text},
         ]
+        self._engine.set_history(self._history)
         self._send_btn.setEnabled(True)
         self._placeholder.hide()
         self._status_label.setText("Ready for questions")
@@ -488,6 +512,7 @@ class ReportChatWidget(QWidget):
     def clear(self):
         """Reset chat state."""
         self._history = []
+        self._engine.clear_history()
         self._data_block_text = ""
         self._report_text = ""
         self._nlp_finding_id = None
@@ -517,39 +542,20 @@ class ReportChatWidget(QWidget):
 
         # Add user bubble
         self._add_bubble(question, "user")
-        self._history.append({"role": "user", "content": question})
         self._input_edit.clear()
 
-        # Check for NLP finding-aware drilldown
+        # Check for NLP finding-aware drilldown (bypasses engine)
         finding_id = getattr(self, '_nlp_finding_id', None)
         if finding_id:
+            self._history.append({"role": "user", "content": question})
             self._send_finding_drilldown(finding_id, question)
             return
 
-        # Build packed prompt (last 5 turns for size management)
-        prompt = self._build_followup_prompt(question)
+        # Sync engine history with widget history before sending
+        self._engine.set_history(self._history)
 
-        # Build 7.0: Detect drilldown intent for DB enrichment
-        drilldown_ctx = self._build_drilldown_intent(question)
-
-        # Disable while processing
-        self._send_btn.setEnabled(False)
-        if drilldown_ctx:
-            self._status_label.setText("Querying data + thinking...")
-        else:
-            self._status_label.setText("Thinking...")
-
-        self._worker = ChatWorker(
-            self._gemini_client, prompt,
-            "You are a Support Analytics engine in follow-up mode. "
-            "When DRILLDOWN DATA is provided, use it to give precise, "
-            "evidence-based answers with specific metrics and ticket examples. "
-            "Cite TRC codes, ticket counts, CSAT scores, and dates.",
-            drilldown_ctx=drilldown_ctx,
-        )
-        self._worker.finished.connect(self._on_response)
-        self._worker.error.connect(self._on_error)
-        self._worker.start()
+        # Send via ChatEngine (engine appends user msg to its own history)
+        self._engine.send(question)
 
     def _send_finding_drilldown(self, finding_id, question):
         """Use NLP synthesizer for finding-aware drilldown response."""
@@ -812,15 +818,93 @@ class ReportChatWidget(QWidget):
     # ─── Response Handling ────────────────────────────────
 
     def _on_response(self, text):
+        """Legacy handler for FindingWorker path."""
         self._add_bubble(text, "assistant")
         self._history.append({"role": "assistant", "content": text})
         self._send_btn.setEnabled(True)
+        self._status_label.setText("Ready")
+
+    def _on_engine_response(self, text):
+        """Handler for ChatEngine path."""
+        self._add_bubble(text, "assistant")
+        # Sync widget history from engine (engine already appended)
+        self._history = self._engine.history
         self._status_label.setText("Ready")
 
     def _on_error(self, error_text):
         self._add_bubble(f"Error: {error_text}", "assistant")
         self._send_btn.setEnabled(True)
         self._status_label.setText("Error occurred")
+
+    def _on_engine_busy(self, busy):
+        self._send_btn.setEnabled(not busy)
+
+    def _on_engine_status(self, text):
+        if text:
+            self._status_label.setText(text)
+
+    # ── ChatEngine callbacks ──
+
+    def _provide_drilldown_context(self, user_message, history):
+        """Context provider: build drilldown enrichment from live DB."""
+        drilldown_ctx = self._build_drilldown_intent(user_message)
+        if not drilldown_ctx:
+            return ""
+
+        self._status_label.setText("Querying data + thinking...")
+
+        # Execute enrichment synchronously (fast DB queries <100ms)
+        try:
+            from src.data.db_manager import DatabaseManager
+            from src.data.report_builder import build_data_block, format_data_block_for_prompt
+
+            db = DatabaseManager(drilldown_ctx["db_path"])
+            db.initialize()
+
+            d_start = drilldown_ctx.get("date_start", "")
+            d_end = drilldown_ctx.get("date_end", "")
+            trc = drilldown_ctx.get("trc")
+
+            mini = build_data_block(db, d_start, d_end, trc_filter=trc)
+            formatted = format_data_block_for_prompt(mini)
+
+            header = "DRILLDOWN DATA (queried from database for this question)"
+            if trc:
+                header += f" — filtered to TRC: {trc}"
+            parts = [f"{header}:", formatted]
+
+            db.close()
+            return "\n\n".join(parts)
+        except Exception as e:
+            logger.warning("Drilldown enrichment failed: %s", e)
+            return ""
+
+    def _pack_followup_history(self, user_message, history):
+        """Custom history packer: last 5 Q&A turns + original report text."""
+        parts = []
+        parts.append("ORIGINAL REPORT:")
+        parts.append(self._report_text[:8000])
+
+        qa_turns = [m for m in history if m["role"] in ("user", "assistant")]
+        qa_turns = qa_turns[1:]  # skip initial assistant (report)
+        recent = qa_turns[-10:]  # last 5 pairs
+
+        if recent:
+            parts.append("\nPRIOR Q&A:")
+            for m in recent:
+                prefix = "Q" if m["role"] == "user" else "A"
+                parts.append(f"{prefix}: {m['content'][:2000]}")
+
+        parts.append(f"\nNEW QUESTION: {user_message}")
+        parts.append(
+            "\nIf the question asks for a drilldown on a specific finding, produce:\n"
+            "WHAT IT IS / EVIDENCE / WHO-WHERE / WHY / WHAT TO DO\n"
+            "If it's a simple question, answer directly.\n"
+            "Always cite specific metrics from the original report.\n"
+            "If DRILLDOWN DATA was provided above, integrate those fresh "
+            "statistics and ticket samples into your answer."
+        )
+        return "\n\n".join(parts)
 
     def _add_bubble(self, text, role):
         """Add a chat bubble to the scroll area."""

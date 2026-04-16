@@ -4,6 +4,8 @@ Upload reports to Google Drive via service account credentials.
 Optional dependency — graceful failure if google-api-python-client not installed.
 """
 
+from __future__ import annotations
+
 import os
 import logging
 from pathlib import Path
@@ -22,12 +24,12 @@ class GoogleDriveExporter:
       - A target folder ID (shared with the service account email)
     """
 
-    def __init__(self, credentials_path="", folder_id=""):
+    def __init__(self, credentials_path: str = "", folder_id: str = "") -> None:
         self._credentials_path = credentials_path
         self._folder_id = folder_id
         self._service = None
 
-    def is_configured(self):
+    def is_configured(self) -> bool:
         """Check if credentials and folder are set."""
         return (
             bool(self._credentials_path)
@@ -57,7 +59,7 @@ class GoogleDriveExporter:
         except Exception as e:
             raise RuntimeError(f"Failed to build Drive service: {e}")
 
-    def upload_report(self, filename, content, mime_type="text/markdown"):
+    def upload_report(self, filename: str, content: str, mime_type: str = "text/markdown") -> str:
         """Upload a report file to the configured Drive folder.
 
         Returns the file ID of the uploaded file.
@@ -91,7 +93,7 @@ class GoogleDriveExporter:
         log.info(f"Uploaded to Drive: {filename} -> {file_id}")
         return file_id
 
-    def test_connection(self):
+    def test_connection(self) -> tuple[bool, str]:
         """Test the Drive connection by listing files in the folder.
 
         Returns (success: bool, message: str)

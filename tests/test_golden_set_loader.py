@@ -74,8 +74,16 @@ class TestLoadPairs:
         assert stats == {"total": 3, "same": 2, "different": 1}
 
     def test_real_golden_set_loads(self):
-        """Smoke test — parse the actual test golden set if present."""
-        real = Path(r"C:/Users/Chris/Downloads/alma_test_10000_1_golden_set.csv")
+        """Smoke test — parse the actual test golden set if present.
+
+        Honours ALMA_GOLDEN_SET_CSV env var; otherwise looks at the
+        gitignored data/test_fixtures/ path. Skips cleanly when absent.
+        """
+        import os
+        real = Path(os.environ.get(
+            "ALMA_GOLDEN_SET_CSV",
+            "data/test_fixtures/alma_test_10000_1_golden_set.csv",
+        ))
         if not real.is_file():
             pytest.skip("Real golden set CSV not available")
         pairs = load_pairs(real)

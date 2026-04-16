@@ -9,11 +9,14 @@ import time
 import yaml
 from pathlib import Path
 
+from src.data.settings_manager import load_settings, get_section
+from src.data.connection_factory import get_connection
+
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QComboBox, QFrame, QScrollArea, QTextEdit,
     QFileDialog, QApplication, QSizePolicy, QStackedWidget,
-    QMessageBox,
+    QMessageBox, QTabWidget,
 )
 from PySide6.QtCore import Qt, QDate, QThread, QTimer, Signal
 
@@ -28,7 +31,8 @@ from src.ui.widgets.date_picker import ModernDatePicker
 from src.ui.widgets.report_history_summary import ReportHistorySummary
 from src.ui.widgets.generation_animation import GenerationAnimationWidget
 from src.ui.widgets.chat_widget import ReportChatWidget
-from src.ui.widgets.empty_state import EmptyState
+from src.ui.widgets.markdown_viewer import MarkdownViewer
+from src.ui.widgets.collapsible_section import CollapsibleSection
 
 
 # ═══════════════════════════════════════════
@@ -139,9 +143,9 @@ class ReportWorker(QThread):
             self.progress.emit("Formatting prompt...")
             data_block_text = format_data_block_for_prompt(block)
 
-            # Replace variables in prompt (Build 7.0: pass db for temporal context)
+            # Replace variables in prompt
             prompt_text = self.prompt_data.get("prompt_text", "")
-            prompt = replace_prompt_variables(prompt_text, block, db=db)
+            prompt = replace_prompt_variables(prompt_text, block)
 
             # Validate
             try:
@@ -162,6 +166,54 @@ class ReportWorker(QThread):
             self.error.emit(traceback.format_exc())
 
 
+class PipelineWorker(QThread):
+    """Background thread using AIReportPipeline (Phase 5.5B).
+
+    Replaces ReportWorker with multi-phase pipeline that includes
+    analyst reports and technical summary.
+    """
+    progress = Signal(str)
+    finished = Signal(dict)  # full pipeline result dict
+    error = Signal(str)
+
+    def __init__(self, db_path, prompt_data, date_start, date_end,
+                 trc_filter, gemini_client, source_id=None):
+        super().__init__()
+        self.db_path = db_path
+        self.prompt_data = prompt_data
+        self.date_start = date_start
+        self.date_end = date_end
+        self.trc_filter = trc_filter
+        self.gemini_client = gemini_client
+        self.source_id = source_id
+
+    def run(self):
+        try:
+            from src.data.db_manager import DatabaseManager
+            from src.data.ai_report_pipeline import AIReportPipeline
+
+            db = DatabaseManager(self.db_path)
+            db.initialize()
+
+            pipeline = AIReportPipeline(
+                db,
+                gemini_client=self.gemini_client,
+                progress_cb=self.progress.emit,
+            )
+            result = pipeline.run(
+                self.prompt_data,
+                self.date_start,
+                self.date_end,
+                trc_filter=self.trc_filter,
+                source_id=self.source_id,
+            )
+            db.close()
+            self.finished.emit(result)
+        except Exception as e:
+            import traceback
+            self.error.emit(traceback.format_exc())
+
+
 # ═══════════════════════════════════════════
 #  VOC REPORT WORKER THREAD
 # ═══════════════════════════════════════════
@@ -169,8 +221,8 @@ class ReportWorker(QThread):
 class VOCReportWorker(QThread):
     """Background thread for VOC Root Cause Analysis report generation.
 
-    Build 7.0: Boots a ReportOrchestrator (3 bridge pool) for parallel
-    Phase 1 TRC analysis.  Falls back to sequential if boot fails.
+    Boots a ReportOrchestrator (3 bridge pool) for parallel Phase 1 TRC
+    analysis.  Falls back to sequential if boot fails.
     """
     progress = Signal(str, int)    # (message, percent)
     finished = Signal(dict)        # full results dict
@@ -195,7 +247,7 @@ class VOCReportWorker(QThread):
             db = DatabaseManager(self.db_path)
             db.initialize()
 
-            # Build 7.0: Boot parallel bridge pool for Phase 1
+            # Boot parallel bridge pool for Phase 1
             orchestrator = self._boot_orchestrator()
 
             self._builder = VOCBuilder(
@@ -230,17 +282,12 @@ class VOCReportWorker(QThread):
         """Boot a ReportOrchestrator for parallel Phase 1.  Returns None on failure."""
         try:
             from src.agents.report_orchestrator import ReportOrchestrator
-            import yaml
+            from src.data.settings_manager import get_section
 
-            # Read settings for model + worker count
-            config_path = Path(__file__).parent.parent.parent.parent / "config" / "settings.yaml"
-            model = "gemini-2.5-flash"
-            num_bridges = 3
-            if config_path.exists():
-                with open(config_path, encoding="utf-8") as f:
-                    cfg = yaml.safe_load(f) or {}
-                model = cfg.get("gemini", {}).get("model", model)
-                num_bridges = cfg.get("agents", {}).get("num_workers", num_bridges)
+            gemini_cfg = get_section("gemini", {})
+            model = gemini_cfg.get("model", "gemini-2.5-flash")
+            agents_cfg = get_section("agents", {})
+            num_bridges = agents_cfg.get("num_workers", 8)
 
             self._orchestrator = ReportOrchestrator(
                 db_path=self.db_path,
@@ -265,68 +312,14 @@ class VOCReportWorker(QThread):
             self._orchestrator.cancel()
 
 
-class NLPSynthesisWorker(QThread):
-    """Background thread for NLP synthesis / deep dive (avoids freezing UI)."""
-    progress = Signal(str)
-    finished = Signal(str, dict)  # (result_text, scan_dict)
-    error = Signal(str)
-
-    def __init__(self, db_path, gemini_client, scan_id, finding_id=None):
-        super().__init__()
-        self.db_path = db_path
-        self.gemini_client = gemini_client
-        self.scan_id = scan_id
-        self.finding_id = finding_id
-
-    def run(self):
-        try:
-            from src.data.db_manager import DatabaseManager
-            from src.data.nlp_synthesis import NLPSynthesizer
-
-            db = DatabaseManager(self.db_path)
-            db.initialize()
-
-            synth = NLPSynthesizer(db, self.gemini_client)
-
-            if self.finding_id:
-                self.progress.emit("Running deep dive analysis...")
-                result = synth.synthesize_single_finding(self.finding_id)
-            else:
-                self.progress.emit("Synthesizing NLP scan findings...")
-                result = synth.synthesize_findings(self.scan_id)
-
-            scan = db.get_latest_completed_scan() or {}
-            db.close()
-            self.finished.emit(result, scan)
-        except Exception:
-            import traceback
-            self.error.emit(traceback.format_exc())
-
-
 # ═══════════════════════════════════════════
 #  HELPER: Build Gemini Client from config
 # ═══════════════════════════════════════════
 
 def _build_gemini_client():
-    """Create bridge-backed Gemini client from settings.yaml (Build 7.0).
-
-    Returns a ReportBridgeClient that is interface-compatible with
-    GeminiClient but routes all calls through a persistent GeminiBridge
-    subprocess, eliminating the ~17-20s cold-start per CLI fork.
-    """
-    from src.agents.report_bridge_client import ReportBridgeClient
-    config_path = Path(__file__).parent.parent.parent.parent / "config" / "settings.yaml"
-    gemini_cfg = {}
-    if config_path.exists():
-        with open(config_path, encoding="utf-8") as f:
-            cfg = yaml.safe_load(f) or {}
-        gemini_cfg = cfg.get("gemini", {})
-    return ReportBridgeClient(
-        cli_path=gemini_cfg.get("cli_path", ""),
-        model=gemini_cfg.get("model", "gemini-2.5-flash"),
-        temperature=gemini_cfg.get("temperature", 0.2),
-        pii_redaction=gemini_cfg.get("pii_redaction", True),
-    )
+    """Create LLM client for report generation via task-routed factory."""
+    from src.gemini.client_factory import build_client_for_task
+    return build_client_for_task("report_generation")
 
 
 # ═══════════════════════════════════════════
@@ -334,20 +327,28 @@ def _build_gemini_client():
 # ═══════════════════════════════════════════
 
 class AIReportsPage(QWidget):
+    """AI Reports page: prompt library, report generation, and history.
+
+    Supports three generation paths:
+      - Standard reports via `ReportWorker` (single-shot Gemini call).
+      - Multi-phase pipeline via `PipelineWorker` (Phase 5.5B pipeline
+        with data assembly + analyst reports + tech summary).
+      - VOC root cause analysis via `VOCReportWorker` (parallel 3-bridge
+        pool for Phase 1 TRC analysis plus accumulator and specialists).
+
+    Tabs: Generate, Prompts (library), History.
+    """
 
     def __init__(self, db_manager, parent=None):
         super().__init__(parent)
         self.db = db_manager
         self._worker = None
         self._voc_worker = None
-        self._nlp_worker = None
+        self._shared_gemini_client = None
         self._current_report_text = ""
         self._current_data_block = ""
         self._drilldown = None
         self._scan_blocked = False
-
-        # Build 7.0: Shared bridge-backed Gemini client (lazy boot)
-        self._shared_gemini_client = None
 
         # Seed canned prompts
         try:
@@ -357,49 +358,56 @@ class AIReportsPage(QWidget):
 
         self._build_ui()
 
-    # ─── Build 7.0: Lifecycle Management ─────────────────
-
-    def _get_gemini_client(self):
-        """Return a shared ReportBridgeClient, creating lazily on first use.
-
-        The bridge subprocess persists across report generations within the
-        same page session, eliminating repeated cold starts (~17-20s each).
-        """
-        if self._shared_gemini_client is not None:
-            return self._shared_gemini_client
-        self._shared_gemini_client = _build_gemini_client()
-        return self._shared_gemini_client
-
-    def cleanup(self):
-        """Shutdown bridge subprocess and release resources.
-
-        Called when the page is destroyed or the application is closing.
-        """
-        # Cancel any running workers
-        if self._voc_worker and self._voc_worker.isRunning():
-            try:
-                self._voc_worker.cancel()
-            except Exception:
-                pass
-
-        # Shutdown shared bridge client
-        if self._shared_gemini_client is not None:
-            try:
-                self._shared_gemini_client.shutdown()
-            except Exception:
-                pass
-            self._shared_gemini_client = None
-
-    def closeEvent(self, event):
-        """Ensure bridge cleanup on widget close."""
-        self.cleanup()
-        super().closeEvent(event)
-
     def _build_ui(self):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
+        # ── Build 11.0: Header + Tab Widget wrapper ──
+        header_widget = QWidget()
+        header_layout = QVBoxLayout(header_widget)
+        header_layout.setContentsMargins(28, 24, 28, 0)
+        header_layout.setSpacing(8)
+
+        header = QLabel("AI Reports")
+        header.setObjectName("PageHeader")
+        header_layout.addWidget(header)
+
+        sub = QLabel("Generate AI-powered analysis reports from ticket data via Gemini")
+        sub.setObjectName("PageSubheader")
+        header_layout.addWidget(sub)
+
+        outer.addWidget(header_widget)
+
+        # ── Tab Widget ──
+        self._tab_widget = QTabWidget()
+        self._tab_widget.setStyleSheet(f"""
+            QTabWidget::pane {{
+                border: none;
+                background: transparent;
+            }}
+            QTabBar::tab {{
+                background: transparent;
+                color: {ALMA_TEXT_MID};
+                padding: 8px 18px;
+                margin-right: 4px;
+                font-size: 13px;
+                font-weight: 600;
+                border: none;
+                border-bottom: 2px solid transparent;
+            }}
+            QTabBar::tab:selected {{
+                color: {ALMA_GREEN_DARK};
+                border-bottom: 2px solid {ALMA_GREEN_DARK};
+            }}
+            QTabBar::tab:hover {{
+                color: {ALMA_GREEN_MID};
+            }}
+        """)
+        outer.addWidget(self._tab_widget)
+
+        # ── Tab 0: Analysis Canvas (existing report generation UI) ──
+        canvas_widget = QWidget()
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
@@ -407,17 +415,8 @@ class AIReportsPage(QWidget):
 
         content = QWidget()
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setContentsMargins(28, 12, 28, 24)
         layout.setSpacing(16)
-
-        # Header
-        header = QLabel("AI Reports")
-        header.setObjectName("PageHeader")
-        layout.addWidget(header)
-
-        sub = QLabel("Generate AI-powered analysis reports from ticket data via Gemini")
-        sub.setObjectName("PageSubheader")
-        layout.addWidget(sub)
 
         # Check Gemini
         self._gemini_available = self._check_gemini()
@@ -428,7 +427,7 @@ class AIReportsPage(QWidget):
         controls = QFrame()
         controls.setStyleSheet(f"""
             QFrame {{
-                background: {ALMA_BG_ELEVATED}; border: 1px solid rgba(214, 210, 202, 0.45);
+                background: {ALMA_BG_ELEVATED}; border: none;
                 border-radius: 12px;
             }}
         """)
@@ -441,7 +440,7 @@ class AIReportsPage(QWidget):
         field_style = f"""
             QComboBox, QDateEdit, QSpinBox {{
                 color: {ALMA_TEXT_DARK}; background: {ALMA_WHITE};
-                border: 1px solid {ALMA_BORDER}; border-radius: 8px;
+                border: none; border-radius: 8px;
                 padding: 8px 12px; font-size: 13px;
             }}
         """
@@ -468,7 +467,7 @@ class AIReportsPage(QWidget):
         manage_btn.setStyleSheet(f"""
             QPushButton {{
                 background: transparent; color: {ALMA_INFO};
-                border: 1px solid {ALMA_INFO}; border-radius: 8px;
+                border: none; border-radius: 8px;
                 padding: 8px 16px; font-size: 12px; font-weight: 600;
             }}
             QPushButton:hover {{ background: #E8F0FE; }}
@@ -478,9 +477,28 @@ class AIReportsPage(QWidget):
         row1.addLayout(col, 1)
         cl.addLayout(row1)
 
-        # Row 2: TRC filter + Date range
+        # Row 2: Source + TRC filter + Date range
         row2 = QHBoxLayout()
         row2.setSpacing(12)
+
+        # Source selector (Session 5)
+        col = QVBoxLayout()
+        col.setSpacing(4)
+        lbl = QLabel("Source")
+        lbl.setStyleSheet(lbl_style)
+        col.addWidget(lbl)
+        from src.ui.widgets.source_selector import SourceSelector
+        self._source_selector = SourceSelector(self)
+        self._source_selector.setStyleSheet(field_style)
+        col.addWidget(self._source_selector)
+        row2.addLayout(col, 1)
+        try:
+            from src.data.connection_factory import get_connection
+            conn = get_connection(self.db.db_path)
+            self._source_selector.refresh_sources(conn)
+            conn.close()
+        except Exception:
+            pass
 
         col = QVBoxLayout()
         col.setSpacing(4)
@@ -523,7 +541,7 @@ class AIReportsPage(QWidget):
         self._generate_btn = QPushButton("  Generate Report  ")
         self._generate_btn.setMinimumHeight(36)
         self._generate_btn.setCursor(Qt.PointingHandCursor)
-        self._generate_btn.setEnabled(self._gemini_available and not self._scan_blocked)
+        self._generate_btn.setEnabled(self._gemini_available)
         self._generate_btn.setStyleSheet(f"""
             QPushButton {{
                 background: {ALMA_GREEN_DARK}; color: {ALMA_CREAM};
@@ -549,7 +567,7 @@ class AIReportsPage(QWidget):
         # Report output card — expanded
         output_card = QFrame()
         output_card.setStyleSheet(f"""
-            QFrame {{ background: {ALMA_BG_ELEVATED}; border: 1px solid rgba(214, 210, 202, 0.45); border-radius: 12px; }}
+            QFrame {{ background: {ALMA_BG_ELEVATED}; border: none; border-radius: 12px; }}
         """)
         apply_card_shadow(output_card)
         ol = QVBoxLayout(output_card)
@@ -567,7 +585,7 @@ class AIReportsPage(QWidget):
             QPushButton {{
                 background: {ALMA_WHITE}; color: {ALMA_TEXT_DARK};
                 font-size: 11px; font-weight: 600;
-                border: 1px solid {ALMA_BORDER}; border-radius: 6px; padding: 4px 12px;
+                border: none; border-radius: 6px; padding: 4px 12px;
             }}
             QPushButton:hover {{ background: {ALMA_CREAM}; }}
             QPushButton:disabled {{ color: {ALMA_TEXT_LIGHT}; }}
@@ -586,6 +604,13 @@ class AIReportsPage(QWidget):
         self._save_md_btn.setStyleSheet(btn_style)
         self._save_md_btn.clicked.connect(self._save_report_md)
         out_row.addWidget(self._save_md_btn)
+
+        self._save_html_btn = QPushButton("Save .html")
+        self._save_html_btn.setEnabled(False)
+        self._save_html_btn.setCursor(Qt.PointingHandCursor)
+        self._save_html_btn.setStyleSheet(btn_style)
+        self._save_html_btn.clicked.connect(self._save_report_html)
+        out_row.addWidget(self._save_html_btn)
 
         self._save_history_btn = QPushButton("Save to History")
         self._save_history_btn.setEnabled(False)
@@ -625,13 +650,12 @@ class AIReportsPage(QWidget):
         self._output_stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._output_stack.setMinimumHeight(450)
 
-        self._output_area = QTextEdit()
-        self._output_area.setReadOnly(True)
+        self._output_area = MarkdownViewer()
         self._output_area.setStyleSheet(f"""
-            QTextEdit {{
+            QTextBrowser {{
                 background: {ALMA_CREAM}; color: {ALMA_TEXT_DARK};
-                border: 1px solid {ALMA_BORDER_LIGHT}; border-radius: 8px;
-                padding: 14px; font-size: 13px; line-height: 1.5;
+                border: none; border-radius: 8px;
+                padding: 14px; font-size: 13px;
             }}
         """)
         self._output_stack.addWidget(self._output_area)
@@ -639,23 +663,37 @@ class AIReportsPage(QWidget):
         self._gen_animation = GenerationAnimationWidget()
         self._gen_animation.setStyleSheet(f"""
             background: {ALMA_CREAM};
-            border: 1px solid {ALMA_BORDER_LIGHT}; border-radius: 8px;
+            border: none; border-radius: 8px;
         """)
         self._output_stack.addWidget(self._gen_animation)
-
-        # Enhanced empty state shown before first report is generated
-        self._empty_state = EmptyState(
-            icon="data",
-            heading="No reports yet",
-            description="Generate your first report to get started",
-            action_label="Generate Report",
-        )
-        self._empty_state.action_clicked.connect(self._on_generate)
-        self._output_stack.addWidget(self._empty_state)
-        self._output_stack.setCurrentIndex(2)  # Show empty state initially
+        self._output_stack.setCurrentIndex(0)
 
         ol.addWidget(self._output_stack, 1)
         layout.addWidget(output_card, 1)
+
+        # ── Collapsible: Analyst Reports (Phase 5.5B) ──
+        self._analyst_section = CollapsibleSection(
+            "Analyst Reports", initially_collapsed=True,
+            section_key="ai_reports.analyst_reports",
+            show_expand_button=True,
+        )
+        self._analyst_viewer = MarkdownViewer()
+        self._analyst_viewer.setMinimumHeight(100)
+        self._analyst_section.add_widget(self._analyst_viewer)
+        self._analyst_section.setVisible(False)  # hidden until report runs
+        layout.addWidget(self._analyst_section)
+
+        # ── Collapsible: Technical Summary (Phase 5.5B) ──
+        self._tech_section = CollapsibleSection(
+            "Technical Process Summary", initially_collapsed=True,
+            section_key="ai_reports.tech_summary",
+            show_expand_button=True,
+        )
+        self._tech_viewer = MarkdownViewer()
+        self._tech_viewer.setMinimumHeight(100)
+        self._tech_section.add_widget(self._tech_viewer)
+        self._tech_section.setVisible(False)  # hidden until report runs
+        layout.addWidget(self._tech_section)
 
         # Report history (compact summary)
         layout.addSpacing(8)
@@ -666,11 +704,91 @@ class AIReportsPage(QWidget):
         # Populate TRC
         self._populate_trc_combo()
 
-        # Chat widget (not in layout — lives in DrilldownPanel when open)
+        # ── Inline chat input (below report in same scroll) ──
+        chat_frame = QFrame()
+        chat_frame.setStyleSheet(f"""
+            QFrame {{
+                background: {ALMA_BG_ELEVATED};
+                border: none;
+                border-radius: 12px;
+            }}
+        """)
+        chat_layout_inner = QHBoxLayout(chat_frame)
+        chat_layout_inner.setContentsMargins(14, 10, 14, 10)
+        chat_layout_inner.setSpacing(8)
+
+        self._canvas_chat_input = QComboBox()
+        self._canvas_chat_input.setEditable(True)
+        self._canvas_chat_input.lineEdit().setPlaceholderText(
+            "Ask a follow-up question about this report"
+        )
+        self._canvas_chat_input.setStyleSheet(f"""
+            QComboBox {{
+                background: {ALMA_WHITE}; border: none;
+                border-radius: 8px; padding: 8px 12px; font-size: 13px;
+                color: {ALMA_TEXT_DARK};
+            }}
+        """)
+        chat_layout_inner.addWidget(self._canvas_chat_input, 1)
+
+        chat_send = QPushButton("Send")
+        chat_send.setCursor(Qt.PointingHandCursor)
+        chat_send.setStyleSheet(f"""
+            QPushButton {{
+                background: {ALMA_GREEN_DARK}; color: white;
+                border: none; border-radius: 8px;
+                padding: 8px 20px; font-size: 13px; font-weight: 600;
+            }}
+            QPushButton:hover {{ background: {ALMA_GREEN_MID}; }}
+        """)
+        chat_send.clicked.connect(self._on_canvas_chat_send)
+        chat_layout_inner.addWidget(chat_send)
+
+        layout.addWidget(chat_frame)
+
+        # Chat widget (used by drilldown and canvas chat)
         self._chat_widget = ReportChatWidget()
 
         scroll.setWidget(content)
-        outer.addWidget(scroll)
+
+        # ── Build 11.0: QSplitter with Evidence Panel ──
+        from PySide6.QtWidgets import QSplitter
+        from src.ui.widgets.evidence_panel import EvidencePanel
+
+        canvas_splitter = QSplitter(Qt.Horizontal)
+        canvas_splitter.addWidget(scroll)
+
+        self._evidence_panel = EvidencePanel()
+        canvas_splitter.addWidget(self._evidence_panel)
+        self._output_area.ticket_clicked.connect(self._evidence_panel.show_ticket)
+        canvas_splitter.setStretchFactor(0, 3)
+        canvas_splitter.setStretchFactor(1, 1)
+        canvas_splitter.setSizes([700, 300])
+
+        canvas_layout = QVBoxLayout(canvas_widget)
+        canvas_layout.setContentsMargins(0, 0, 0, 0)
+        canvas_layout.addWidget(canvas_splitter)
+
+        self._tab_widget.addTab(canvas_widget, "Analysis canvas")
+
+        # ── Tab 1: Report History ──
+        from src.ui.pages.ai_reports_history_tab import ReportHistoryTab
+        self._history_tab = ReportHistoryTab(self.db)
+        self._history_tab.view_report_requested.connect(self._on_view_report)
+        self._tab_widget.addTab(self._history_tab, "Report history")
+
+        # ── Tab 2: Manage Prompts ──
+        from src.ui.pages.ai_reports_prompts_tab import ManagePromptsTab
+        self._prompts_tab = ManagePromptsTab(self.db)
+        self._tab_widget.addTab(self._prompts_tab, "Manage prompts")
+
+        # ── Tab 3: A/B Compare ──
+        try:
+            from src.ui.pages.ab_compare import ABComparePage
+            self._ab_tab = ABComparePage(self.db)
+            self._tab_widget.addTab(self._ab_tab, "A/B Compare")
+        except Exception:
+            pass
 
     # ═══════════════════════════════════════
     #  COMMON HELPERS
@@ -683,23 +801,18 @@ class AIReportsPage(QWidget):
         except Exception:
             return False
 
-    def set_scan_blocking(self, blocked: bool):
-        """Disable/enable report generation based on active NLP scan."""
-        self._scan_blocked = blocked
-        can_generate = self._gemini_available and not blocked
-        self._generate_btn.setEnabled(can_generate)
-        if blocked:
-            self._generate_btn.setToolTip(
-                "NLP scan in progress \u2014 report generation disabled"
-            )
-        else:
-            self._generate_btn.setToolTip("")
+    def _get_gemini_client(self):
+        """Cached bridge client -- avoids repeated 17-20s cold starts."""
+        if self._shared_gemini_client is not None:
+            return self._shared_gemini_client
+        self._shared_gemini_client = _build_gemini_client()
+        return self._shared_gemini_client
 
     def _build_setup_guide(self, layout):
         guide = QFrame()
         guide.setStyleSheet(f"""
             QFrame {{
-                background: {ALMA_CREAM}; border: 1px solid {ALMA_WARNING};
+                background: {ALMA_CREAM}; border: none;
                 border-radius: 12px;
             }}
         """)
@@ -775,6 +888,7 @@ class AIReportsPage(QWidget):
         self._generate_btn.setText("  Generating...  ")
         self._copy_btn.setEnabled(False)
         self._save_md_btn.setEnabled(False)
+        self._save_html_btn.setEnabled(False)
         self._save_history_btn.setEnabled(False)
         self._export_drive_btn.setEnabled(False)
         self._chat_btn.setEnabled(False)
@@ -785,11 +899,11 @@ class AIReportsPage(QWidget):
         self._gen_animation.start_animation()
 
         try:
-            gc = self._get_gemini_client()
+            gc = _build_gemini_client()
         except Exception as e:
             self._gen_animation.stop_animation()
             self._output_stack.setCurrentIndex(0)
-            self._output_area.setPlainText(f"Gemini client error: {e}")
+            self._output_area.set_markdown(f"**Gemini client error:** {e}")
             self._generate_btn.setEnabled(True)
             self._generate_btn.setText("  Generate Report  ")
             return
@@ -798,22 +912,24 @@ class AIReportsPage(QWidget):
         if not prompt_data or not prompt_data.get("prompt_text"):
             self._gen_animation.stop_animation()
             self._output_stack.setCurrentIndex(0)
-            self._output_area.setPlainText("No prompt selected or prompt text is empty.")
+            self._output_area.set_markdown("*No prompt selected or prompt text is empty.*")
             self._generate_btn.setEnabled(True)
             self._generate_btn.setText("  Generate Report  ")
             return
 
         self._chat_widget.set_gemini_client(gc)
 
-        self._worker = ReportWorker(
+        source_id = self._source_selector.selected_source_id() if hasattr(self, '_source_selector') else None
+        self._worker = PipelineWorker(
             self.db.db_path, prompt_data,
             self._date_from.date().toString("yyyy-MM-dd"),
             self._date_to.date().toString("yyyy-MM-dd"),
             self._trc_combo.currentData() or "",
             gc,
+            source_id=source_id,
         )
         self._worker.progress.connect(self._on_progress)
-        self._worker.finished.connect(self._on_finished)
+        self._worker.finished.connect(self._on_pipeline_finished)
         self._worker.error.connect(self._on_error)
         self._worker.start()
 
@@ -826,22 +942,24 @@ class AIReportsPage(QWidget):
     def _on_error(self, trace):
         self._gen_animation.stop_animation()
         self._output_stack.setCurrentIndex(0)
-        self._generate_btn.setEnabled(self._gemini_available and not self._scan_blocked)
+        self._generate_btn.setEnabled(self._gemini_available)
         self._generate_btn.setText("  Generate Report  ")
         self._progress_lbl.setVisible(False)
-        self._output_area.setPlainText(f"Error:\n\n{trace}")
+        self._output_area.set_markdown(f"## Error\n\n```\n{trace}\n```")
 
     def _on_finished(self, text, data_block_text):
+        """Legacy callback for ReportWorker (kept for NLP synthesis path)."""
         self._gen_animation.stop_animation()
         self._output_stack.setCurrentIndex(0)
-        self._generate_btn.setEnabled(self._gemini_available and not self._scan_blocked)
+        self._generate_btn.setEnabled(self._gemini_available)
         self._generate_btn.setText("  Generate Report  ")
         self._progress_lbl.setVisible(False)
-        self._output_area.setPlainText(text)
+        self._output_area.set_markdown(text)
         self._current_report_text = text
         self._current_data_block = data_block_text
         self._copy_btn.setEnabled(True)
         self._save_md_btn.setEnabled(True)
+        self._save_html_btn.setEnabled(True)
         self._save_history_btn.setEnabled(True)
         self._export_drive_btn.setEnabled(True)
         self._chat_btn.setEnabled(True)
@@ -849,398 +967,97 @@ class AIReportsPage(QWidget):
         # Set chat context
         self._chat_widget.set_report_context(data_block_text, text)
 
-        # Build 7.0: Provide live DB access for data-grounded drilldown
-        try:
-            date_start = self._date_from.date().toString("yyyy-MM-dd")
-            date_end = self._date_to.date().toString("yyyy-MM-dd")
-            scan = self.db.get_latest_completed_scan()
-            scan_id = scan["scan_id"] if scan else None
-            self._chat_widget.set_db_context(
-                self.db.db_path, date_start, date_end, scan_id=scan_id,
-            )
-        except Exception:
-            pass  # Drilldown enrichment is best-effort
-
-    def _copy_report(self):
-        text = self._output_area.toPlainText()
-        if text:
-            QApplication.clipboard().setText(text)
-
-    def _save_report_md(self):
-        text = self._output_area.toPlainText()
-        if not text:
-            return
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Save Report", "", "Markdown (*.md);;Text (*.txt)"
-        )
-        if path:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(text)
-
-    def _save_to_history(self):
-        if not self._current_report_text:
-            return
-        prompt_name = self._prompt_combo.currentText()
-        chat_history = self._chat_widget.get_chat_history()
-        try:
-            self.db.save_report(
-                page="ai_reports",
-                parameters={"prompt": prompt_name,
-                             "date_from": self._date_from.date().toString("yyyy-MM-dd"),
-                             "date_to": self._date_to.date().toString("yyyy-MM-dd")},
-                summary=self._current_report_text[:500],
-                full_results=json.dumps({"report_text": self._current_report_text}),
-                report_type="standard",
-                chat_history=chat_history,
-            )
-            self.report_summary.refresh()
-            self._save_history_btn.setText("Saved!")
-            QTimer.singleShot(2000, lambda: self._save_history_btn.setText("Save to History"))
-        except Exception as e:
-            QMessageBox.warning(self, "Save Error", str(e))
-
-    def _export_to_drive(self):
-        if not self._current_report_text:
-            return
-        try:
-            from src.export.gdrive_export import GoogleDriveExporter
-            config_path = Path(__file__).parent.parent.parent.parent / "config" / "settings.yaml"
-            with open(config_path, encoding="utf-8") as f:
-                cfg = yaml.safe_load(f) or {}
-            drive_cfg = cfg.get("export", {}).get("google_drive", {})
-            if not drive_cfg.get("enabled"):
-                QMessageBox.information(self, "Not Configured",
-                    "Google Drive export is not configured. Set it up in Settings.")
-                return
-            exporter = GoogleDriveExporter(
-                drive_cfg.get("credentials_path", ""),
-                drive_cfg.get("folder_id", ""),
-            )
-            if not exporter.is_configured():
-                QMessageBox.warning(self, "Not Configured",
-                    "Google Drive credentials or folder ID missing.")
-                return
-            from datetime import datetime
-            filename = f"alma_report_standard_{datetime.now().strftime('%Y%m%d_%H%M')}.md"
-            file_id = exporter.upload_report(filename, self._current_report_text)
-            self._export_drive_btn.setText("Exported!")
-            QTimer.singleShot(2000, lambda: self._export_drive_btn.setText("Export to Drive"))
-        except ImportError:
-            QMessageBox.information(self, "Missing Dependencies",
-                "Install google-api-python-client and google-auth for Drive export.")
-        except Exception as e:
-            QMessageBox.warning(self, "Export Error", str(e))
-
-    def _open_chat_drilldown(self):
-        """Open follow-up chat in the DrilldownPanel."""
-        if self._drilldown and self._current_report_text:
-            self._drilldown.show_widget(
-                "Follow-Up Chat",
-                "AI Report",
-                self._chat_widget,
-            )
-
-    def _open_prompt_manager(self):
-        from src.ui.dialogs.prompt_editor import PromptEditorDialog
-        dlg = PromptEditorDialog(parent=self)
-        if dlg.exec():
-            data = dlg.get_prompt_data()
-            if data.get("name") and data.get("prompt_text"):
-                self.db.save_prompt(data)
-                self._populate_prompt_combo()
-
-    # ═══════════════════════════════════════
-    #  DRILLDOWN REPORT HISTORY
-    # ═══════════════════════════════════════
-
-    def set_drilldown_panel(self, panel):
-        """Receive the shared DrilldownPanel from main_window."""
-        self._drilldown = panel
-
-    def _open_report_history(self):
-        """Open the DrilldownPanel with the full report history list."""
-        if not self._drilldown:
-            return
-        reports = self.report_summary.get_reports_for_drilldown()
-        count = len(reports)
-        self._drilldown.show_reports(
-            "AI Reports",
-            f"{count} report{'s' if count != 1 else ''}",
-            reports,
-            detail_callback=self._render_report_detail_html,
-            load_callback=self._load_past_report,
-        )
-
-    def _render_report_detail_html(self, report_id):
-        """Render an AI report as HTML for the DrilldownPanel."""
-        report = self.db.get_full_report(report_id)
-        if not report:
-            return "<p>Report not found.</p>"
-
-        raw = report.get("full_results", "")
-        try:
-            data = json.loads(raw)
-            text = data.get("report_text", raw)
-        except (json.JSONDecodeError, TypeError):
-            text = raw
-
-        # Convert plain text to HTML, preserving line breaks
-        import html as html_mod
-        escaped = html_mod.escape(text)
-        paragraphs = escaped.split("\n\n")
-        html_parts = ['<div style="font-family: Segoe UI, sans-serif; font-size: 13px;">']
-        for p in paragraphs:
-            p = p.strip()
-            if p:
-                if p.startswith("#"):
-                    p = p.lstrip("#").strip()
-                    html_parts.append(f"<h3 style='margin: 12px 0 6px;'>{p}</h3>")
-                else:
-                    html_parts.append(f"<p style='margin: 6px 0;'>{p.replace(chr(10), '<br>')}</p>")
-
-        # Chat history
-        chat_hist = report.get("chat_history", "")
-        if chat_hist:
-            try:
-                chat_data = json.loads(chat_hist)
-                if chat_data:
-                    html_parts.append("<h3 style='margin: 16px 0 6px; border-top: 1px solid #E8E5DE; padding-top: 12px;'>Follow-up Q&A</h3>")
-                    for entry in chat_data:
-                        role = entry.get("role", "")
-                        content = html_mod.escape(entry.get("content", ""))
-                        if role == "user":
-                            html_parts.append(f"<p style='margin: 6px 0; color: #1B6B4D;'><b>Q:</b> {content}</p>")
-                        elif role == "assistant":
-                            html_parts.append(f"<p style='margin: 6px 0;'><b>A:</b> {content.replace(chr(10), '<br>')}</p>")
-            except (json.JSONDecodeError, TypeError):
-                pass
-
-        html_parts.append("</div>")
-        return "".join(html_parts)
-
-    def _load_past_report(self, report_id):
-        """Load a past report into the main view."""
-        report = self.db.get_full_report(report_id)
-        if not report:
-            return
-        raw = report.get("full_results", "")
-        try:
-            data = json.loads(raw)
-            text = data.get("report_text", raw)
-        except (json.JSONDecodeError, TypeError):
-            text = raw
-        self._output_stack.setCurrentIndex(0)
-        self._output_area.setPlainText(text)
-        self._current_report_text = text
-        self._copy_btn.setEnabled(True)
-        self._save_md_btn.setEnabled(True)
-        self._chat_btn.setEnabled(True)
-
-        # Restore chat history
-        chat_hist = report.get("chat_history", "")
-        if chat_hist:
-            try:
-                gc = self._get_gemini_client()
-                self._chat_widget.set_gemini_client(gc)
-            except Exception:
-                pass
-            self._chat_widget.load_chat_history(chat_hist)
-
-    # ═══════════════════════════════════════
-    #  PUBLIC API
-    # ═══════════════════════════════════════
-
-    def refresh_gemini_status(self):
-        self._gemini_available = self._check_gemini()
-        self._generate_btn.setEnabled(self._gemini_available and not self._scan_blocked)
-
-    def populate_trc_filter(self):
-        """Called by main_window when data changes."""
-        self._trc_combo.clear()
-        self._trc_combo.addItem("All TRCs", "")
-        self._populate_trc_combo()
-
-    def sync_date_to_data(self):
-        """Set date pickers to match the actual data range in the DB."""
-        try:
-            from PySide6.QtCore import QDate
-            min_d, max_d = self.db.get_date_range()
-            if min_d:
-                parts = min_d[:10].split("-")
-                if len(parts) == 3:
-                    self._date_from.setDate(QDate(int(parts[0]), int(parts[1]), int(parts[2])))
-            if max_d:
-                parts = max_d[:10].split("-")
-                if len(parts) == 3:
-                    self._date_to.setDate(QDate(int(parts[0]), int(parts[1]), int(parts[2])))
-        except Exception:
-            pass
-
-    # ═══════════════════════════════════════
-    #  NLP SCAN INTEGRATION
-    # ═══════════════════════════════════════
-
-    def _generate_nlp_synthesis(self):
-        """Generate synthesis report from latest NLP scan (background thread)."""
-        self._output_stack.setCurrentIndex(0)
-        scan = self.db.get_latest_completed_scan()
-        if not scan:
-            self._output_area.setPlainText(
-                "No completed NLP scans found.\n\n"
-                "Go to NLP Scanner page to run a scan first."
-            )
-            return
-
-        self._generate_btn.setEnabled(False)
-        self._generate_btn.setText("  Synthesizing...  ")
-        self._output_area.clear()
-        self._output_stack.setCurrentIndex(1)
-        self._gen_animation.start_animation()
-        self._gen_animation.update_status("Synthesizing NLP findings...")
-
-        try:
-            gc = self._get_gemini_client()
-            self._chat_widget.set_gemini_client(gc)
-        except Exception as e:
-            self._gen_animation.stop_animation()
-            self._output_stack.setCurrentIndex(0)
-            self._output_area.setPlainText(f"Gemini client error: {e}")
-            self._generate_btn.setEnabled(True)
-            self._generate_btn.setText("  Generate Report  ")
-            return
-
-        self._nlp_worker = NLPSynthesisWorker(
-            self.db.db_path, gc, scan["scan_id"],
-        )
-        self._nlp_worker.progress.connect(lambda msg: self._gen_animation.update_status(msg))
-        self._nlp_worker.finished.connect(self._on_nlp_synthesis_finished)
-        self._nlp_worker.error.connect(self._on_nlp_synthesis_error)
-        self._nlp_worker.start()
-
-    def _on_nlp_synthesis_finished(self, result, scan):
-        """Handle NLP synthesis completion."""
+    def _on_pipeline_finished(self, result):
+        """Callback for PipelineWorker (Phase 5.5B multi-phase pipeline)."""
         self._gen_animation.stop_animation()
         self._output_stack.setCurrentIndex(0)
-        self._generate_btn.setEnabled(True)
+        self._generate_btn.setEnabled(self._gemini_available)
         self._generate_btn.setText("  Generate Report  ")
+        self._progress_lbl.setVisible(False)
 
-        self._output_area.setPlainText(result)
-        self._current_report_text = result
+        report_md = result.get("report_md", "")
+        data_block = result.get("data_block", "")
+
+        # Main report → MarkdownViewer
+        self._output_area.set_markdown(report_md)
+        self._current_report_text = report_md
+        self._current_data_block = data_block
+
+        # Analyst Reports section
+        analyst_md = result.get("analyst_md", "")
+        if analyst_md:
+            self._analyst_viewer.set_markdown(analyst_md)
+            self._analyst_section.setVisible(True)
+        else:
+            self._analyst_section.setVisible(False)
+
+        # Technical Summary section
+        tech_md = result.get("tech_summary_md", "")
+        if tech_md:
+            self._tech_viewer.set_markdown(tech_md)
+            self._tech_section.setVisible(True)
+        else:
+            self._tech_section.setVisible(False)
+
+        # Enable action buttons
         self._copy_btn.setEnabled(True)
         self._save_md_btn.setEnabled(True)
+        self._save_html_btn.setEnabled(True)
         self._save_history_btn.setEnabled(True)
         self._export_drive_btn.setEnabled(True)
         self._chat_btn.setEnabled(True)
 
-        # Set context for follow-up chat
-        date_range = f"{scan.get('date_range_start', '')} to {scan.get('date_range_end', '')}"
-        self._chat_widget.set_report_context(
-            f"NLP Scan synthesis for {date_range}", result,
-        )
+        # Set chat context
+        self._chat_widget.set_report_context(data_block, report_md)
 
-        # Build 7.0: Live DB access for data-grounded drilldown
+        # ── Build 11.0: Persist report run to analysis_runs ──
         try:
-            self._chat_widget.set_db_context(
-                self.db.db_path,
-                scan.get("date_range_start", ""),
-                scan.get("date_range_end", ""),
-                scan_id=scan.get("scan_id"),
-            )
-        except Exception:
-            pass
-
-    def _on_nlp_synthesis_error(self, trace):
-        """Handle NLP synthesis error."""
-        self._gen_animation.stop_animation()
-        self._output_stack.setCurrentIndex(0)
-        self._generate_btn.setEnabled(True)
-        self._generate_btn.setText("  Generate Report  ")
-        self._output_area.setPlainText(f"Synthesis failed:\n\n{trace}")
-
-    def load_nlp_finding(self, finding_id, finding_title):
-        """Called from NLP Scanner 'Deep Dive' -- triggers per-finding
-        drilldown via Gemini (background thread)."""
-        self._output_stack.setCurrentIndex(1)
-        self._gen_animation.start_animation()
-        self._gen_animation.update_status(f"Loading deep dive for: {finding_title}...")
-        self._generate_btn.setEnabled(False)
-        self._generate_btn.setText("  Deep Diving...  ")
-        self._output_area.clear()
-
-        try:
-            gc = self._get_gemini_client()
-            self._chat_widget.set_gemini_client(gc)
+            from src.services.post_report_persist import persist_report_run
+            from src.data.db_manager import DB_PATH
+            persist_conn = get_connection(DB_PATH)
+            persist_report_run({
+                "prompt_template": self._prompt_combo.currentText(),
+                "output_text": report_md,
+                "trc_filter": self._trc_combo.currentText(),
+                "date_start": self._date_from.date().toString("yyyy-MM-dd"),
+                "date_end": self._date_to.date().toString("yyyy-MM-dd"),
+                "model_used": result.get("model_used"),
+                "token_count": result.get("token_count"),
+                "cost_usd": result.get("cost_usd"),
+                "duration_sec": result.get("duration_sec"),
+                "source": "manual",
+            }, persist_conn)
+            persist_conn.close()
         except Exception as e:
-            self._gen_animation.stop_animation()
-            self._output_stack.setCurrentIndex(0)
-            self._output_area.setPlainText(f"Gemini client error: {e}")
-            self._generate_btn.setEnabled(True)
-            self._generate_btn.setText("  Generate Report  ")
-            return
+            import logging
+            logging.getLogger("alma.ai_reports").warning("Report persist failed: %s", e)
 
-        scan = self.db.get_latest_completed_scan()
-        scan_id = scan["scan_id"] if scan else ""
+        # Refresh history widgets so new report appears
+        self.report_summary.refresh()
+        self._history_tab._refresh()
 
-        self._nlp_finding_title = finding_title
-        self._nlp_finding_id = finding_id
-        self._nlp_worker = NLPSynthesisWorker(
-            self.db.db_path, gc, scan_id, finding_id=finding_id,
-        )
-        self._nlp_worker.progress.connect(lambda msg: self._gen_animation.update_status(msg))
-        self._nlp_worker.finished.connect(self._on_nlp_finding_finished)
-        self._nlp_worker.error.connect(self._on_nlp_synthesis_error)
-        self._nlp_worker.start()
+        # Populate evidence panel with report metadata
+        from datetime import datetime as _dt
+        self._evidence_panel.show_metadata({
+            "Pipeline": "AI Report",
+            "Tickets": str(result.get("ticket_count", "")),
+            "TRC filter": self._trc_combo.currentText(),
+            "Generated": _dt.now().strftime("%b %d, %Y %I:%M %p"),
+            "Duration": f"{result.get('duration_sec', 0) or 0:.1f}s",
+        })
 
-    def _on_nlp_finding_finished(self, result, scan):
-        """Handle deep dive finding completion."""
-        self._gen_animation.stop_animation()
-        self._output_stack.setCurrentIndex(0)
-        self._generate_btn.setEnabled(True)
-        self._generate_btn.setText("  Generate Report  ")
-
-        self._output_area.setPlainText(result)
-        self._current_report_text = result
-        self._copy_btn.setEnabled(True)
-        self._save_md_btn.setEnabled(True)
-        self._save_history_btn.setEnabled(True)
-        self._export_drive_btn.setEnabled(True)
-        self._chat_btn.setEnabled(True)
-
-        finding_title = getattr(self, '_nlp_finding_title', '')
-        finding_id = getattr(self, '_nlp_finding_id', None)
-
-        # Set up chat for follow-up questions
-        self._chat_widget.set_report_context(
-            f"Deep dive on finding: {finding_title}", result,
-        )
-        # Store finding_id for finding-aware chat
-        if finding_id:
-            self._chat_widget._nlp_finding_id = finding_id
-
-        # Build 7.0: Live DB access for drilldown
-        try:
-            if scan:
-                self._chat_widget.set_db_context(
-                    self.db.db_path,
-                    scan.get("date_range_start", ""),
-                    scan.get("date_range_end", ""),
-                    scan_id=scan.get("scan_id"),
-                )
-        except Exception:
-            pass
-
-    # ═══════════════════════════════════════
-    #  VOC ROOT CAUSE ANALYSIS (Build 6.0)
-    # ═══════════════════════════════════════
+    # ═══════════════════════════════════════════
+    #  VOC ROOT CAUSE ANALYSIS
+    # ═══════════════════════════════════════════
 
     def _generate_voc_report(self):
-        """Build plan → show preview → launch VOC worker if confirmed."""
+        """Build plan -> show preview -> launch VOC worker if confirmed."""
         from src.data.voc_builder import VOCBuilder
 
         try:
             gc = self._get_gemini_client()
         except Exception as e:
-            self._output_area.setPlainText(f"Gemini client error: {e}")
+            self._output_area.set_markdown(f"**Gemini client error:** {e}")
             return
 
         builder = VOCBuilder(self.db, gc)
@@ -1254,8 +1071,8 @@ class AIReportsPage(QWidget):
 
         if not plan["trc_plans"]:
             self._output_stack.setCurrentIndex(0)
-            self._output_area.setPlainText(
-                "No tickets found in the specified date range.\n\n"
+            self._output_area.set_markdown(
+                "**No tickets found** in the specified date range.\n\n"
                 "Adjust date range or TRC filter and try again."
             )
             return
@@ -1269,6 +1086,7 @@ class AIReportsPage(QWidget):
         self._generate_btn.setText("  Generating VOC Report...  ")
         self._copy_btn.setEnabled(False)
         self._save_md_btn.setEnabled(False)
+        self._save_html_btn.setEnabled(False)
         self._save_history_btn.setEnabled(False)
         self._export_drive_btn.setEnabled(False)
         self._chat_btn.setEnabled(False)
@@ -1334,19 +1152,24 @@ class AIReportsPage(QWidget):
             self._gen_animation.update_status(message)
 
     def _on_voc_finished(self, result):
-        """Display report, enable buttons, store in history."""
+        """Display VOC report, enable buttons, set chat context."""
         self._gen_animation.stop_animation()
         self._output_stack.setCurrentIndex(0)
         self._generate_btn.setEnabled(self._gemini_available and not self._scan_blocked)
         self._generate_btn.setText("  Generate Report  ")
 
         report_text = result.get("report_text", "")
-        self._output_area.setPlainText(report_text)
+        self._output_area.set_markdown(report_text)
         self._current_report_text = report_text
         self._current_data_block = ""
 
+        # Hide pipeline-specific sections (VOC has its own structure)
+        self._analyst_section.setVisible(False)
+        self._tech_section.setVisible(False)
+
         self._copy_btn.setEnabled(True)
         self._save_md_btn.setEnabled(True)
+        self._save_html_btn.setEnabled(True)
         self._save_history_btn.setEnabled(True)
         self._export_drive_btn.setEnabled(True)
         self._chat_btn.setEnabled(True)
@@ -1360,7 +1183,7 @@ class AIReportsPage(QWidget):
         )
         self._chat_widget.set_report_context(context_str, report_text)
 
-        # Build 7.0: Live DB access for data-grounded drilldown
+        # Live DB access for data-grounded drilldown
         try:
             date_start = self._date_from.date().toString("yyyy-MM-dd")
             date_end = self._date_to.date().toString("yyyy-MM-dd")
@@ -1372,10 +1195,424 @@ class AIReportsPage(QWidget):
         except Exception:
             pass
 
+        # ── Build 11.0: Persist VOC report run ──
+        try:
+            from src.services.post_report_persist import persist_report_run
+            from src.data.db_manager import DB_PATH
+            persist_conn = get_connection(DB_PATH)
+            persist_report_run({
+                "prompt_template": "voc_root_cause",
+                "output_text": report_text,
+                "trc_filter": self._trc_combo.currentText(),
+                "date_start": self._date_from.date().toString("yyyy-MM-dd"),
+                "date_end": self._date_to.date().toString("yyyy-MM-dd"),
+                "ticket_count": stats.get("total_tickets"),
+                "cost_usd": stats.get("total_cost"),
+                "duration_sec": stats.get("duration_sec"),
+                "source": "manual",
+            }, persist_conn)
+            persist_conn.close()
+        except Exception as e:
+            import logging
+            logging.getLogger("alma.ai_reports").warning("VOC report persist failed: %s", e)
+
     def _on_voc_error(self, trace):
-        """Display error, re-enable buttons."""
+        """Display VOC error, re-enable buttons."""
         self._gen_animation.stop_animation()
         self._output_stack.setCurrentIndex(0)
         self._generate_btn.setEnabled(self._gemini_available and not self._scan_blocked)
         self._generate_btn.setText("  Generate Report  ")
-        self._output_area.setPlainText(f"VOC Report Error:\n\n{trace}")
+        self._output_area.set_markdown(f"## Error\n\n```\n{trace}\n```")
+
+    def _copy_report(self):
+        text = self._current_report_text or self._output_area.toPlainText()
+        if text:
+            QApplication.clipboard().setText(text)
+
+    def _save_report_md(self):
+        text = self._current_report_text or self._output_area.toPlainText()
+        if not text:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Report", "", "Markdown (*.md);;Text (*.txt)"
+        )
+        if path:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+
+    def _save_report_html(self):
+        """Save the current report as a styled .html file."""
+        text = self._current_report_text or self._output_area.toPlainText()
+        if not text:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Report as HTML", "", "HTML (*.html)"
+        )
+        if path:
+            from src.ui.widgets.markdown_viewer import md_to_html
+            html_content = md_to_html(text)
+            full_html = f"""<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<title>Alma Insights Report</title>
+<style>
+  body {{ font-family: 'Segoe UI', sans-serif; max-width: 900px; margin: 40px auto; padding: 0 20px; color: #333; }}
+  h1, h2, h3 {{ color: #14573F; }}
+  table {{ border-collapse: collapse; width: 100%; margin: 12px 0; }}
+  th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+  th {{ background: #f5f5f0; font-weight: 600; }}
+  code {{ background: #f5f5f0; padding: 2px 6px; border-radius: 3px; font-family: 'Cascadia Code', Consolas, monospace; }}
+  pre {{ background: #f5f5f0; padding: 12px; border-radius: 6px; overflow-x: auto; }}
+  blockquote {{ border-left: 3px solid #5BA888; margin: 12px 0; padding: 8px 16px; color: #555; }}
+</style>
+</head><body>
+{html_content}
+</body></html>"""
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(full_html)
+            self._save_html_btn.setText("Saved!")
+            QTimer.singleShot(2000, lambda: self._save_html_btn.setText("Save .html"))
+
+    def _save_to_history(self):
+        if not self._current_report_text:
+            return
+        prompt_name = self._prompt_combo.currentText()
+        chat_history = self._chat_widget.get_chat_history()
+        try:
+            self.db.save_report(
+                page="ai_reports",
+                parameters={"prompt": prompt_name,
+                             "date_from": self._date_from.date().toString("yyyy-MM-dd"),
+                             "date_to": self._date_to.date().toString("yyyy-MM-dd")},
+                summary=self._current_report_text[:500],
+                full_results=json.dumps({"report_text": self._current_report_text}),
+                report_type="standard",
+                chat_history=chat_history,
+            )
+            self.report_summary.refresh()
+            self._save_history_btn.setText("Saved!")
+            QTimer.singleShot(2000, lambda: self._save_history_btn.setText("Save to History"))
+        except Exception as e:
+            QMessageBox.warning(self, "Save Error", str(e))
+
+    def _export_to_drive(self):
+        if not self._current_report_text:
+            return
+        try:
+            from src.export.gdrive_export import GoogleDriveExporter
+            _cfg = load_settings()
+            drive_cfg = _cfg.get("export", {}).get("google_drive", {})
+            if not drive_cfg.get("enabled"):
+                QMessageBox.information(self, "Not Configured",
+                    "Google Drive export is not configured. Set it up in Settings.")
+                return
+            exporter = GoogleDriveExporter(
+                drive_cfg.get("credentials_path", ""),
+                drive_cfg.get("folder_id", ""),
+            )
+            if not exporter.is_configured():
+                QMessageBox.warning(self, "Not Configured",
+                    "Google Drive credentials or folder ID missing.")
+                return
+            from datetime import datetime
+            filename = f"alma_report_standard_{datetime.now().strftime('%Y%m%d_%H%M')}.md"
+            file_id = exporter.upload_report(filename, self._current_report_text)
+            self._export_drive_btn.setText("Exported!")
+            QTimer.singleShot(2000, lambda: self._export_drive_btn.setText("Export to Drive"))
+        except ImportError:
+            QMessageBox.information(self, "Missing Dependencies",
+                "Install google-api-python-client and google-auth for Drive export.")
+        except Exception as e:
+            QMessageBox.warning(self, "Export Error", str(e))
+
+    def _on_canvas_chat_send(self):
+        """Handle inline chat send from the Analysis Canvas."""
+        text = self._canvas_chat_input.currentText().strip()
+        if not text:
+            return
+        self._canvas_chat_input.lineEdit().clear()
+        # Open the drilldown chat and send the message
+        if self._drilldown and self._current_report_text:
+            self._chat_widget.set_report_context(
+                self._current_data_block, self._current_report_text
+            )
+            self._drilldown.show_widget(
+                "Follow-Up Chat", "AI Report", self._chat_widget,
+            )
+            # Send the message into the chat widget
+            self._chat_widget.send_message(text)
+
+    def _open_chat_drilldown(self):
+        """Open follow-up chat in the DrilldownPanel."""
+        if self._drilldown and self._current_report_text:
+            self._drilldown.show_widget(
+                "Follow-Up Chat",
+                "AI Report",
+                self._chat_widget,
+            )
+
+    def _open_prompt_manager(self):
+        from src.ui.dialogs.prompt_editor import PromptEditorDialog
+        dlg = PromptEditorDialog(parent=self)
+        if dlg.exec():
+            data = dlg.get_prompt_data()
+            if data.get("name") and data.get("prompt_text"):
+                self.db.save_prompt(data)
+                self._populate_prompt_combo()
+
+    # ═══════════════════════════════════════
+    #  DRILLDOWN REPORT HISTORY
+    # ═══════════════════════════════════════
+
+    def set_drilldown_panel(self, panel):
+        """Receive the shared DrilldownPanel from main_window."""
+        self._drilldown = panel
+
+    def _open_report_history(self):
+        """Open the DrilldownPanel with the full report history list."""
+        if not self._drilldown:
+            return
+        reports = self.report_summary.get_reports_for_drilldown()
+        count = len(reports)
+        self._drilldown.show_reports(
+            "AI Reports",
+            f"{count} report{'s' if count != 1 else ''}",
+            reports,
+            detail_callback=self._render_report_detail_html,
+            load_callback=self._load_past_report,
+        )
+
+    def _render_report_detail_html(self, report_id):
+        """Render an AI report as HTML for the DrilldownPanel (Phase 5.5B: markdown)."""
+        from src.ui.widgets.markdown_viewer import md_to_html
+        report = self.db.get_full_report(report_id)
+        if not report:
+            return "<p>Report not found.</p>"
+
+        raw = report.get("full_results", "")
+        try:
+            data = json.loads(raw)
+            text = data.get("report_text", raw)
+        except (json.JSONDecodeError, TypeError):
+            text = raw
+
+        # Convert markdown to styled HTML
+        html = md_to_html(text)
+
+        # Append chat history if present
+        chat_hist = report.get("chat_history", "")
+        if chat_hist:
+            try:
+                import html as html_mod
+                chat_data = json.loads(chat_hist)
+                if chat_data:
+                    html += "\n<hr>\n<h3>Follow-up Q&amp;A</h3>\n"
+                    for entry in chat_data:
+                        role = entry.get("role", "")
+                        content = html_mod.escape(entry.get("content", ""))
+                        if role == "user":
+                            html += f"<p style='color: #1B6B4D;'><b>Q:</b> {content}</p>\n"
+                        elif role == "assistant":
+                            html += f"<p><b>A:</b> {content.replace(chr(10), '<br>')}</p>\n"
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        return html
+
+    def _on_view_report(self, run_id):
+        """Load a past report from analysis_runs into the canvas."""
+        report = self.db.get_report_run(run_id)
+        if not report:
+            return
+        text = report.get("output_text", "")
+        self._output_area.set_markdown(text)
+        self._current_report_text = text
+        self._copy_btn.setEnabled(True)
+        self._save_md_btn.setEnabled(True)
+        self._save_html_btn.setEnabled(True)
+        self._export_drive_btn.setEnabled(True)
+        self._chat_btn.setEnabled(True)
+        self._tab_widget.setCurrentIndex(0)  # Switch to Analysis Canvas
+
+        # Show metadata in evidence panel
+        self._evidence_panel.show_metadata({
+            "Pipeline": report.get("prompt_template", ""),
+            "Tickets": str(report.get("ticket_count", "")),
+            "TRC filter": report.get("trc_filter", "All TRCs"),
+            "Generated": report.get("run_date", ""),
+            "Duration": f"{report.get('duration_sec', 0) or 0:.1f}s",
+        })
+
+    def _load_past_report(self, report_id):
+        """Load a past report into the main view."""
+        report = self.db.get_full_report(report_id)
+        if not report:
+            return
+        raw = report.get("full_results", "")
+        try:
+            data = json.loads(raw)
+            text = data.get("report_text", raw)
+        except (json.JSONDecodeError, TypeError):
+            text = raw
+        self._output_area.set_markdown(text)
+        self._current_report_text = text
+        self._copy_btn.setEnabled(True)
+        self._save_md_btn.setEnabled(True)
+        self._save_html_btn.setEnabled(True)
+        self._chat_btn.setEnabled(True)
+
+        # Restore chat history
+        chat_hist = report.get("chat_history", "")
+        if chat_hist:
+            try:
+                gc = _build_gemini_client()
+                self._chat_widget.set_gemini_client(gc)
+            except Exception:
+                pass
+            self._chat_widget.load_chat_history(chat_hist)
+
+    # ═══════════════════════════════════════
+    #  PUBLIC API
+    # ═══════════════════════════════════════
+
+    def refresh_gemini_status(self):
+        self._gemini_available = self._check_gemini()
+        self._generate_btn.setEnabled(self._gemini_available and not self._scan_blocked)
+
+    def set_scan_blocking(self, active):
+        """Block/unblock Generate button during NLP scans."""
+        self._scan_blocked = active
+        if active:
+            self._generate_btn.setEnabled(False)
+            self._generate_btn.setToolTip("NLP scan in progress — generation disabled")
+        else:
+            self._generate_btn.setEnabled(self._gemini_available)
+            self._generate_btn.setToolTip("")
+
+    def populate_trc_filter(self):
+        """Called by main_window when data changes."""
+        self._trc_combo.clear()
+        self._trc_combo.addItem("All TRCs", "")
+        self._populate_trc_combo()
+
+    def sync_date_to_data(self):
+        """Set date pickers to match the actual data range in the DB."""
+        try:
+            from PySide6.QtCore import QDate
+            min_d, max_d = self.db.get_date_range()
+            if min_d:
+                parts = min_d[:10].split("-")
+                if len(parts) == 3:
+                    self._date_from.setDate(QDate(int(parts[0]), int(parts[1]), int(parts[2])))
+            if max_d:
+                parts = max_d[:10].split("-")
+                if len(parts) == 3:
+                    self._date_to.setDate(QDate(int(parts[0]), int(parts[1]), int(parts[2])))
+        except Exception:
+            pass
+
+    # ═══════════════════════════════════════
+    #  NLP SCAN INTEGRATION
+    # ═══════════════════════════════════════
+
+    def _generate_nlp_synthesis(self):
+        """Generate synthesis report from latest NLP scan."""
+        scan = self.db.get_latest_completed_scan()
+        if not scan:
+            self._output_area.set_markdown(
+                "**No completed NLP scans found.**\n\n"
+                "Go to NLP Scanner page to run a scan first."
+            )
+            return
+
+        self._generate_btn.setEnabled(False)
+        self._generate_btn.setText("  Synthesizing...  ")
+        self._output_area.clear()
+
+        try:
+            gc = _build_gemini_client()
+            self._chat_widget.set_gemini_client(gc)
+
+            from src.data.nlp_synthesis import NLPSynthesizer
+            synth = NLPSynthesizer(self.db, gc)
+            result = synth.synthesize_findings(scan["scan_id"])
+
+            self._output_area.set_markdown(result)
+            self._current_report_text = result
+            self._copy_btn.setEnabled(True)
+            self._save_md_btn.setEnabled(True)
+            self._save_html_btn.setEnabled(True)
+            self._save_history_btn.setEnabled(True)
+            self._export_drive_btn.setEnabled(True)
+            self._chat_btn.setEnabled(True)
+
+            # Set context for follow-up chat
+            self._chat_widget.set_report_context(
+                f"NLP Scan synthesis for {scan['date_range_start']} to {scan['date_range_end']}",
+                result,
+            )
+
+        except Exception as e:
+            self._output_area.set_markdown(f"**Synthesis failed:** {e}")
+        finally:
+            self._generate_btn.setEnabled(True)
+            self._generate_btn.setText("  Generate Report  ")
+
+    def load_nlp_finding(self, finding_id, finding_title):
+        """
+        Called from NLP Scanner 'Deep Dive' -- triggers per-finding
+        drilldown via Gemini.
+        """
+        self._output_area.clear()
+        self._output_area.set_markdown(f"*Loading deep dive for: {finding_title}...*")
+
+        try:
+            gc = _build_gemini_client()
+            self._chat_widget.set_gemini_client(gc)
+
+            from src.data.nlp_synthesis import NLPSynthesizer
+            synth = NLPSynthesizer(self.db, gc)
+            result = synth.synthesize_single_finding(finding_id)
+
+            self._output_area.set_markdown(result)
+            self._current_report_text = result
+            self._copy_btn.setEnabled(True)
+            self._save_md_btn.setEnabled(True)
+            self._save_html_btn.setEnabled(True)
+            self._save_history_btn.setEnabled(True)
+            self._export_drive_btn.setEnabled(True)
+            self._chat_btn.setEnabled(True)
+
+            # Set up chat for follow-up questions
+            self._chat_widget.set_report_context(
+                f"Deep dive on finding: {finding_title}",
+                result,
+            )
+            # Store finding_id for finding-aware chat
+            self._chat_widget._nlp_finding_id = finding_id
+
+        except Exception as e:
+            self._output_area.set_markdown(f"**Deep dive failed:** {e}")
+
+    # ═══════════════════════════════════════════
+    #  RESOURCE CLEANUP
+    # ═══════════════════════════════════════════
+
+    def cleanup(self):
+        """Shutdown bridge subprocess and release resources."""
+        if self._voc_worker and self._voc_worker.isRunning():
+            try:
+                self._voc_worker.cancel()
+            except Exception:
+                pass
+        if self._shared_gemini_client is not None:
+            try:
+                self._shared_gemini_client.shutdown()
+            except Exception:
+                pass
+            self._shared_gemini_client = None
+
+    def closeEvent(self, event):
+        """Ensure bridge cleanup on widget close."""
+        self.cleanup()
+        super().closeEvent(event)

@@ -27,6 +27,7 @@ Public API:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import sqlite3
@@ -66,6 +67,39 @@ DEFAULT_PARAMS: dict = {
     # After per-TRC clustering, greedily merge two clusters if their
     # centroid cosine exceeds this threshold. Set to 0.0 to disable.
     "centroid_merge_threshold": 0.85,
+    # ── Phase 6 telemetry flags (plan §6) ──
+    # All default False so existing tests + gate re-scoring are unchanged.
+    # Each enables a post-assignment stage inside run_canonicalization:
+    "telemetry_drift_enabled": False,
+    "telemetry_fission_enabled": False,
+    "telemetry_fission_commit_splits": False,  # even when fission detected,
+                                               # don't reassign tickets (Phase 6
+                                               # is observational; splits
+                                               # commit later via HITL queue).
+    "telemetry_dormancy_enabled": False,
+    # Stability bands for cluster_drift_events.stability_band
+    "drift_band_stable_max": 0.05,      # cos distance
+    "drift_band_normal_max": 0.15,
+    "drift_band_drifting_max": 0.30,    # above this → 'unstable'; cluster tier → 'drifting'
+    # Fission triggers
+    "fission_variance_threshold": 0.15,      # mean cos distance from centroid
+    "fission_silhouette_threshold": 0.30,    # below this triggers
+    "fission_member_growth_multiplier": 2.0, # 2x growth since last scan
+    "fission_subhdbscan_min_cluster_size": 3,
+    "fission_silhouette_improvement_min": 0.10,
+    "fission_llm_commit_score": 4.0,         # score >= this → commit (when commit_splits enabled)
+    # Dormancy
+    "dormancy_threshold_scans": 3,           # active → dormant after N consecutive empty scans
+    "retirement_threshold_scans": 10,        # dormant → retired after N consecutive empty scans
+    "resurrection_min_members": 3,           # dormant → active when this many NEW members land
+    # ── Phase 7 enrichment rollup (S10.1) ──
+    # Populates canonical_cluster_enrichment at end of run_canonicalization.
+    # Default ON — this is core data for the analyst report. Flip off only
+    # in tuning harnesses / tests where the rollup isn't exercised.
+    "enrichment_rollup_enabled": True,
+    # ── Member snapshots (S10.4) — default ON, cheap + unblocks Phase 6 snippets_then ──
+    "member_snapshots_enabled": True,
+    "member_snapshots_cap": 200,
 }
 
 # Embedding dimension (Qwen3-Embedding-0.6B) — confirmed at load time
@@ -661,12 +695,17 @@ def run_canonicalization(
     trc: Optional[str] = None,
     force_recluster: bool = False,
     params: Optional[dict] = None,
+    llm_client=None,
 ) -> CanonicalizationResult:
     """Run canonicalization across all TRCs (or one TRC if `trc` is given).
 
     When `force_recluster=True`, existing centroids are ignored (stage 1 skipped)
     — used by the tuning harness for clean grid-search runs. The persisted
     canonical_clusters rows remain; this just changes assignment for THIS run.
+
+    `llm_client` is consumed only by the optional Phase 6 fission stage (per
+    `params["telemetry_fission_enabled"]`); it's plumbed through here so
+    callers don't have to re-invoke a separate function.
     """
     import time
     t0 = time.perf_counter()
@@ -674,6 +713,15 @@ def run_canonicalization(
     p = dict(DEFAULT_PARAMS)
     if params:
         p.update(params)
+
+    # ── Phase 6: snapshot prior state for drift + dormancy calcs ──
+    prior_state: dict[str, dict] = {}
+    if p.get("telemetry_drift_enabled") or p.get("telemetry_dormancy_enabled"):
+        try:
+            prior_state = _snapshot_prior_state(conn)
+        except Exception as exc:
+            logger.warning("Phase 6 snapshot failed, telemetry stages will be skipped: %s", exc)
+            prior_state = {}
 
     ticket_ids, ticket_trcs, embeddings, confidences = _load_embeddings_for_trc(conn, trc)
     if not ticket_ids:
@@ -905,6 +953,60 @@ def run_canonicalization(
                 # Migration 018 not applied — silently skip multi-label.
                 multilabel_enabled = False
 
+    # ── Phase 6 telemetry stages (all optional; each wrapped so an
+    # observational bug can't fail the whole scan) ──
+    telemetry_summary: dict[str, int] = {}
+    if p.get("telemetry_drift_enabled") and prior_state:
+        try:
+            n_drift = _detect_and_log_drift(conn, scan_id, prior_state, p)
+            telemetry_summary["drift_events"] = n_drift
+        except Exception:
+            logger.exception("Phase 6 drift detection failed (non-fatal)")
+
+    if p.get("telemetry_fission_enabled"):
+        try:
+            n_fission = _detect_and_execute_fission(conn, scan_id, p, llm_client=llm_client)
+            telemetry_summary["fission_events"] = n_fission
+        except Exception:
+            logger.exception("Phase 6 fission detection failed (non-fatal)")
+
+    if p.get("telemetry_dormancy_enabled"):
+        try:
+            n_dormancy = _detect_dormancy_and_resurrection(conn, scan_id, prior_state, p)
+            telemetry_summary["dormancy_events"] = n_dormancy
+        except Exception:
+            logger.exception("Phase 6 dormancy detection failed (non-fatal)")
+
+    if telemetry_summary:
+        logger.info("Phase 6 telemetry for scan %s: %s", scan_id, telemetry_summary)
+
+    # ── Phase 7 enrichment rollup + S10.4 member snapshots ──
+    # Both run AFTER assignments land but BEFORE commit so a failure rolls
+    # the whole scan back cleanly. Each is independently guarded; either
+    # being disabled or missing its migration is a no-op, not a failure.
+    if p.get("enrichment_rollup_enabled", True):
+        try:
+            from src.data.cluster_enrichment_rollup import compute_enrichment_rollups
+            rr = compute_enrichment_rollups(conn, scan_id, persist=True)
+            if rr.rows_written:
+                logger.info(
+                    "Phase 7 rollup for scan %s: %d rows (%d ms)",
+                    scan_id, rr.rows_written, rr.wall_time_ms,
+                )
+        except Exception:
+            logger.exception("Phase 7 enrichment rollup failed (non-fatal)")
+
+    if p.get("member_snapshots_enabled", True):
+        try:
+            n_snap = _write_member_snapshots(
+                conn, scan_id=scan_id,
+                cap=int(p.get("member_snapshots_cap", 200)),
+            )
+            if n_snap:
+                logger.info("S10.4 member snapshots for scan %s: %d rows", scan_id, n_snap)
+        except Exception:
+            logger.exception("S10.4 member snapshot write failed (non-fatal)")
+
     conn.commit()
 
     wall_ms = int((time.perf_counter() - t0) * 1000)
@@ -1060,3 +1162,897 @@ def record_tuning_run(
     )
     conn.commit()
     return run_id
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Phase 6 — Drift + Fission + Dormancy telemetry
+# ══════════════════════════════════════════════════════════════════════════
+#
+# All three stages are observational: they read the current DB state, compare
+# it to a snapshot taken at the top of run_canonicalization, and write rows
+# to the telemetry tables (cluster_drift_events, cluster_fission_events,
+# dormancy_events). Stages never re-assign tickets or delete clusters on
+# their own; the one exception is fission-commit, gated by
+# `params["telemetry_fission_commit_splits"]` which defaults False.
+#
+# Plan reference: canonicalization-enrichment.md §6.
+# Kernel reference: phase-6-9-session-kernel.md "Session N+1".
+
+
+def _extract_centroid_blob(row_centroid: Optional[bytes]) -> Optional[np.ndarray]:
+    """Safe blob → vector parse for telemetry snapshots. Returns None if
+    the row has no centroid yet (new probationary cluster pre-upsert)."""
+    if row_centroid is None:
+        return None
+    try:
+        v = np.frombuffer(row_centroid, dtype=np.float32).copy()
+        if v.size == 0:
+            return None
+        return _l2_normalize(v)
+    except Exception:
+        return None
+
+
+def _cluster_variance(embeds: np.ndarray, centroid: np.ndarray) -> float:
+    """Mean cosine distance of members from centroid. Both inputs assumed
+    L2-normalized. Returns 0.0 for empty input (caller guards)."""
+    if len(embeds) == 0:
+        return 0.0
+    return float(np.mean(1.0 - (embeds @ centroid)))
+
+
+def _compute_silhouette_map(
+    embeds_by_cluster: dict[str, np.ndarray],
+) -> dict[str, float]:
+    """Per-cluster mean silhouette across all labeled members.
+
+    sklearn.silhouette_samples requires ≥ 2 unique labels with ≥ 1 sample
+    each. For single-cluster inputs we return {} (silhouette undefined).
+    Clusters with < 2 members get None silhouette.
+    """
+    clean = {cid: e for cid, e in embeds_by_cluster.items() if len(e) > 0}
+    if len(clean) < 2:
+        return {}
+    X_parts = []
+    labels = []
+    order: list[str] = []
+    for cid, e in clean.items():
+        order.append(cid)
+        X_parts.append(e)
+        labels.extend([cid] * len(e))
+    X = np.vstack(X_parts).astype(np.float32)
+    try:
+        from sklearn.metrics import silhouette_samples  # lazy import
+    except Exception as exc:  # pragma: no cover
+        logger.warning("silhouette unavailable (sklearn missing?): %s", exc)
+        return {}
+    try:
+        samples = silhouette_samples(X, np.asarray(labels), metric="cosine")
+    except Exception as exc:
+        logger.warning("silhouette_samples failed: %s", exc)
+        return {}
+    out: dict[str, float] = {}
+    start = 0
+    for cid in order:
+        n = len(clean[cid])
+        sl = samples[start:start + n]
+        out[cid] = float(np.mean(sl)) if n else float("nan")
+        start += n
+    return out
+
+
+def _snapshot_prior_state(conn) -> dict[str, dict]:
+    """Capture cluster state *before* run_canonicalization mutates anything.
+
+    Returns {cluster_id: {centroid, members, member_count, tier,
+                          last_seen_scan_id, scans_without_members,
+                          variance, silhouette}}.
+
+    Empty dict if no canonical_clusters exist yet (first scan).
+    """
+    rows = conn.execute(
+        """
+        SELECT cluster_id, centroid_blob, tier, last_seen_scan_id,
+               COALESCE(scans_without_members, 0)
+          FROM canonical_clusters
+        """
+    ).fetchall()
+    if not rows:
+        return {}
+
+    # Members per cluster
+    members_by_cluster: dict[str, set[str]] = {}
+    for cid, tid in conn.execute(
+        """
+        SELECT canonical_issue_id, ticket_id FROM ticket_index
+         WHERE canonical_issue_id IS NOT NULL
+        """
+    ).fetchall():
+        members_by_cluster.setdefault(cid, set()).add(tid)
+
+    # Load embeddings only for tickets that are assigned (for variance/sil)
+    all_members = {t for s in members_by_cluster.values() for t in s}
+    embed_by_tid: dict[str, np.ndarray] = {}
+    if all_members:
+        placeholders = ",".join("?" * len(all_members))
+        for tid, blob in conn.execute(
+            f"SELECT ticket_id, embedding_blob FROM ticket_embeddings "
+            f"WHERE ticket_id IN ({placeholders})",
+            tuple(all_members),
+        ).fetchall():
+            try:
+                v = _l2_normalize(np.frombuffer(blob, dtype=np.float32).copy())
+                embed_by_tid[tid] = v
+            except Exception:
+                pass
+
+    snapshot: dict[str, dict] = {}
+    embeds_by_cluster: dict[str, np.ndarray] = {}
+    centroids_by_cluster: dict[str, np.ndarray] = {}
+    for cid, centroid_blob, tier, last_seen, scans_without in rows:
+        centroid = _extract_centroid_blob(centroid_blob)
+        members = members_by_cluster.get(cid, set())
+        snapshot[cid] = {
+            "centroid": centroid,
+            "members": members,
+            "member_count": len(members),
+            "tier": tier or "probationary",
+            "last_seen_scan_id": last_seen,
+            "scans_without_members": int(scans_without),
+            "variance": None,
+            "silhouette": None,
+        }
+        if centroid is not None and members:
+            emats = [embed_by_tid[t] for t in members if t in embed_by_tid]
+            if emats:
+                mat = np.vstack(emats)
+                embeds_by_cluster[cid] = mat
+                centroids_by_cluster[cid] = centroid
+                snapshot[cid]["variance"] = _cluster_variance(mat, centroid)
+
+    # Silhouette requires ≥ 2 populated clusters
+    sil = _compute_silhouette_map(embeds_by_cluster)
+    for cid, s in sil.items():
+        snapshot[cid]["silhouette"] = s
+
+    return snapshot
+
+
+def _classify_stability_band(drift_cos: float, params: dict) -> str:
+    if drift_cos < float(params.get("drift_band_stable_max", 0.05)):
+        return "stable"
+    if drift_cos < float(params.get("drift_band_normal_max", 0.15)):
+        return "normal"
+    if drift_cos < float(params.get("drift_band_drifting_max", 0.30)):
+        return "drifting"
+    return "unstable"
+
+
+def _load_current_cluster_state(conn) -> dict[str, dict]:
+    """Post-scan snapshot. Same shape as _snapshot_prior_state but reflects
+    the state AFTER run_canonicalization wrote assignments and centroids."""
+    return _snapshot_prior_state(conn)
+
+
+def _detect_and_log_drift(
+    conn, scan_id: str, prior_state: dict[str, dict], params: dict,
+) -> int:
+    """Write cluster_drift_events for clusters that existed in prior_state
+    and still exist post-scan. Returns rows inserted."""
+    current = _load_current_cluster_state(conn)
+    events = 0
+    tier_updates: list[tuple[str, str]] = []
+    for cid, prev in prior_state.items():
+        cur = current.get(cid)
+        if cur is None:
+            continue
+        cv = cur.get("centroid")
+        pv = prev.get("centroid")
+        if cv is None or pv is None:
+            continue  # can't compute drift without both
+
+        drift_cos = float(max(0.0, min(2.0, 1.0 - float(pv @ cv))))
+        band = _classify_stability_band(drift_cos, params)
+
+        prior_members: set[str] = prev.get("members", set())
+        cur_members: set[str] = cur.get("members", set())
+        retained = prior_members & cur_members
+        added = cur_members - prior_members
+        lost = prior_members - cur_members
+
+        conn.execute(
+            """
+            INSERT INTO cluster_drift_events
+              (event_id, cluster_id, scan_id, prev_scan_id,
+               centroid_before_blob, centroid_after_blob, drift_cosine,
+               members_added, members_lost, members_retained,
+               member_count_before, member_count_after,
+               variance_before, variance_after,
+               silhouette_before, silhouette_after,
+               stability_band)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                uuid.uuid4().hex,
+                cid,
+                scan_id,
+                prev.get("last_seen_scan_id"),
+                _vec_to_blob(pv), _vec_to_blob(cv), drift_cos,
+                len(added), len(lost), len(retained),
+                prev.get("member_count"), cur.get("member_count"),
+                prev.get("variance"), cur.get("variance"),
+                prev.get("silhouette"), cur.get("silhouette"),
+                band,
+            ),
+        )
+        events += 1
+
+        if band == "unstable" and (cur.get("tier") or "") != "drifting":
+            tier_updates.append((cid, "drifting"))
+
+    for cid, new_tier in tier_updates:
+        conn.execute(
+            "UPDATE canonical_clusters SET tier = ? WHERE cluster_id = ?",
+            (new_tier, cid),
+        )
+
+    return events
+
+
+def _extract_json_object(raw: str) -> Optional[dict]:
+    """Best-effort JSON extraction — strips markdown fences and trailing prose."""
+    if not raw:
+        return None
+    txt = raw.strip()
+    if txt.startswith("```"):
+        # strip ```json ... ``` fences
+        lines = [ln for ln in txt.splitlines() if not ln.strip().startswith("```")]
+        txt = "\n".join(lines).strip()
+    # find first { and matching balanced } — simple bracket counter
+    start = txt.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    for i in range(start, len(txt)):
+        ch = txt[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(txt[start:i + 1])
+                except Exception:
+                    return None
+    return None
+
+
+def _load_cluster_member_embeddings(
+    conn, cluster_id: str,
+) -> tuple[list[str], np.ndarray]:
+    """Load (ticket_ids, embedding_matrix L2-normalized) for all tickets
+    currently assigned to cluster_id. Empty arrays if none."""
+    rows = conn.execute(
+        """
+        SELECT ti.ticket_id, te.embedding_blob
+          FROM ticket_index ti
+          JOIN ticket_embeddings te ON te.ticket_id = ti.ticket_id
+         WHERE ti.canonical_issue_id = ?
+        """,
+        (cluster_id,),
+    ).fetchall()
+    if not rows:
+        return [], np.empty((0, _EMBED_DIM_FALLBACK), dtype=np.float32)
+    tids = [r[0] for r in rows]
+    mats = []
+    for _, blob in rows:
+        try:
+            mats.append(_l2_normalize(np.frombuffer(blob, dtype=np.float32).copy()))
+        except Exception:
+            pass
+    if not mats:
+        return tids, np.empty((0, _EMBED_DIM_FALLBACK), dtype=np.float32)
+    return tids, np.vstack(mats).astype(np.float32)
+
+
+def _fission_triggers(
+    cur: dict, prev: Optional[dict], params: dict,
+) -> list[str]:
+    """Return list of trigger names; empty if cluster is stable."""
+    triggers: list[str] = []
+    var = cur.get("variance")
+    sil = cur.get("silhouette")
+    if var is not None and var > float(params.get("fission_variance_threshold", 0.15)):
+        triggers.append("variance_threshold")
+    if sil is not None and sil < float(params.get("fission_silhouette_threshold", 0.30)):
+        triggers.append("silhouette_drop")
+    if prev is not None:
+        prev_n = prev.get("member_count") or 0
+        cur_n = cur.get("member_count") or 0
+        mult = float(params.get("fission_member_growth_multiplier", 2.0))
+        if prev_n >= 3 and cur_n >= prev_n * mult:
+            triggers.append("member_count_doubled")
+    return triggers
+
+
+def _sub_hdbscan(
+    embeds: np.ndarray, params: dict,
+) -> tuple[np.ndarray, np.ndarray]:
+    """HDBSCAN with Phase 6 defaults for within-cluster fission detection."""
+    sub_params = dict(params)
+    sub_params["min_cluster_size"] = int(params.get("fission_subhdbscan_min_cluster_size", 3))
+    sub_params["min_samples"] = 1
+    sub_params["allow_single_cluster"] = False  # we WANT to see multiple children
+    return _hdbscan_per_trc(embeds, sub_params)
+
+
+def _detect_and_execute_fission(
+    conn, scan_id: str, params: dict, *, llm_client=None,
+) -> int:
+    """Detect over-merged clusters, score with LLM (if client provided),
+    and log cluster_fission_events. Returns rows inserted.
+
+    Commit of actual splits is gated on `params["telemetry_fission_commit_splits"]`
+    (default False — Phase 6 is observational)."""
+    current = _load_current_cluster_state(conn)
+    # Prior state isn't available to this helper when called from
+    # run_canonicalization (it lives in the caller's scope); we reconstruct
+    # a partial prior from the most recent drift event for each cluster so
+    # member_count_doubled can still fire.
+    prev_counts: dict[str, int] = {}
+    try:
+        for cid, prev_cnt in conn.execute(
+            """
+            SELECT cluster_id, member_count_before FROM cluster_drift_events
+             WHERE event_id IN (
+               SELECT event_id FROM cluster_drift_events e1
+                WHERE e1.cluster_id = cluster_drift_events.cluster_id
+                ORDER BY created_at DESC LIMIT 1
+             )
+            """
+        ).fetchall():
+            if prev_cnt is not None:
+                prev_counts[cid] = int(prev_cnt)
+    except sqlite3.OperationalError:
+        pass  # telemetry table absent — first-scan case
+
+    # Identify candidates
+    candidates: list[dict] = []
+    for cid, cur in current.items():
+        if cur["member_count"] < max(6, int(params.get("fission_subhdbscan_min_cluster_size", 3)) * 2):
+            continue  # too small to split meaningfully
+        prev_like = {"member_count": prev_counts.get(cid)} if cid in prev_counts else None
+        triggers = _fission_triggers(cur, prev_like, params)
+        if not triggers:
+            continue
+
+        tids, mat = _load_cluster_member_embeddings(conn, cid)
+        if len(mat) < 2 * int(params.get("fission_subhdbscan_min_cluster_size", 3)):
+            continue
+
+        sub_labels, _probs = _sub_hdbscan(mat, params)
+        unique = sorted({int(l) for l in sub_labels if l >= 0})
+        if len(unique) < 2:
+            continue  # HDBSCAN didn't find ≥ 2 sub-groups
+
+        # Silhouette after proposed split (only non-noise points)
+        mask = sub_labels >= 0
+        X = mat[mask]
+        y = sub_labels[mask]
+        sil_after: Optional[float] = None
+        if len(set(y.tolist())) >= 2 and len(X) >= 2:
+            try:
+                from sklearn.metrics import silhouette_score
+                sil_after = float(silhouette_score(X, y, metric="cosine"))
+            except Exception:
+                sil_after = None
+
+        sil_before = cur.get("silhouette")
+        sil_improve: Optional[float] = None
+        if sil_before is not None and sil_after is not None:
+            sil_improve = sil_after - sil_before
+        min_improve = float(params.get("fission_silhouette_improvement_min", 0.10))
+        if sil_improve is not None and sil_improve < min_improve:
+            # Sub-structure too weak; record the rejection and move on
+            conn.execute(
+                """
+                INSERT INTO cluster_fission_events
+                  (event_id, parent_cluster_id, scan_id, triggered_by,
+                   child_cluster_ids_json, member_count_parent,
+                   tickets_reassigned_count, variance_before,
+                   silhouette_before, silhouette_after, silhouette_improvement,
+                   llm_gate_score, llm_gate_reasoning, committed)
+                VALUES (?, ?, ?, ?, NULL, ?, 0, ?, ?, ?, ?, NULL, 'silhouette_below_min', 0)
+                """,
+                (
+                    uuid.uuid4().hex, cid, scan_id, ",".join(triggers),
+                    cur["member_count"], cur.get("variance"),
+                    sil_before, sil_after, sil_improve,
+                ),
+            )
+            continue
+
+        # Compose child snippets from representative ticket subjects where possible
+        child_snippets: dict[int, list[str]] = {}
+        for lbl in unique:
+            members_lbl = [tids[i] for i, l in enumerate(sub_labels) if l == lbl]
+            snippets = []
+            for tid in members_lbl[:3]:
+                row = conn.execute(
+                    "SELECT subject_sanitized FROM ticket_index WHERE ticket_id = ?",
+                    (tid,),
+                ).fetchone()
+                if row and row[0]:
+                    snippets.append(str(row[0])[:240])
+            child_snippets[lbl] = snippets
+
+        candidates.append({
+            "parent_cluster_id": cid,
+            "triggers": triggers,
+            "member_count": cur["member_count"],
+            "variance_before": cur.get("variance"),
+            "silhouette_before": sil_before,
+            "silhouette_after": sil_after,
+            "silhouette_improvement": sil_improve,
+            "sub_labels": sub_labels.tolist(),
+            "sub_unique": unique,
+            "child_snippets": child_snippets,
+            "ticket_ids": tids,
+        })
+
+    if not candidates:
+        return 0
+
+    # LLM gate — one batched call over all candidates
+    scores: dict[str, tuple[Optional[float], Optional[str], str]] = {}
+    if llm_client is not None:
+        try:
+            prompt_path = (
+                __file__.rsplit("src", 1)[0] + "config/prompts/fission_gate.txt"
+            )
+            tpl = open(prompt_path, "r", encoding="utf-8").read()
+        except Exception as exc:
+            logger.warning("fission_gate prompt unavailable: %s", exc)
+            tpl = None
+        if tpl:
+            payload = []
+            for cand in candidates:
+                children = []
+                cur = current[cand["parent_cluster_id"]]
+                for lbl_idx, lbl in enumerate(cand["sub_unique"]):
+                    members_lbl = [
+                        cand["ticket_ids"][i]
+                        for i, l in enumerate(cand["sub_labels"]) if l == lbl
+                    ]
+                    children.append({
+                        "child_index": lbl_idx,
+                        "member_count": len(members_lbl),
+                        "representative_snippets": cand["child_snippets"].get(lbl, []),
+                    })
+                # Parent label lookup
+                plabel_row = conn.execute(
+                    "SELECT canonical_label FROM canonical_clusters WHERE cluster_id = ?",
+                    (cand["parent_cluster_id"],),
+                ).fetchone()
+                payload.append({
+                    "parent_cluster_id": cand["parent_cluster_id"],
+                    "parent_label": (plabel_row[0] if plabel_row else None) or "",
+                    "parent_member_count": cand["member_count"],
+                    "parent_variance": cand["variance_before"],
+                    "parent_silhouette": cand["silhouette_before"],
+                    "proposed_children": children,
+                    "silhouette_improvement": cand["silhouette_improvement"],
+                })
+            prompt = tpl.replace("{candidates_json}", json.dumps(payload, indent=2))
+            try:
+                raw = llm_client.generate(prompt, timeout=180)
+                parsed = _extract_json_object(raw or "")
+                if parsed and isinstance(parsed.get("decisions"), list):
+                    for item in parsed["decisions"]:
+                        pcid = str(item.get("parent_cluster_id") or "").strip()
+                        if not pcid:
+                            continue
+                        try:
+                            sc = float(item.get("score"))
+                        except Exception:
+                            sc = None
+                        reasoning = str(item.get("reasoning") or "")[:500]
+                        rec = str(item.get("recommendation") or "defer")
+                        scores[pcid] = (sc, reasoning, rec)
+            except Exception as exc:
+                logger.warning("Fission LLM call failed (non-fatal): %s", exc)
+
+    # Persist fission events (committed=0 unless commit_splits flag set & score passes)
+    commit_splits = bool(params.get("telemetry_fission_commit_splits", False))
+    commit_score = float(params.get("fission_llm_commit_score", 4.0))
+    rows_inserted = 0
+    for cand in candidates:
+        pcid = cand["parent_cluster_id"]
+        gate_score, reasoning, _rec = scores.get(pcid, (None, None, None))
+        should_commit = bool(
+            commit_splits and gate_score is not None and gate_score >= commit_score
+        )
+
+        # Default: not committed, no children, no reassignments
+        child_cids_json: Optional[str] = None
+        tickets_reassigned = 0
+        committed_flag = 0
+
+        if should_commit:
+            # Attempt the commit atomically. Any failure rolls back via the
+            # enclosing run_canonicalization transaction; we also fall back
+            # to a non-committed event record so the audit trail reflects
+            # the attempt.
+            try:
+                child_ids, reassigned = _commit_fission_split(
+                    conn,
+                    parent_cluster_id=pcid,
+                    sub_labels=cand["sub_labels"],
+                    ticket_ids=cand["ticket_ids"],
+                    scan_id=scan_id,
+                    params=params,
+                )
+                child_cids_json = json.dumps(child_ids)
+                tickets_reassigned = reassigned
+                committed_flag = 1
+            except Exception as exc:
+                logger.warning(
+                    "Fission commit failed for parent %s (non-fatal, event recorded uncommitted): %s",
+                    pcid, exc,
+                )
+                child_cids_json = None
+                tickets_reassigned = 0
+                committed_flag = 0
+
+        conn.execute(
+            """
+            INSERT INTO cluster_fission_events
+              (event_id, parent_cluster_id, scan_id, triggered_by,
+               child_cluster_ids_json, member_count_parent,
+               tickets_reassigned_count, variance_before,
+               silhouette_before, silhouette_after, silhouette_improvement,
+               llm_gate_score, llm_gate_reasoning, committed)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                uuid.uuid4().hex, pcid, scan_id, ",".join(cand["triggers"]),
+                child_cids_json, cand["member_count"],
+                tickets_reassigned, cand["variance_before"],
+                cand["silhouette_before"], cand["silhouette_after"],
+                cand["silhouette_improvement"],
+                gate_score, reasoning,
+                committed_flag,
+            ),
+        )
+        rows_inserted += 1
+
+    return rows_inserted
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# S10.3 — Fission split commit
+# ──────────────────────────────────────────────────────────────────────────
+
+def _commit_fission_split(
+    conn, *,
+    parent_cluster_id: str,
+    sub_labels,
+    ticket_ids: list[str],
+    scan_id: str,
+    params: dict,
+) -> tuple[list[str], int]:
+    """Execute a fission split: create N child clusters, reassign tickets,
+    retire the parent by setting tier='split' + split_into_json.
+
+    Runs within the caller's transaction. On any error, raises — caller
+    records an uncommitted fission_event and lets run_canonicalization
+    rollback if needed.
+
+    Returns (child_cluster_ids, tickets_reassigned_count).
+    """
+    # Resolve parent TRC (child cluster IDs inherit it)
+    prow = conn.execute(
+        "SELECT trc FROM canonical_clusters WHERE cluster_id = ?",
+        (parent_cluster_id,),
+    ).fetchone()
+    if prow is None:
+        raise RuntimeError(f"parent cluster {parent_cluster_id} not found")
+    parent_trc = prow[0] or "unknown"
+
+    sub_labels_arr = np.asarray(sub_labels)
+    unique_labels = sorted({int(l) for l in sub_labels_arr if l >= 0})
+    if len(unique_labels) < 2:
+        raise RuntimeError(
+            f"fission commit requires ≥2 sub-clusters, got {len(unique_labels)}"
+        )
+
+    # Group tickets by sub_label (skip noise=-1)
+    label_to_tids: dict[int, list[str]] = {}
+    for tid, lab in zip(ticket_ids, sub_labels_arr):
+        lab = int(lab)
+        if lab < 0:
+            continue
+        label_to_tids.setdefault(lab, []).append(tid)
+
+    # Pull embeddings for all members (once, reuse per sub-cluster)
+    # Confidence-weighted centroid per sub-label
+    from collections import OrderedDict
+    emb_by_tid: dict[str, np.ndarray] = OrderedDict()
+    conf_by_tid: dict[str, float] = {}
+    for tid in ticket_ids:
+        row = conn.execute(
+            "SELECT embedding_blob, dim_size FROM ticket_embeddings WHERE ticket_id = ?",
+            (tid,),
+        ).fetchone()
+        if row is None or row[0] is None:
+            continue
+        dim = int(row[1] or _EMBED_DIM_FALLBACK)
+        try:
+            emb_by_tid[tid] = _blob_to_vec(row[0], dim)
+        except ValueError:
+            continue
+        # Pull most recent sub_cluster_confidence
+        crow = conn.execute(
+            """SELECT sub_cluster_confidence FROM nlp_ticket_classifications
+                WHERE ticket_id = ?
+             ORDER BY rowid DESC LIMIT 1""",
+            (tid,),
+        ).fetchone()
+        conf_by_tid[tid] = (
+            float(crow[0]) if crow and crow[0] is not None else _DEFAULT_CONFIDENCE
+        )
+
+    # Create child clusters + reassign members
+    child_cids: list[str] = []
+    total_reassigned = 0
+    now = datetime.now(timezone.utc).isoformat()
+    for lab in unique_labels:
+        member_tids = [t for t in label_to_tids[lab] if t in emb_by_tid]
+        if not member_tids:
+            raise RuntimeError(f"sub-label {lab} has no embedable members")
+        member_embeds = np.vstack([
+            _l2_normalize(emb_by_tid[t]) for t in member_tids
+        ]).astype(np.float32)
+        member_confs = np.asarray(
+            [conf_by_tid.get(t, _DEFAULT_CONFIDENCE) for t in member_tids],
+            dtype=np.float32,
+        )
+        child_centroid = _compute_confidence_weighted_centroid(member_embeds, member_confs)
+        medoid_idx = _compute_medoid(member_embeds, child_centroid)
+        rep_ticket = member_tids[medoid_idx] if medoid_idx >= 0 else None
+
+        child_cid = _new_cluster_id(parent_trc)
+        _upsert_cluster(
+            conn,
+            cluster_id=child_cid,
+            trc=parent_trc,
+            centroid=child_centroid,
+            rep_ticket=rep_ticket,
+            member_count=len(member_tids),
+            scan_id=scan_id,
+            new=True,
+        )
+        # Tier starts 'active' since it inherits a proven parent cohort
+        conn.execute(
+            "UPDATE canonical_clusters SET tier = 'active' WHERE cluster_id = ?",
+            (child_cid,),
+        )
+        child_cids.append(child_cid)
+
+        # Reassign tickets to this child
+        for tid in member_tids:
+            cos_to_child = float(emb_by_tid[tid] @ child_centroid)
+            _write_ticket_assignment(
+                conn,
+                ticket_id=tid,
+                cluster_id=child_cid,
+                confidence=cos_to_child,
+                method="fission_split",
+                membership_prob=None,
+                now_iso=now,
+            )
+            total_reassigned += 1
+
+    # Retire parent — tier='split', record descendants
+    conn.execute(
+        """UPDATE canonical_clusters
+              SET tier = 'split',
+                  split_into_json = ?,
+                  merged_into = NULL,
+                  last_seen_scan_id = ?,
+                  last_seen_at = ?
+            WHERE cluster_id = ?""",
+        (json.dumps(child_cids), scan_id, now, parent_cluster_id),
+    )
+
+    return child_cids, total_reassigned
+
+
+def _detect_dormancy_and_resurrection(
+    conn, scan_id: str, prior_state: dict[str, dict], params: dict,
+) -> int:
+    """Update cluster tier based on scans_without_members + resurrection rule.
+    Writes dormancy_events for every transition. Returns rows inserted."""
+    dormancy_threshold = int(params.get("dormancy_threshold_scans", 3))
+    retirement_threshold = int(params.get("retirement_threshold_scans", 10))
+    resurrection_min = int(params.get("resurrection_min_members", 3))
+
+    # Fresh current member sets per cluster
+    current_members_by_cluster: dict[str, set[str]] = {}
+    for cid, tid in conn.execute(
+        """
+        SELECT canonical_issue_id, ticket_id FROM ticket_index
+         WHERE canonical_issue_id IS NOT NULL
+        """
+    ).fetchall():
+        current_members_by_cluster.setdefault(cid, set()).add(tid)
+
+    # Walk every known cluster (including those with 0 current members)
+    rows = conn.execute(
+        """
+        SELECT cluster_id, tier, COALESCE(scans_without_members, 0), centroid_blob
+          FROM canonical_clusters
+        """
+    ).fetchall()
+
+    events = 0
+    for cid, tier, scans_without, centroid_blob in rows:
+        tier = tier or "probationary"
+        scans_without = int(scans_without or 0)
+
+        cur_members = current_members_by_cluster.get(cid, set())
+        cur_count = len(cur_members)
+        prior_members: set[str] = set()
+        if cid in prior_state:
+            prior_members = prior_state[cid].get("members", set()) or set()
+        new_members = cur_members - prior_members
+        new_count = len(new_members)
+
+        # Counter update: +1 if empty this scan, else reset to 0
+        new_counter = scans_without + 1 if cur_count == 0 else 0
+
+        new_tier = tier
+        transition: Optional[str] = None
+        confirmation_gate: Optional[bool] = None
+        resurrection_cos: Optional[float] = None
+        resurrecting_ids: Optional[list[str]] = None
+
+        # Resurrection (dormant/retired → active on ≥ N NEW members)
+        if tier in ("dormant", "retired") and new_count >= resurrection_min:
+            new_tier = "active"
+            new_counter = 0
+            transition = f"{tier}->active"
+            confirmation_gate = True
+            resurrecting_ids = sorted(list(new_members))[:50]
+            # Avg cosine of new members to the cluster centroid
+            cv = _extract_centroid_blob(centroid_blob)
+            if cv is not None:
+                embeds = []
+                for tid in resurrecting_ids:
+                    row = conn.execute(
+                        "SELECT embedding_blob FROM ticket_embeddings WHERE ticket_id = ?",
+                        (tid,),
+                    ).fetchone()
+                    if row and row[0]:
+                        try:
+                            embeds.append(_l2_normalize(np.frombuffer(row[0], dtype=np.float32).copy()))
+                        except Exception:
+                            pass
+                if embeds:
+                    mat = np.vstack(embeds)
+                    resurrection_cos = float(np.mean(mat @ cv))
+        # Active → dormant
+        elif tier == "active" and new_counter >= dormancy_threshold:
+            new_tier = "dormant"
+            transition = "active->dormant"
+        # Dormant → retired
+        elif tier == "dormant" and new_counter >= retirement_threshold:
+            new_tier = "retired"
+            transition = "dormant->retired"
+
+        # Persist counter + tier updates
+        if new_tier != tier or new_counter != scans_without:
+            conn.execute(
+                "UPDATE canonical_clusters SET tier = ?, scans_without_members = ? WHERE cluster_id = ?",
+                (new_tier, new_counter, cid),
+            )
+
+        if transition:
+            conn.execute(
+                """
+                INSERT INTO dormancy_events
+                  (event_id, cluster_id, scan_id, tier_transition,
+                   scans_without_members, resurrecting_ticket_ids_json,
+                   avg_resurrection_cosine, confirmation_gate_passed)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    uuid.uuid4().hex, cid, scan_id, transition,
+                    scans_without,  # counter AT transition time (before reset)
+                    json.dumps(resurrecting_ids) if resurrecting_ids else None,
+                    resurrection_cos,
+                    confirmation_gate,
+                ),
+            )
+            events += 1
+
+    return events
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# S10.4 — historical member snapshots
+# ──────────────────────────────────────────────────────────────────────────
+#
+# After each scan, snapshot a sample of member ticket_ids per cluster so the
+# Phase 6 regression prompt can later hydrate `snippets_then` — the "what did
+# this cluster look like last scan?" context. PHI-free (stores ticket_ids
+# only; subjects/bodies hydrated at regression time via the normal path).
+#
+# Sampling is deterministic (seeded by scan_id+cluster_id) so snapshots are
+# reproducible across re-runs.
+
+def _write_member_snapshots(conn, *, scan_id: str, cap: int = 200) -> int:
+    """Write one cluster_member_snapshots row per cluster with ≥1 member.
+
+    Cap at `cap` ticket_ids per cluster; for larger clusters, sample
+    deterministically seeded by (scan_id, cluster_id).
+
+    No-op if migration 025 hasn't landed (caller catches and logs).
+    Returns number of rows written.
+    """
+    # Fast schema probe
+    try:
+        conn.execute("SELECT 1 FROM cluster_member_snapshots LIMIT 0")
+    except sqlite3.OperationalError:
+        return 0  # migration 025 not applied
+
+    # Pull members grouped by cluster
+    cluster_members: dict[str, list[str]] = {}
+    for cid, tid in conn.execute(
+        """
+        SELECT canonical_issue_id, ticket_id FROM ticket_index
+         WHERE canonical_issue_id IS NOT NULL
+         ORDER BY canonical_issue_id, ticket_id
+        """
+    ).fetchall():
+        cluster_members.setdefault(cid, []).append(tid)
+
+    if not cluster_members:
+        return 0
+
+    # Idempotent per-scan: replace prior rows for this scan_id
+    conn.execute(
+        "DELETE FROM cluster_member_snapshots WHERE scan_id = ?",
+        (scan_id,),
+    )
+
+    rows = []
+    for cid, members in cluster_members.items():
+        member_count = len(members)
+        if member_count > cap:
+            # Deterministic sample: seed on (scan_id, cluster_id) — same scan
+            # run twice yields the same sample, but different clusters in the
+            # same scan get distinct samples.
+            seed_bytes = hashlib.sha256(
+                f"{scan_id}:{cid}".encode("utf-8")
+            ).digest()
+            seed = int.from_bytes(seed_bytes[:8], "big")
+            rng = np.random.default_rng(seed)
+            idx = rng.choice(member_count, size=cap, replace=False)
+            sampled = [members[int(i)] for i in sorted(idx)]
+        else:
+            sampled = members
+        rows.append((
+            cid,
+            scan_id,
+            json.dumps(sampled),
+            member_count,
+        ))
+
+    conn.executemany(
+        """INSERT INTO cluster_member_snapshots
+             (cluster_id, scan_id, member_ticket_ids_json, member_count)
+           VALUES (?, ?, ?, ?)""",
+        rows,
+    )
+    return len(rows)

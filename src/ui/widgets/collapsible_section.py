@@ -55,25 +55,15 @@ class CollapsibleSection(QFrame):
 
     @staticmethod
     def get_default_collapsed(section_key: str) -> bool:
-        """Read the default collapsed state from config/settings.yaml.
+        """Read the default collapsed state from settings.
 
         Returns True if the section should start collapsed, False if expanded.
         """
-        import yaml
-        from pathlib import Path
-
-        config_path = (
-            Path(__file__).resolve().parent.parent.parent.parent
-            / "config" / "settings.yaml"
-        )
-        if not config_path.exists():
-            return False  # default: expanded
+        from src.data.settings_manager import get_section
 
         try:
-            with open(config_path, encoding="utf-8") as f:
-                cfg = yaml.safe_load(f) or {}
-
-            sd = cfg.get("behavior", {}).get("section_defaults", {})
+            behavior = get_section("behavior", {})
+            sd = behavior.get("section_defaults", {})
             preset = sd.get("preset", "all_open")
 
             if preset == "all_open":

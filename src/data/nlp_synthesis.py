@@ -14,6 +14,12 @@ _PROMPTS_DIR = Path(__file__).resolve().parent.parent.parent / "config" / "promp
 
 
 class NLPSynthesizer:
+    """Generates narrative summaries of NLP scan findings via Gemini.
+
+    Takes structured findings from `nlp_findings` and asks Gemini to
+    produce an executive-readable summary. Called after NLPMetaAnalyzer
+    to layer narrative on top of the statistical aggregations.
+    """
 
     def __init__(self, db, gemini_client):
         self.db = db

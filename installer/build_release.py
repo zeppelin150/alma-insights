@@ -18,6 +18,7 @@ Output:
 """
 
 import argparse
+import json
 import os
 import platform
 import shutil
@@ -33,7 +34,15 @@ from pathlib import Path
 # ═══ Configuration ═══
 
 APP_NAME = "AlmaInsights"
-APP_VERSION = "1.0.0"
+
+# Single-source version from src/__init__.py
+_version_file = Path(__file__).resolve().parent.parent / "src" / "__init__.py"
+APP_VERSION = "1.0.0"  # fallback
+if _version_file.exists():
+    for _line in _version_file.read_text().splitlines():
+        if _line.startswith("VERSION"):
+            APP_VERSION = _line.split("=", 1)[1].strip().strip("\"'")
+            break
 
 # Python version to bundle
 PY_VERSION = "3.12.8"
@@ -43,13 +52,24 @@ PY_MAJOR_MINOR = "312"  # used in filenames like python312.dll
 PBS_RELEASE = "20241219"
 PBS_PY_VERSION = "3.12.8"
 
-# Packages to install into the bundled Python
+# Packages installed into the bundled Python.
+#
+# Exact pins only — this is what actually ships. Must stay in sync with
+# requirements.txt. CI enforces parity via tests/test_phase4_build.py.
 PACKAGES = [
-    "PySide6-Essentials>=6.6.0",
-    "pandas>=2.0.0",
-    "scikit-learn>=1.3.0",
-    "nltk>=3.8.0",
-    "pyyaml>=6.0",
+    "PySide6-Essentials==6.8.1.1",
+    "pandas==2.2.3",
+    "scikit-learn==1.5.2",
+    "nltk==3.9.1",
+    "pyyaml==6.0.2",
+    "numpy==1.26.4",
+    "scipy==1.14.1",
+    "vaderSentiment==3.3.2",
+    "sentence-transformers==3.3.1",
+    "hdbscan==0.8.40",
+    "markdown==3.7",
+    "keyring==25.5.0",
+    "PyJWT==2.10.1",
 ]
 
 # App source files/dirs to include
@@ -58,6 +78,7 @@ APP_CONTENTS = [
     "src",
     "config",
     "assets",
+    "migrations",
 ]
 
 # URLs
@@ -66,6 +87,32 @@ WIN_EMBED_URL = (
     f"python-{PY_VERSION}-embed-amd64.zip"
 )
 GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py"
+
+# Node.js standalone version to bundle (LTS)
+NODE_VERSION = "22.14.0"
+NODE_WIN_URL = (
+    f"https://nodejs.org/dist/v{NODE_VERSION}/"
+    f"node-v{NODE_VERSION}-win-x64.zip"
+)
+NODE_MAC_ARM_URL = (
+    f"https://nodejs.org/dist/v{NODE_VERSION}/"
+    f"node-v{NODE_VERSION}-darwin-arm64.tar.gz"
+)
+NODE_MAC_X86_URL = (
+    f"https://nodejs.org/dist/v{NODE_VERSION}/"
+    f"node-v{NODE_VERSION}-darwin-x64.tar.gz"
+)
+
+# Gemini CLI npm package — pinned to the bridge-compatible version.
+# Bumping requires validating `scan_server/server.js` bridge compatibility.
+GEMINI_CLI_PACKAGE = "@google/gemini-cli@0.36.0"
+
+# Sentence-transformers model to pre-download for offline use
+ST_MODEL_NAME = "Qwen/Qwen3-Embedding-0.6B"
+_LEGACY_MODEL_NAME = "all-MiniLM-L6-v2"  # cleaned up during install
+
+# CPU-only PyTorch index (avoids 2GB CUDA download)
+TORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
 
 # python-build-standalone URLs (both architectures for macOS)
 PBS_BASE = (
@@ -196,14 +243,15 @@ def copy_app_source(staging_dir):
 
 
 def copy_installer_files(staging_dir, plat):
-    """Copy the install script and entry point wrappers."""
+    """Copy the install + uninstall scripts and entry-point wrappers."""
     installer_dest = staging_dir / "_installer"
     installer_dest.mkdir(exist_ok=True)
 
-    # Copy install.py
+    # install.py + uninstall.py both live in _installer/
     shutil.copy2(INSTALLER_DIR / "install.py", installer_dest / "install.py")
+    shutil.copy2(INSTALLER_DIR / "uninstall.py", installer_dest / "uninstall.py")
 
-    # Copy platform-specific entry points
+    # Platform-specific top-level wrappers
     if plat == "windows":
         shutil.copy2(
             INSTALLER_DIR / "install_win.bat",
@@ -212,6 +260,10 @@ def copy_installer_files(staging_dir, plat):
         shutil.copy2(
             INSTALLER_DIR / "launcher_win.bat",
             staging_dir / "AlmaInsights.bat",
+        )
+        shutil.copy2(
+            INSTALLER_DIR / "uninstall_win.bat",
+            staging_dir / "Uninstall Alma Insights.bat",
         )
     else:
         shutil.copy2(
@@ -222,11 +274,275 @@ def copy_installer_files(staging_dir, plat):
             INSTALLER_DIR / "launcher_mac.command",
             staging_dir / "AlmaInsights.command",
         )
+        shutil.copy2(
+            INSTALLER_DIR / "uninstall_mac.command",
+            staging_dir / "Uninstall Alma Insights.command",
+        )
         # Ensure executable permissions
-        os.chmod(staging_dir / "Install Alma Insights.command", 0o755)
-        os.chmod(staging_dir / "AlmaInsights.command", 0o755)
+        for name in ("Install Alma Insights.command",
+                     "AlmaInsights.command",
+                     "Uninstall Alma Insights.command"):
+            os.chmod(staging_dir / name, 0o755)
 
-    log("  Installer files copied")
+    log("  Installer + uninstall files copied")
+
+
+def download_node_windows(staging_dir, tmp):
+    """Download and extract standalone Node.js for Windows."""
+    log_step("Download Node.js (Windows)")
+    node_zip = tmp / "node-win.zip"
+    download(NODE_WIN_URL, node_zip)
+
+    node_dir = staging_dir / "node"
+    with zipfile.ZipFile(node_zip) as zf:
+        zf.extractall(tmp)
+
+    # Node.js extracts to node-vX.Y.Z-win-x64/ — flatten into staging/node/
+    extracted = tmp / f"node-v{NODE_VERSION}-win-x64"
+    if extracted.exists():
+        shutil.move(str(extracted), str(node_dir))
+    else:
+        # Fallback: find the extracted directory
+        for candidate in tmp.iterdir():
+            if candidate.is_dir() and candidate.name.startswith("node-v"):
+                shutil.move(str(candidate), str(node_dir))
+                break
+        else:
+            log("  [ERROR] Could not find extracted Node.js directory")
+            sys.exit(1)
+
+    log(f"  Extracted to {node_dir}")
+    return node_dir
+
+
+def download_node_macos(staging_dir, tmp):
+    """Download and extract standalone Node.js for macOS."""
+    machine = platform.machine().lower()
+    if machine in ("arm64", "aarch64"):
+        url = NODE_MAC_ARM_URL
+        arch = "arm64"
+    else:
+        url = NODE_MAC_X86_URL
+        arch = "x64"
+
+    log_step(f"Download Node.js (macOS {arch})")
+    node_tar = tmp / "node-mac.tar.gz"
+    download(url, node_tar)
+
+    with tarfile.open(node_tar, "r:gz") as tf:
+        tf.extractall(tmp)
+
+    extracted = tmp / f"node-v{NODE_VERSION}-darwin-{arch}"
+    node_dir = staging_dir / "node"
+    if extracted.exists():
+        shutil.move(str(extracted), str(node_dir))
+    else:
+        for candidate in tmp.iterdir():
+            if candidate.is_dir() and candidate.name.startswith("node-v"):
+                shutil.move(str(candidate), str(node_dir))
+                break
+        else:
+            log("  [ERROR] Could not find extracted Node.js directory")
+            sys.exit(1)
+
+    log(f"  Extracted to {node_dir}")
+    return node_dir
+
+
+def install_gemini_cli(node_dir):
+    """Install Gemini CLI into the bundled Node.js prefix."""
+    log_step("Install Gemini CLI")
+
+    if platform.system() == "Windows":
+        npm_cmd = str(node_dir / "npm.cmd")
+        if not Path(npm_cmd).exists():
+            npm_cmd = str(node_dir / "npm")
+    else:
+        npm_cmd = str(node_dir / "bin" / "npm")
+
+    cmd = [npm_cmd, "install", "-g", GEMINI_CLI_PACKAGE,
+           "--prefix", str(node_dir)]
+
+    # On Windows, npm is a .cmd script and needs cmd.exe
+    if platform.system() == "Windows":
+        cmd = ["cmd.exe", "/c"] + cmd
+
+    result = run_cmd(cmd, check=False)
+    if result.returncode == 0:
+        log("  Gemini CLI installed successfully")
+        return
+
+    # Phase 4: fail-fast — a bundle missing Gemini CLI is non-shippable.
+    # The CLI owns Gemini OAuth at runtime; if it's absent the startup
+    # splash's Check 4 will block the app from launching.
+    log("  [ERROR] Gemini CLI installation failed.")
+    if result.stderr:
+        log(f"  stderr: {result.stderr[:600]}")
+    if result.stdout:
+        log(f"  stdout: {result.stdout[:600]}")
+    log("  This is a build blocker — the bundled Node.js must be able to")
+    log("  install @google/gemini-cli at build time. Check npm registry")
+    log("  reachability and the pinned version in GEMINI_CLI_PACKAGE.")
+    sys.exit(1)
+
+
+def download_st_model(python_exe, staging_dir):
+    """Pre-download sentence-transformers model for offline use.
+
+    Uses huggingface_hub.snapshot_download with local_dir to produce
+    a clean directory layout (no symlinks, no blobs/refs/snapshots
+    duplication that cache_folder creates on Windows).
+    """
+    log_step("Pre-download ML model (sentence-transformers)")
+
+    # Clean directory name for the local model
+    model_local_name = ST_MODEL_NAME.split("/")[-1]
+    model_dir = staging_dir / "app" / "data" / "models"
+    model_path = model_dir / model_local_name
+    model_dir.mkdir(parents=True, exist_ok=True)
+
+    result = run_cmd(
+        [str(python_exe), "-c",
+         f"from huggingface_hub import snapshot_download; "
+         f"snapshot_download('{ST_MODEL_NAME}', "
+         f"local_dir=r'{model_path}'); "
+         f"from sentence_transformers import SentenceTransformer; "
+         f"SentenceTransformer(r'{model_path}'); "
+         f"print('Model downloaded and verified OK')"],
+        check=False,
+    )
+
+    if result.returncode == 0:
+        model_size = _dir_size_mb(model_dir)
+        log(f"  Model pre-downloaded for offline use ({model_size:.0f} MB)")
+        # Clean up legacy MiniLM model if present
+        _cleanup_legacy_model(model_dir)
+    else:
+        log("  [WARN] Model download failed — will download on first use")
+        if result.stderr:
+            log(f"  {result.stderr[:300]}")
+
+
+def _dir_size_mb(path: Path) -> float:
+    """Calculate total size of a directory in MB."""
+    total = sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+    return total / (1024 * 1024)
+
+
+def _cleanup_legacy_model(model_dir: Path):
+    """Remove old MiniLM model files if present."""
+    for d in model_dir.iterdir():
+        if d.is_dir() and _LEGACY_MODEL_NAME in d.name:
+            log(f"  Cleaning up legacy model: {d.name}")
+            shutil.rmtree(d, ignore_errors=True)
+
+
+def write_sbom(python_exe, staging_dir):
+    """Write an SBOM (`pip list --format=json`) into app/sbom.json.
+
+    The SBOM lists every pip-installed package in the bundled Python,
+    with exact versions. It's embedded so any installed bundle can be
+    audited in isolation (`cat app/sbom.json`) without running pip.
+    """
+    log_step("Write SBOM")
+    sbom_path = staging_dir / "app" / "sbom.json"
+    result = run_cmd(
+        [str(python_exe), "-m", "pip", "list", "--format", "json",
+         "--disable-pip-version-check"],
+        check=False,
+    )
+    if result.returncode != 0:
+        log(f"  [ERROR] pip list failed: {result.stderr[:300]}")
+        sys.exit(1)
+
+    sbom_path.parent.mkdir(parents=True, exist_ok=True)
+    sbom_doc = {
+        "schema_version": 1,
+        "generated_by": "installer/build_release.py",
+        "app": APP_NAME,
+        "python_version": PY_VERSION,
+        "packages": json.loads(result.stdout or "[]"),
+    }
+    sbom_path.write_text(json.dumps(sbom_doc, indent=2), encoding="utf-8")
+    log(f"  Wrote {sbom_path} ({len(sbom_doc['packages'])} packages)")
+
+
+def write_checksums(staging_dir):
+    """Write SHA-256 for every app/**/*.py file into app/checksums.json.
+
+    Lets the startup splash (Phase 2 Check 1) detect tampering — a
+    single modified file will fail the hash comparison on launch.
+    Skips bytecode and the sbom/checksums files themselves.
+    """
+    log_step("Write app/checksums.json")
+    import hashlib
+
+    app_dir = staging_dir / "app"
+    checksums: dict[str, str] = {}
+    skipped = 0
+
+    for f in sorted(app_dir.rglob("*.py")):
+        # Skip anything that shouldn't be hashed:
+        #   - bytecode caches
+        #   - data/ which is runtime-mutable
+        rel = f.relative_to(app_dir).as_posix()
+        if "__pycache__" in rel or rel.startswith("data/"):
+            skipped += 1
+            continue
+        h = hashlib.sha256()
+        with open(f, "rb") as fh:
+            for chunk in iter(lambda: fh.read(65536), b""):
+                h.update(chunk)
+        checksums[rel] = h.hexdigest()
+
+    out = {
+        "schema_version": 1,
+        "generated_by": "installer/build_release.py",
+        "root": "app",
+        "algorithm": "sha256",
+        "files": checksums,
+    }
+    dest = app_dir / "checksums.json"
+    dest.write_text(json.dumps(out, indent=2), encoding="utf-8")
+    log(f"  Wrote {dest} ({len(checksums)} files, skipped {skipped})")
+
+
+def verify_manifest(staging_dir):
+    """Verify all required files/dirs exist before creating the zip."""
+    log_step("Verify build manifest")
+
+    system = platform.system()
+    if system == "Windows":
+        python_bin = "python/python.exe"
+        node_bin = "node/node.exe"
+    else:
+        python_bin = "python/bin/python3"
+        node_bin = "node/bin/node"
+
+    required = [
+        python_bin,
+        node_bin,
+        "app/main.py",
+        "app/src/__init__.py",
+        "app/config",
+        "app/migrations",
+        "app/assets",
+        "_installer/install.py",
+    ]
+
+    missing = []
+    for rel_path in required:
+        full = staging_dir / rel_path
+        if not full.exists():
+            missing.append(rel_path)
+
+    if missing:
+        log("  [ERROR] Missing required paths in build:")
+        for m in missing:
+            log(f"    - {m}")
+        sys.exit(1)
+
+    log(f"  All {len(required)} required paths verified")
 
 
 def create_zip(staging_dir, output_path):
@@ -302,8 +618,23 @@ def build_windows():
         site_packages = python_dir / "Lib" / "site-packages"
         site_packages.mkdir(parents=True, exist_ok=True)
 
-        # 4. Install packages
-        log_step("Step 4: Install dependencies")
+        # 4a. Install CPU-only PyTorch (avoids 2GB CUDA download)
+        log_step("Step 4a: Install CPU-only PyTorch")
+        torch_cmd = [
+            str(python_exe), "-m", "pip", "install",
+            "--no-warn-script-location",
+            "--disable-pip-version-check",
+            "--index-url", TORCH_CPU_INDEX,
+            "torch",
+        ]
+        result = run_cmd(torch_cmd, check=False)
+        if result.returncode == 0:
+            log("  CPU-only PyTorch installed")
+        else:
+            log("  [WARN] CPU-only torch install failed — sentence-transformers may pull CUDA version")
+
+        # 4b. Install packages
+        log_step("Step 4b: Install dependencies")
         pip_cmd = [
             str(python_exe), "-m", "pip", "install",
             "--no-warn-script-location",
@@ -326,19 +657,35 @@ def build_windows():
             if result.stderr:
                 log(f"  {result.stderr[:200]}")
 
-        # 6. Clean up
-        log_step("Step 6: Clean up bundled Python")
+        # 6. Pre-download sentence-transformers model
+        download_st_model(python_exe, staging)
+
+        # 7. Clean up
+        log_step("Step 7: Clean up bundled Python")
         clean_python_dir(python_dir)
 
-        # 7. Copy app source
-        log_step("Step 7: Copy application source")
+        # 8. Copy app source
+        log_step("Step 8: Copy application source")
         copy_app_source(staging)
 
-        # 8. Copy installer files
-        log_step("Step 8: Copy installer files")
+        # 9. Download and bundle Node.js
+        node_dir = download_node_windows(staging, tmp)
+
+        # 10. Install Gemini CLI into bundled Node.js
+        install_gemini_cli(node_dir)
+
+        # 11. Copy installer files
+        log_step("Step 11: Copy installer files")
         copy_installer_files(staging, "windows")
 
-        # 9. Create zip
+        # 12. SBOM + integrity
+        write_sbom(python_exe, staging)
+        write_checksums(staging)
+
+        # 13. Verify build manifest
+        verify_manifest(staging)
+
+        # 14. Create zip
         DIST_DIR.mkdir(exist_ok=True)
         output = DIST_DIR / f"{APP_NAME}-win64.zip"
         create_zip(staging, output)
@@ -418,19 +765,35 @@ def build_macos():
         else:
             log("  [WARN] PySide6 import check failed — build may still work")
 
-        # 5. Clean up
-        log_step("Step 5: Clean up bundled Python")
+        # 5. Pre-download sentence-transformers model
+        download_st_model(python_exe, staging)
+
+        # 6. Clean up
+        log_step("Step 6: Clean up bundled Python")
         clean_python_dir(python_dir)
 
-        # 6. Copy app source
-        log_step("Step 6: Copy application source")
+        # 7. Copy app source
+        log_step("Step 7: Copy application source")
         copy_app_source(staging)
 
-        # 7. Copy installer files
-        log_step("Step 7: Copy installer files")
+        # 8. Download and bundle Node.js
+        node_dir = download_node_macos(staging, tmp)
+
+        # 9. Install Gemini CLI into bundled Node.js
+        install_gemini_cli(node_dir)
+
+        # 10. Copy installer files
+        log_step("Step 10: Copy installer files")
         copy_installer_files(staging, "macos")
 
-        # 8. Create zip
+        # 11. SBOM + integrity
+        write_sbom(python_exe, staging)
+        write_checksums(staging)
+
+        # 12. Verify build manifest
+        verify_manifest(staging)
+
+        # 13. Create zip
         DIST_DIR.mkdir(exist_ok=True)
         output = DIST_DIR / f"{APP_NAME}-macOS-{arch_label}.zip"
         create_zip(staging, output)

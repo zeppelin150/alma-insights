@@ -10,6 +10,8 @@ REDACTED ticket subject lines — these pass through the PII filter in
 GeminiClient before being sent.
 """
 
+from __future__ import annotations
+
 from pathlib import Path
 
 _PROMPTS_DIR = Path(__file__).parent.parent.parent / "config" / "prompts"

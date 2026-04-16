@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QDate, QThread, Signal
 from PySide6.QtGui import QFont, QColor
 
+from src.data.settings_manager import load_settings, get_section
 from src.ui.theme import (
     ALMA_GREEN_DARK, ALMA_GREEN_LIGHT, ALMA_GREEN_SUBTLE,
     ALMA_WHITE, ALMA_CREAM, ALMA_TEXT_DARK, ALMA_TEXT_MID, ALMA_TEXT_LIGHT,
@@ -45,6 +46,7 @@ from src.ui.widgets.analysis_page_base import AnalysisPageBase
 from src.ui.widgets.kpi_card import KPICard, KPICardRow
 from src.ui.widgets.tab_scroll_content import TabScrollContent
 from src.ui.widgets.reports_tab import ReportsTab
+from src.ui.widgets.filter_chip_bar import FilterChipBar
 from src.ui.layman_mode import is_layman_mode, translate_label, format_sentiment, format_tfidf
 
 
@@ -53,12 +55,19 @@ from src.ui.layman_mode import is_layman_mode, translate_label, format_sentiment
 # ═══════════════════════════════════════════
 
 class TrendingWorker(QThread):
+    """Background thread running the 12-step trending engine analysis.
+
+    Runs `trending_engine.run_analysis()` which produces TF-IDF rising
+    terms, VADER sentiment, topic clusters, CUSUM drift, and z-score
+    anomalies. Results are emitted via `finished(dict)`.
+    """
+
     progress = Signal(str)
     finished = Signal(dict)
     error = Signal(str)
 
     def __init__(self, db_path, date_start, date_end, trc_filter, window_size,
-                 topic_method="nmf"):
+                 topic_method="nmf", source_id=None):
         super().__init__()
         self.db_path = db_path
         self.date_start = date_start
@@ -66,6 +75,7 @@ class TrendingWorker(QThread):
         self.trc_filter = trc_filter
         self.window_size = window_size
         self.topic_method = topic_method
+        self.source_id = source_id
 
     def run(self):
         try:
@@ -84,6 +94,7 @@ class TrendingWorker(QThread):
                 topic_method=self.topic_method,
                 progress_callback=on_progress,
                 db=db,
+                source_id=self.source_id,
             )
 
             db.close()
@@ -183,6 +194,13 @@ class AIEnhancementWorker(QThread):
 # ═══════════════════════════════════════════
 
 class HypothesisWorker(QThread):
+    """Background thread that tests a user-entered hypothesis via Gemini.
+
+    Builds evidence (matching tickets, temporal patterns, correlations)
+    and asks Gemini to evaluate whether the hypothesis is supported
+    by the data. Uses `config/prompts/hypothesis.txt`.
+    """
+
     progress = Signal(str)
     finished = Signal(dict)
     error = Signal(str)
@@ -226,6 +244,12 @@ class HypothesisWorker(QThread):
 # ═══════════════════════════════════════════
 
 class TrendingTopicsPage(AnalysisPageBase):
+    """Trending Topics page: TF-IDF, sentiment, forecasting, hypothesis testing.
+
+    Tabs: Trending (rising/cooling terms, sentiment, topic clusters) and
+    Hypothesis (user-driven Gemini-powered hypothesis testing with
+    evidence assembly and statistical validation).
+    """
 
     def __init__(self, db_manager, parent=None):
         super().__init__(
@@ -272,13 +296,27 @@ class TrendingTopicsPage(AnalysisPageBase):
 
     def set_drilldown_panel(self, panel):
         super().set_drilldown_panel(panel)
-        self._reports_tab.set_drilldown_panel(panel)
+        self._reports_tab.set_drilldown_panel(
+            panel, detail_callback=self._render_report_detail_html)
 
     # ═══════════════════════════════════════════
     #  FILTER BAR SETUP
     # ═══════════════════════════════════════════
 
     def _setup_filters(self):
+        # v2: Action-first layout — primary button before filters
+        self.filter_bar.add_primary_action("Analyze")
+        from src.ui.widgets.source_selector import SourceSelector
+        self._source_selector = SourceSelector(self)
+        self._source_selector.setFixedWidth(160)
+        self.filter_bar.add_custom_widget("Source", self._source_selector)
+        try:
+            from src.data.connection_factory import get_connection
+            conn = get_connection(self.db.db_path)
+            self._source_selector.refresh_sources(conn)
+            conn.close()
+        except Exception:
+            pass
         self.filter_bar.add_date_range()
         self.filter_bar.add_combo_filter("trc", "TRC", ["All TRCs"])
         self.filter_bar.add_combo_filter(
@@ -303,8 +341,7 @@ class TrendingTopicsPage(AnalysisPageBase):
         trc_combo.addItem("All TRCs", "")
         trc_combo.setMinimumWidth(160)
 
-        self.filter_bar.add_action_button("Analyze")
-        self.filter_bar.add_action_button("Manage Terms", primary=False)
+        # Manage Terms moved to its own tab (Tab 5)
 
     # ═══════════════════════════════════════════
     #  ACTION / FILTER HOOKS
@@ -313,12 +350,41 @@ class TrendingTopicsPage(AnalysisPageBase):
     def _on_action_triggered(self, action):
         if action == "Analyze":
             self._on_analyze()
-        elif action == "Manage Terms":
-            self._open_term_manager()
 
     def _on_filters_changed(self, filters):
-        # Filters changed — no auto-query (user clicks Analyze)
-        pass
+        """Sync filter chip bar when filters change."""
+        self._sync_chips()
+
+    def _sync_chips(self):
+        """Update the chip bar to reflect current filter state."""
+        if not hasattr(self, '_chip_bar') or self._chip_bar is None:
+            return  # Not yet initialized
+        chips = {}
+        trc = self.trc_combo.currentText() if self.trc_combo else ""
+        if trc and trc != "All TRCs":
+            chips["TRC"] = trc
+        window = self.window_combo.currentText() if self.window_combo else ""
+        if window and window != "Weekly":
+            chips["Window"] = window
+        method = self.method_combo.currentText() if self.method_combo else ""
+        if method and "NMF" not in method:
+            chips["Method"] = method
+        self._chip_bar.set_filters(chips)
+
+    def _on_chip_removed(self, key):
+        """Reset filter when a chip is removed."""
+        if key == "TRC":
+            self.trc_combo.setCurrentIndex(0)
+        elif key == "Window":
+            self.filter_bar.set_combo_value("window", "Weekly")
+        elif key == "Method":
+            self.filter_bar.set_combo_value("method", "NMF Topics (overlap)")
+
+    def _on_chip_clear_all(self):
+        """Reset all filters to defaults."""
+        self.trc_combo.setCurrentIndex(0)
+        self.filter_bar.set_combo_value("window", "Weekly")
+        self.filter_bar.set_combo_value("method", "NMF Topics (overlap)")
 
     # ═══════════════════════════════════════════
     #  TAB SETUP
@@ -343,6 +409,15 @@ class TrendingTopicsPage(AnalysisPageBase):
         self._reports_tab = ReportsTab("trending_topics", self.db)
         self.add_tab(self._reports_tab, "Reports")
 
+        # ── Tab 5: Manage Terms ──
+        self._terms_tab = TabScrollContent()
+        terms_layout = self._terms_tab.content_layout
+        self._term_panel = TermManagerPanel(self.db)
+        self._term_panel.terms_changed.connect(self._on_terms_changed)
+        terms_layout.addWidget(self._term_panel)
+        self._terms_tab.add_stretch()
+        self.add_tab(self._terms_tab, "Manage Terms")
+
         # Store scroll ref for dynamic chart height
         self._scroll = self._overview_tab
 
@@ -356,16 +431,23 @@ class TrendingTopicsPage(AnalysisPageBase):
         self._kpi_sentiment = self._kpi_row.add_card(
             KPICard("Sentiment Avg", "\u2014", "average polarity")
         )
-        self._kpi_ticket_count = self._kpi_row.add_card(
-            KPICard("Ticket Count", "\u2014", "tickets analyzed")
+        self._kpi_trc_count = self._kpi_row.add_card(
+            KPICard("TRC Count", "\u2014", "unique TRC codes")
         )
-        self._kpi_top_trc = self._kpi_row.add_card(
-            KPICard("Top TRC", "\u2014", "most data")
+        self._kpi_range = self._kpi_row.add_card(
+            KPICard("Sentiment Range", "\u2014", "min → max for period")
         )
         self._kpi_period = self._kpi_row.add_card(
             KPICard("Analysis Period", "\u2014", "date range")
         )
+        self._kpi_row.apply_accent_cycle()
         layout.addWidget(self._kpi_row)
+
+        # ── Filter Chip Bar ──
+        self._chip_bar = FilterChipBar()
+        self._chip_bar.filter_removed.connect(self._on_chip_removed)
+        self._chip_bar.all_cleared.connect(self._on_chip_clear_all)
+        layout.addWidget(self._chip_bar)
 
         # ── Skeleton loading ──
         self._build_skeleton(layout)
@@ -386,10 +468,9 @@ class TrendingTopicsPage(AnalysisPageBase):
 
         self._overview_tab.add_stretch()
 
-        # Content sections for skeleton toggle
+        # Content sections for skeleton toggle (mood is independent)
         self._content_sections = [
             self._sentiment_legend, self._sentiment_section,
-            self._mood_section,
         ]
 
     # ── TAB 2: DEEP DIVE ─────────────────────────────
@@ -453,37 +534,55 @@ class TrendingTopicsPage(AnalysisPageBase):
         )
         parent_layout.addWidget(self._sentiment_legend)
 
-        # ── Chart section: TRC dropdown + mode switcher + chart ──
-        self._sentiment_section = QWidget()
-        sent_layout = QVBoxLayout(self._sentiment_section)
-        sent_layout.setContentsMargins(0, 0, 0, 0)
-        sent_layout.setSpacing(8)
+        # ── Chart section: card-wrapped TRC dropdown + mode switcher + chart ──
+        chart_frame = QFrame()
+        chart_frame.setObjectName("SentChartPanel")
+        chart_frame.setStyleSheet(
+            f"#SentChartPanel {{ background: {ALMA_BG_ELEVATED};"
+            " border: none; border-radius: 12px; }}"
+        )
+        apply_card_shadow_soft(chart_frame)
+        chart_frame_layout = QVBoxLayout(chart_frame)
+        chart_frame_layout.setContentsMargins(12, 8, 12, 8)
+        chart_frame_layout.setSpacing(8)
+
+        self._sentiment_section = chart_frame
 
         # ── TRC dropdown selector (Lightdash-style) ──
         self._trc_dropdown = TRCDropdownSelector()
         self._trc_dropdown.selection_changed.connect(self._on_trc_selection_changed)
-        sent_layout.addWidget(self._trc_dropdown)
+        chart_frame_layout.addWidget(self._trc_dropdown)
 
         # ── Chart mode switcher ──
         self._sentiment_mode_switcher = ChartModeSwitcher()
-        sent_layout.addWidget(self._sentiment_mode_switcher)
+        chart_frame_layout.addWidget(self._sentiment_mode_switcher)
 
-        # ── Chart (height scales with window — recalculated in resizeEvent) ──
+        # ── Chart (capped height — fits within the card) ──
         self.sentiment_chart = LineChartWidget()
+        self.sentiment_chart.setMinimumHeight(220)
+        self.sentiment_chart.setMaximumHeight(350)
         self._sentiment_mode_switcher.mode_changed.connect(self.sentiment_chart.set_chart_mode)
-        sent_layout.addWidget(self.sentiment_chart)
+        chart_frame_layout.addWidget(self.sentiment_chart)
 
-        parent_layout.addWidget(self._sentiment_section)
+        parent_layout.addWidget(chart_frame)
 
-        # ── Current Mood section: summary table + pagination ──
-        self._mood_section = QWidget()
-        mood_layout = QVBoxLayout(self._mood_section)
-        mood_layout.setContentsMargins(0, 0, 0, 0)
+        # ── Current Mood section: standalone card with table + pagination ──
+        mood_frame = QFrame()
+        mood_frame.setObjectName("MoodPanel")
+        mood_frame.setStyleSheet(
+            f"#MoodPanel {{ background: {ALMA_BG_ELEVATED};"
+            " border: none; border-radius: 12px; }}"
+        )
+        apply_card_shadow_soft(mood_frame)
+        self._mood_section = mood_frame
+        mood_layout = QVBoxLayout(mood_frame)
+        mood_layout.setContentsMargins(12, 8, 12, 8)
         mood_layout.setSpacing(8)
 
         mood_title = QLabel("Current Mood")
         mood_title.setStyleSheet(
-            f"font-size: 14px; font-weight: 700; color: {ALMA_TEXT_DARK}; border: none;"
+            f"font-size: 14px; font-weight: 700; color: {ALMA_TEXT_DARK};"
+            " background: transparent; border: none;"
         )
         mood_layout.addWidget(mood_title)
 
@@ -492,17 +591,32 @@ class TrendingTopicsPage(AnalysisPageBase):
         self.sentiment_table.setHorizontalHeaderLabels([
             "TRC", "Current Window", "Previous Window", "\u0394 Change", "Trend"
         ])
+        # TRC column: stretches to fill available width (names are most important)
         self.sentiment_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        for i in range(1, 5):
+        # Data columns: size to content so values are fully readable
+        for i in range(1, 4):
             self.sentiment_table.horizontalHeader().setSectionResizeMode(i, QHeaderView.ResizeToContents)
+        # Trend column: fixed width (labels like "Getting Worse", "Getting Better")
+        self.sentiment_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Fixed)
+        self.sentiment_table.horizontalHeader().resizeSection(4, 180)
         self.sentiment_table.verticalHeader().setVisible(False)
         configure_table(self.sentiment_table)
         self.sentiment_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.sentiment_table.setMaximumHeight(180)
-        self.sentiment_table.setStyleSheet("QTableWidget { border: none; }")
+        self.sentiment_table.verticalHeader().setDefaultSectionSize(32)
+        self.sentiment_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.sentiment_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.sentiment_table.setWordWrap(False)
+        self.sentiment_table.setTextElideMode(Qt.ElideRight)
+        self.sentiment_table.setMouseTracking(True)
+        self.sentiment_table.setStyleSheet(
+            "QTableWidget { border: none; background: transparent; }"
+            " QToolTip { background: #333; color: #fff; border: 1px solid #555;"
+            " padding: 4px 8px; font-size: 12px; }"
+        )
         mood_layout.addWidget(self.sentiment_table)
 
-        self._sentiment_pager = PaginationBar(page_size=10)
+        self._mood_page_size = 10
+        self._sentiment_pager = PaginationBar(page_size=self._mood_page_size)
         self._sentiment_pager.page_changed.connect(self._on_sentiment_page_changed)
         mood_layout.addWidget(self._sentiment_pager)
 
@@ -517,19 +631,29 @@ class TrendingTopicsPage(AnalysisPageBase):
     # ═══════════════════════════════════════════
 
     def _build_correlation_panel(self, parent_layout):
-        corr_section = QWidget()
+        corr_section = QFrame()
+        corr_section.setObjectName("CorrCard")
+        corr_section.setStyleSheet(
+            f"#CorrCard {{ background: {ALMA_BG_ELEVATED};"
+            " border: none; border-radius: 12px; }}"
+        )
+        apply_card_shadow_soft(corr_section)
         layout = QVBoxLayout(corr_section)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(16, 14, 16, 14)
         layout.setSpacing(8)
 
         title = QLabel("Cross-TRC Correlation Signals")
         title.setStyleSheet(
-            f"font-size: 14px; font-weight: 700; color: {ALMA_TEXT_DARK}; border: none;"
+            f"font-size: 14px; font-weight: 700; color: {ALMA_TEXT_DARK};"
+            " border: none; background: transparent;"
         )
         layout.addWidget(title)
 
         subtitle = QLabel("Statistically significant correlations between TRC metrics across time")
-        subtitle.setStyleSheet(f"font-size: 11px; color: {ALMA_TEXT_LIGHT}; border: none;")
+        subtitle.setStyleSheet(
+            f"font-size: 11px; color: {ALMA_TEXT_LIGHT};"
+            " border: none; background: transparent;"
+        )
         layout.addWidget(subtitle)
 
         self._correlation_container = QVBoxLayout()
@@ -554,14 +678,21 @@ class TrendingTopicsPage(AnalysisPageBase):
     # ═══════════════════════════════════════════
 
     def _build_terms_panel(self, parent_layout):
-        terms_section = QWidget()
+        terms_section = QFrame()
+        terms_section.setObjectName("TermsCard")
+        terms_section.setStyleSheet(
+            f"#TermsCard {{ background: {ALMA_BG_ELEVATED};"
+            " border: none; border-radius: 12px; }}"
+        )
+        apply_card_shadow_soft(terms_section)
         layout = QVBoxLayout(terms_section)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(16, 14, 16, 14)
         layout.setSpacing(8)
 
         title = QLabel("Rising & Cooling Terms")
         title.setStyleSheet(
-            f"font-size: 14px; font-weight: 700; color: {ALMA_TEXT_DARK}; border: none;"
+            f"font-size: 14px; font-weight: 700; color: {ALMA_TEXT_DARK};"
+            " border: none; background: transparent;"
         )
         layout.addWidget(title)
 
@@ -606,13 +737,22 @@ class TrendingTopicsPage(AnalysisPageBase):
     # ═══════════════════════════════════════════
 
     def _build_topics_panel(self, parent_layout):
-        topics_section = QWidget()
+        topics_section = QFrame()
+        topics_section.setObjectName("TopicsCard")
+        topics_section.setStyleSheet(
+            f"#TopicsCard {{ background: {ALMA_BG_ELEVATED};"
+            " border: none; border-radius: 12px; }}"
+        )
+        apply_card_shadow_soft(topics_section)
         layout = QVBoxLayout(topics_section)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(16, 14, 16, 14)
         layout.setSpacing(8)
 
         self._topics_title = QLabel("Topic Clusters")
-        self._topics_title.setStyleSheet(f"font-size: 14px; font-weight: 700; color: {ALMA_TEXT_DARK}; border: none;")
+        self._topics_title.setStyleSheet(
+            f"font-size: 14px; font-weight: 700; color: {ALMA_TEXT_DARK};"
+            " border: none; background: transparent;"
+        )
         layout.addWidget(self._topics_title)
 
         self._clusters_grid = QGridLayout()
@@ -643,8 +783,7 @@ class TrendingTopicsPage(AnalysisPageBase):
         self._keyword_panel.keywords_applied.connect(self._on_keywords_applied)
         self._keyword_panel.dismissed.connect(self._on_panel_dismissed)
 
-        self._term_panel = TermManagerPanel(self.db)
-        self._term_panel.terms_changed.connect(self._on_terms_changed)
+        # _term_panel created in _setup_tabs (Tab 5)
 
         # Track AI result counts for badge display
         self._smoothing_count = 0
@@ -660,7 +799,7 @@ class TrendingTopicsPage(AnalysisPageBase):
         self._ai_tools_bar.setStyleSheet(f"""
             QFrame {{
                 background: {ALMA_BG_ELEVATED};
-                border: 1px solid {ALMA_GREEN_SUBTLE};
+                border: none;
                 border-left: 3px solid {ALMA_GREEN_DARK};
                 border-radius: 8px;
             }}
@@ -689,7 +828,7 @@ class TrendingTopicsPage(AnalysisPageBase):
         _btn_style = f"""
             QPushButton {{
                 background: transparent; color: {ALMA_GREEN_DARK};
-                border: 1px solid {ALMA_BORDER_LIGHT}; border-radius: 6px;
+                border: none; border-radius: 6px;
                 padding: 4px 12px; font-size: 11px; font-weight: 600;
             }}
             QPushButton:hover {{
@@ -795,12 +934,8 @@ class TrendingTopicsPage(AnalysisPageBase):
     # ═══════════════════════════════════════════
 
     def resizeEvent(self, event):
-        """Scale chart height proportionally to the visible scroll viewport."""
+        """Let the chart size itself within min/max constraints."""
         super().resizeEvent(event)
-        # Use the scroll viewport (what the user actually sees), not the full page
-        viewport_h = self._scroll.viewport().height() if hasattr(self, '_scroll') else self.height()
-        chart_h = max(180, int(viewport_h * 0.30))
-        self.sentiment_chart.setFixedHeight(chart_h)
 
     # ═══════════════════════════════════════════
     #  ANALYZE
@@ -846,8 +981,10 @@ class TrendingTopicsPage(AnalysisPageBase):
         window_size = self.window_combo.currentText()
         topic_method = self.method_combo.currentData()
 
+        source_id = self._source_selector.selected_source_id() if hasattr(self, '_source_selector') else None
         self._worker = TrendingWorker(
-            self.db.db_path, date_start, date_end, trc_filter, window_size, topic_method
+            self.db.db_path, date_start, date_end, trc_filter, window_size, topic_method,
+            source_id=source_id,
         )
         self._worker.progress.connect(self._on_progress)
         self._worker.finished.connect(self._on_results)
@@ -926,17 +1063,19 @@ class TrendingTopicsPage(AnalysisPageBase):
         else:
             self._kpi_sentiment.set_value("\u2014")
 
-        # Ticket Count
-        ticket_count = result.get("ticket_count", 0)
-        self._kpi_ticket_count.set_value(f"{ticket_count:,}" if ticket_count else "\u2014")
+        # TRC Count — number of unique TRC codes
+        trc_count = len(sentiment) if sentiment else 0
+        self._kpi_trc_count.set_value(f"{trc_count}" if trc_count else "\u2014")
+        self._kpi_trc_count.set_subtitle("unique TRC codes")
 
-        # Top TRC
-        if sentiment:
-            top_trc = max(sentiment.keys(), key=lambda k: len(sentiment[k]), default="\u2014")
-            self._kpi_top_trc.set_value(top_trc)
-            self._kpi_top_trc.set_subtitle(f"{len(sentiment.get(top_trc, []))} data points")
+        # Sentiment Range — min → max across all data points
+        if all_vals:
+            low, high = min(all_vals), max(all_vals)
+            self._kpi_range.set_value(f"{low:+.2f} → {high:+.2f}")
+            span = high - low
+            self._kpi_range.set_subtitle(f"span {span:.2f}")
         else:
-            self._kpi_top_trc.set_value("\u2014")
+            self._kpi_range.set_value("\u2014")
 
         # Analysis Period
         date_from_str = self.date_from.date().toString("MMM d")
@@ -1045,7 +1184,9 @@ class TrendingTopicsPage(AnalysisPageBase):
 
         self.sentiment_table.setRowCount(len(page_items))
         for i, (trc, series) in enumerate(page_items):
-            self.sentiment_table.setItem(i, 0, QTableWidgetItem(trc))
+            trc_item = QTableWidgetItem(trc)
+            trc_item.setToolTip(trc)  # hover-to-discover full name
+            self.sentiment_table.setItem(i, 0, trc_item)
 
             current = series[-1][1] if series else 0
             previous = series[-2][1] if len(series) >= 2 else 0
@@ -1077,11 +1218,18 @@ class TrendingTopicsPage(AnalysisPageBase):
             trend_item.setFont(QFont("Segoe UI", 11, QFont.Bold))
             self.sentiment_table.setItem(i, 4, trend_item)
 
-        # Force layout recalculation
-        self.sentiment_table.updateGeometry()
-        self._mood_section.updateGeometry()
-        if self._mood_section.layout():
-            self._mood_section.layout().activate()
+        # Resize table to fit content — standalone, not dependent on layout
+        self._resize_mood_table()
+        self._mood_section.setVisible(True)
+
+    def _resize_mood_table(self):
+        """Set table height to fit one page of rows (pagination-driven, fixed size)."""
+        row_h = self.sentiment_table.verticalHeader().defaultSectionSize()
+        header_h = self.sentiment_table.horizontalHeader().height()
+        # Always sized for page_size rows so the card never changes height
+        visible_rows = min(self.sentiment_table.rowCount(), self._mood_page_size)
+        needed = header_h + (visible_rows * row_h) + 4
+        self.sentiment_table.setFixedHeight(max(needed, 60))
 
     # ═══════════════════════════════════════════
     #  POPULATE: TERMS
@@ -1252,7 +1400,7 @@ class TrendingTopicsPage(AnalysisPageBase):
 
         card.setStyleSheet(f"""
             QFrame {{
-                background: {ALMA_BG_ELEVATED}; border: 1px solid {border_color};
+                background: {ALMA_BG_ELEVATED}; border: none;
                 border-radius: 10px; padding: 8px;
             }}
             QFrame:hover {{ background: {ALMA_CREAM}; }}
@@ -1535,7 +1683,7 @@ class TrendingTopicsPage(AnalysisPageBase):
         menu = QMenu(self)
         menu.setStyleSheet(f"""
             QMenu {{
-                background: {ALMA_WHITE}; border: 1px solid {ALMA_BORDER};
+                background: {ALMA_WHITE}; border: none;
                 border-radius: 6px; padding: 4px;
             }}
             QMenu::item {{
@@ -1582,14 +1730,10 @@ class TrendingTopicsPage(AnalysisPageBase):
                 pass
 
     def _open_term_manager(self):
-        """Open the Term Manager in the DrilldownPanel (or fallback to dialog)."""
-        if self._drilldown:
-            self._open_terms_drilldown()
-        else:
-            from src.ui.dialogs.term_manager_dialog import TermManagerDialog
-            dlg = TermManagerDialog(self.db, self)
-            dlg.terms_changed.connect(self._on_terms_changed)
-            dlg.exec()
+        """Switch to the Manage Terms tab."""
+        # Tab 5 (0-indexed: 4)
+        self.tab_widget.setCurrentIndex(4)
+        self._term_panel.refresh()
 
     def _on_terms_changed(self):
         """Callback when terms are modified in the Term Manager."""
@@ -1617,16 +1761,7 @@ class TrendingTopicsPage(AnalysisPageBase):
             return
 
         try:
-            import yaml
-            from pathlib import Path
-            settings_path = Path("config/settings.yaml")
-            if settings_path.exists():
-                with open(settings_path) as f:
-                    settings = yaml.safe_load(f) or {}
-            else:
-                settings = {}
-
-            ai_cfg = settings.get("ai_enhancements", {})
+            ai_cfg = get_section("ai_enhancements", {})
             smoothing_enabled = ai_cfg.get("smoothing", False)
             keywords_enabled = ai_cfg.get("keywords", False)
 
@@ -1783,15 +1918,8 @@ class TrendingTopicsPage(AnalysisPageBase):
         )
 
     def _open_terms_drilldown(self):
-        """Open the DrilldownPanel with the term manager."""
-        if not self._drilldown:
-            return
-        self._term_panel.refresh()
-        self._drilldown.show_widget(
-            "Manage Terms",
-            "Weights, compounds & aliases",
-            self._term_panel,
-        )
+        """Switch to the Manage Terms tab (replaces drilldown approach)."""
+        self._open_term_manager()
 
     def _on_panel_dismissed(self):
         """Callback when an AI panel emits 'dismissed' -- close the drawer."""
@@ -1920,11 +2048,12 @@ class TrendingTopicsPage(AnalysisPageBase):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        scroll.setStyleSheet(f"QScrollArea {{ background: {ALMA_CREAM}; border: none; }}")
 
         content = QWidget()
+        content.setStyleSheet(f"background: {ALMA_CREAM};")
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setContentsMargins(24, 20, 24, 24)
         layout.setSpacing(16)
 
         # Header
@@ -1938,13 +2067,14 @@ class TrendingTopicsPage(AnalysisPageBase):
 
         # Input card
         input_card = QFrame()
+        input_card.setObjectName("HypInputCard")
         input_card.setStyleSheet(f"""
-            QFrame {{
-                background: {ALMA_BG_ELEVATED}; border: 1px solid rgba(214, 210, 202, 0.45);
+            #HypInputCard {{
+                background: {ALMA_BG_ELEVATED}; border: none;
                 border-radius: 12px;
             }}
         """)
-        apply_card_shadow(input_card)
+        apply_card_shadow_soft(input_card)
         input_layout = QVBoxLayout(input_card)
         input_layout.setContentsMargins(16, 14, 16, 14)
         input_layout.setSpacing(10)
@@ -1959,7 +2089,7 @@ class TrendingTopicsPage(AnalysisPageBase):
         self._hyp_input.setStyleSheet(f"""
             QTextEdit {{
                 background: {ALMA_CREAM}; color: {ALMA_TEXT_DARK};
-                border: 1px solid {ALMA_BORDER}; border-radius: 8px;
+                border: none; border-radius: 8px;
                 padding: 8px 10px; font-size: 13px;
             }}
         """)
@@ -1973,7 +2103,7 @@ class TrendingTopicsPage(AnalysisPageBase):
         date_field_style = f"""
             QDateEdit {{
                 color: {ALMA_TEXT_DARK}; background: {ALMA_WHITE};
-                border: 1px solid {ALMA_BORDER}; border-radius: 8px;
+                border: none; border-radius: 8px;
                 padding: 8px 12px; font-size: 13px;
             }}
         """
@@ -2111,13 +2241,14 @@ class TrendingTopicsPage(AnalysisPageBase):
 
         # ── Hypothesis card ──
         hyp_card = QFrame()
+        hyp_card.setObjectName("HypCard")
         hyp_card.setStyleSheet(f"""
-            QFrame {{
-                background: {ALMA_BG_ELEVATED}; border: 1px solid rgba(214, 210, 202, 0.45);
+            #HypCard {{
+                background: {ALMA_BG_ELEVATED}; border: none;
                 border-radius: 12px;
             }}
         """)
-        apply_card_shadow(hyp_card)
+        apply_card_shadow_soft(hyp_card)
         hyp_layout = QVBoxLayout(hyp_card)
         hyp_layout.setContentsMargins(16, 14, 16, 14)
         hyp_layout.setSpacing(8)
@@ -2162,13 +2293,14 @@ class TrendingTopicsPage(AnalysisPageBase):
 
         # ── Evidence panels grid ──
         evidence_card = QFrame()
+        evidence_card.setObjectName("EvidenceCard")
         evidence_card.setStyleSheet(f"""
-            QFrame {{
-                background: {ALMA_BG_ELEVATED}; border: 1px solid rgba(214, 210, 202, 0.45);
+            #EvidenceCard {{
+                background: {ALMA_BG_ELEVATED}; border: none;
                 border-radius: 12px;
             }}
         """)
-        apply_card_shadow(evidence_card)
+        apply_card_shadow_soft(evidence_card)
         ev_layout = QVBoxLayout(evidence_card)
         ev_layout.setContentsMargins(16, 14, 16, 14)
         ev_layout.setSpacing(10)
@@ -2246,13 +2378,14 @@ class TrendingTopicsPage(AnalysisPageBase):
 
         # ── AI Synthesis ──
         synth_card = QFrame()
+        synth_card.setObjectName("SynthCard")
         synth_card.setStyleSheet(f"""
-            QFrame {{
-                background: {ALMA_BG_ELEVATED}; border: 1px solid rgba(214, 210, 202, 0.45);
+            #SynthCard {{
+                background: {ALMA_BG_ELEVATED}; border: none;
                 border-radius: 12px;
             }}
         """)
-        apply_card_shadow(synth_card)
+        apply_card_shadow_soft(synth_card)
         synth_layout = QVBoxLayout(synth_card)
         synth_layout.setContentsMargins(16, 14, 16, 14)
         synth_layout.setSpacing(8)
@@ -2263,16 +2396,10 @@ class TrendingTopicsPage(AnalysisPageBase):
 
         gemini_text = result.get("gemini_synthesis")
         if gemini_text:
-            synth_body = QTextBrowser()
-            synth_body.setPlainText(gemini_text)
+            from src.ui.widgets.markdown_viewer import MarkdownViewer
+            synth_body = MarkdownViewer()
+            synth_body.set_markdown(gemini_text)
             synth_body.setMinimumHeight(150)
-            synth_body.setStyleSheet(f"""
-                QTextBrowser {{
-                    background: {ALMA_CREAM}; color: {ALMA_TEXT_DARK};
-                    border: 1px solid {ALMA_BORDER_LIGHT}; border-radius: 8px;
-                    padding: 10px; font-size: 13px;
-                }}
-            """)
             synth_layout.addWidget(synth_body)
         else:
             guide = QLabel("Enable Gemini CLI in Settings for AI synthesis")

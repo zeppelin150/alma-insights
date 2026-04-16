@@ -1,0 +1,58 @@
+{
+  "name": "VOC Root Cause Analysis",
+  "description": "Full 3-bridge analysis with Pattern, Friction, and Novelty specialists",
+  "definition_id": "voc_root_cause",
+  "data_scope": {
+    "trc_filter": null,
+    "date_mode": "fixed"
+  },
+  "sampling": {
+    "max_tickets": 300,
+    "stratify_by": "friction_type",
+    "oversample_anomalies": true,
+    "anomaly_oversample_pct": 0.20
+  },
+  "phase1": {
+    "batch_prompt": "voc_analysis_batch.txt",
+    "single_trc_prompt": "voc_analysis.txt",
+    "enabled": true
+  },
+  "accumulator": {
+    "enabled": true,
+    "max_rounds": 8
+  },
+  "specialists": [
+    {
+      "name": "pattern_detector",
+      "prompt": "voc_pattern_detector.txt",
+      "owns_sections": [2, 4],
+      "extra_context": ["global_statistics"]
+    },
+    {
+      "name": "novelty_scanner",
+      "prompt": "voc_novelty_scanner.txt",
+      "owns_sections": [3],
+      "extra_context": ["nlp_baseline"]
+    },
+    {
+      "name": "friction_scorer",
+      "prompt": "voc_friction_scorer.txt",
+      "owns_sections": [5, 6],
+      "extra_context": ["csat_metrics", "escalation_metrics"]
+    }
+  ],
+  "convergence": {
+    "prompt": "voc_convergence.txt",
+    "output_sections": [
+      "executive_summary",
+      "top_friction_points",
+      "getting_worse",
+      "getting_better",
+      "root_cause_map",
+      "recommendations",
+      "trc_summary_table"
+    ],
+    "input_cap_chars": 800000,
+    "target_lines": "300-500"
+  }
+}

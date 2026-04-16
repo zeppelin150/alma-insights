@@ -1,0 +1,223 @@
+"""
+Alma Insights — Update Checker
+
+Checks a GitHub release feed for a newer version of the app. Three
+auth modes are supported:
+
+    disabled     — no check runs; every call emits up_to_date.
+    pat          — fine-grained PAT pulled from the OS keyring.
+    github_app   — JWT-minted installation token (Phase 3, optional).
+
+Repo and auth_mode are read from settings.yaml `updates.*`. The secret
+token is read from the OS keyring under the key `github_update_token`.
+Legacy settings — `github_pat` under `updates`, or a plaintext PAT in
+`~/.alma-insights/credentials.json` — are honoured as a fallback.
+
+Usage:
+    checker = build_default_update_checker(parent=self)
+    checker.update_available.connect(...)
+    checker.check()                         # runs in background thread
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import urllib.error
+import urllib.request
+from threading import Thread
+from typing import Literal
+
+from PySide6.QtCore import QObject, Signal
+
+from src import VERSION
+
+logger = logging.getLogger("alma.updater")
+
+AuthMode = Literal["disabled", "pat", "github_app"]
+
+# Default repo kept for backwards compatibility with the existing
+# Settings → Updates tab. Real users override this in settings.yaml.
+DEFAULT_OWNER = "alma-health"
+DEFAULT_REPO = "alma-insights"
+DEFAULT_TOKEN_KEY = "github_update_token"  # matches pat_store._SECRET_KEYS
+
+_CHECK_TIMEOUT = 15  # seconds
+
+
+# ──────────────────────────────────────────────────────────────────
+# Version comparison helpers (public for Settings tab + tests)
+# ──────────────────────────────────────────────────────────────────
+
+def _parse_version(tag: str) -> tuple:
+    """Parse a semver tag like 'v1.2.3' or '1.2.3-rc1' into a tuple."""
+    tag = tag.lstrip("vV").strip()
+    if "-" in tag:
+        tag = tag.split("-", 1)[0]
+    try:
+        return tuple(int(p) for p in tag.split("."))
+    except (ValueError, TypeError):
+        return (0, 0, 0)
+
+
+def _is_newer(current: str, candidate: str) -> bool:
+    """True iff candidate parses to a strictly newer version than current."""
+    return _parse_version(candidate) > _parse_version(current)
+
+
+# ──────────────────────────────────────────────────────────────────
+# UpdateChecker
+# ──────────────────────────────────────────────────────────────────
+
+class UpdateChecker(QObject):
+    """Polls a GitHub release feed and emits one of three signals."""
+
+    update_available = Signal(str, str, str)  # (current, new, html_url)
+    up_to_date = Signal()
+    check_failed = Signal(str)
+
+    def __init__(
+        self,
+        parent: QObject | None = None,
+        *,
+        releases_url: str | None = None,
+        github_pat: str | None = None,
+        auth_mode: AuthMode = "pat",
+    ) -> None:
+        super().__init__(parent)
+        self._url = releases_url or _default_releases_url()
+        self._pat = github_pat or ""
+        self._auth_mode: AuthMode = auth_mode
+
+    # ── public ──────────────────────────────────────────────────
+
+    def check(self) -> None:
+        """Launch the check in a background thread."""
+        if self._auth_mode == "disabled":
+            logger.info("Update check skipped — auth_mode=disabled")
+            self.up_to_date.emit()
+            return
+        Thread(target=self._do_check, daemon=True).start()
+
+    # ── internal ────────────────────────────────────────────────
+
+    def _do_check(self) -> None:
+        try:
+            response_json = self._fetch_latest_release()
+        except _CheckerError as exc:
+            self.check_failed.emit(str(exc))
+            return
+
+        tag = response_json.get("tag_name") or ""
+        if not tag:
+            self.check_failed.emit("No tag_name in GitHub release response")
+            return
+
+        if _is_newer(VERSION, tag):
+            html_url = response_json.get("html_url", "")
+            logger.info("Update available: %s -> %s", VERSION, tag)
+            self.update_available.emit(VERSION, tag.lstrip("vV"), html_url)
+        else:
+            logger.info("Up to date (current=%s, latest=%s)", VERSION, tag)
+            self.up_to_date.emit()
+
+    def _fetch_latest_release(self) -> dict:
+        """Do the HTTP call with mode-appropriate auth. Raises _CheckerError."""
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "User-Agent": f"AlmaInsights/{VERSION}",
+        }
+        if self._pat:
+            headers["Authorization"] = f"Bearer {self._pat}"
+
+        req = urllib.request.Request(self._url, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=_CHECK_TIMEOUT) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            raise _CheckerError(_http_error_message(exc)) from exc
+        except urllib.error.URLError as exc:
+            raise _CheckerError(f"Network error: {exc.reason}") from exc
+        except (ValueError, OSError) as exc:  # json decode / truncated read
+            raise _CheckerError(f"Unexpected response: {exc}") from exc
+
+
+# ──────────────────────────────────────────────────────────────────
+# Factories (what the startup check and Settings tab use)
+# ──────────────────────────────────────────────────────────────────
+
+def build_default_update_checker(parent: QObject | None = None) -> UpdateChecker:
+    """Build an UpdateChecker from settings.yaml + the OS keyring."""
+    auth_mode, releases_url, token = _resolve_config_and_token()
+    return UpdateChecker(
+        parent=parent,
+        releases_url=releases_url,
+        github_pat=token,
+        auth_mode=auth_mode,
+    )
+
+
+def _resolve_config_and_token() -> tuple[AuthMode, str, str]:
+    """Read `updates.*` from settings and the token from the keyring."""
+    try:
+        from src.data.settings_manager import get_section
+        cfg = get_section("updates", {}) or {}
+    except Exception:  # noqa: BLE001 — settings must never block updates logic
+        cfg = {}
+
+    mode_raw = str(cfg.get("auth_mode", "disabled")).lower().strip()
+    mode: AuthMode = mode_raw if mode_raw in ("disabled", "pat", "github_app") else "disabled"
+
+    repo = str(cfg.get("github_repo", "")).strip() or f"{DEFAULT_OWNER}/{DEFAULT_REPO}"
+    releases_url = f"https://api.github.com/repos/{repo}/releases/latest"
+
+    token = _load_token(mode, cfg)
+    return mode, releases_url, token
+
+
+def _load_token(mode: AuthMode, cfg: dict) -> str:
+    """Load the auth token appropriate for the current mode."""
+    if mode == "disabled":
+        return ""
+
+    if mode == "github_app":
+        try:
+            from src.updater.github_app_auth import mint_installation_token
+            return mint_installation_token(cfg) or ""
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("GitHub App auth unavailable: %s", exc)
+            return ""
+
+    # mode == "pat"
+    try:
+        from src.data import pat_store
+        token = pat_store.load_setting(DEFAULT_TOKEN_KEY)
+        if token:
+            return token
+        # Legacy fallbacks: the pre-Phase-3 Settings UI used "github_pat"
+        return pat_store.load_setting("github_pat") or ""
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Token lookup failed: %s", exc)
+        return ""
+
+
+def _default_releases_url() -> str:
+    return f"https://api.github.com/repos/{DEFAULT_OWNER}/{DEFAULT_REPO}/releases/latest"
+
+
+# ──────────────────────────────────────────────────────────────────
+# Error helpers
+# ──────────────────────────────────────────────────────────────────
+
+class _CheckerError(Exception):
+    """Internal marker for errors already translated to a user-facing string."""
+
+
+def _http_error_message(exc: urllib.error.HTTPError) -> str:
+    if exc.code == 401:
+        return "GitHub authentication failed — check your update token"
+    if exc.code == 403:
+        return "GitHub API rate limit or permission denied"
+    if exc.code == 404:
+        return "Release repo not found — check updates.github_repo in settings"
+    return f"GitHub API error: {exc.code}"

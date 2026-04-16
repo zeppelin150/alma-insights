@@ -25,8 +25,13 @@ from src.ui.pages.ai_reports import AIReportsPage
 from src.ui.pages.ab_compare import ABComparePage
 from src.ui.pages.smart_reporting import SmartReportingPage
 from src.ui.pages.settings_page import SettingsPage
+from src.ui.pages.source_monitor_page import SourceMonitorPage
+from src.ui.pages.guru_page import GuruPage
+from src.ui.pages.data_warehouse_page import DataWarehousePage
+from src.ui.pages.gemini_chats_page import GeminiChatsPage
 from src.ui.dialogs.help_dialog import HelpDialog
 from src.data.db_manager import DatabaseManager
+from src.data.settings_manager import get_section
 from src.data.job_queue import JobQueue, JobDescriptor
 from src.ui.widgets.job_overlay import JobOverlay
 from src.ui.widgets.drilldown_panel import DrilldownPanel
@@ -34,6 +39,14 @@ from src.ui.widgets.toast import ToastManager
 
 
 class MainWindow(QMainWindow):
+    """Top-level application window.
+
+    Hosts the sidebar navigation, stacked content pages, status bar,
+    and overlays (job overlay, drilldown panel, toast manager). Owns
+    the singleton `DatabaseManager` and central `JobQueue`. Pages are
+    registered by integer index (PAGE_* constants) and receive the
+    shared drilldown panel via `set_drilldown_panel()`.
+    """
 
     PAGE_CONVERSATIONS = 0
     PAGE_DASHBOARD = 1
@@ -43,6 +56,10 @@ class MainWindow(QMainWindow):
     PAGE_AB_COMPARE = 5
     PAGE_SMART_REPORTING = 6
     PAGE_SETTINGS = 7
+    PAGE_SOURCE_MONITOR = 8
+    PAGE_GURU = 9
+    PAGE_GEMINI_CHATS = 10  # Build 11.0
+    PAGE_DATA_WAREHOUSE = 11  # Session 4: Data Warehouse
 
     def __init__(self):
         super().__init__()
@@ -60,6 +77,7 @@ class MainWindow(QMainWindow):
         self._sidebar_collapsed = False   # Build 10.0: T10
         self._sidebar_text_widgets = []   # labels/sections hidden when collapsed
         self._page_anim = None            # Build 10.0: T16 — page fade ref
+        self._page_widgets = {}           # Stage 2: PAGE_* constant → widget for setCurrentWidget
 
         self._build_ui()
 
@@ -80,6 +98,9 @@ class MainWindow(QMainWindow):
         self.incidents_page.set_drilldown_panel(self._drilldown)
         self.reports_page.set_drilldown_panel(self._drilldown)
         self.ab_compare_page.set_drilldown_panel(self._drilldown)
+        self.guru_page.set_drilldown_panel(self._drilldown)
+        self.gemini_chats_page.set_drilldown_panel(self._drilldown)
+        self.data_warehouse_page.set_drilldown_panel(self._drilldown)
 
         self._setup_calendar_sync()
         self._restore_settings()
@@ -184,7 +205,8 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 12, 0, 12)
         layout.setSpacing(0)
 
-        self._sidebar_text_widgets = []
+        self._sidebar_text_widgets = []   # Section labels + footer (hidden on collapse)
+        self._sidebar_dividers = []        # Dividers (stay visible, just shrink margins)
 
         # ── SOURCES section ──
         section0 = QLabel("SOURCES")
@@ -193,11 +215,14 @@ class MainWindow(QMainWindow):
         self._sidebar_text_widgets.append(section0)
 
         layout.addWidget(self._sidebar_btn("\U0001F4AC  Conversations", self.PAGE_CONVERSATIONS, "\U0001F4AC"))
+        layout.addWidget(self._sidebar_btn("\U0001F4E1  Source Monitor", self.PAGE_SOURCE_MONITOR, "\U0001F4E1"))
+        layout.addWidget(self._sidebar_btn("\U0001F4DA  Guru KB", self.PAGE_GURU, "\U0001F4DA"))
 
         # Divider
         div0 = QFrame()
         div0.setObjectName("SidebarDivider")
         layout.addWidget(div0)
+        self._sidebar_dividers.append(div0)
 
         # ── ANALYSIS section ──
         section1 = QLabel("ANALYSIS")
@@ -213,6 +238,7 @@ class MainWindow(QMainWindow):
         div1 = QFrame()
         div1.setObjectName("SidebarDivider")
         layout.addWidget(div1)
+        self._sidebar_dividers.append(div1)
 
         # ── REPORTS section ──
         section2 = QLabel("REPORTS")
@@ -221,13 +247,19 @@ class MainWindow(QMainWindow):
         self._sidebar_text_widgets.append(section2)
 
         layout.addWidget(self._sidebar_btn("\U0001F916  AI Reports", self.PAGE_REPORTS, "\U0001F916"))
-        layout.addWidget(self._sidebar_btn("\U0001F504  A/B Compare", self.PAGE_AB_COMPARE, "\U0001F504"))
+        # Build 11.0: A/B Compare moved into AI Reports as a tab
+        # (page still exists in stack for backward compat, sidebar button hidden)
+        self._ab_sidebar_btn = self._sidebar_btn("\U0001F504  A/B Compare", self.PAGE_AB_COMPARE, "\U0001F504")
+        self._ab_sidebar_btn.setVisible(False)
+        layout.addWidget(self._ab_sidebar_btn)
         layout.addWidget(self._sidebar_btn("\u26A1  Smart Reporting", self.PAGE_SMART_REPORTING, "\u26A1"))
+        layout.addWidget(self._sidebar_btn("\U0001F4AC  Gemini Chats", self.PAGE_GEMINI_CHATS, "\U0001F4AC"))
 
         # Divider
         div2 = QFrame()
         div2.setObjectName("SidebarDivider")
         layout.addWidget(div2)
+        self._sidebar_dividers.append(div2)
 
         # ── SYSTEM section ──
         section3 = QLabel("SYSTEM")
@@ -235,6 +267,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(section3)
         self._sidebar_text_widgets.append(section3)
 
+        layout.addWidget(self._sidebar_btn("\U0001F5C4\ufe0f  Data Warehouse", self.PAGE_DATA_WAREHOUSE, "\U0001F5C4\ufe0f"))
         layout.addWidget(self._sidebar_btn("\u2699\ufe0f  Settings", self.PAGE_SETTINGS, "\u2699\ufe0f"))
 
         layout.addStretch()
@@ -247,7 +280,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._collapse_btn)
 
         # Footer
-        self._sidebar_footer = QLabel("v1.0.0 — RCM Operations")
+        from src import VERSION
+        self._sidebar_footer = QLabel(f"v{VERSION} — RCM Operations")
         self._sidebar_footer.setObjectName("SidebarFooter")
         layout.addWidget(self._sidebar_footer)
         self._sidebar_text_widgets.append(self._sidebar_footer)
@@ -270,7 +304,11 @@ class MainWindow(QMainWindow):
 
     def _set_active_page(self, index):
         self._active_page = index
-        self.content_stack.setCurrentIndex(index)
+        widget = self._page_widgets.get(index)
+        if widget:
+            self.content_stack.setCurrentWidget(widget)
+        else:
+            self.content_stack.setCurrentIndex(index)
 
         # Re-raise job overlay after page switch (QStackedWidget repaints
         # the new page on top, which can obscure the overlay)
@@ -329,20 +367,26 @@ class MainWindow(QMainWindow):
         self._sidebar_anim2 = anim2
 
         if self._sidebar_collapsed:
-            # Collapse: immediately switch to icon-only text
+            # Collapse: switch to icon-only, centered
             for btn, _ in self._sidebar_buttons:
                 icon = btn.property("icon_char") or ""
                 btn.setText(icon)
-                btn.setStyleSheet(
-                    btn.styleSheet()  # keep existing
-                )
+                btn.setProperty("collapsed", "true")
             for w in self._sidebar_text_widgets:
                 w.setVisible(False)
+            for div in self._sidebar_dividers:
+                div.setProperty("collapsed", "true")
             self._collapse_btn.setText("▶")
+            self._collapse_btn.setProperty("collapsed", "true")
         else:
             # Expand: restore full text after animation finishes
             anim.finished.connect(self._restore_sidebar_text)
             self._collapse_btn.setText("◀  Collapse")
+            self._collapse_btn.setProperty("collapsed", "false")
+
+        # One bulk re-style instead of per-widget unpolish/polish
+        self._sidebar.style().unpolish(self._sidebar)
+        self._sidebar.style().polish(self._sidebar)
 
         anim.start(QAbstractAnimation.KeepWhenStopped)
         anim2.start(QAbstractAnimation.KeepWhenStopped)
@@ -352,8 +396,14 @@ class MainWindow(QMainWindow):
         for btn, _ in self._sidebar_buttons:
             full = btn.property("full_text") or ""
             btn.setText(full)
+            btn.setProperty("collapsed", "false")
         for w in self._sidebar_text_widgets:
             w.setVisible(True)
+        for div in self._sidebar_dividers:
+            div.setProperty("collapsed", "false")
+        # One bulk re-style
+        self._sidebar.style().unpolish(self._sidebar)
+        self._sidebar.style().polish(self._sidebar)
 
     # ═══════════════════════════════════════════
     #  CONTENT AREA
@@ -372,19 +422,23 @@ class MainWindow(QMainWindow):
         self.conversations_page = ConversationSearchPage(self.db)
         self.conversations_page.data_loaded.connect(self._on_data_loaded)
         self.content_stack.addWidget(self.conversations_page)
+        self._page_widgets[self.PAGE_CONVERSATIONS] = self.conversations_page
 
         # Page 1: TRC Analytics
         self.dashboard_page = TRCAnalyticsPage(self.db)
         self.content_stack.addWidget(self.dashboard_page)
+        self._page_widgets[self.PAGE_DASHBOARD] = self.dashboard_page
 
         # Page 2: Trending Topics
         self.trending_page = TrendingTopicsPage(self.db)
         self.content_stack.addWidget(self.trending_page)
+        self._page_widgets[self.PAGE_TRENDING] = self.trending_page
 
         # Page 3: Incidents
         self.incidents_page = IncidentsPage(self.db)
         self.incidents_page.scan_complete.connect(self._update_incident_badge)
         self.content_stack.addWidget(self.incidents_page)
+        self._page_widgets[self.PAGE_INCIDENTS] = self.incidents_page
 
         # NLP Scanner signals now wired through TRC Analytics (NLP Scanner absorbed)
         self.dashboard_page.deep_dive_requested.connect(self._on_nlp_deep_dive)
@@ -394,14 +448,26 @@ class MainWindow(QMainWindow):
         # Page 4: AI Reports
         self.reports_page = AIReportsPage(self.db)
         self.content_stack.addWidget(self.reports_page)
+        self._page_widgets[self.PAGE_REPORTS] = self.reports_page
 
         # Page 5: A/B Compare
         self.ab_compare_page = ABComparePage(self.db)
         self.content_stack.addWidget(self.ab_compare_page)
+        self._page_widgets[self.PAGE_AB_COMPARE] = self.ab_compare_page
 
         # Page 6: Smart Reporting
         self.smart_reporting_page = SmartReportingPage(self.db)
         self.content_stack.addWidget(self.smart_reporting_page)
+        self._page_widgets[self.PAGE_SMART_REPORTING] = self.smart_reporting_page
+
+        # Schedule Manager (persistent DB-backed scheduling for Smart Reporting)
+        try:
+            from src.data.schedule_manager import ScheduleManager
+            self._schedule_manager = ScheduleManager(self.db, parent=self)
+            self.smart_reporting_page.set_schedule_manager(self._schedule_manager)
+            self._schedule_manager.start()
+        except Exception:
+            self._schedule_manager = None
 
         # Page 7: Settings
         self.settings_page = SettingsPage()
@@ -412,6 +478,39 @@ class MainWindow(QMainWindow):
         self.settings_page.api_toggle.toggled.connect(self._on_api_toggled)
         self.settings_page.settings_changed.connect(self._on_settings_changed)
         self.content_stack.addWidget(self.settings_page)
+        self._page_widgets[self.PAGE_SETTINGS] = self.settings_page
+
+        # Page 8: Source Monitor (Zendesk)
+        self.source_monitor_page = SourceMonitorPage(self.db)
+        self.content_stack.addWidget(self.source_monitor_page)
+        self._page_widgets[self.PAGE_SOURCE_MONITOR] = self.source_monitor_page
+
+        # Page 9: Guru Knowledge Base (Phase 4)
+        self.guru_page = GuruPage(self.db)
+        self.content_stack.addWidget(self.guru_page)
+        self._page_widgets[self.PAGE_GURU] = self.guru_page
+
+        # Page 10: Gemini Chats (Build 11.0)
+        self.gemini_chats_page = GeminiChatsPage(self.db)
+        self.content_stack.addWidget(self.gemini_chats_page)
+        self._page_widgets[self.PAGE_GEMINI_CHATS] = self.gemini_chats_page
+
+        # Page 11: Data Warehouse (Session 4)
+        self.data_warehouse_page = DataWarehousePage(self.db)
+        self.content_stack.addWidget(self.data_warehouse_page)
+        self._page_widgets[self.PAGE_DATA_WAREHOUSE] = self.data_warehouse_page
+
+        # Source Warehouse + Watchlist Engine (Phase 3.5)
+        self._source_warehouse = None
+        self._watchlist_engine = None
+        self._setup_warehouse_and_watchlist()
+
+        # Guru Integration (Phase 4)
+        self._setup_guru()
+
+        # Zendesk Monitor — background polling + spike detection
+        self._zendesk_monitor = None
+        self._setup_zendesk_monitor()
 
         layout.addWidget(self.content_stack)
         return content
@@ -450,7 +549,7 @@ class MainWindow(QMainWindow):
             label = "No data loaded" if count == 0 else f"{count:,} conversations"
             self.conversations_page.set_data_source_label(label)
 
-        self.ticket_count_label.setText(f"{count} conversations in database")
+        self.ticket_count_label.setText(f"{count} tickets in database")
 
         # Populate TRC filters on all pages
         self.conversations_page.populate_trc_filter()
@@ -474,6 +573,129 @@ class MainWindow(QMainWindow):
 
         # Initialize incident badge
         self._update_incident_badge(0)
+
+    # ═══════════════════════════════════════════
+    #  SOURCE WAREHOUSE + WATCHLIST (Phase 3.5)
+    # ═══════════════════════════════════════════
+
+    def _setup_warehouse_and_watchlist(self):
+        """Initialize SourceWarehouse and WatchlistEngine.
+
+        These are source-agnostic — they work with any source monitor.
+        Created once on app start; passed to monitors via constructor.
+        """
+        try:
+            from src.data.source_warehouse import SourceWarehouse
+            from src.data.watchlist_engine import WatchlistEngine
+
+            self._source_warehouse = SourceWarehouse(self.db)
+            self._watchlist_engine = WatchlistEngine(
+                self.db, warehouse=self._source_warehouse
+            )
+
+            # Wire watchlist to Source Monitor Page
+            self.source_monitor_page.set_watchlist(self._watchlist_engine)
+
+            # Run maintenance on start (prune old rollups, expire old alerts)
+            self._source_warehouse.rollup_maintenance()
+
+        except Exception as exc:
+            import logging
+            logging.getLogger("alma.main").warning(
+                "Warehouse/watchlist setup skipped: %s", exc
+            )
+
+    # ═══════════════════════════════════════════
+    #  GURU INTEGRATION (Phase 4)
+    # ═══════════════════════════════════════════
+
+    def _setup_guru(self):
+        """Initialize Guru client and pipelines if credentials are configured."""
+        try:
+            from src.data.guru_client import GuruClient
+            from src.data.guru_friction_pipeline import GuruFrictionPipeline
+            from src.data.guru_content_pipeline import GuruContentPipeline
+            from src.data.guru_effectiveness import GuruEffectivenessTracker
+
+            email, token = GuruClient.load_credentials()
+            if not email or not token:
+                return  # Not configured yet
+
+            client = GuruClient(email, token)
+            friction = GuruFrictionPipeline(self.db, client)
+            content = GuruContentPipeline(self.db, client)
+            effectiveness = GuruEffectivenessTracker(self.db)
+
+            self.guru_page.set_guru_client(client)
+            self.guru_page.set_friction_pipeline(friction)
+            self.guru_page.set_content_pipeline(content)
+            self.guru_page.set_effectiveness_tracker(effectiveness)
+
+            # Wire connection_changed to re-setup
+            if not getattr(self, "_guru_signal_wired", False):
+                self.guru_page.connection_changed.connect(self._setup_guru)
+                self._guru_signal_wired = True
+
+            # Run periodic effectiveness measurement on start
+            try:
+                effectiveness.measure_effectiveness()
+            except Exception:
+                pass
+
+        except Exception as exc:
+            import logging
+            logging.getLogger("alma.main").warning(
+                "Guru setup skipped: %s", exc
+            )
+
+    # ═══════════════════════════════════════════
+    #  ZENDESK MONITOR (Phase 3)
+    # ═══════════════════════════════════════════
+
+    def _setup_zendesk_monitor(self):
+        """Create and start the Zendesk monitor if credentials are configured."""
+        # Wire connection_changed ONCE (idempotent via _zd_signal_wired flag)
+        if not getattr(self, "_zd_signal_wired", False):
+            self.source_monitor_page.connection_changed.connect(
+                self._on_zendesk_connection_changed
+            )
+            self._zd_signal_wired = True
+
+        try:
+            from src.data.zendesk_client import ZendeskClient
+            from src.data.zendesk_monitor import ZendeskMonitor
+
+            subdomain, email, api_key, _view_id = ZendeskClient.load_credentials()
+            if not subdomain or not api_key:
+                # No Zendesk configured — leave monitor as None
+                return
+
+            self._zendesk_monitor = ZendeskMonitor(
+                self.db,
+                warehouse=self._source_warehouse,
+                watchlist=self._watchlist_engine,
+                parent=self
+            )
+            self.source_monitor_page.set_monitor(self._zendesk_monitor)
+
+            # Start polling
+            self._zendesk_monitor.start(interval_seconds=120)
+
+        except Exception as exc:
+            import logging
+            logging.getLogger("alma.main").warning(
+                "Zendesk monitor setup skipped: %s", exc
+            )
+
+    def _on_zendesk_connection_changed(self):
+        """Restart Zendesk monitor when connection settings change."""
+        # Stop existing monitor
+        if self._zendesk_monitor:
+            self._zendesk_monitor.stop()
+            self._zendesk_monitor = None
+
+        # Re-setup with new credentials
+        self._setup_zendesk_monitor()
 
     # ═══════════════════════════════════════════
     #  SETTINGS WIRING
@@ -502,7 +724,7 @@ class MainWindow(QMainWindow):
                 self.status_label.setText("Demo data loaded")
 
             count = self.db.get_ticket_count()
-            self.ticket_count_label.setText(f"{count} conversations in database")
+            self.ticket_count_label.setText(f"{count} tickets in database")
             self.conversations_page.set_data_source_label("Testing data")
             self.conversations_page.populate_trc_filter()
             self.dashboard_page.populate_trc_filter()
@@ -516,7 +738,7 @@ class MainWindow(QMainWindow):
         else:
             # Clear all data — live mode
             self._clear_all_data()
-            self.ticket_count_label.setText("0 conversations in database")
+            self.ticket_count_label.setText("0 tickets in database")
             self.conversations_page.set_data_source_label("No data loaded")
             self.conversations_page.populate_trc_filter()
             self.dashboard_page.populate_trc_filter()
@@ -527,8 +749,8 @@ class MainWindow(QMainWindow):
 
     def _on_data_loaded(self, stats):
         """Conversations page: CSV import or API ingestion completed."""
-        count = stats.get("tickets_created", stats.get("conversations", 0))
-        self.ticket_count_label.setText(f"{count} conversations in database")
+        count = self.db.get_ticket_count()
+        self.ticket_count_label.setText(f"{count} tickets in database")
         source = "CSV" if "total_csv_rows" in stats else "Lightdash"
         self.status_label.setText(f"Imported {count:,} conversations from {source}")
 
@@ -812,17 +1034,13 @@ class MainWindow(QMainWindow):
 
     def _make_voc_report_job(self, date_start, date_end, trc_filter=None):
         """Create a JobDescriptor for VOC report (via JobQueue)."""
-        import yaml
-        from pathlib import Path
         from src.data.job_queue import JobDescriptor, CallableWorker
 
         # Read model name for overlay display
         model = "gemini-2.5-flash"
         try:
-            cfg_path = Path(__file__).resolve().parent.parent.parent / "config" / "settings.yaml"
-            with open(cfg_path) as f:
-                cfg = yaml.safe_load(f) or {}
-            model = cfg.get("gemini", {}).get("model", model)
+            gemini_cfg = get_section("gemini")
+            model = gemini_cfg.get("model", model)
         except Exception:
             pass
 
@@ -851,43 +1069,28 @@ class MainWindow(QMainWindow):
 
     def _get_auto_analysis_config(self):
         """Read behavior.auto_analysis from config/settings.yaml."""
-        import yaml
-        from pathlib import Path
-        config_path = Path(__file__).resolve().parent.parent.parent / "config" / "settings.yaml"
         try:
-            if config_path.exists():
-                with open(config_path, encoding="utf-8") as f:
-                    cfg = yaml.safe_load(f) or {}
-                return cfg.get("behavior", {}).get("auto_analysis", {})
+            behavior = get_section("behavior")
+            return behavior.get("auto_analysis", {})
         except Exception:
             pass
         return {}
 
     def _is_calendar_sync_enabled(self):
         """Check if analysis page calendar sync is enabled."""
-        import yaml
-        from pathlib import Path
-        config_path = Path(__file__).resolve().parent.parent.parent / "config" / "settings.yaml"
         try:
-            if config_path.exists():
-                with open(config_path, encoding="utf-8") as f:
-                    cfg = yaml.safe_load(f) or {}
-                return cfg.get("behavior", {}).get("calendar_sync", {}).get("analysis_pages", False)
+            behavior = get_section("behavior")
+            return behavior.get("calendar_sync", {}).get("analysis_pages", False)
         except Exception:
             pass
         return False
 
     def _is_ai_reports_sync_enabled(self):
         """Check if AI Reports calendar sync is enabled."""
-        import yaml
-        from pathlib import Path
-        config_path = Path(__file__).resolve().parent.parent.parent / "config" / "settings.yaml"
         try:
-            if config_path.exists():
-                with open(config_path, encoding="utf-8") as f:
-                    cfg = yaml.safe_load(f) or {}
-                cs = cfg.get("behavior", {}).get("calendar_sync", {})
-                return cs.get("analysis_pages", False) and cs.get("ai_reports", False)
+            behavior = get_section("behavior")
+            cs = behavior.get("calendar_sync", {})
+            return cs.get("analysis_pages", False) and cs.get("ai_reports", False)
         except Exception:
             pass
         return False
@@ -1126,13 +1329,21 @@ class MainWindow(QMainWindow):
             'sub_pattern_snapshots',   # Sub-pattern history
             'provisional_classifications',  # Provisional classifications
             'prompt_library',          # User-customized prompts
+            'source_registry',         # Source metadata survives reset for re-import
         }
 
         try:
             conn = self.db.conn
+            conn.execute("PRAGMA foreign_keys = OFF")
 
-            # 1. Drop the FTS virtual table first (also removes shadow tables)
+            # 1. Drop ALL FTS virtual tables (shared + per-source)
+            #    FTS5 virtual tables cannot be DELETEd, only DROPped.
             try:
+                fts_tables = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%_fts'"
+                ).fetchall()
+                for (fts_name,) in fts_tables:
+                    conn.execute(f"DROP TABLE IF EXISTS [{fts_name}]")
                 conn.execute("DROP TABLE IF EXISTS conversations_fts")
             except Exception:
                 pass
@@ -1141,7 +1352,7 @@ class MainWindow(QMainWindow):
             tables = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' "
                 "AND name NOT LIKE 'sqlite_%' "
-                "AND name NOT LIKE 'conversations_fts%'"
+                "AND name NOT LIKE '%_fts%'"
             ).fetchall()
 
             # 3. Delete from each table individually, skipping preserved NLP tables
@@ -1154,6 +1365,7 @@ class MainWindow(QMainWindow):
                     pass
 
             conn.commit()
+            conn.execute("PRAGMA foreign_keys = ON")
 
             # 4. VACUUM to reclaim disk space (must be outside transaction)
             try:
@@ -1175,9 +1387,9 @@ class MainWindow(QMainWindow):
             msg.setWindowTitle("Close Alma Insights")
             msg.setText("Clear session data?")
             msg.setInformativeText(
-                "Imported ticket data will be removed from your local machine. "
-                "Any unsaved reports should be exported first.\n\n"
-                "This keeps your machine clean and protects data privacy."
+                "Staging data (raw import rows) will be cleared.\n"
+                "All tickets, enrichments, and reports are preserved in the database.\n\n"
+                "Choose 'Keep & Close' to retain everything as-is."
             )
             msg.setStandardButtons(
                 QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel
@@ -1196,21 +1408,18 @@ class MainWindow(QMainWindow):
                 # 1. Stop all background workers (they hold DB connections)
                 self._stop_all_workers()
 
-                # 2. Clear all data via SQL (reliable on Windows)
-                self._clear_all_data()
+                # 2. Build 11.0: Clear ephemeral data only (preserve persistent)
+                try:
+                    from src.services.clear_session import clear_session_data
+                    clear_session_data(str(self.db.db_path))
+                except Exception as e:
+                    import logging
+                    logging.getLogger("alma.main").warning(
+                        "Session clear failed: %s (data preserved)", e
+                    )
 
                 # 3. Close the main connection
                 self.db.close()
-
-                # 4. Best-effort file cleanup (WAL, SHM, DB)
-                import shutil
-                from pathlib import Path
-                data_dir = Path(self.db.db_path).parent
-                try:
-                    if data_dir.exists():
-                        shutil.rmtree(data_dir, ignore_errors=True)
-                except Exception:
-                    pass
 
                 event.accept()
                 return

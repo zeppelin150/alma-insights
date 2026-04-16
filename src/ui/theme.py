@@ -129,6 +129,19 @@ def get_stylesheet():
     }}
     QMainWindow {{ background-color: {ALMA_CREAM}; }}
 
+    /* ── GLOBAL: Remove visible borders from group boxes ── */
+    QGroupBox {{
+        border: none;
+        margin-top: 8px;
+        padding-top: 4px;
+    }}
+    QGroupBox::title {{
+        subcontrol-origin: margin;
+        padding: 0 6px;
+        font-weight: 600;
+        color: {ALMA_TEXT_DARK};
+    }}
+
     /* ── TOP BAR ── */
     #TopBar {{
         background-color: {ALMA_GREEN_DARK};
@@ -170,8 +183,20 @@ def get_stylesheet():
         border-left: 3px solid {ALMA_TEXT_ON_DARK};
         padding-left: 17px;
     }}
+    /* Collapsed sidebar: icon-only buttons, centered */
+    #SidebarButton[collapsed="true"] {{
+        padding: 10px 0px; margin: 2px 4px; text-align: center; font-size: 16px;
+    }}
+    #SidebarButton[collapsed="true"][active="true"] {{
+        border-left: none; padding-left: 0px;
+        border-bottom: 3px solid {ALMA_TEXT_ON_DARK};
+        padding-bottom: 7px;
+    }}
     #SidebarDivider {{
         background: rgba(243,241,236,0.1); min-height: 1px; max-height: 1px; margin: 12px 20px;
+    }}
+    #SidebarDivider[collapsed="true"] {{
+        margin: 8px 8px;
     }}
     #SidebarFooter {{
         color: rgba(243,241,236,0.3); font-size: 10px; padding: 12px 20px;
@@ -180,6 +205,9 @@ def get_stylesheet():
         background: transparent; color: rgba(243,241,236,0.4);
         border: none; border-radius: 6px; padding: 8px 20px;
         font-size: 16px; font-weight: 400; margin: 0px 12px;
+    }}
+    #SidebarCollapseBtn[collapsed="true"] {{
+        padding: 8px 0px; margin: 0px 4px; text-align: center;
     }}
     #SidebarCollapseBtn:hover {{
         background: {ALMA_GREEN_MID}; color: {ALMA_TEXT_ON_DARK};
@@ -208,7 +236,7 @@ def get_stylesheet():
     /* ── CARDS ── */
     #Card {{
         background-color: {ALMA_BG_ELEVATED};
-        border: 1px solid rgba(214, 210, 202, 0.45);
+        border: none;
         border-radius: 12px;
     }}
     #CardTitle {{ font-size: 14px; font-weight: 700; color: {ALMA_TEXT_DARK}; }}
@@ -334,7 +362,7 @@ def get_stylesheet():
     /* ── TABLES ── (T5: 4px grid — 10px 16px) */
     QTableWidget, QTableView {{
         background: {ALMA_BG_ELEVATED};
-        border: 1px solid rgba(214, 210, 202, 0.45);
+        border: none;
         border-radius: 10px;
         gridline-color: rgba(214, 210, 202, 0.35);
         selection-background-color: {ALMA_GREEN_SUBTLE};
@@ -400,7 +428,7 @@ def get_stylesheet():
 
     /* ── TABS ── */
     QTabWidget::pane {{
-        border: 1px solid rgba(214, 210, 202, 0.45); border-radius: 12px;
+        border: none; border-radius: 12px;
         background: {ALMA_BG_ELEVATED}; top: -1px;
     }}
     QTabBar::tab {{
@@ -474,7 +502,7 @@ def get_stylesheet():
     /* ── FILTER CHIPS (T3) ── */
     #FilterChip {{
         background: rgba(3,40,27,0.08); color: {ALMA_GREEN_DARK};
-        border: 1px solid rgba(3,40,27,0.15); border-radius: 14px;
+        border: none; border-radius: 14px;
         padding: 4px 12px; font-size: 12px; font-weight: 500;
     }}
     #FilterChip:hover {{
@@ -495,7 +523,7 @@ def get_stylesheet():
     /* ── TOAST NOTIFICATIONS (T9 placeholder) ── */
     #Toast {{
         background: {ALMA_BG_ELEVATED};
-        border: 1px solid rgba(214, 210, 202, 0.45);
+        border: none;
         border-radius: 10px;
     }}
     #ToastSuccess {{ border-left: 4px solid {ALMA_SUCCESS}; }}
@@ -505,7 +533,7 @@ def get_stylesheet():
 
     /* ── BUILDING BLOCKS (Analysis Page Base) ── */
     #AnalysisTab::pane {{
-        border: 1px solid rgba(214, 210, 202, 0.45); border-radius: 12px;
+        border: none; border-radius: 12px;
         background: {ALMA_CREAM}; top: -1px;
     }}
     /* v2: Green-cell active tabs — only the selected tab gets a filled cell */
@@ -524,7 +552,7 @@ def get_stylesheet():
     }}
     #FilterBar {{
         background: {ALMA_BG_ELEVATED};
-        border: 1px solid {ALMA_BORDER_LIGHT};
+        border: none;
         border-radius: 10px;
     }}
     /* v2: Filter bar separator between action and filters */
@@ -534,7 +562,7 @@ def get_stylesheet():
     }}
     #KPICard {{
         background: {ALMA_BG_ELEVATED};
-        border: 1px solid rgba(214, 210, 202, 0.45);
+        border: none;
         border-radius: 12px;
     }}
     /* v2: KPI accent border colors */

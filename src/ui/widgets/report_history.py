@@ -125,7 +125,7 @@ class ReportHistoryWidget(QWidget):
         card.setStyleSheet(f"""
             QFrame {{
                 background: {ALMA_WHITE};
-                border: 1px solid {ALMA_BORDER_LIGHT};
+                border: none;
                 border-radius: 6px;
                 padding: 8px 12px;
             }}
