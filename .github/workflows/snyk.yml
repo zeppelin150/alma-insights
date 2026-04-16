@@ -1,6 +1,26 @@
 name: Snyk Security Scan
 
-on: [push, pull_request, workflow_dispatch]
+# Fires on:
+#   - Pushes to main that change pinned dependencies
+#   - PRs that change pinned dependencies (covers Dependabot-style PRs)
+#   - Weekly — catches newly-disclosed CVEs against pinned versions
+#   - Manual — ad-hoc deep scans from the Actions tab
+# Rationale: CVE scans don't need to re-run on every code-only push; running
+# them on every commit produced noisy duplicate entries in the run list.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'requirements.txt'
+      - 'requirements.lock'
+      - '.github/workflows/snyk.yml'
+  pull_request:
+    paths:
+      - 'requirements.txt'
+      - 'requirements.lock'
+  schedule:
+    - cron: '0 6 * * 1'     # Monday 06:00 UTC — weekly cron
+  workflow_dispatch:
 
 jobs:
   security:

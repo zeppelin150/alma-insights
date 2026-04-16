@@ -69,7 +69,7 @@ PACKAGES = [
     "hdbscan==0.8.40",
     "markdown==3.7",
     "keyring==25.5.0",
-    "PyJWT==2.10.1",
+    "PyJWT[crypto]==2.10.1",
 ]
 
 # App source files/dirs to include

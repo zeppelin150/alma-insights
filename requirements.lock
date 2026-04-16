@@ -30,7 +30,10 @@ sentence-transformers==3.3.1
 hdbscan==0.8.40
 markdown==3.7
 keyring==25.5.0
-PyJWT==2.10.1
+# PyJWT[crypto] — pulls `cryptography` for RS256 (GitHub App auth path).
+# Critical for tests/test_github_app_auth.py; without the extra, CI fails
+# at 'from cryptography.hazmat.primitives import serialization'.
+PyJWT[crypto]==2.10.1
 
 # ── Transitive pins (regenerate on M1 to fill in hashes) ────────
 # The following are the expected transitive deps. pip-compile on the
