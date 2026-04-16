@@ -70,6 +70,11 @@ debug/
 *secret*
 *.yaml.migrated
 
+# Re-include the secrets-audit tool + its test (their filenames match
+# *secret* but they hold no secrets — they're the tool that FINDS them).
+!scripts/audit_secrets.py
+!tests/test_audit_secrets.py
+
 # ── IDE + editor ────────────────────────────────────────────────────
 .vscode/
 .idea/
