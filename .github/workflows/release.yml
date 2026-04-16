@@ -63,13 +63,18 @@ jobs:
         run: python installer/build_release.py --platform ${{ matrix.platform }}
 
       # ── macOS signing + notarization (only runs when secrets are present) ──
+      # sign_macos.sh exits 0 cleanly if any secret is missing, so this step
+      # stays green on forks / pre-enrollment runs. When all 6 secrets are
+      # configured, it produces a signed + notarized zip.
       - name: Sign + notarize (macOS)
-        if: startsWith(matrix.os, 'macos') && env.APPLE_ID != ''
+        if: startsWith(matrix.os, 'macos')
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
-          SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_SIGNING_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_SIGNING_CERTIFICATE_P12_BASE64 }}
+          APPLE_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_SIGNING_CERTIFICATE_PASSWORD }}
         run: |
           bash installer/ci/sign_macos.sh "dist/${{ matrix.artifact }}"
 
