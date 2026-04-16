@@ -24,6 +24,14 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-14]
     runs-on: ${{ matrix.os }}
 
+    # Force bash on every runner including Windows. Without this, Windows
+    # defaults to pwsh and bash-style line continuations (`\` at EOL)
+    # become literal backslashes — pytest then sees `\` as a path argument
+    # and tries to collect tests from the drive root.
+    defaults:
+      run:
+        shell: bash
+
     steps:
       - uses: actions/checkout@v4
 
@@ -54,7 +62,13 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.lock
-          pip install pytest pytest-qt
+          # pytest only — NOT pytest-qt. pytest-qt installs a
+          # sys.excepthook that fails tests on any uncaught exception
+          # reaching the Qt event loop, which clashes with our crash-
+          # handler tests (they deliberately raise to verify the report
+          # gets written + redacted). Our splash tests use a plain
+          # QApplication fixture, no pytest-qt features.
+          pip install pytest
 
       - name: Phase 1 tests (foundation)
         run: |
