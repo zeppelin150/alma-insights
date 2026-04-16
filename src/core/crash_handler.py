@@ -25,6 +25,7 @@ import json
 import re
 import sys
 import traceback
+import uuid
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -92,7 +93,12 @@ def _write_report(exc_type, exc_value, exc_tb) -> Path:
         "traceback": tb_text,
         "hardware_profile": _load_hardware_profile(),
     }
-    path = _CRASH_DIR / f"crash_{stamp.strftime('%Y%m%d_%H%M%S_%f')}.json"
+    # Timestamp + short random suffix. The suffix guarantees uniqueness
+    # across rapid-fire crashes even when the OS clock's microsecond
+    # resolution is too coarse to distinguish them (observed on Windows
+    # runners where two _hook() calls collide on identical strftime output).
+    suffix = uuid.uuid4().hex[:8]
+    path = _CRASH_DIR / f"crash_{stamp.strftime('%Y%m%d_%H%M%S_%f')}_{suffix}.json"
     path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     return path
 
