@@ -1,0 +1,138 @@
+name: Snyk Security Scan
+
+on: [push, pull_request, workflow_dispatch]
+
+jobs:
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Snyk vulnerability scan
+        uses: snyk/actions/python@master
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --json-file-output=snyk-results.json --severity-threshold=low
+
+      - name: Generate readable report
+        if: always()
+        run: |
+          echo "## Snyk Security Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Scan date:** $(date -u)" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ ! -f snyk-results.json ]; then
+            echo "⚠️ No results file generated — Snyk may have failed to run." >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
+          VULN_COUNT=$(cat snyk-results.json | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          vulns = data.get('vulnerabilities', [])
+          print(len(vulns))
+          " 2>/dev/null || echo "0")
+
+          if [ "$VULN_COUNT" = "0" ]; then
+            echo "✅ **No vulnerabilities found!**" >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
+          echo "🚨 **Found $VULN_COUNT vulnerabilities**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Generate summary table
+          python3 << 'EOF' >> $GITHUB_STEP_SUMMARY
+          import json
+
+          with open("snyk-results.json") as f:
+              data = json.load(f)
+
+          vulns = data.get("vulnerabilities", [])
+          if not vulns:
+              print("No vulnerabilities to report.")
+              exit()
+
+          # Count by severity
+          severity_counts = {}
+          for v in vulns:
+              sev = v.get("severity", "unknown")
+              severity_counts[sev] = severity_counts.get(sev, 0) + 1
+
+          severity_emoji = {
+              "critical": "🔴",
+              "high": "🟠",
+              "medium": "🟡",
+              "low": "🔵",
+              "unknown": "⚪"
+          }
+
+          print("### Severity Breakdown")
+          print("")
+          print("| Severity | Count |")
+          print("|----------|-------|")
+          for sev in ["critical", "high", "medium", "low"]:
+              if sev in severity_counts:
+                  emoji = severity_emoji.get(sev, "")
+                  print(f"| {emoji} {sev.capitalize()} | {severity_counts[sev]} |")
+          print("")
+
+          # Detail table
+          print("### Vulnerability Details")
+          print("")
+          print("| Package | Severity | Title | Fix Available |")
+          print("|---------|----------|-------|---------------|")
+
+          seen = set()
+          for v in sorted(vulns, key=lambda x: ["critical","high","medium","low"].index(x.get("severity","low")) if x.get("severity","low") in ["critical","high","medium","low"] else 99):
+              pkg = v.get("packageName", "?")
+              sev = v.get("severity", "?")
+              title = v.get("title", "?")
+              fix = "✅ Yes" if v.get("isUpgradable") or v.get("isPatchable") else "❌ No"
+              key = f"{pkg}-{title}"
+
+              if key in seen:
+                  continue
+              seen.add(key)
+
+              emoji = severity_emoji.get(sev, "")
+              print(f"| `{pkg}` | {emoji} {sev.capitalize()} | {title} | {fix} |")
+          EOF
+
+      - name: Upload results as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: snyk-report
+          path: snyk-results.json
+          retention-days: 30
+
+      # Optional: upload to GitHub Security tab
+      - name: Upload SARIF to GitHub Security
+        uses: snyk/actions/python@master
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --sarif-file-output=snyk.sarif
+          command: test
+
+      - name: Upload SARIF file
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        continue-on-error: true
+        with:
+          sarif_file: snyk.sarif
