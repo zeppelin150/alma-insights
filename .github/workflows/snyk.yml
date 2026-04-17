@@ -32,17 +32,56 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
+
+      - name: Set up Node (for Snyk CLI)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Install CPU-only torch FIRST so the subsequent resolution for
+      # sentence-transformers reuses the ~200 MB CPU wheel instead of
+      # pulling the ~2.5 GB CUDA build (+ nvidia-cuda-* drivers).
+      # Saves ~7 minutes per scan.
+      - name: Install CPU-only PyTorch
+        run: |
+          pip install --index-url https://download.pytorch.org/whl/cpu torch
 
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run Snyk vulnerability scan
-        uses: snyk/actions/python@master
+      - name: Install Snyk CLI
+        run: npm install -g snyk
+
+      # Run Snyk on the host runner (not in a Docker container) so it sees
+      # packages we installed above. --skip-unresolved avoids 422 errors
+      # from the CPU-only torch wheel (pulled from download.pytorch.org,
+      # not PyPI) that Snyk's resolver can't look up.
+      - name: Run Snyk vulnerability scan (JSON)
         continue-on-error: true
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-        with:
-          args: --json-file-output=snyk-results.json --severity-threshold=low
+        run: |
+          snyk test \
+            --file=requirements.txt \
+            --package-manager=pip \
+            --command=python3 \
+            --skip-unresolved \
+            --json-file-output=snyk-results.json \
+            --severity-threshold=low || true
+
+      - name: Run Snyk vulnerability scan (SARIF)
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          snyk test \
+            --file=requirements.txt \
+            --package-manager=pip \
+            --command=python3 \
+            --skip-unresolved \
+            --sarif-file-output=snyk.sarif || true
 
       - name: Generate readable report
         if: always()
@@ -133,25 +172,15 @@ jobs:
           EOF
 
       - name: Upload results as artifact
-        if: always()
+        if: always() && hashFiles('snyk-results.json') != ''
         uses: actions/upload-artifact@v4
         with:
           name: snyk-report
           path: snyk-results.json
           retention-days: 30
 
-      # Optional: upload to GitHub Security tab
-      - name: Upload SARIF to GitHub Security
-        uses: snyk/actions/python@master
-        continue-on-error: true
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-        with:
-          args: --sarif-file-output=snyk.sarif
-          command: test
-
       - name: Upload SARIF file
-        if: always()
+        if: always() && hashFiles('snyk.sarif') != ''
         uses: github/codeql-action/upload-sarif@v3
         continue-on-error: true
         with:
