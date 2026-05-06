@@ -153,9 +153,17 @@ def _build_where(f: QueryIssueFilters) -> tuple[list[str], list[Any]]:
     # caller decides via _needs_cluster_join.)
 
     if f.trc is not None:
-        # Case-insensitive exact match on trc_code OR trc_label
-        parts.append("(LOWER(ti.trc_code) = LOWER(?) OR LOWER(COALESCE(ti.trc_label, '')) = LOWER(?))")
-        params.extend([f.trc, f.trc])
+        # F-2b (bug-bash 2026-04-23): match trc_code OR trc_label by
+        # substring, case-insensitive, mirroring payer semantics. Real
+        # TRC labels are long sentences ("Refund cash pay invoice OR
+        # Charge cancellation fee"); requiring exact match meant that
+        # any slight prompt paraphrase produced 0 results.
+        parts.append(
+            "(LOWER(ti.trc_code) LIKE LOWER(?) "
+            "OR LOWER(COALESCE(ti.trc_label, '')) LIKE LOWER(?))"
+        )
+        like_pat = f"%{f.trc}%"
+        params.extend([like_pat, like_pat])
     if f.payer is not None:
         parts.append("LOWER(COALESCE(ti.insurance_payer, '')) LIKE LOWER(?)")
         params.append(f"%{f.payer}%")
@@ -249,6 +257,24 @@ def _compose_scope_sql(
     """.strip()
 
     return group_sql, total_sql, id_expr, params
+
+
+def _compose_raw_total_sql(f: QueryIssueFilters) -> tuple[str, list[Any]]:
+    """Count tickets matching the filter scope, WITHOUT the
+    canonical-assignment requirement that _compose_scope_sql injects
+    for group_by=concept|cluster.
+
+    Used to populate scope.raw_tickets_in_filter so the LLM can
+    distinguish 'filter matched nothing' from 'filter matched tickets
+    but none have canonical assignments'. See handle_query_issues."""
+    where_parts, params = _build_where(f)
+    where_clause = " AND ".join(where_parts) if where_parts else "1=1"
+    sql = f"""
+        SELECT COUNT(DISTINCT ti.ticket_id) AS total
+        FROM ticket_index ti
+        WHERE {where_clause}
+    """.strip()
+    return sql, params
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -363,6 +389,25 @@ def query_issues(
     total_tickets = int(conn.execute(total_sql, params).fetchone()[0] or 0)
     rows = conn.execute(group_sql, params + [limit]).fetchall()
 
+    # Also compute raw ticket count in the filter scope WITHOUT the
+    # canonical-assignment requirement — so an LLM can tell apart
+    # "filter matched nothing" from "filter matched tickets but none
+    # are assigned to a canonical concept/cluster". The latter happens
+    # in every database where canonicalization hasn't been run (our
+    # prod DB as of 2026-04-23 has canonical_concepts=0).
+    # For group_by in (trc|payer|provider) the two counts are identical;
+    # for concept/cluster they can diverge. This is additive — existing
+    # scope.total_tickets behaviour is preserved.
+    # Skip the raw computation when the filter itself requires canonical
+    # tables (concept_id filter) — there's no meaningful "raw" count and
+    # the join isn't part of the base ticket_index-only SQL.
+    raw_tickets_in_filter = total_tickets
+    if group_by in ("concept", "cluster") and f.concept_id is None:
+        raw_total_sql, raw_params = _compose_raw_total_sql(f)
+        raw_tickets_in_filter = int(
+            conn.execute(raw_total_sql, raw_params).fetchone()[0] or 0
+        )
+
     top_issues: list[dict] = []
     for rank, r in enumerate(rows, start=1):
         group_id = r[0]
@@ -395,14 +440,27 @@ def query_issues(
             )
         top_issues.append(issue)
 
-    return {
+    result: dict = {
         "scope": {
             "filters": f.as_dict(),
             "total_tickets": total_tickets,
+            "raw_tickets_in_filter": raw_tickets_in_filter,
         },
         "group_by": group_by,
         "top_issues": top_issues,
     }
+
+    # Surface a hint whenever the scoped total is zero but raw tickets exist.
+    # This is the single most common reason the chat LLM confabulates
+    # "no tickets found in the database" (bug-bash 2026-04-23, F-2).
+    if total_tickets == 0 and raw_tickets_in_filter > 0:
+        result["hint"] = (
+            f"The filter matched {raw_tickets_in_filter} tickets but none are assigned "
+            "to a canonical concept/cluster (canonical_concepts may be unpopulated). "
+            "Retry with group_by=trc, payer, or provider for a raw breakdown."
+        )
+
+    return result
 
 
 # ──────────────────────────────────────────────────────────────────────

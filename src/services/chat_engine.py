@@ -42,6 +42,20 @@ ResponseHandler = Callable[[str], str]
 _MAX_TOOL_ROUNDS = 3
 _TOOL_CALL_RE = re.compile(r"TOOL_CALL:\s*(\w+)\s+(\{.*?\})", re.DOTALL)
 
+# Adaptive bridge-recycle (F-9): phrases that strongly indicate a
+# "tools aren't responding" response as opposed to a legitimate
+# "filter matched nothing" response. Tuned to avoid false positives
+# on the latter.
+_DEGRADED_PHRASES = (
+    "i encountered an issue retrieving",
+    "i encountered an issue performing",
+    "i encountered an issue with",
+    "unable to retrieve",
+    "was unable to retrieve",
+    "encountered some connection issues with the tools",
+)
+_DEFAULT_RECYCLE_THRESHOLD = 3
+
 # Tool prompt addendum — extracted to src/data/chat_tools/tool_prompts.py
 from src.data.chat_tools.tool_prompts import TOOL_PROMPT_ADDENDUM as _TOOL_PROMPT_ADDENDUM
 
@@ -121,6 +135,10 @@ class ChatEngine(QObject):
     error_occurred = Signal(str)
     busy_changed = Signal(bool)
     status_update = Signal(str)
+    # Adaptive bridge-recycle (F-9, bug-bash 2026-04-23):
+    # fires when N consecutive responses look degraded. Consumers that
+    # own a warm client should shut it down and set_client() a fresh one.
+    bridge_recycle_requested = Signal()
 
     def __init__(
         self,
@@ -132,6 +150,7 @@ class ChatEngine(QObject):
         tools_enabled: bool = False,
         use_mcp_tools: bool = False,
         db_path: Optional[str] = None,
+        recycle_threshold: int = _DEFAULT_RECYCLE_THRESHOLD,
         parent: Optional[QObject] = None,
     ):
         super().__init__(parent)
@@ -150,6 +169,10 @@ class ChatEngine(QObject):
         self._worker: Optional[_ChatWorker] = None
         self._tool_rounds = 0
         self._session_filters: dict = {}
+
+        # Adaptive bridge-recycle state (F-9)
+        self._recycle_threshold = max(1, int(recycle_threshold))
+        self._degraded_streak = 0
 
         # Telemetry callback — set by page to persist to chat_messages
         self._telemetry_callback: Optional[Callable] = None
@@ -221,6 +244,22 @@ class ChatEngine(QObject):
         """Send a user message. Returns immediately; results via signals."""
         if self.is_busy:
             return
+
+        # Adaptive bridge-recycle (F-9). If the last N responses looked
+        # degraded (tools not producing data), drop the warm client and
+        # ask the consumer to wire a fresh one. We emit the signal FIRST
+        # so the consumer can rebuild before we try to use the client.
+        if (
+            self._warm_client is not None
+            and self._degraded_streak >= self._recycle_threshold
+        ):
+            self.status_update.emit(
+                "Refreshing the analysis bridge to improve answer quality — "
+                "this takes a few extra seconds…"
+            )
+            self._warm_client = None
+            self._degraded_streak = 0
+            self.bridge_recycle_requested.emit()
 
         self._history.append({"role": "user", "content": user_message})
         self._tool_rounds = 0
@@ -316,6 +355,17 @@ class ChatEngine(QObject):
             processed = self._response_handler(raw_response)
         self._history.append({"role": "assistant", "content": processed})
 
+        # Adaptive bridge-recycle: update degraded-streak counter based
+        # on this response. Streak resets on any clean response.
+        if self._is_degraded_response(processed):
+            self._degraded_streak += 1
+            logger.debug(
+                "Degraded response detected; streak=%d/%d",
+                self._degraded_streak, self._recycle_threshold,
+            )
+        else:
+            self._degraded_streak = 0
+
         # Fire telemetry callback so the page can persist to chat_messages
         if self._telemetry_callback:
             try:
@@ -331,6 +381,35 @@ class ChatEngine(QObject):
         self.busy_changed.emit(False)
         self.status_update.emit("")
         self.error_occurred.emit(error_text)
+        # Worker-level errors (bridge crashed, timeout, etc.) count as
+        # degraded — they're the strongest signal that the warm bridge
+        # needs to be recycled.
+        self._degraded_streak += 1
+
+    # ── Adaptive recycle helpers ─────────────────────────────
+
+    @staticmethod
+    def _is_degraded_response(text: str) -> bool:
+        """Detect a 'tools not working' response.
+
+        True only for phrases that specifically indicate tool-infrastructure
+        failure, NOT for legitimate 'no matches found' or 'please clarify'
+        responses. Tuned conservatively to avoid false-positive recycles
+        on genuinely empty queries (like out-of-scope payer names).
+        """
+        if not text:
+            return True
+        lower = text.lower()
+        return any(p in lower for p in _DEGRADED_PHRASES)
+
+    @property
+    def degraded_streak(self) -> int:
+        """Number of consecutive degraded responses (F-9 observability)."""
+        return self._degraded_streak
+
+    def reset_degraded_streak(self) -> None:
+        """Explicit reset — used after a caller-driven recycle."""
+        self._degraded_streak = 0
 
     # ── Tool execution loop ───────────────────────────────
 

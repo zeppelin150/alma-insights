@@ -1,0 +1,724 @@
+{
+  "date": "2026-05-01",
+  "days": 600,
+  "db": "C:\\alma-insights\\data\\local_warehouse.db",
+  "columns": [
+    {
+      "table": "ticket_index",
+      "column": "friction_type",
+      "canonical_size": 12,
+      "distinct_observed": 12,
+      "proposed_additions": [],
+      "proposed_retirements": [],
+      "suspected_typos": [],
+      "in_canon_count": 12
+    },
+    {
+      "table": "ticket_index",
+      "column": "sentiment_polarity",
+      "canonical_size": 4,
+      "distinct_observed": 4,
+      "proposed_additions": [],
+      "proposed_retirements": [],
+      "suspected_typos": [],
+      "in_canon_count": 4
+    },
+    {
+      "table": "ticket_index",
+      "column": "anomaly_flag",
+      "canonical_size": 3,
+      "distinct_observed": 3,
+      "proposed_additions": [],
+      "proposed_retirements": [],
+      "suspected_typos": [],
+      "in_canon_count": 3
+    },
+    {
+      "table": "ticket_index",
+      "column": "trc_code",
+      "snapshot_size": 0,
+      "distinct_observed": 134,
+      "new_arrivals": [
+        {
+          "value": "Refund cash pay invoice OR Charge cancellation fee",
+          "count": 215,
+          "first_seen": "2025-01-03 1:20:00"
+        },
+        {
+          "value": "Client cannot locate EAP benefit information",
+          "count": 184,
+          "first_seen": "2025-01-16 00:18:00"
+        },
+        {
+          "value": "Client portal access issue",
+          "count": 135,
+          "first_seen": "2025-01-15 00:08:00"
+        },
+        {
+          "value": "Provider availability settings not saving",
+          "count": 60,
+          "first_seen": "2025-01-15 00:57:00"
+        },
+        {
+          "value": "Claims ineligible for Payout Confidence",
+          "count": 57,
+          "first_seen": "2025-01-05 0:38:00"
+        },
+        {
+          "value": "Provider account setup issue",
+          "count": 56,
+          "first_seen": "2025-01-15 01:19:00"
+        },
+        {
+          "value": "Client shows ineligible but has active coverage",
+          "count": 55,
+          "first_seen": "2025-01-15 01:13:00"
+        },
+        {
+          "value": "Provider appeal of medical audit denials",
+          "count": 50,
+          "first_seen": "2025-01-10 1:03:00"
+        },
+        {
+          "value": "EAP care coordination with an Alma provider (client matching)",
+          "count": 48,
+          "first_seen": "2025-01-10 1:02:00"
+        },
+        {
+          "value": "Provider payout rate dissatisfaction",
+          "count": 47,
+          "first_seen": "2025-01-02 0:55:00"
+        },
+        {
+          "value": "Provider Alma deduction due to medical audits",
+          "count": 38,
+          "first_seen": "2025-01-16 0:08:00"
+        },
+        {
+          "value": "Client receives an unexpected cancellation fee invoice",
+          "count": 37,
+          "first_seen": "2025-01-15 1:07:00"
+        },
+        {
+          "value": "Client receives insurance invoice from a provider they do not know",
+          "count": 34,
+          "first_seen": "2025-01-12 1:00:00"
+        },
+        {
+          "value": "Remove State License",
+          "count": 24,
+          "first_seen": "2025-01-01 0:17:00"
+        },
+        {
+          "value": "Client receives an insurance invoice 45+ days after session",
+          "count": 23,
+          "first_seen": "2025-01-03 1:00:00"
+        },
+        {
+          "value": "Invoice dispute - already paid via insurance",
+          "count": 22,
+          "first_seen": "2025-01-17 00:53:00"
+        },
+        {
+          "value": "Provider believes payout amount is incorrect",
+          "count": 20,
+          "first_seen": "2025-01-02 1:19:00"
+        },
+        {
+          "value": "Claim re-submission to fix processing error",
+          "count": 16,
+          "first_seen": "2025-01-10 1:04:00"
+        },
+        {
+          "value": "Client disputes invoice adjustments from returned claims",
+          "count": 15,
+          "first_seen": "2025-01-23 0:34:00"
+        },
+        {
+          "value": "Provider credentialing status inquiry",
+          "count": 13,
+          "first_seen": "2025-01-24 00:22:00"
+        },
+        {
+          "value": "Provider disputes client\u2019s Alma payment responsibility (claim has not yet returned)",
+          "count": 12,
+          "first_seen": "2025-01-13 0:21:00"
+        },
+        {
+          "value": "Support request regarding Remove State License",
+          "count": 12,
+          "first_seen": "2025-01-15 01:16:00"
+        },
+        {
+          "value": "Client cannot locate Autopay link",
+          "count": 11,
+          "first_seen": "2025-01-04 0:49:00"
+        },
+        {
+          "value": "Client cannot self-serve provider contact information",
+          "count": 10,
+          "first_seen": "2025-01-20 1:13:00"
+        },
+        {
+          "value": "Client eligible but cannot access Client Portal",
+          "count": 10,
+          "first_seen": "2025-01-03 2:00:00"
+        },
+        {
+          "value": "Provider concern about usage of 90837",
+          "count": 10,
+          "first_seen": "2025-01-11 0:51:00"
+        },
+        {
+          "value": "Provider unaware of Alma\u2019s deduction policies",
+          "count": 10,
+          "first_seen": "2025-01-16 0:26:00"
+        },
+        {
+          "value": "Client receives Inactive Coverage denial",
+          "count": 9,
+          "first_seen": "2025-01-02 0:32:00"
+        },
+        {
+          "value": "Client receives OON health plan denial",
+          "count": 9,
+          "first_seen": "2025-01-05 0:43:00"
+        },
+        {
+          "value": "Client receives denial due to lack of prior authorization",
+          "count": 9,
+          "first_seen": "2025-01-05 1:41:00"
+        },
+        {
+          "value": "Incorrect CPT/diagnosis codes submitted",
+          "count": 9,
+          "first_seen": "2025-01-03 0:25:00"
+        },
+        {
+          "value": "Provider 1099 link lapsed (48+ hours)",
+          "count": 9,
+          "first_seen": "2025-01-02 0:17:00"
+        },
+        {
+          "value": "Provider no-show for consultation",
+          "count": 9,
+          "first_seen": "2025-01-03 1:43:00"
+        },
+        {
+          "value": "Provider wants to charge past unpaid invoices to new client card on file",
+          "count": 9,
+          "first_seen": "2025-01-10 1:03:00"
+        },
+        {
+          "value": "Client receives plan limitation denial",
+          "count": 8,
+          "first_seen": "2025-01-08 1:11:00"
+        },
+        {
+          "value": "Client requires payment plan",
+          "count": 8,
+          "first_seen": "2025-01-03 1:27:00"
+        },
+        {
+          "value": "Client seeking Alma provider",
+          "count": 8,
+          "first_seen": "2025-01-22 1:26:00"
+        },
+        {
+          "value": "Customer follow-up required",
+          "count": 8,
+          "first_seen": "2025-01-03 1:40:00"
+        },
+        {
+          "value": "EAP claim re-submission to fix processing error",
+          "count": 8,
+          "first_seen": "2025-01-30 1:23:00"
+        },
+        {
+          "value": "Provider calendar won't sync with external calendar",
+          "count": 8,
+          "first_seen": "2025-01-04 1:16:00"
+        },
+        {
+          "value": "Provider cannot access 1099 (incorrect TIN / missing address)",
+          "count": 8,
+          "first_seen": "2025-01-05 0:25:00"
+        },
+        {
+          "value": "Provider cannot create an appointment",
+          "count": 8,
+          "first_seen": "2025-01-11 1:03:00"
+        },
+        {
+          "value": "Provider cannot locate most recent eligibility check",
+          "count": 8,
+          "first_seen": "2025-01-02 0:36:00"
+        },
+        {
+          "value": "Provider cannot set / change consultation availability",
+          "count": 8,
+          "first_seen": "2025-01-09 1:50:00"
+        },
+        {
+          "value": "Provider contracted vs. payout rate confusion",
+          "count": 8,
+          "first_seen": "2025-01-29 0:57:00"
+        },
+        {
+          "value": "Provider membership cancel request",
+          "count": 8,
+          "first_seen": "2025-01-08 0:20:00"
+        },
+        {
+          "value": "Provider superbill education required",
+          "count": 8,
+          "first_seen": "2025-01-01 1:25:00"
+        },
+        {
+          "value": "Client cannot self-serve superbill",
+          "count": 7,
+          "first_seen": "2025-01-03 0:22:00"
+        },
+        {
+          "value": "Client disputes Alma denials policy",
+          "count": 7,
+          "first_seen": "2025-01-06 0:52:00"
+        },
+        {
+          "value": "Client disputes Alma payment responsibility (claim has not yet returned)",
+          "count": 7,
+          "first_seen": "2025-01-01 0:28:00"
+        },
+        {
+          "value": "Client receives denial due to provider medical audit",
+          "count": 7,
+          "first_seen": "2025-01-20 0:10:00"
+        },
+        {
+          "value": "Draft claim tied to ineligble eligibility check",
+          "count": 7,
+          "first_seen": "2025-01-15 0:26:00"
+        },
+        {
+          "value": "Duplicate claim submitted",
+          "count": 7,
+          "first_seen": "2025-01-07 0:37:00"
+        },
+        {
+          "value": "One-time claim processing error (confirmed by Core Ops)",
+          "count": 7,
+          "first_seen": "2025-01-15 1:31:00"
+        },
+        {
+          "value": "Provider cannot invite client to use Client Portal",
+          "count": 7,
+          "first_seen": "2025-01-08 0:12:00"
+        },
+        {
+          "value": "Provider membership invoice dispute",
+          "count": 7,
+          "first_seen": "2025-01-05 1:41:00"
+        },
+        {
+          "value": "Provider payout timeline confusion",
+          "count": 7,
+          "first_seen": "2025-01-01 1:37:00"
+        },
+        {
+          "value": "Provider portal 2FA reset required",
+          "count": 7,
+          "first_seen": "2025-01-10 0:05:00"
+        },
+        {
+          "value": "Spam consultation request",
+          "count": 7,
+          "first_seen": "2025-01-18 1:46:00"
+        },
+        {
+          "value": "Claim is part of a known Payer escalation",
+          "count": 6,
+          "first_seen": "2025-01-04 0:12:00"
+        },
+        {
+          "value": "Client receives an unexpected consultation fee invoice",
+          "count": 6,
+          "first_seen": "2025-01-12 0:54:00"
+        },
+        {
+          "value": "Most recent eligibility check is 1+ months old",
+          "count": 6,
+          "first_seen": "2025-01-04 1:37:00"
+        },
+        {
+          "value": "Overpayment requiring refund from provider",
+          "count": 6,
+          "first_seen": "2025-01-26 0:27:00"
+        },
+        {
+          "value": "Provider clinical tools feature request  (Note Assist, Telehealth, Progress Notes)",
+          "count": 6,
+          "first_seen": "2025-01-04 1:44:00"
+        },
+        {
+          "value": "Provider dissatisfaction with practice growth / number of CRs",
+          "count": 6,
+          "first_seen": "2025-01-19 1:00:00"
+        },
+        {
+          "value": "Provider inactive membership status",
+          "count": 6,
+          "first_seen": "2025-01-25 0:19:00"
+        },
+        {
+          "value": "Provider membership pause request",
+          "count": 6,
+          "first_seen": "2025-01-11 1:22:00"
+        },
+        {
+          "value": "Provider receives re-credentialing notification from CAQH",
+          "count": 6,
+          "first_seen": "2025-01-18 0:09:00"
+        },
+        {
+          "value": "Root Cause",
+          "count": 6,
+          "first_seen": "2025-01-11 1:43:00"
+        },
+        {
+          "value": "Third party (HSA, FSA, HRA) payment delay",
+          "count": 6,
+          "first_seen": "2025-01-06 0:12:00"
+        },
+        {
+          "value": "Upgrade/downgrade request",
+          "count": 6,
+          "first_seen": "2025-01-03 0:53:00"
+        },
+        {
+          "value": "139",
+          "count": 5,
+          "first_seen": "2025-01-08 1:26:00"
+        },
+        {
+          "value": "Action needed with Stripe to release payout",
+          "count": 5,
+          "first_seen": "2025-01-08 1:47:00"
+        },
+        {
+          "value": "Billing portal password reset required",
+          "count": 5,
+          "first_seen": "2025-01-08 0:18:00"
+        },
+        {
+          "value": "CX initiated invite to Client Portal",
+          "count": 5,
+          "first_seen": "2025-01-05 0:24:00"
+        },
+        {
+          "value": "Claim outcome differs from EC",
+          "count": 5,
+          "first_seen": "2025-01-18 1:10:00"
+        },
+        {
+          "value": "Client cannot self-serve health plan updates",
+          "count": 5,
+          "first_seen": "2025-01-05 0:17:00"
+        },
+        {
+          "value": "Client insurance on file is secondary",
+          "count": 5,
+          "first_seen": "2025-01-24 0:07:00"
+        },
+        {
+          "value": "Client is not eligible for client portal",
+          "count": 5,
+          "first_seen": "2025-01-07 0:40:00"
+        },
+        {
+          "value": "Client receives out-of-pocket invoice for insured services (balance billing)",
+          "count": 5,
+          "first_seen": "2025-01-05 0:25:00"
+        },
+        {
+          "value": "Community Hub email dissatisfaction",
+          "count": 5,
+          "first_seen": "2025-01-15 0:58:00"
+        },
+        {
+          "value": "Customer complaint against Alma",
+          "count": 5,
+          "first_seen": "2025-01-07 0:43:00"
+        },
+        {
+          "value": "Interest in Alma career opportunities",
+          "count": 5,
+          "first_seen": "2025-01-28 1:05:00"
+        },
+        {
+          "value": "Payout freeze due to provider non-response (medical audits)",
+          "count": 5,
+          "first_seen": "2025-01-03 1:57:00"
+        },
+        {
+          "value": "Provider 1099 corrections required",
+          "count": 5,
+          "first_seen": "2025-01-07 1:51:00"
+        },
+        {
+          "value": "Provider cannot locate consultation requests in the Alma portal",
+          "count": 5,
+          "first_seen": "2025-01-01 1:39:00"
+        },
+        {
+          "value": "Provider cannot locate payout rates in the portal",
+          "count": 5,
+          "first_seen": "2025-01-01 0:56:00"
+        },
+        {
+          "value": "Provider cannot update client Autopay",
+          "count": 5,
+          "first_seen": "2025-01-16 0:16:00"
+        },
+        {
+          "value": "Provider confusion about calendar connection to eligibility",
+          "count": 5,
+          "first_seen": "2025-01-14 0:20:00"
+        },
+        {
+          "value": "Provider confusion regarding deduction policy",
+          "count": 5,
+          "first_seen": "2025-01-09 1:47:00"
+        },
+        {
+          "value": "Provider missed portal deadline to cancel claim",
+          "count": 5,
+          "first_seen": "2025-01-22 1:07:00"
+        },
+        {
+          "value": "Provider request for profile update (post-onboarding)",
+          "count": 5,
+          "first_seen": "2025-01-23 0:21:00"
+        },
+        {
+          "value": "Provider set consultation availability to \u201cOff\u201d",
+          "count": 5,
+          "first_seen": "2025-01-02 0:39:00"
+        },
+        {
+          "value": "Care coordination with an Alma provider (client matching)",
+          "count": 4,
+          "first_seen": "2025-01-08 0:10:00"
+        },
+        {
+          "value": "Client EAP claims processed through regular insurance",
+          "count": 4,
+          "first_seen": "2025-01-28 0:13:00"
+        },
+        {
+          "value": "Client cannot access Secure Messaging",
+          "count": 4,
+          "first_seen": "2025-01-30 1:45:00"
+        },
+        {
+          "value": "Client cannot self-serve most recent eligibilty check",
+          "count": 4,
+          "first_seen": "2025-01-15 1:15:00"
+        },
+        {
+          "value": "Client consent to use Note Assist",
+          "count": 4,
+          "first_seen": "2025-01-10 0:24:00"
+        },
+        {
+          "value": "Eligibility check in progress",
+          "count": 4,
+          "first_seen": "2025-01-15 1:23:00"
+        },
+        {
+          "value": "Email Update Request",
+          "count": 4,
+          "first_seen": "2025-01-01 1:53:00"
+        },
+        {
+          "value": "Provider CAQH confusion",
+          "count": 4,
+          "first_seen": "2025-01-29 1:51:00"
+        },
+        {
+          "value": "Provider cannot locate credentialing status in Alma portal",
+          "count": 4,
+          "first_seen": "2025-01-09 0:15:00"
+        },
+        {
+          "value": "Provider cannot self-serve payout rates in the portal (not yet credentialed)",
+          "count": 4,
+          "first_seen": "2025-01-03 1:10:00"
+        },
+        {
+          "value": "Provider clinical tools troubleshooting (Note Assist, Telehealth, Progress Notes)",
+          "count": 4,
+          "first_seen": "2025-01-09 1:51:00"
+        },
+        {
+          "value": "Provider disputes Alma denials policy",
+          "count": 4,
+          "first_seen": "2025-01-15 1:04:00"
+        },
+        {
+          "value": "Provider medical audit dissatisfaction",
+          "count": 4,
+          "first_seen": "2025-01-16 0:23:00"
+        },
+        {
+          "value": "Provider membership restart request",
+          "count": 4,
+          "first_seen": "2025-01-08 1:52:00"
+        },
+        {
+          "value": "Provider payout is on hold with Alma",
+          "count": 4,
+          "first_seen": "2025-01-20 0:11:00"
+        },
+        {
+          "value": "Provider portal password reset required",
+          "count": 4,
+          "first_seen": "2025-01-01 1:15:00"
+        },
+        {
+          "value": "Provider request to upload notes from a different EHR",
+          "count": 4,
+          "first_seen": "2025-01-23 1:08:00"
+        },
+        {
+          "value": "Spam",
+          "count": 4,
+          "first_seen": "2025-01-10 0:07:00"
+        },
+        {
+          "value": "Client EAP benefits not yet available in the Alma portal",
+          "count": 3,
+          "first_seen": "2025-01-25 1:33:00"
+        },
+        {
+          "value": "Client phone number does not match Alma portal",
+          "count": 3,
+          "first_seen": "2025-01-15 1:20:00"
+        },
+        {
+          "value": "Complaint - client\u2019s negative experience with Alma provider",
+          "count": 3,
+          "first_seen": "2025-01-06 1:08:00"
+        },
+        {
+          "value": "Continuing Education credit confirmation",
+          "count": 3,
+          "first_seen": "2025-01-06 1:00:00"
+        },
+        {
+          "value": "Education on Alma\u2019s policies and offerings",
+          "count": 3,
+          "first_seen": "2025-01-15 0:45:00"
+        },
+        {
+          "value": "Negative provider experience with a client",
+          "count": 3,
+          "first_seen": "2025-01-30 1:52:00"
+        },
+        {
+          "value": "Negative provider experience with another Alma provider",
+          "count": 3,
+          "first_seen": "2025-01-18 0:59:00"
+        },
+        {
+          "value": "Provider cannot locate membership agreement",
+          "count": 3,
+          "first_seen": "2025-01-21 1:18:00"
+        },
+        {
+          "value": "Provider confusion regarding Payout Confidence",
+          "count": 3,
+          "first_seen": "2025-01-09 1:50:00"
+        },
+        {
+          "value": "Provider did not receive 1 or more onboarding emails",
+          "count": 3,
+          "first_seen": "2025-01-19 1:38:00"
+        },
+        {
+          "value": "Provider not eligible for 1099",
+          "count": 3,
+          "first_seen": "2025-01-03 1:30:00"
+        },
+        {
+          "value": "Provider profile not live in the directory",
+          "count": 3,
+          "first_seen": "2025-01-29 1:27:00"
+        },
+        {
+          "value": "Provider request to customize intake forms",
+          "count": 3,
+          "first_seen": "2025-01-05 1:55:00"
+        },
+        {
+          "value": "Provider uses a record-keeping system outside of Alma\u2019s EHR",
+          "count": 3,
+          "first_seen": "2025-01-05 0:43:00"
+        },
+        {
+          "value": "Provider wants to add or remove a payer program (e.g., EAPs)",
+          "count": 3,
+          "first_seen": "2025-01-16 1:10:00"
+        },
+        {
+          "value": "Security concerns and phishing attempts",
+          "count": 3,
+          "first_seen": "2025-01-02 1:48:00"
+        },
+        {
+          "value": "Client state of service does not match credentialing",
+          "count": 2,
+          "first_seen": "2025-01-07 0:50:00"
+        },
+        {
+          "value": "Provider cannot create new appointment due to invalid payment method",
+          "count": 2,
+          "first_seen": "2025-01-03 1:49:00"
+        },
+        {
+          "value": "Provider cannot edit / delete a past appointment",
+          "count": 2,
+          "first_seen": "2025-01-28 0:36:00"
+        },
+        {
+          "value": "Provider interested in joining Alma",
+          "count": 2,
+          "first_seen": "2025-01-29 0:50:00"
+        },
+        {
+          "value": "Complaint - EAP client\u2019s negative experience with Alma provider",
+          "count": 1,
+          "first_seen": "2025-01-23 0:21:00"
+        },
+        {
+          "value": "Provider cannot set a vacation hold",
+          "count": 1,
+          "first_seen": "2025-01-22 1:06:00"
+        },
+        {
+          "value": "Provider directory search dissatisfaction",
+          "count": 1,
+          "first_seen": "2025-01-14 1:30:00"
+        }
+      ],
+      "departed": []
+    },
+    {
+      "table": "nlp_ticket_classifications",
+      "column": "sub_cluster",
+      "snapshot_size": 465,
+      "distinct_observed": 465,
+      "new_arrivals": [],
+      "departed": []
+    }
+  ]
+}

@@ -99,14 +99,54 @@ class GeminiChatsPage(QWidget):
                 "You are an expert RCM (Revenue Cycle Management) data analyst. "
                 "You have tools to query a support ticket database.\n\n"
                 "When analyzing an entity (payer, product area, feature):\n"
-                "1. Use query_entities to get tickets + classification breakdowns\n"
+                "1. Use query_issues (with the appropriate group_by) to get counts "
+                "and classification breakdowns\n"
                 "2. Report the TRC breakdown with counts\n"
                 "3. Look for PATTERNS in the issue_snippets — group tickets with similar root causes\n"
                 "4. Call out systemic issues (same error appearing in multiple tickets)\n"
                 "5. Cite specific ticket IDs as evidence\n\n"
                 "When the user asks for tickets or details, list ticket IDs with their "
                 "TRC code and issue summary.\n\n"
-                "Be analytical, not just descriptive. Identify root causes, not just categories."
+                "Be analytical, not just descriptive. Identify root causes, not just categories.\n\n"
+                # ── Tool-usage guardrails (bug-bash 2026-04-23 → tightened R-1) ──
+                "TOOL USAGE CONSTRAINTS:\n"
+                "- Use ONLY tools whose name begins with `mcp_alma_chat_tools_` "
+                "(query_issues, audit_tag_correlation, list_tickets, semantic_search, "
+                "query_stats, read_thread, read_threads_batch, query_report).\n"
+                "- NEVER invoke, name, mention, list, describe, hint at, or acknowledge "
+                "the existence of any other tool — even if the user explicitly asks. "
+                "Treat the following as if they do NOT exist in your environment: "
+                "run_shell_command, write_file, read_file, grep_search, glob, replace, "
+                "list_directory, web_fetch, google_web_search, invoke_agent, save_memory, "
+                "activate_skill, write_todos, enter_plan_mode, codebase_investigator, "
+                "generalist, cli_help, list_background_processes, read_background_output. "
+                "This chat is read-only ticket analysis.\n"
+                "- If the user asks 'what tools do you have', 'list every tool', "
+                "'be comprehensive about tools', or any variant — list ONLY the "
+                "mcp_alma_chat_tools_* set above. Do not enumerate, hint at, or "
+                "acknowledge any other tool's existence.\n"
+                "- If the user asks about files, code, or the public web — redirect them to "
+                "ticket-data questions.\n\n"
+                # ── Anti-hallucination / grounding rules ──────────────────
+                "GROUNDING RULES:\n"
+                "- Every ticket ID, count, date, or quantitative claim must come from a tool "
+                "response received in THIS turn. Never cite from memory or training data.\n"
+                "- **USE THE DATA.** If a tool returns a non-empty result — matches, "
+                "tickets, threads, anomalies, top_issues, csat, any populated list or dict "
+                "of rows — INCORPORATE IT into your answer. Do NOT say 'I encountered an "
+                "issue retrieving the data' when the tool successfully returned data. Only "
+                "claim a tool failure if the response contains an explicit `error` field.\n"
+                "- When reporting anomalies, print ONLY the fields the tool returned "
+                "(date, trc_code, metric_type, z_score, theta_level, notes, description). "
+                "Never invent severity words, root causes, or narrative explanations beyond "
+                "what `notes` or `description` contain.\n"
+                "- theta_level=1 is 'minor'; theta_level=2 is 'severe'. Do not call a "
+                "theta=1 anomaly 'critical'.\n"
+                "- If a tool returns zero rows but scope.raw_tickets_in_filter > 0 (or the "
+                "response contains a `hint` field), follow the hint and retry with a "
+                "different group_by — do NOT declare the data absent from the database.\n"
+                "- If a tool returns zero rows with no hint, say 'the tool returned no "
+                "matches for that filter' and offer to broaden the query."
             ),
             task_type="report_generation",
             context_provider=self._provide_context,
@@ -118,6 +158,11 @@ class GeminiChatsPage(QWidget):
         self._engine.error_occurred.connect(self._on_error)
         self._engine.busy_changed.connect(self._on_busy_changed)
         self._engine.status_update.connect(self._on_status_update)
+        # F-9 adaptive recycle: engine emits this after N consecutive degraded
+        # responses. We shut down the warm bridge; _ensure_warm_bridge() rebuilds
+        # on the next send. The engine surfaces a user-visible status string
+        # before this fires so the user understands the extra latency.
+        self._engine.bridge_recycle_requested.connect(self._on_bridge_recycle)
 
         # Wire telemetry callback for chat_messages storage
         self._engine.set_telemetry_callback(self._on_telemetry)
@@ -155,8 +200,16 @@ class GeminiChatsPage(QWidget):
                 f"across {trc_count} TRC categories, "
                 f"date range: {date_range[0] or 'unknown'} to {date_range[1] or 'unknown'}. "
                 f"It also contains {convo_count} full conversation threads (searchable). "
-                f"Use query_tickets for structured data (dates, TRCs, status). "
-                f"Use search_conversations for text search across thread content."
+                f"Tool guidance: "
+                f"`query_issues` (group_by: trc|payer|provider|concept|cluster) for counts "
+                f"and ranked issue lists; "
+                f"`semantic_search` for natural-language lookup; "
+                f"`query_stats` for anomalies/trends/baselines/csat AND "
+                f"`stat_type='friction_distribution'` for product-bug / friction-type / "
+                f"repeat-contact / feature-broken aggregates "
+                f"(use this instead of semantic_search when the user wants a friction-type breakdown); "
+                f"`read_thread` for a ticket's full conversation; "
+                f"`list_tickets` for raw ticket filters."
             )
         except Exception as e:
             logger.warning("Context scope failed: %s", e)
@@ -429,6 +482,17 @@ class GeminiChatsPage(QWidget):
             logger.info("Warm bridge booted for chat with MCP (model=%s)", model)
         except Exception as e:
             logger.warning("Warm bridge boot failed, using build-per-message: %s", e)
+            self._warm_bridge = None
+
+    def _on_bridge_recycle(self):
+        """F-9: tear down the warm bridge on engine request; next send()
+        will re-boot through _ensure_warm_bridge()."""
+        if self._warm_bridge is not None:
+            logger.info("Bridge recycle requested by engine (degraded-response streak)")
+            try:
+                self._warm_bridge.shutdown()
+            except Exception as e:
+                logger.debug("Bridge shutdown during recycle failed: %s", e)
             self._warm_bridge = None
 
     # ── Session chips ────────────────────────────────────

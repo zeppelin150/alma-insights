@@ -100,12 +100,46 @@ def _lookup_expected_cluster(conn, tag: str) -> tuple[Optional[str], Optional[st
     )
 
 
-def _tagged_ticket_ids(conn, tag: str) -> list[str]:
-    rows = conn.execute(
-        "SELECT DISTINCT ticket_id FROM ticket_tags WHERE tag = ?",
-        (tag,),
-    ).fetchall()
-    return [r[0] for r in rows]
+def _tagged_ticket_ids(conn, tag: str) -> tuple[list[str], str]:
+    """Return ticket_ids that carry the given tag AND the source used.
+
+    Primary source: ticket_tags table (the canonical home of
+    cross-cutting tags applied by enrichment pipelines).
+
+    Fallback: ticket_index.friction_type (bug-bash 2026-04-23 F-8).
+    Many production DBs never had the ticket_tags pipeline run but do
+    have friction_type populated on ticket_index. Without this fallback
+    audit_tag_correlation always reports 'no tickets' for tags like
+    'incorrect_charge' / 'feature_broken' that live in friction_type.
+
+    Other possible locations (kept for future expansion):
+    - ticket_index.tags (JSON string of tags per ticket)
+    - tickets.tags (Zendesk-style tag list)
+    """
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT ticket_id FROM ticket_tags WHERE tag = ?",
+            (tag,),
+        ).fetchall()
+    except Exception:
+        rows = []
+    ids = [r[0] for r in rows]
+    if ids:
+        return ids, "ticket_tags"
+
+    # Fallback: friction_type on ticket_index
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT ticket_id FROM ticket_index WHERE friction_type = ?",
+            (tag,),
+        ).fetchall()
+    except Exception:
+        rows = []
+    ids = [r[0] for r in rows]
+    if ids:
+        return ids, "ticket_index.friction_type"
+
+    return [], "ticket_tags"  # empty, but indicate primary source attempted
 
 
 def _concept_distribution(conn, ticket_ids: list[str]) -> list[dict]:
@@ -263,7 +297,7 @@ def audit_tag_correlation(
         return {"error": "tag is required (non-empty string)"}
     top_k = max(1, min(int(top_k), _MAX_TOP_K))
 
-    tagged_ids = _tagged_ticket_ids(conn, tag)
+    tagged_ids, tag_source = _tagged_ticket_ids(conn, tag)
     total = len(tagged_ids)
 
     expected_cid, expected_label, incident_desc = _lookup_expected_cluster(conn, tag)
@@ -294,6 +328,7 @@ def audit_tag_correlation(
 
     return {
         "tag": tag,
+        "tag_source": tag_source,
         "total_tagged_tickets": total,
         "tagged_with_assignment": int(with_assignment_count),
         "tagged_unassigned": total - int(with_assignment_count),

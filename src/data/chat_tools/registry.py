@@ -214,9 +214,15 @@ def _persist_tool_execution(
     elapsed_ms: float,
     error: str | None,
 ) -> None:
-    """Write a row to chat_tool_executions (best-effort, non-blocking)."""
-    if not session_id:
-        return  # Can't log without session context
+    """Write a row to chat_tool_executions (best-effort, non-blocking).
+
+    When session_id is None (programmatic probes, harness runs, any
+    non-UI caller) we still write with a synthetic "adhoc_probe"
+    session_id so the paper trail survives. Previously this silently
+    dropped the row — which hid every programmatic invocation from
+    the audit table.
+    """
+    effective_session_id = session_id or "adhoc_probe"
 
     try:
         # Check table exists (graceful on pre-009 databases)
@@ -240,7 +246,7 @@ def _persist_tool_execution(
             (
                 str(uuid.uuid4()),
                 message_id or "",
-                session_id,
+                effective_session_id,
                 tool_name,
                 json.dumps(args, default=str),
                 result_json,

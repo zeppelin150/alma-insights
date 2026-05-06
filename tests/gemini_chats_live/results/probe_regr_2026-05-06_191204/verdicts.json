@@ -1,0 +1,59 @@
+{
+  "stamp": "2026-05-06_191204",
+  "model": "gemini-2.5-flash-lite",
+  "iterations_per_q": 5,
+  "questions": [
+    "Q07",
+    "Q08",
+    "Q17"
+  ],
+  "aggregate": {
+    "Q07": {
+      "iterations": 5,
+      "PASS": 1,
+      "FAIL": 0,
+      "WEAK": 4,
+      "UNKNOWN": 0,
+      "pass_rate": 0.2,
+      "verdicts_in_order": [
+        "WEAK",
+        "PASS",
+        "WEAK",
+        "WEAK",
+        "WEAK"
+      ]
+    },
+    "Q08": {
+      "iterations": 5,
+      "PASS": 3,
+      "FAIL": 1,
+      "WEAK": 1,
+      "UNKNOWN": 0,
+      "pass_rate": 0.6,
+      "verdicts_in_order": [
+        "PASS",
+        "PASS",
+        "FAIL",
+        "PASS",
+        "WEAK"
+      ]
+    },
+    "Q17": {
+      "iterations": 5,
+      "PASS": 4,
+      "FAIL": 1,
+      "WEAK": 0,
+      "UNKNOWN": 0,
+      "pass_rate": 0.8,
+      "verdicts_in_order": [
+        "PASS",
+        "PASS",
+        "PASS",
+        "PASS",
+        "FAIL"
+      ]
+    }
+  },
+  "tool_trace_count": 0,
+  "tool_trace": []
+}

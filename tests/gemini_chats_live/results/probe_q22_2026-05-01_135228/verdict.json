@@ -1,0 +1,18 @@
+{
+  "timestamp": "2026-05-01_135228",
+  "model": "gemini-2.5-flash-lite",
+  "iterations": 5,
+  "verdicts": [
+    "PASS",
+    "PASS",
+    "PASS",
+    "PASS",
+    "PASS"
+  ],
+  "pass_count": 5,
+  "fail_count": 0,
+  "weak_count": 0,
+  "pass_rate": 1.0,
+  "aggregate": "CLEAN",
+  "leak_counts": {}
+}

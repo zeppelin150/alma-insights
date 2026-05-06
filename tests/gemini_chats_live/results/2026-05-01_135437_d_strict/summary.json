@@ -1,0 +1,15 @@
+{
+  "started_at": "2026-05-01_135437_d_strict",
+  "run_start_iso": "2026-05-01T13:54:37",
+  "model": "gemini-2.5-flash-lite",
+  "timeout_s": 240,
+  "prompt_preset": "none",
+  "prompt_extra_chars": 0,
+  "restart_every": 0,
+  "db_path": "C:\\alma-insights\\data\\local_warehouse.db",
+  "total_questions": 22,
+  "completed": 22,
+  "errors": 0,
+  "timeouts": 0,
+  "finished_at": "2026-05-01_135636"
+}

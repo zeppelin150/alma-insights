@@ -149,23 +149,84 @@ TOOL_SCHEMAS = [
     {
         "name": "query_stats",
         "description": (
-            "Query statistical engine outputs: anomalies, trends, or baselines."
+            "Query statistical engine outputs. "
+            "stat_type=anomalies returns real statistical anomalies from anomaly_flags "
+            "(z_score, theta_level, metric_type, date, notes). "
+            "stat_type=trends returns weekly volume by dimension "
+            "(trc, friction_type, sub_cluster, payer, provider). "
+            "stat_type=baselines returns TRC baseline snapshots. "
+            "stat_type=csat returns CSAT score bucket counts (low/mid/high/null + mean). "
+            "stat_type=friction_distribution returns the ranked breakdown of "
+            "ticket_index.friction_type — USE THIS for 'product bug', 'feature broken', "
+            "'friction pattern', 'repeat contact', or any aggregate-over-friction question. "
+            "Optional cross_dim='trc'|'payer' nests per-dimension counts inside each row."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "stat_type": {
                     "type": "string",
-                    "enum": ["anomalies", "trends", "baselines"],
+                    "enum": [
+                        "anomalies", "trends", "baselines", "csat",
+                        "friction_distribution",
+                    ],
                     "description": "Type of statistical data to query",
                 },
                 "severity": {
                     "type": "string",
-                    "description": "Anomaly severity filter (for stat_type=anomalies)",
+                    "enum": ["severe", "minor"],
+                    "description": "Anomaly severity filter (for stat_type=anomalies). "
+                    "'severe' = theta_level>=2, 'minor' = theta_level=1.",
+                },
+                "metric_type": {
+                    "type": "string",
+                    "description": "Anomaly metric filter (sentiment, term_freq, volume...)",
+                },
+                "trc_code": {
+                    "type": "string",
+                    "description": "Filter anomalies to one TRC",
+                },
+                "date_range": {
+                    "type": "string",
+                    "description": "ISO range 'YYYY-MM-DD/YYYY-MM-DD' for anomaly/trend date filter",
                 },
                 "dimension": {
                     "type": "string",
-                    "description": "Trend dimension (for stat_type=trends, e.g. friction_type)",
+                    "enum": [
+                        "trc", "trc_code", "friction_type",
+                        "sub_cluster", "cluster", "sub_pattern",
+                        "payer", "insurance_payer",
+                        "provider", "provider_id",
+                    ],
+                    "description": "Trend dimension (for stat_type=trends)",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max rows to return (default 20, max 100/500 depending on stat_type)",
+                },
+                "top_k": {
+                    "type": "integer",
+                    "description": "(friction_distribution only) Top N friction types, default 10, max 20",
+                },
+                "cross_dim": {
+                    "type": "string",
+                    "enum": ["trc", "payer"],
+                    "description": "(friction_distribution only) Nest a per-{trc|payer} breakdown inside each row",
+                },
+                "friction_type": {
+                    "type": "string",
+                    "description": (
+                        "(friction_distribution only) Filter to a single friction type. "
+                        "Known canonical values: incorrect_charge, feature_broken, "
+                        "repeat_contact, access_blocked, policy_confusion, missing_information, "
+                        "self_serve_failure, process_delay, automation_loop, communication_gap, "
+                        "escalation_demand, other. Open enum — novel values return a "
+                        "gate_warning rather than an error."
+                    ),
+                },
+                "payer": {
+                    "type": "string",
+                    "description": "(friction_distribution / trends only) Substring filter on insurance_payer",
                 },
             },
             "required": ["stat_type"],
@@ -239,47 +300,45 @@ def _get_db_connection():
     return conn
 
 
+_MCP_ALLOWED_TOOLS = {t["name"] for t in TOOL_SCHEMAS}
+
+
 def _execute_tool(name, args):
-    """Execute a chat tool and return the result dict."""
+    """Execute a chat tool and return the result dict.
+
+    Delegates to src.data.chat_tools.registry.dispatch_tool so every
+    call is logged to chat_tool_executions with a synthetic session id
+    ("adhoc_probe" when no session context is threaded through the MCP
+    protocol). Previously this function imported handlers directly,
+    bypassing the registry, which is why the audit table stayed empty
+    (bug-bash 2026-04-23, F-5).
+
+    Restricts to tool names declared in TOOL_SCHEMAS so legacy registry
+    aliases (query_entities, query_tickets, etc.) don't leak through
+    the MCP interface.
+    """
+    if name not in _MCP_ALLOWED_TOOLS:
+        return {"error": f"Unknown tool: {name}"}
+
     conn = _get_db_connection()
     if not conn:
         return {"error": "ALMA_DB_PATH not set"}
 
     try:
-        if name == "query_issues":
-            from src.data.issue_query_handler import handle_query_issues
-            return handle_query_issues(conn, args, session_filters={})
-
-        elif name == "audit_tag_correlation":
-            from src.data.tag_audit import handle_audit_tag_correlation
-            return handle_audit_tag_correlation(conn, args, session_filters={})
-
-        elif name == "list_tickets":
-            from src.data.chat_tools.fast_path import handle_list_tickets
-            return handle_list_tickets(conn, args, session_filters={})
-
-        elif name == "semantic_search":
-            from src.data.chat_tools.semantic_tools import handle_semantic_search
-            return handle_semantic_search(conn, args, session_filters={})
-
-        elif name == "query_stats":
-            from src.data.chat_tools.fast_path import handle_query_stats
-            return handle_query_stats(conn, args, session_filters={})
-
-        elif name == "read_thread":
-            from src.data.chat_tools.thread_tools import handle_read_thread
-            return handle_read_thread(conn, args, session_filters={})
-
-        elif name == "read_threads_batch":
-            from src.data.chat_tools.thread_tools import handle_read_threads_batch
-            return handle_read_threads_batch(conn, args, session_filters={})
-
-        elif name == "query_report":
-            from src.data.chat_tools.report_tools import handle_query_report
-            return handle_query_report(conn, args, session_filters={})
-
-        else:
-            return {"error": f"Unknown tool: {name}"}
+        from src.data.chat_tools.registry import dispatch_tool
+        # dispatch_tool returns a JSON string; MCP expects a dict.
+        result_json = dispatch_tool(
+            tool_name=name,
+            args=args,
+            conn=conn,
+            session_filters={},
+            session_id=None,  # resolves to "adhoc_probe" in registry
+            message_id=None,
+        )
+        try:
+            return json.loads(result_json)
+        except (json.JSONDecodeError, TypeError):
+            return {"raw": result_json}
     except Exception as e:
         return {"error": str(e)}
     finally:

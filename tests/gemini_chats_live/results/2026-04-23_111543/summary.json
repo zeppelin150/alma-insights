@@ -1,0 +1,11 @@
+{
+  "started_at": "2026-04-23_111543",
+  "model": "gemini-2.5-flash-lite",
+  "timeout_s": 240,
+  "db_path": "C:\\alma-insights\\data\\local_warehouse.db",
+  "total_questions": 22,
+  "completed": 18,
+  "errors": 0,
+  "timeouts": 4,
+  "finished_at": "2026-04-23_113423"
+}
