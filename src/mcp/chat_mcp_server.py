@@ -303,15 +303,35 @@ def _get_db_connection():
 _MCP_ALLOWED_TOOLS = {t["name"] for t in TOOL_SCHEMAS}
 
 
+def _read_active_session_id() -> str | None:
+    """Read the chat session-id pointer file the host page maintains.
+
+    Added 2026-05-07: previously every MCP tool dispatch was tagged with
+    'adhoc_probe' because the stdio MCP protocol provides no session
+    context. The chat page now writes the active session_id to a file
+    whose path is passed in via the ALMA_CHAT_SESSION_FILE env var; the
+    server reads it on every dispatch. Falls back to None (so the
+    registry auto-tags 'adhoc_probe') when the file is unreadable.
+    """
+    path = os.environ.get("ALMA_CHAT_SESSION_FILE", "")
+    if not path:
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            value = f.read().strip()
+        return value or None
+    except OSError:
+        return None
+
+
 def _execute_tool(name, args):
     """Execute a chat tool and return the result dict.
 
-    Delegates to src.data.chat_tools.registry.dispatch_tool so every
-    call is logged to chat_tool_executions with a synthetic session id
-    ("adhoc_probe" when no session context is threaded through the MCP
-    protocol). Previously this function imported handlers directly,
-    bypassing the registry, which is why the audit table stayed empty
-    (bug-bash 2026-04-23, F-5).
+    Delegates to src.data.chat_tools.registry.dispatch_tool so every call
+    is logged to chat_tool_executions. The session_id is sourced from
+    the ALMA_CHAT_SESSION_FILE pointer (see ``_read_active_session_id``)
+    so the Drill Down monitor's tools tile actually counts the calls.
+    Falls back to "adhoc_probe" when no chat session is active.
 
     Restricts to tool names declared in TOOL_SCHEMAS so legacy registry
     aliases (query_entities, query_tickets, etc.) don't leak through
@@ -324,6 +344,8 @@ def _execute_tool(name, args):
     if not conn:
         return {"error": "ALMA_DB_PATH not set"}
 
+    session_id = _read_active_session_id()
+
     try:
         from src.data.chat_tools.registry import dispatch_tool
         # dispatch_tool returns a JSON string; MCP expects a dict.
@@ -332,7 +354,7 @@ def _execute_tool(name, args):
             args=args,
             conn=conn,
             session_filters={},
-            session_id=None,  # resolves to "adhoc_probe" in registry
+            session_id=session_id,  # sourced from pointer file; None → adhoc_probe
             message_id=None,
         )
         try:

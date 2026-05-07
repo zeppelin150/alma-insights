@@ -99,6 +99,11 @@ class MessageBubble(QFrame):
         lbl = QLabel(content)
         lbl.setWordWrap(True)
         lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        # 2026-05-07: MinimumExpanding vertical policy fixes the long-message
+        # cutoff bug. Without it, QLabel with wordwrap computes height from
+        # initial width (before layout assigns real width) and clips long
+        # responses mid-line.
+        lbl.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.MinimumExpanding)
         lbl.setStyleSheet(f"""
             font-size: 14px; color: {ALMA_CREAM};
             line-height: 22px; background: transparent;
@@ -205,6 +210,7 @@ class MessageBubble(QFrame):
         # Section header (bold)
         header_lbl = QLabel(header)
         header_lbl.setWordWrap(True)
+        header_lbl.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.MinimumExpanding)
         header_lbl.setStyleSheet(f"""
             font-size: 14px; font-weight: 700;
             color: {ALMA_TEXT_DARK}; background: transparent;
@@ -236,6 +242,7 @@ class MessageBubble(QFrame):
                 lbl = QLabel(clean)
                 lbl.setWordWrap(True)
                 lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                lbl.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.MinimumExpanding)
                 lbl.setStyleSheet(f"""
                     font-size: 13px; color: {ALMA_TEXT_DARK};
                     line-height: 22px; background: transparent;
@@ -294,6 +301,7 @@ class MessageBubble(QFrame):
         lbl = QLabel(clean)
         lbl.setWordWrap(True)
         lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        lbl.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.MinimumExpanding)
         lbl.setStyleSheet(f"""
             font-size: 13px; color: {ALMA_TEXT_DARK};
             line-height: 22px; background: transparent;

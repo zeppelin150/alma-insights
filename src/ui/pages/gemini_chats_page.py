@@ -450,9 +450,23 @@ class GeminiChatsPage(QWidget):
     # ── Warm bridge ──────────────────────────────────────
 
     def _build_mcp_config(self) -> list[dict]:
-        """Build MCP server config for chat tools."""
+        """Build MCP server config for chat tools.
+
+        2026-05-07 fix: also point the server at a per-session pointer file
+        (data/.current_chat_session) so each MCP tool dispatch tags its
+        chat_tool_executions row with the active chat session_id. Without
+        this, dispatch_tool falls back to "adhoc_probe" and the Drill Down
+        monitor counts 0 tool calls (it queries WHERE session_id = <real>).
+        The pointer file is written by ChatEngine.send() at chat-page
+        construction time and refreshed every session switch.
+        """
         import sys
+        from pathlib import Path
         db_path = str(self.db.db_path) if hasattr(self.db, "db_path") else ""
+        pointer_file = str(
+            Path(db_path).parent / ".current_chat_session"
+            if db_path else ""
+        )
         return [
             {
                 "name": "alma-chat-tools",
@@ -460,9 +474,25 @@ class GeminiChatsPage(QWidget):
                 "args": ["-m", "src.mcp.chat_mcp_server"],
                 "env": [
                     {"name": "ALMA_DB_PATH", "value": db_path},
+                    {"name": "ALMA_CHAT_SESSION_FILE", "value": pointer_file},
                 ],
             }
         ]
+
+    def _write_session_pointer(self) -> None:
+        """Atomically write the active session_id to the pointer file the
+        MCP server reads on each dispatch. Called whenever session changes."""
+        if not self._session_id:
+            return
+        try:
+            from pathlib import Path
+            db_path = getattr(self.db, "db_path", None)
+            if not db_path:
+                return
+            pointer = Path(str(db_path)).parent / ".current_chat_session"
+            pointer.write_text(self._session_id, encoding="utf-8")
+        except Exception as exc:
+            logger.debug("session pointer write failed: %s", exc)
 
     def _ensure_warm_bridge(self):
         """Boot the warm bridge on first use, reuse thereafter.
@@ -475,7 +505,14 @@ class GeminiChatsPage(QWidget):
 
         try:
             from src.agents.report_bridge_client import ReportBridgeClient
-            model = self._model_combo.currentData() or "gemini-2.5-flash-lite"
+            # 2026-05-07: never fall back to gemini-2.5-flash-lite — it returns
+            # invalid_stream errors on ACP tool calls (memory: bridge_v5_rewrite.md).
+            # If the combo picker has nothing selected, default to the working
+            # flash tier rather than the broken lite tier.
+            model = self._model_combo.currentData() or "gemini-2.5-flash"
+            if "lite" in model:
+                logger.info("rewriting %s -> gemini-2.5-flash (lite is broken)", model)
+                model = "gemini-2.5-flash"
             self._warm_bridge = ReportBridgeClient(model=model)
             self._warm_bridge.set_mcp_config(self._build_mcp_config())
             self._engine.set_client(self._warm_bridge)
@@ -658,6 +695,7 @@ class GeminiChatsPage(QWidget):
                 return
             self._session_id = session_id
             self._engine.set_session_id(session_id)
+            self._write_session_pointer()  # MCP server reads this per-dispatch
             self._engine.set_history(session.get("messages", []))
             self._clear_messages_ui()
             for msg in self._engine.history:
@@ -701,6 +739,7 @@ class GeminiChatsPage(QWidget):
                 from src.services.chat_session import create_session
                 self._session_id = create_session("gemini_chats", conn=self.db.conn)
                 self._engine.set_session_id(self._session_id)
+                self._write_session_pointer()  # MCP server tags tool calls
             except Exception as e:
                 logger.warning("Session create failed: %s", e)
 
@@ -748,20 +787,32 @@ class GeminiChatsPage(QWidget):
 
         This fires BEFORE response_ready, so we write the message here
         with full telemetry and set a flag so _on_response skips the duplicate write.
+
+        2026-05-07 fix: compute cost_usd from tokens × model pricing so the
+        Drill Down monitor's "Cost" tile actually moves off $0.0000.
+        Previously the path persisted tokens but skipped cost entirely.
         """
         if not self._session_id:
             return
         try:
             from src.services.chat_session import append_message
+            from src.data.usage_tracker import UsageTracker
             # Build tool_calls list for persistence
             tool_names = telemetry.get("tool_names", [])
             tool_calls_data = [{"name": n} for n in tool_names] if tool_names else None
 
+            # Compute cost from tokens (estimate_tokens already populated by ChatEngine)
+            tokens_in = telemetry.get("tokens_in") or 0
+            tokens_out = telemetry.get("tokens_out") or 0
+            model_used = telemetry.get("model_used") or "gemini-2.5-flash"
+            cost_usd = UsageTracker.estimate_cost(tokens_in, tokens_out, model_used)
+
             append_message(
                 self._session_id, role, content, self.db.conn,
-                model_used=telemetry.get("model_used"),
-                tokens_in=telemetry.get("tokens_in"),
-                tokens_out=telemetry.get("tokens_out"),
+                model_used=model_used,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                cost_usd=cost_usd,
                 latency_ms=telemetry.get("latency_ms"),
                 tool_calls=tool_calls_data,
             )
