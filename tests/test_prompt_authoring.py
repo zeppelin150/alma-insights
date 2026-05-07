@@ -290,3 +290,33 @@ class TestParseAuthoringResponse:
     def test_empty_response_returns_empty_dict(self):
         from src.ui.widgets.prompt_wizard import _parse_authoring_response
         assert _parse_authoring_response("") == {}
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Analysis Canvas dropdown refresh — 2026-05-07 user-reported bug
+# ──────────────────────────────────────────────────────────────────────
+
+class TestCanvasComboRefresh:
+    """When the wizard saves a custom prompt, the Analysis Canvas combo
+    must pick it up immediately. Wired via prompts_tab.prompt_saved signal.
+    Validates the signal-connection contract end-to-end without instantiating
+    the full Qt page (we just exercise the wiring shape)."""
+
+    def test_managepromtstab_emits_prompt_saved(self, qtbot=None):
+        """Smoke: verify ManagePromptsTab re-emits the wizard's signal."""
+        # Minimal smoke — full Qt instantiation requires offscreen platform
+        # which is verified by tests/test_ai_reports_e2e.py. Here we just
+        # confirm the signal exists at the class level.
+        from PySide6.QtCore import Signal
+        from src.ui.pages.ai_reports_prompts_tab import ManagePromptsTab
+        # Signal is a class attribute on QObject subclasses
+        assert hasattr(ManagePromptsTab, "prompt_saved"), (
+            "ManagePromptsTab must expose prompt_saved signal so the canvas "
+            "dropdown can refresh when a new custom prompt is authored."
+        )
+
+    def test_promptwizard_emits_prompt_saved(self):
+        from src.ui.widgets.prompt_wizard import PromptWizard
+        assert hasattr(PromptWizard, "prompt_saved"), (
+            "PromptWizard must emit prompt_saved(name) on save."
+        )

@@ -820,6 +820,12 @@ class AIReportsPage(QWidget):
         from src.ui.pages.ai_reports_prompts_tab import ManagePromptsTab
         self._prompts_tab = ManagePromptsTab(self.db)
         self._tab_widget.addTab(self._prompts_tab, "Manage prompts")
+        # 2026-05-07 fix: when the wizard saves a new prompt, refresh the
+        # Analysis Canvas dropdown so the user can pick it immediately
+        # without having to close + reopen the page.
+        self._prompts_tab.prompt_saved.connect(
+            lambda _name: self._populate_prompt_combo()
+        )
 
         # ── Tab 3: A/B Compare ──
         try:
