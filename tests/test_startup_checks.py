@@ -156,47 +156,169 @@ from src.startup.checks import gemini as gem_check
 
 
 class TestGeminiOAuth:
+    """Behavioural contracts for check_gemini_oauth. The subprocess-based
+    probe was retired on 2026-04-17 (see TestGeminiOAuthFileBased). These
+    tests target the current file-based implementation."""
+
     def test_cli_missing_fails(self, monkeypatch):
         monkeypatch.setattr(gem_check, "_resolve_cli_path", lambda: None)
         result = gem_check.check_gemini_oauth()
         assert result.status == "fail"
         assert "not found" in result.message.lower()
 
-    def test_cli_timeout_fails(self, monkeypatch, tmp_path):
-        fake_cli = tmp_path / "gemini"
-        fake_cli.write_text("")
-        monkeypatch.setattr(gem_check, "_resolve_cli_path", lambda: fake_cli)
-        def raise_timeout(*a, **kw):
-            raise subprocess.TimeoutExpired(cmd="gemini", timeout=1)
-        monkeypatch.setattr(gem_check.subprocess, "run", raise_timeout)
-        result = gem_check.check_gemini_oauth()
-        assert result.status == "fail"
-        assert "timed out" in result.message.lower()
-
-    def test_cli_nonzero_fails(self, monkeypatch, tmp_path):
-        fake_cli = tmp_path / "gemini"
-        fake_cli.write_text("")
-        monkeypatch.setattr(gem_check, "_resolve_cli_path", lambda: fake_cli)
-        result_proc = MagicMock(returncode=1, stderr="unauthenticated", stdout="")
-        monkeypatch.setattr(gem_check.subprocess, "run", lambda *a, **k: result_proc)
-        result = gem_check.check_gemini_oauth()
-        assert result.status == "fail"
-        assert "unauthenticated" in result.message.lower()
-
-    def test_cli_ok_passes(self, monkeypatch, tmp_path):
-        fake_cli = tmp_path / "gemini"
-        fake_cli.write_text("")
-        monkeypatch.setattr(gem_check, "_resolve_cli_path", lambda: fake_cli)
-        result_proc = MagicMock(returncode=0, stderr="", stdout="pong")
-        monkeypatch.setattr(gem_check.subprocess, "run", lambda *a, **k: result_proc)
-        result = gem_check.check_gemini_oauth()
-        assert result.status == "pass"
-
     def test_unauthenticated_detector(self):
+        """_looks_unauthenticated is retained for backwards compat with any
+        caller that still imports it."""
         assert gem_check._looks_unauthenticated("Error: not logged in")
         assert gem_check._looks_unauthenticated("auth error: refresh failed")
         assert not gem_check._looks_unauthenticated("fine")
         assert not gem_check._looks_unauthenticated("")
+
+    def test_cli_missing_is_non_critical(self, monkeypatch):
+        """Missing CLI should not block Continue — user must be able to reach Settings."""
+        monkeypatch.setattr(gem_check, "_resolve_cli_path", lambda: None)
+        result = gem_check.check_gemini_oauth()
+        assert result.critical is False
+
+    def test_missing_oauth_file_is_non_critical(self, monkeypatch, tmp_path):
+        fake_cli = tmp_path / "gemini"
+        fake_cli.write_text("")
+        monkeypatch.setattr(gem_check, "_resolve_cli_path", lambda: fake_cli)
+        monkeypatch.setattr(gem_check, "_oauth_file_path", lambda: tmp_path / "nope.json")
+        result = gem_check.check_gemini_oauth()
+        assert result.critical is False
+
+    def test_malformed_oauth_file_is_non_critical(self, monkeypatch, tmp_path):
+        fake_cli = tmp_path / "gemini"
+        fake_cli.write_text("")
+        bad = tmp_path / "google_accounts.json"
+        bad.write_text("{not-valid-json")
+        monkeypatch.setattr(gem_check, "_resolve_cli_path", lambda: fake_cli)
+        monkeypatch.setattr(gem_check, "_oauth_file_path", lambda: bad)
+        result = gem_check.check_gemini_oauth()
+        assert result.status == "fail"
+        assert result.critical is False
+
+    def test_probe_timeout_is_short(self):
+        """Regression guard: if anyone ever re-introduces a subprocess
+        timeout, keep it short."""
+        assert gem_check._TIMEOUT_SECONDS <= 5, (
+            f"_TIMEOUT_SECONDS={gem_check._TIMEOUT_SECONDS}s is too long."
+        )
+
+
+class TestGeminiOAuthFileBased:
+    """Bug-bash 2026-04-17 — the subprocess probe stalled the splash for
+    ~55s on every launch because Python's subprocess timeout could not
+    reap orphaned node.exe grandchildren of the `gemini --prompt` call.
+    Replaced with a file-based check that reads
+    ~/.gemini/google_accounts.json directly. Runs in microseconds, no
+    cmd.exe flash, no hang risk."""
+
+    def test_no_subprocess_in_check_function(self):
+        """Primary contract: the probe must not spawn any subprocess."""
+        import inspect
+        src = inspect.getsource(gem_check.check_gemini_oauth)
+        # We allow `subprocess` to still be imported (module-level) but
+        # the check function must not call subprocess.run / Popen.
+        assert "subprocess.run" not in src, (
+            "check_gemini_oauth must not call subprocess.run — the blocking "
+            "probe is what stalled the splash. Use a file-based check."
+        )
+        assert "subprocess.Popen" not in src, (
+            "check_gemini_oauth must not spawn processes."
+        )
+
+    def test_missing_cli_still_fails(self, monkeypatch):
+        """Keep the CLI-not-found signal — users need to know if the bundled
+        CLI is gone."""
+        monkeypatch.setattr(gem_check, "_resolve_cli_path", lambda: None)
+        result = gem_check.check_gemini_oauth()
+        assert result.status == "fail"
+        assert "not found" in result.message.lower()
+        assert result.critical is False  # Bug #2 — non-critical
+
+    def test_missing_oauth_file_is_warn_or_fail(self, monkeypatch, tmp_path):
+        """CLI present, no google_accounts.json → not authenticated."""
+        fake_cli = tmp_path / "gemini"
+        fake_cli.write_text("")
+        monkeypatch.setattr(gem_check, "_resolve_cli_path", lambda: fake_cli)
+        monkeypatch.setattr(gem_check, "_oauth_file_path", lambda: tmp_path / "missing.json")
+        result = gem_check.check_gemini_oauth()
+        assert result.status in ("fail", "warn")
+        assert result.critical is False
+
+    def test_empty_oauth_file_is_not_pass(self, monkeypatch, tmp_path):
+        """File exists but has no refresh token → not authenticated."""
+        fake_cli = tmp_path / "gemini"
+        fake_cli.write_text("")
+        monkeypatch.setattr(gem_check, "_resolve_cli_path", lambda: fake_cli)
+        bad = tmp_path / "google_accounts.json"
+        bad.write_text("{}")
+        monkeypatch.setattr(gem_check, "_oauth_file_path", lambda: bad)
+        result = gem_check.check_gemini_oauth()
+        assert result.status != "pass"
+
+    def test_valid_oauth_file_passes(self, monkeypatch, tmp_path):
+        """CLI present, google_accounts.json has a refresh token → pass."""
+        fake_cli = tmp_path / "gemini"
+        fake_cli.write_text("")
+        monkeypatch.setattr(gem_check, "_resolve_cli_path", lambda: fake_cli)
+        good = tmp_path / "google_accounts.json"
+        good.write_text('{"refresh_token": "1//abc123"}')
+        monkeypatch.setattr(gem_check, "_oauth_file_path", lambda: good)
+        result = gem_check.check_gemini_oauth()
+        assert result.status == "pass", (
+            f"Expected pass with valid refresh_token; got {result.status} — {result.message}"
+        )
+
+    def test_check_completes_in_under_100ms(self, monkeypatch, tmp_path):
+        """The whole point of this refactor: no subprocess, no hang."""
+        import time
+        fake_cli = tmp_path / "gemini"
+        fake_cli.write_text("")
+        monkeypatch.setattr(gem_check, "_resolve_cli_path", lambda: fake_cli)
+        good = tmp_path / "google_accounts.json"
+        good.write_text('{"refresh_token": "1//abc123"}')
+        monkeypatch.setattr(gem_check, "_oauth_file_path", lambda: good)
+
+        t0 = time.monotonic()
+        gem_check.check_gemini_oauth()
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        assert elapsed_ms < 100, (
+            f"File-based probe took {elapsed_ms:.0f}ms — should be <100ms."
+        )
+
+
+class TestCheckerFailedIds:
+    """Gate 2 of bug #2 — caller must be able to see which checks failed
+    so that main.py can route the user to the right Settings page."""
+
+    def test_failed_check_ids_is_empty_when_all_pass(self):
+        from src.startup.checker import Checker, CheckResult
+
+        def ok():
+            return CheckResult(id="ok", name="ok", status="pass", critical=True)
+
+        c = Checker([("ok", ok)])
+        c.run_all()
+        assert c.failed_check_ids == []
+
+    def test_failed_check_ids_lists_warn_and_fail(self):
+        from src.startup.checker import Checker, CheckResult
+
+        def ok():
+            return CheckResult(id="ok", name="ok", status="pass", critical=True)
+
+        def warned():
+            return CheckResult(id="gemini_oauth", name="g", status="warn", critical=False)
+
+        def failed():
+            return CheckResult(id="cli", name="cli", status="fail", critical=False)
+
+        c = Checker([("ok", ok), ("gemini_oauth", warned), ("cli", failed)])
+        c.run_all()
+        assert set(c.failed_check_ids) == {"gemini_oauth", "cli"}
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -350,6 +472,52 @@ class TestDatabase:
         assert result.status == "fail"
         assert result.critical is True
 
+    # ── Bug-bash 2026-04-17 ────────────────────────────────────────
+    # The check pointed at `data/alma_insights.db` but the real DB is
+    # `data/local_warehouse.db` (see connection_factory.py:34 and
+    # db_manager.py:16). The check also queried the wrong column on
+    # schema_migrations — the actual schema is (filename, applied_at),
+    # not (version). Result: check always hit the "no DB yet" branch
+    # and silently created a 0-byte stub file.
+
+    def test_db_path_points_at_local_warehouse(self):
+        """The default _DB_PATH must match the path the app actually uses."""
+        from src.data.connection_factory import DEFAULT_DB_PATH
+        assert db_check._DB_PATH.name == DEFAULT_DB_PATH.name, (
+            f"database check reads {db_check._DB_PATH.name!r} but the app "
+            f"actually uses {DEFAULT_DB_PATH.name!r}. The check is looking "
+            "at the wrong file."
+        )
+
+    def test_real_schema_migrations_layout(self, tmp_path, monkeypatch):
+        """Reads schema version from a filename-based migrations table."""
+        db = tmp_path / "local_warehouse.db"
+        with sqlite3.connect(str(db)) as conn:
+            conn.execute(
+                "CREATE TABLE schema_migrations "
+                "(filename TEXT PRIMARY KEY, applied_at TEXT)"
+            )
+            conn.executemany(
+                "INSERT INTO schema_migrations VALUES (?, ?)",
+                [
+                    ("001_initial_baseline.sql", "2026-04-15"),
+                    ("002_source_warehouse.sql", "2026-04-15"),
+                    ("016_warehouse_enrichment.sql", "2026-04-15"),
+                ],
+            )
+            conn.execute("CREATE TABLE tickets (id INTEGER)")
+            conn.execute("INSERT INTO tickets VALUES (1)")
+        monkeypatch.setattr(db_check, "_DB_PATH", db)
+
+        result = db_check.check_database()
+        assert result.status == "pass"
+        # The check should report the highest migration number (16), not
+        # fail silently because the column isn't named `version`.
+        assert "16" in result.message, (
+            f"Expected the highest migration number (16) in the message, "
+            f"got: {result.message!r}"
+        )
+
 
 # ──────────────────────────────────────────────────────────────────
 # Check 9 — config
@@ -395,14 +563,32 @@ class TestConfig:
 # ──────────────────────────────────────────────────────────────────
 
 class TestRegistry:
-    def test_default_checks_has_ten_entries(self):
-        """Phase 4 added integrity as Check 1 → 10 total."""
+    def test_default_checks_has_twelve_entries(self):
+        """2026-04-17 added rollback → 11; 2026-05-07 added zombies → 12."""
         from src.startup.checks import DEFAULT_CHECKS
-        assert len(DEFAULT_CHECKS) == 10
+        assert len(DEFAULT_CHECKS) == 12
 
     def test_integrity_is_first_check(self):
         from src.startup.checks import DEFAULT_CHECKS
         assert DEFAULT_CHECKS[0][0] == "integrity"
+
+    def test_rollback_is_registered(self):
+        from src.startup.checks import DEFAULT_CHECKS
+        ids = [cid for cid, _ in DEFAULT_CHECKS]
+        assert "rollback" in ids, (
+            "Rollback check must be registered so users see pending "
+            "rollback state during startup."
+        )
+
+    def test_zombies_is_registered(self):
+        """2026-05-07: zombies sweep is registered after rollback so the
+        splash kills orphan gemini.exe / node.exe before any bridge boot."""
+        from src.startup.checks import DEFAULT_CHECKS
+        ids = [cid for cid, _ in DEFAULT_CHECKS]
+        assert "zombies" in ids, (
+            "Zombies sweep must be registered to clean orphan bridge "
+            "subprocesses before the user reaches the main window."
+        )
 
     def test_all_ids_unique(self):
         from src.startup.checks import DEFAULT_CHECKS
@@ -420,3 +606,77 @@ class TestRegistry:
                 # some (e.g. hardware) take an optional app_version arg
                 r = fn("test-version")
                 assert isinstance(r, CheckResult)
+
+
+# ──────────────────────────────────────────────────────────────────
+# Check 11 — pending rollback (bug-bash 2026-04-17)
+# ──────────────────────────────────────────────────────────────────
+
+class TestRollbackCheck:
+    """The rollback module writes `data/rollback_state.json` + keeps
+    `_src_previous/` / `_config_previous/` / `_migrations_previous/`
+    dirs around after an update. The main app eventually calls
+    clear_state_if_stable() 65s after MainWindow opens, but the user
+    has no visibility into the state during the splash. This check
+    surfaces it."""
+
+    def _import(self):
+        from src.startup.checks import rollback as rb_check
+        return rb_check
+
+    def test_no_state_passes_clean(self, tmp_path, monkeypatch):
+        rb_check = self._import()
+        monkeypatch.setattr(rb_check, "_PROJECT_ROOT", tmp_path)
+        result = rb_check.check_rollback()
+        assert result.status == "pass"
+        assert result.critical is False
+
+    def test_stale_previous_dirs_without_state_warn(self, tmp_path, monkeypatch):
+        """An earlier update left backup dirs but rollback_state.json was
+        already cleaned — surface as warn so the user can manually prune."""
+        rb_check = self._import()
+        (tmp_path / "_src_previous").mkdir()
+        (tmp_path / "data").mkdir()
+        monkeypatch.setattr(rb_check, "_PROJECT_ROOT", tmp_path)
+        result = rb_check.check_rollback()
+        assert result.status == "warn"
+        assert result.critical is False
+        assert "previous" in result.message.lower()
+
+    def test_active_grace_window_is_warn(self, tmp_path, monkeypatch):
+        """A rollback state inside the grace window means the app just
+        applied an update and is watching for crashes. Inform, don't block."""
+        import json
+        from datetime import datetime, timezone
+        rb_check = self._import()
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        (data_dir / "rollback_state.json").write_text(json.dumps({
+            "schema_version": 1,
+            "previous": "v1.0.0",
+            "new": "v1.0.1",
+            "applied_at": datetime.now(timezone.utc).isoformat(),
+            "grace_window_s": 60,
+        }))
+        monkeypatch.setattr(rb_check, "_PROJECT_ROOT", tmp_path)
+        result = rb_check.check_rollback()
+        assert result.status == "warn"
+        assert result.critical is False
+        assert "grace" in result.message.lower() or "v1.0.1" in result.message
+
+    def test_check_is_non_critical_always(self, tmp_path, monkeypatch):
+        """Rollback check must never block Continue — it's informational."""
+        import json
+        from datetime import datetime, timezone, timedelta
+        rb_check = self._import()
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        expired = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        (data_dir / "rollback_state.json").write_text(json.dumps({
+            "applied_at": expired, "grace_window_s": 60,
+            "previous": "v1", "new": "v2",
+        }))
+        (tmp_path / "_src_previous").mkdir()
+        monkeypatch.setattr(rb_check, "_PROJECT_ROOT", tmp_path)
+        result = rb_check.check_rollback()
+        assert result.critical is False

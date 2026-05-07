@@ -25,6 +25,12 @@ keyring==25.5.0
 # RS256 signing in the optional GitHub App auth path (see github_app_auth.py).
 PyJWT[crypto]==2.10.1
 
+# Test-only — used by pytest.ini for the `--timeout=120` hard cap that
+# prevents Windows test-suite hangs (memory: zombie_processes.md). Safe in
+# the bundle; pytest itself isn't shipped to end users via the installer.
+pytest==8.3.4
+pytest-timeout==2.3.1
+
 # Optional — Google Drive export
 # google-api-python-client==2.149.0
 # google-auth==2.36.0

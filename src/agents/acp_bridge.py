@@ -114,6 +114,7 @@ class ACPBridge:
     # ── Class-level process registry for atexit cleanup ──
     _all_processes: list["subprocess.Popen"] = []
     _atexit_registered = False
+    _zombie_sweep_done = False
 
     @classmethod
     def _register_atexit(cls):
@@ -122,6 +123,29 @@ class ACPBridge:
             import atexit
             atexit.register(cls._cleanup_all)
             cls._atexit_registered = True
+
+    @classmethod
+    def _sweep_zombies_once(cls) -> None:
+        """Pre-boot zombie sweep — fires once per session before the first
+        bridge boot. Hardens against the hard-kill / GC-crash leakage path
+        that the atexit handler can't catch (memory: zombie_processes.md)."""
+        if cls._zombie_sweep_done:
+            return
+        cls._zombie_sweep_done = True
+        try:
+            from src.agents.bridge_zombie_sweep import sweep_zombie_bridges
+            result = sweep_zombie_bridges()
+            if result.total_killed:
+                import logging
+                logging.getLogger("alma.acp_bridge").info(
+                    "pre-boot zombie sweep: killed %d orphan(s); pids=%s",
+                    result.total_killed, result.terminated_pids,
+                )
+        except Exception as exc:
+            import logging
+            logging.getLogger("alma.acp_bridge").debug(
+                "zombie sweep failed (non-fatal): %s", exc,
+            )
 
     @classmethod
     def _cleanup_all(cls):
@@ -280,7 +304,13 @@ class ACPBridge:
         """Boot the ACP subprocess if not already alive.
 
         Sends ``initialize`` + ``session/new`` handshake.
+
+        Pre-boot: runs a one-shot zombie sweep that kills any orphan
+        gemini.exe / node.exe processes left behind by hard-killed
+        sessions — protects against the SQLite-lock + RAM-exhaustion
+        failure mode (memory: zombie_processes.md).
         """
+        ACPBridge._sweep_zombies_once()
         with self._lock:
             if self._process and self._process.poll() is None:
                 return  # already running

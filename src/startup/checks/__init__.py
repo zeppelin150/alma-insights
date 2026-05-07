@@ -14,6 +14,8 @@ The splash wires these into a Checker in the documented order:
      8. model.check_embedding_model
      9. database.check_database
     10. config.check_config
+    11. rollback.check_rollback         (added 2026-04-17)
+    12. zombies.check_zombies           (added 2026-05-07)
 """
 
 from src.startup.checks.airgap import check_environment_guard
@@ -25,7 +27,9 @@ from src.startup.checks.gemini import check_gemini_oauth
 from src.startup.checks.hardware import check_hardware
 from src.startup.checks.integrity import check_integrity
 from src.startup.checks.model import check_embedding_model
+from src.startup.checks.rollback import check_rollback
 from src.startup.checks.updates import check_for_update
+from src.startup.checks.zombies import check_zombies
 
 
 DEFAULT_CHECKS = [
@@ -39,4 +43,6 @@ DEFAULT_CHECKS = [
     ("embedding_model",  check_embedding_model),
     ("database",         check_database),
     ("config",           check_config),
+    ("rollback",         check_rollback),
+    ("zombies",          check_zombies),
 ]
