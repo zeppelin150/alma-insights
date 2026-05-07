@@ -134,3 +134,9 @@ package-lock.json
 # ── HuggingFace cache (local dev downloads) ─────────────────────────
 .cache/huggingface/
 ~/.cache/huggingface/
+
+# ── E2E runner output artifacts ─────────────────────────────────────
+# Per-run JSON + markdown dumps from scripts/run_ai_report_e2e.py.
+# Useful for local inspection but should never be committed.
+tools/audit_reports/e2e_*.json
+tools/audit_reports/e2e_*.md

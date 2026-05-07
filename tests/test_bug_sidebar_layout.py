@@ -59,14 +59,19 @@ class TestH0_CollapseSidebarPerformance:
     """H0: Sidebar collapse uses <= 10 style update calls."""
 
     def test_count_unpolish_polish_in_toggle(self):
-        """H0: _toggle_sidebar has <= 10 unpolish/polish pairs.
+        """Keep the total number of style-update calls bounded.
 
-        Count occurrences of style().unpolish() and style().polish() in the
-        _toggle_sidebar and _restore_sidebar_text methods combined.
-        """
+        Budget revised 2026-04-17: per-widget unpolish/polish is
+        REQUIRED for correctness (see test_collapse_renders_icons...) —
+        a bulk restyle on the container does not cascade into children
+        and the collapsed CSS selector silently fails.
+
+        The real-world cost is well under 1ms for ~12 buttons, so the
+        old <=20 budget was over-tight. New budget: <=80 total calls
+        across the two methods (enough for ~20 widgets × 2 paths × 2
+        calls each)."""
         src = (Path(__file__).parent.parent / "src" / "ui" / "main_window.py").read_text(encoding="utf-8")
 
-        # Extract just the two methods
         toggle_start = src.find("def _toggle_sidebar(self):")
         toggle_end = src.find("\n    def ", toggle_start + 1)
         restore_start = src.find("def _restore_sidebar_text(self):")
@@ -78,43 +83,89 @@ class TestH0_CollapseSidebarPerformance:
 
         unpolish_count = combined.count("unpolish(")
         polish_count = combined.count("polish(")
-
         total_style_calls = unpolish_count + polish_count
-        assert total_style_calls <= 20, \
-            f"H0 REJECTED: {total_style_calls} style update calls found ({unpolish_count} unpolish + {polish_count} polish). " \
-            f"Expected <= 20 for acceptable performance. Each pair forces full stylesheet re-evaluation."
-
-    def test_no_per_widget_unpolish_in_loops(self):
-        """Verify unpolish/polish calls are NOT inside button/divider loops."""
-        src = (Path(__file__).parent.parent / "src" / "ui" / "main_window.py").read_text(encoding="utf-8")
-
-        toggle_start = src.find("def _toggle_sidebar(self):")
-        toggle_end = src.find("\n    def ", toggle_start + 1)
-        toggle_body = src[toggle_start:toggle_end]
-
-        # Extract the for-btn loop body
-        btn_loop_start = toggle_body.find("for btn")
-        if btn_loop_start >= 0:
-            # Get lines within the loop (indented lines after the for)
-            lines = toggle_body[btn_loop_start:].split("\n")
-            loop_lines = [lines[0]]
-            for line in lines[1:]:
-                if line.startswith("            ") or line.startswith("\t\t\t"):
-                    loop_lines.append(line)
-                else:
-                    break
-            loop_body = "\n".join(loop_lines)
-            assert "unpolish" not in loop_body, \
-                "unpolish() is still called INSIDE the button loop — should be outside"
+        assert total_style_calls <= 80, (
+            f"{total_style_calls} style update calls — budget is 80. "
+            f"({unpolish_count} unpolish + {polish_count} polish)."
+        )
 
     def test_bulk_restyle_exists(self):
-        """Verify a single bulk unpolish/polish on the sidebar container exists."""
+        """The container still gets a final restyle after its children — serves as a
+        safety net for any widgets we didn't restyle individually."""
         src = (Path(__file__).parent.parent / "src" / "ui" / "main_window.py").read_text(encoding="utf-8")
 
-        toggle_start = src.find("def _toggle_sidebar(self):")
-        toggle_end = src.find("\n    def ", toggle_start + 1)
-        toggle_body = src[toggle_start:toggle_end]
+        restore_start = src.find("def _restore_sidebar_text(self):")
+        restore_end = src.find("\n    def ", restore_start + 1)
+        restore_body = src[restore_start:restore_end]
 
-        # Should have self._sidebar.style().unpolish(self._sidebar) — bulk restyle
-        assert "self._sidebar.style().unpolish(self._sidebar)" in toggle_body, \
+        assert "self._sidebar.style().unpolish(self._sidebar)" in restore_body, (
             "Missing bulk restyle call on sidebar container"
+        )
+
+
+def test_collapse_renders_icons_and_sizehint_collapses():
+    """Bug-bash 2026-04-17 (second attempt) — collapsed sidebar showed
+    blank rectangles instead of icons.
+
+    The first attempted fix used `btn.setStyleSheet("")` per button and
+    a source-inspection test that only grepped for that string. That
+    test passed but the bug persisted: `setStyleSheet("")` does NOT
+    trigger QSS re-evaluation for dynamic property selectors like
+    `[collapsed="true"]`. The idiomatic Qt pattern that actually works
+    is `style().unpolish(w)` + `style().polish(w)` per widget.
+
+    This is a behaviour-level test: instantiates MainWindow under
+    offscreen Qt and verifies:
+      (1) button.text() equals its icon_char after collapse
+      (2) button.sizeHint().width() is small (~emoji width, not
+          ~emoji + 40px padding) — the precise signal that the
+          collapsed CSS actually activated.
+    Runs all assertions in one function because MainWindow init is
+    expensive and close() has slow teardown paths."""
+    import os
+    os.environ["QT_QPA_PLATFORM"] = "offscreen"
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    from src.ui.theme import get_stylesheet
+    app.setStyleSheet(get_stylesheet())
+    from src.ui.main_window import MainWindow
+    w = MainWindow()
+    w.show()
+    app.processEvents()
+
+    # Collapse
+    w._toggle_sidebar()
+    app.processEvents()
+
+    widest = 0
+    for btn, _ in w._sidebar_buttons:
+        if not btn.isVisible():
+            continue
+        icon = btn.property("icon_char") or ""
+        assert btn.text() == icon, (
+            f"Collapsed button text should equal its icon char; "
+            f"got {btn.text()!r}, expected {icon!r}"
+        )
+        widest = max(widest, btn.sizeHint().width())
+
+    assert widest <= 60, (
+        f"Widest collapsed-button sizeHint is {widest}px. "
+        "The collapsed QSS rule did not activate — expected <= 60px "
+        "(collapsed horizontal padding is 0, glyph ~16-32px). "
+        "Check that _toggle_sidebar calls unpolish()/polish() per button."
+    )
+
+    # Expand back
+    w._toggle_sidebar()
+    app.processEvents()
+    w._restore_sidebar_text()   # normally fires on animation finished
+    app.processEvents()
+
+    for btn, _ in w._sidebar_buttons:
+        if not btn.isVisible():
+            continue
+        full = btn.property("full_text") or ""
+        assert btn.text() == full, (
+            f"Expanded button should show full text; "
+            f"got {btn.text()!r}, expected {full!r}"
+        )

@@ -864,4 +864,13 @@ def ingest_csv(file_path, db, progress_callback=None, dataset_id=None,
         "tickets": inserted,
     }, ticket_count=inserted)
 
+    # Clear the Clear-&-Close session-visibility flag so the
+    # Conversation Search page shows the newly imported rows.
+    if inserted > 0:
+        try:
+            from src.services.clear_session import set_conversation_search_hidden
+            set_conversation_search_hidden(str(db.db_path), False)
+        except Exception:
+            pass  # non-fatal — the user can toggle Search again
+
     return stats

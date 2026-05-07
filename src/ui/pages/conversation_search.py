@@ -778,11 +778,18 @@ class ConversationSearchPage(QWidget):
         csat_min = int(csat_val) if csat_val else None
         csat_max = int(csat_val) if csat_val else None
 
-        results = self.db.search_conversations(
-            keyword=keyword, trc_code=trc_code,
-            date_from=date_from, date_to=date_to,
-            csat_min=csat_min, csat_max=csat_max,
-        )
+        # Session-visibility flag (bug-bash 2026-04-17): if the user ran
+        # Clear & Close and no new import has loaded data since, render
+        # the page empty without touching the warehouse tables.
+        from src.services.clear_session import is_conversation_search_hidden
+        if is_conversation_search_hidden(str(self.db.db_path)):
+            results = []
+        else:
+            results = self.db.search_conversations(
+                keyword=keyword, trc_code=trc_code,
+                date_from=date_from, date_to=date_to,
+                csat_min=csat_min, csat_max=csat_max,
+            )
 
         self._current_results = results
         self._populate_table(results)

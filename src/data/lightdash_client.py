@@ -554,6 +554,15 @@ def _run_ingestion_inner(
     log.end(status="OK" if not log._errors else "WARN",
             detail=f"{stats['conversations']:,} conversations from {total_written:,} rows")
 
+    # Clear the Clear-&-Close session-visibility flag so Conversation
+    # Search shows the newly imported conversations.
+    if stats["conversations"] > 0:
+        try:
+            from src.services.clear_session import set_conversation_search_hidden
+            set_conversation_search_hidden(str(db.db_path), False)
+        except Exception:
+            pass  # non-fatal
+
     return stats
 
 

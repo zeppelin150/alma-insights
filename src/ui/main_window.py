@@ -367,17 +367,28 @@ class MainWindow(QMainWindow):
         self._sidebar_anim2 = anim2
 
         if self._sidebar_collapsed:
-            # Collapse: switch to icon-only, centered
+            # Collapse: switch to icon-only, centered.
+            # We must call unpolish/polish PER BUTTON — the bulk
+            # restyle on self._sidebar does not cascade into children,
+            # and setStyleSheet("") alone does not trigger re-evaluation
+            # of dynamic property selectors like [collapsed="true"].
+            # 12 buttons × (unpolish + polish) is well under 1ms total.
             for btn, _ in self._sidebar_buttons:
                 icon = btn.property("icon_char") or ""
                 btn.setText(icon)
                 btn.setProperty("collapsed", "true")
+                btn.style().unpolish(btn)
+                btn.style().polish(btn)
             for w in self._sidebar_text_widgets:
                 w.setVisible(False)
             for div in self._sidebar_dividers:
                 div.setProperty("collapsed", "true")
+                div.style().unpolish(div)
+                div.style().polish(div)
             self._collapse_btn.setText("▶")
             self._collapse_btn.setProperty("collapsed", "true")
+            self._collapse_btn.style().unpolish(self._collapse_btn)
+            self._collapse_btn.style().polish(self._collapse_btn)
         else:
             # Expand: restore full text after animation finishes
             anim.finished.connect(self._restore_sidebar_text)
@@ -397,11 +408,18 @@ class MainWindow(QMainWindow):
             full = btn.property("full_text") or ""
             btn.setText(full)
             btn.setProperty("collapsed", "false")
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
         for w in self._sidebar_text_widgets:
             w.setVisible(True)
         for div in self._sidebar_dividers:
             div.setProperty("collapsed", "false")
-        # One bulk re-style
+            div.style().unpolish(div)
+            div.style().polish(div)
+        self._collapse_btn.setProperty("collapsed", "false")
+        self._collapse_btn.style().unpolish(self._collapse_btn)
+        self._collapse_btn.style().polish(self._collapse_btn)
+        # One bulk re-style on the container for good measure
         self._sidebar.style().unpolish(self._sidebar)
         self._sidebar.style().polish(self._sidebar)
 

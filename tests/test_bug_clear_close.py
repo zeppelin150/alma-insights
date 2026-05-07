@@ -151,3 +151,109 @@ class TestClearBehavior:
 
         count = seeded_db.conn.execute("SELECT COUNT(*) FROM sub_patterns").fetchone()[0]
         assert count == 1, "sub_patterns should survive clear"
+
+
+# ──────────────────────────────────────────────────────────────────
+# Bug-bash 2026-04-17 — Conversation Search session-visibility flag
+#
+# Clear & Close wipes the legacy `conversations` ingestion buffer, but
+# the Conversation Search page reads from the PERSISTENT per-source
+# warehouse tables (`{prefix}_conversations`). Those are not wiped
+# (by design — the Data Warehouse page needs them).
+#
+# To give the user the "Clear & Close empties the Conversation Search
+# page without wiping the warehouse" behaviour they asked for, we
+# introduce a session-visibility flag: `ui.conversation_search_hidden`.
+#   * clear_session_data() sets it True.
+#   * ConversationSearch.run_search() returns [] when True.
+#   * A successful CSV / Lightdash import clears it back to False.
+# ──────────────────────────────────────────────────────────────────
+
+
+class TestConversationSearchHiddenFlag:
+    """The flag lives in a lazy `app_state` table inside the DB itself,
+    so tests with isolated tmp DBs never touch the user's real data.
+    (Earlier design used settings.yaml — that leaked writes from every
+    test that called clear_session_data into the real settings file.)"""
+
+    def test_default_is_false(self, tmp_path):
+        from src.services.clear_session import is_conversation_search_hidden
+        from src.data.db_manager import DatabaseManager
+        db = DatabaseManager(tmp_path / "flag_default.db")
+        db.initialize()
+        db.close()
+        assert is_conversation_search_hidden(str(tmp_path / "flag_default.db")) is False
+
+    def test_set_true_then_read(self, tmp_path):
+        from src.services.clear_session import (
+            is_conversation_search_hidden,
+            set_conversation_search_hidden,
+        )
+        from src.data.db_manager import DatabaseManager
+        db = DatabaseManager(tmp_path / "flag_set.db")
+        db.initialize()
+        db.close()
+        p = str(tmp_path / "flag_set.db")
+        set_conversation_search_hidden(p, True)
+        assert is_conversation_search_hidden(p) is True
+
+    def test_set_false_then_read(self, tmp_path):
+        from src.services.clear_session import (
+            is_conversation_search_hidden,
+            set_conversation_search_hidden,
+        )
+        from src.data.db_manager import DatabaseManager
+        db = DatabaseManager(tmp_path / "flag_unset.db")
+        db.initialize()
+        db.close()
+        p = str(tmp_path / "flag_unset.db")
+        set_conversation_search_hidden(p, True)
+        set_conversation_search_hidden(p, False)
+        assert is_conversation_search_hidden(p) is False
+
+    def test_clear_session_data_sets_flag(self, seeded_db):
+        from src.services.clear_session import (
+            clear_session_data,
+            is_conversation_search_hidden,
+        )
+        p = str(seeded_db.db_path)
+        assert is_conversation_search_hidden(p) is False, "precondition"
+        clear_session_data(p)
+        assert is_conversation_search_hidden(p) is True, (
+            "Clear & Close must set the session-visibility flag so the "
+            "Conversation Search page renders empty while the Data "
+            "Warehouse preserves its rows."
+        )
+
+
+class TestConversationSearchHiddenFlagWiredInto:
+    """Source-inspection tests: verify the two callers we expect to
+    respect / clear the flag actually reference it. Cheaper than spinning
+    up a Qt page in a unit test."""
+
+    def test_conversation_search_page_checks_flag(self):
+        src = (
+            Path(__file__).parent.parent / "src" / "ui" / "pages" / "conversation_search.py"
+        ).read_text(encoding="utf-8")
+        assert "is_conversation_search_hidden" in src, (
+            "Conversation Search page must import and check the session "
+            "visibility flag in run_search()."
+        )
+
+    def test_csv_ingestion_clears_flag(self):
+        src = (
+            Path(__file__).parent.parent / "src" / "data" / "csv_ingestion.py"
+        ).read_text(encoding="utf-8")
+        assert "set_conversation_search_hidden" in src, (
+            "CSV ingestion must clear the hidden flag after a successful "
+            "import so Conversation Search shows the new data."
+        )
+
+    def test_lightdash_clears_flag(self):
+        src = (
+            Path(__file__).parent.parent / "src" / "data" / "lightdash_client.py"
+        ).read_text(encoding="utf-8")
+        assert "set_conversation_search_hidden" in src, (
+            "Lightdash ingestion must clear the hidden flag after a "
+            "successful pull."
+        )

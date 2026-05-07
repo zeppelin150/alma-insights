@@ -21,6 +21,82 @@ EPHEMERAL_TABLES = [
 ]
 
 
+# ──────────────────────────────────────────────────────────────────
+# Conversation-Search session-visibility flag (bug-bash 2026-04-17)
+#
+# The Conversation Search page reads from the per-source warehouse
+# tables, which are intentionally preserved across Clear & Close (the
+# Data Warehouse page relies on them). To give the user the "Clear &
+# Close empties the Conversation Search page" behaviour without
+# destroying the warehouse, we track a flag in a lazy `app_state`
+# table inside the DB itself — NOT in settings.yaml.
+#
+# Storing the flag in the DB (rather than settings.yaml) means any
+# test that uses a tmp DB is automatically isolated; the earlier
+# settings.yaml approach leaked writes from every test that called
+# clear_session_data() into the user's real settings file.
+#
+# Set to True by clear_session_data(), read by the Conversation Search
+# page, and cleared to False by a successful CSV or Lightdash import.
+# ──────────────────────────────────────────────────────────────────
+
+_FLAG_KEY = "conversation_search_hidden"
+
+
+def _ensure_app_state(conn) -> None:
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS app_state "
+        "(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+    )
+
+
+def is_conversation_search_hidden(db_path: str) -> bool:
+    """True if the user has just run Clear & Close on this DB and no
+    new import has loaded data yet. Conversation Search should render
+    empty. Returns False for any read failure (safest default)."""
+    try:
+        conn = get_connection(db_path, readonly=True)
+    except Exception:
+        return False
+    try:
+        row = conn.execute(
+            "SELECT value FROM app_state WHERE key = ?", (_FLAG_KEY,)
+        ).fetchone()
+        return bool(row and row[0] == "1")
+    except Exception:
+        return False
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def set_conversation_search_hidden(db_path: str, hidden: bool) -> None:
+    """Persist the flag in the DB. Import paths call this with False
+    after a successful load; clear_session_data() calls it with True."""
+    try:
+        conn = get_connection(db_path)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not open DB to set flag: %s", exc)
+        return
+    try:
+        _ensure_app_state(conn)
+        with atomic(conn):
+            conn.execute(
+                "INSERT INTO app_state (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (_FLAG_KEY, "1" if hidden else "0"),
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not persist %s=%s: %s", _FLAG_KEY, hidden, exc)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def clear_session_data(db_path: str):
     """Wipe all ephemeral tables.  Persistent tables survive intact.
 
@@ -67,3 +143,7 @@ def clear_session_data(db_path: str):
         logger.info("Session data cleared. Persistent tables preserved.")
     finally:
         conn.close()
+
+    # Hide the Conversation Search page until the next import. Warehouse
+    # tables (what the Data Warehouse page reads) are untouched.
+    set_conversation_search_hidden(db_path, True)

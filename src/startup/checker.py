@@ -87,6 +87,12 @@ class Checker:
             r.status == "pass" for r in self._results if r.critical
         )
 
+    @property
+    def failed_check_ids(self) -> list[str]:
+        """IDs of checks whose status is not 'pass'. Used by the launcher
+        to decide post-splash routing (e.g. open Settings when OAuth failed)."""
+        return [r.id for r in self._results if r.status != "pass"]
+
     def summary(self) -> dict[str, int]:
         """Bucket counts: {'pass': n, 'warn': n, 'fail': n}."""
         buckets = {"pass": 0, "warn": 0, "fail": 0}

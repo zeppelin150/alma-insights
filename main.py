@@ -116,14 +116,25 @@ def main():
         if not ok:
             print("[startup] Critical check failed; aborting (see output above).")
             sys.exit(1)
+        failed_check_ids: list[str] = []
     else:
-        if not _run_splash(app):
+        accepted, failed_check_ids = _run_splash(app)
+        if not accepted:
             # User closed splash without Continue, or a critical check blocked it
             sys.exit(1)
 
     # Launch main window
     window = MainWindow()
     window.show()
+
+    # If the Gemini OAuth startup check failed (CLI missing, timed out, or
+    # reports unauthenticated) route the user straight to Settings → AI
+    # Provider so they can re-authenticate without hunting through the UI.
+    if "gemini_oauth" in failed_check_ids and hasattr(window, "PAGE_SETTINGS"):
+        try:
+            window._set_active_page(window.PAGE_SETTINGS)
+        except Exception as exc:  # noqa: BLE001 — routing is non-fatal
+            print(f"[startup] Could not route to Settings after OAuth failure: {exc}")
 
     # Wire guard to status bar if available
     if hasattr(window, 'qt_error_label'):
@@ -139,8 +150,13 @@ def main():
     sys.exit(app.exec())
 
 
-def _run_splash(app) -> bool:
-    """Show the splash, run all checks, return True if user clicked Continue."""
+def _run_splash(app) -> tuple[bool, list[str]]:
+    """Show the splash, run all checks, and return (accepted, failed_check_ids).
+
+    `accepted` is True if the user clicked Continue. `failed_check_ids` is
+    the list of check IDs that did not pass — used by main() to route the
+    user to the appropriate Settings page (e.g. AI Provider when
+    gemini_oauth failed)."""
     from src.startup.checker import Checker
     from src.startup.checks import DEFAULT_CHECKS
     from src.startup.splash_window import SplashWindow
@@ -153,7 +169,8 @@ def _run_splash(app) -> bool:
     checker = Checker(DEFAULT_CHECKS)
     splash.run(checker)
 
-    return splash.exec() == QDialog.Accepted
+    accepted = splash.exec() == QDialog.Accepted
+    return accepted, checker.failed_check_ids
 
 
 def _run_checks_headless(app_version: str) -> bool:
