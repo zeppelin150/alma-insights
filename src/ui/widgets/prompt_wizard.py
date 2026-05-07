@@ -302,14 +302,9 @@ class PromptWizard(QWidget):
                 system = "\n".join(m["content"] for m in messages
                                     if m["role"] == "system")
                 resp = client.generate(user_msg, system_prompt=system, timeout=60)
-                # Try to parse JSON; fall back to bot_reply only
-                import json as _json
-                try:
-                    return _json.loads(resp)
-                except Exception:
-                    return {"bot_reply": resp}
             except Exception:
                 return {}
+            return _parse_authoring_response(resp)
         return _call
 
     def _append_chat(self, role: str, text: str) -> None:
@@ -324,6 +319,57 @@ class PromptWizard(QWidget):
 # ──────────────────────────────────────────────────────────────────────
 # Internal helpers — list rendering + qss
 # ──────────────────────────────────────────────────────────────────────
+
+def _parse_authoring_response(resp: str) -> dict:
+    """Parse the LLM response into the authoring-session merge dict.
+
+    Tolerant of three shapes:
+      1. Plain text — returned as ``{"bot_reply": <text>}`` with any
+         fenced code block stripped.
+      2. Bare JSON object — returned as-is.
+      3. Conversational text + a ```json``` fenced block — the JSON is
+         parsed into the merge dict; the surrounding text becomes
+         ``bot_reply`` (with the fenced block stripped so the user
+         never sees raw JSON in the chat log).
+
+    Falls back to ``{"bot_reply": resp}`` on any parse error.
+    """
+    import json as _json
+    import re as _re
+
+    if not resp:
+        return {}
+
+    # Try whole-string JSON first
+    s = resp.strip()
+    try:
+        parsed = _json.loads(s)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+
+    # Look for a fenced JSON block; if present, parse it + use the rest
+    # as the user-facing bot_reply.
+    fence = _re.search(
+        r"```(?:json|JSON|json5)?\s*\n?(?P<body>\{[\s\S]*?\})\s*\n?```",
+        resp,
+    )
+    if fence:
+        try:
+            parsed = _json.loads(fence.group("body"))
+            if isinstance(parsed, dict):
+                surrounding = (resp[:fence.start()] + resp[fence.end():]).strip()
+                if surrounding and "bot_reply" not in parsed:
+                    parsed["bot_reply"] = surrounding
+                return parsed
+        except Exception:
+            pass
+
+    # Plain conversational reply — strip any leftover fences defensively
+    cleaned = _re.sub(r"```[\s\S]*?```", "", resp).strip()
+    return {"bot_reply": cleaned or resp}
+
 
 def _section_item(label: str) -> QListWidgetItem:
     item = QListWidgetItem(label)
