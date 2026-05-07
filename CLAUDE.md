@@ -24,6 +24,82 @@ Alma Insights is a PySide6 desktop application for analyzing healthcare RCM (Rev
 - Known: `test_reporting_foundation::test_bridge_fallback` pre-existing failure
 - Known: `test_feature_integration` has live-DB-dependent failures (expected)
 
+## AI Reports — Structured-output rebuild (R1–R5, 2026-05-06)
+
+The Analysis Canvas, Evidence Panel, and Prompt Builder were rebuilt
+2026-05-06 against the 3.24.26 reference screenshots. The pipeline now
+emits a JSON-fenced `AlmaReport` (see [`src/data/report_schema.py`](src/data/report_schema.py))
+which the canvas renders as `FindingCard` widgets bound to the evidence
+panel via `finding_clicked` + `metadata_changed` signals. Multi-bridge
+specialist + convergence dispatch is the **universal default**
+(`ai.report_pipeline.kind=multi_bridge`); `single_pass` falls back to a
+single Gemini call for legacy callers.
+
+Settings (`data/settings.yaml > ai.report_pipeline`):
+- `kind`               — `multi_bridge` (default) | `single_pass`
+- `bridges`            — pool size (default `4`)
+- `model`              — empty → uses `ai.active_model`
+- `convergence_model`  — empty → reuses `model`
+
+Grounding harness ([`src/data/report_grounding.py`](src/data/report_grounding.py))
+audits every report along count / entity / time fidelity dimensions;
+below 0.75 the report gains a `low_accuracy` flag (warn-only, never
+blocks per user spec). Migration `migrations/026_report_findings.sql`
+extends `analysis_reports` with `findings_json`, `pipeline_kind`,
+`specialist_count`, `accuracy_score`, `cost_usd`.
+
+Full architecture: [`docs/AI_REPORTS.md`](docs/AI_REPORTS.md). Drift
+audit checklist: `~/.claude/projects/C--alma-insights/memory/reports_drift_audit.md`.
+
+## Bug Bash Protocol (MANDATORY)
+
+When the user reports a bug, or asks you to fix/diagnose/investigate a defect, you MUST follow these four gates **in order**. Do not skip. Do not combine. Do not propose a fix before Gate 2 is complete.
+
+### Gate 1 — Investigate
+
+Before touching any code:
+
+1. Open a TodoWrite list with one entry per gate (Investigate / Repro / Fix / Verify), plus sub-items for investigation steps.
+2. Restate the bug in one sentence in your own words — if you can't, ask the user a clarifying question before proceeding.
+3. **Targeted reads only.** Start from the symptom (error message, stack trace, page name, function name) and use `Grep`/`Glob` to locate the relevant code. Read only the files the evidence points to. Do NOT bulk-read directories speculatively.
+4. If the trail needs more than 3 searches/reads to narrow down, stop and spawn the `Explore` subagent instead. Protect the main context window.
+5. Produce a written **Investigation Summary** with:
+   - Suspected root cause (one sentence)
+   - Specific file:line references supporting the hypothesis (use markdown links like `[db_manager.py:204](src/data/db_manager.py:204)`)
+   - Any assumptions that still need verification
+
+**Do not proceed to Gate 2 until the Investigation Summary is posted to the user.**
+
+### Gate 2 — Plan + Build a Repro
+
+Before writing the fix:
+
+1. Describe the test plan in ≤ 5 lines: what input, what expected output, what file the test lives in.
+2. Write a **failing test** that reproduces the bug. Prefer pytest in `tests/`; match the existing test file's style and fixtures (`empty_db`, `seeded_db`).
+3. Run the test and confirm it fails for the expected reason (not an import error, not a fixture error). Quote the relevant failure line in your response.
+4. **Exception:** If a repro is genuinely impractical (e.g. Qt paint glitch, race condition requiring live bridge, third-party UI bug), you must explicitly state *why* a failing test can't be written and get user acknowledgment before proceeding. Do not silently skip this gate.
+
+**Do not proceed to Gate 3 until there is a failing test (or an acknowledged exception).**
+
+### Gate 3 — Fix
+
+1. Make the smallest change that turns the failing test green. No drive-by refactors, no unrelated cleanups, no "while I'm here" improvements (see existing guidance on scope discipline).
+2. Respect project patterns: `get_connection()` for DB, `settings_manager` for config, `build_client_for_task()` for LLM, signals/slots for cross-thread Qt.
+3. If the fix requires changes in more than 2 files, pause and explain why before editing.
+
+### Gate 4 — Verify
+
+1. Re-run the failing test — it must now pass.
+2. Run the **nearest related test file(s)** in groups of 3–4 (never the full `tests/`). Report the pass/fail counts.
+3. For UI-observable changes, use the `preview_*` tools to verify in the running app.
+4. Kill zombies before any E2E run: `wmic process where "commandline like '%alma_mcp_server%'" call terminate`.
+5. Update the TodoWrite list — mark each gate completed as it finishes, one at a time.
+6. Final response to the user must include: (a) root cause in one sentence, (b) files changed with links, (c) test results, (d) any remaining risks.
+
+### Gate violations
+
+If you catch yourself about to propose a fix without a repro, or about to bulk-read files without a symptom trail, stop and restart at Gate 1. The user has explicitly authorized this protocol — treat skipping a gate as a bug in your own behavior.
+
 ## Architecture Overview
 
 ```

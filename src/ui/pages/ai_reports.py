@@ -33,6 +33,12 @@ from src.ui.widgets.generation_animation import GenerationAnimationWidget
 from src.ui.widgets.chat_widget import ReportChatWidget
 from src.ui.widgets.markdown_viewer import MarkdownViewer
 from src.ui.widgets.collapsible_section import CollapsibleSection
+# R1.8: structured-output canvas replaces the raw markdown viewer for the
+# main report panel. The canvas owns its own MarkdownViewer for the legacy
+# fallback path, so all existing _output_area.set_markdown() / clear()
+# call sites still work — see src/ui/widgets/report_canvas.py.
+from src.ui.widgets.report_canvas import ReportCanvas
+from src.data.report_schema import Report as _StructuredReport  # R1.8 hydration
 
 
 # ═══════════════════════════════════════════
@@ -323,6 +329,35 @@ def _build_gemini_client():
 
 
 # ═══════════════════════════════════════════
+#  HELPER: Structured metadata for the EvidencePanel (R1.8)
+# ═══════════════════════════════════════════
+
+def _meta_from_report(report, *, fallback_md: str = "") -> dict:
+    """Build the dict consumed by EvidencePanel.show_metadata.
+
+    Used on the legacy / parse-failure path where ReportCanvas falls back
+    to set_markdown() and the canvas's own metadata signal would otherwise
+    not fire. Mirrors the keys ReportCanvas._emit_metadata builds — keep
+    the two in sync if you change either.
+    """
+    scope = report.scope or {}
+    bridges = report.bridges_used if report.pipeline_kind == "multi_bridge" else 1
+    spec = report.specialist_count if report.pipeline_kind == "multi_bridge" else 0
+    return {
+        "pipeline":     report.pipeline_kind,
+        "specialists":  spec,
+        "tickets":      scope.get("ticket_count") or scope.get("tickets") or "-",
+        "trc categories": str(scope.get("trc_filter") or "-"),
+        "generated":    report.generated_at or "-",
+        "cost":         f"${report.cost_usd:.2f}" if report.cost_usd else "-",
+        "bridges":      bridges,
+        "accuracy_score": report.accuracy_score,
+        "accuracy_flags": list(report.accuracy_flags),
+        "duration_sec": report.duration_sec,
+    }
+
+
+# ═══════════════════════════════════════════
 #  AI REPORTS PAGE
 # ═══════════════════════════════════════════
 
@@ -347,6 +382,7 @@ class AIReportsPage(QWidget):
         self._shared_gemini_client = None
         self._current_report_text = ""
         self._current_data_block = ""
+        self._current_report: _StructuredReport | None = None  # R1.8 structured payload
         self._drilldown = None
         self._scan_blocked = False
 
@@ -650,14 +686,11 @@ class AIReportsPage(QWidget):
         self._output_stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._output_stack.setMinimumHeight(450)
 
-        self._output_area = MarkdownViewer()
-        self._output_area.setStyleSheet(f"""
-            QTextBrowser {{
-                background: {ALMA_CREAM}; color: {ALMA_TEXT_DARK};
-                border: none; border-radius: 8px;
-                padding: 14px; font-size: 13px;
-            }}
-        """)
+        # R1.8: ReportCanvas replaces the bare MarkdownViewer. It exposes
+        # set_markdown() / clear() / ticket_clicked for backward compat AND
+        # adds set_report() / finding_clicked / metadata_changed for the
+        # structured-output rendering path.
+        self._output_area = ReportCanvas()
         self._output_stack.addWidget(self._output_area)
 
         self._gen_animation = GenerationAnimationWidget()
@@ -760,7 +793,13 @@ class AIReportsPage(QWidget):
 
         self._evidence_panel = EvidencePanel()
         canvas_splitter.addWidget(self._evidence_panel)
+        # R1.8 wiring — canvas → evidence panel:
+        # - ticket_clicked  → show_ticket  (legacy path, ticket links in body_md)
+        # - finding_clicked → show_finding (new, structured cards)
+        # - metadata_changed→ show_metadata (new, header chips + accuracy + cost)
         self._output_area.ticket_clicked.connect(self._evidence_panel.show_ticket)
+        self._output_area.finding_clicked.connect(self._evidence_panel.show_finding)
+        self._output_area.metadata_changed.connect(self._evidence_panel.show_metadata)
         canvas_splitter.setStretchFactor(0, 3)
         canvas_splitter.setStretchFactor(1, 1)
         canvas_splitter.setSizes([700, 300])
@@ -977,9 +1016,22 @@ class AIReportsPage(QWidget):
 
         report_md = result.get("report_md", "")
         data_block = result.get("data_block", "")
-
-        # Main report → MarkdownViewer
-        self._output_area.set_markdown(report_md)
+        # R1.7/R1.8: prefer structured Report over raw markdown. The canvas
+        # picks the right view (cards vs legacy markdown) and emits the
+        # finding_clicked + metadata_changed signals to the evidence panel
+        # automatically — no manual show_metadata call needed.
+        report_obj = result.get("report")
+        if isinstance(report_obj, _StructuredReport) and report_obj.findings:
+            self._output_area.set_report(report_obj)
+        elif isinstance(report_obj, _StructuredReport):
+            # parse failed → carry the legacy markdown forward via raw_markdown
+            self._output_area.set_markdown(report_obj.raw_markdown or report_md)
+            self._output_area.metadata_changed.emit(
+                _meta_from_report(report_obj, fallback_md=report_md)
+            )
+        else:
+            self._output_area.set_markdown(report_md)
+        self._current_report = report_obj if isinstance(report_obj, _StructuredReport) else None
         self._current_report_text = report_md
         self._current_data_block = data_block
 
@@ -1036,15 +1088,8 @@ class AIReportsPage(QWidget):
         self.report_summary.refresh()
         self._history_tab._refresh()
 
-        # Populate evidence panel with report metadata
-        from datetime import datetime as _dt
-        self._evidence_panel.show_metadata({
-            "Pipeline": "AI Report",
-            "Tickets": str(result.get("ticket_count", "")),
-            "TRC filter": self._trc_combo.currentText(),
-            "Generated": _dt.now().strftime("%b %d, %Y %I:%M %p"),
-            "Duration": f"{result.get('duration_sec', 0) or 0:.1f}s",
-        })
+        # R1.8: evidence-panel metadata is now emitted by ReportCanvas
+        # via the metadata_changed signal — no manual call needed.
 
     # ═══════════════════════════════════════════
     #  VOC ROOT CAUSE ANALYSIS
@@ -1278,6 +1323,23 @@ class AIReportsPage(QWidget):
             return
         prompt_name = self._prompt_combo.currentText()
         chat_history = self._chat_widget.get_chat_history()
+        # R1.8: persist the structured Report alongside the legacy markdown so
+        # rehydration (Report History → View) can recover findings + accuracy
+        # without reparsing the LLM output. See migration 026 for column shape.
+        report = getattr(self, "_current_report", None)
+        full_results_payload: dict = {"report_text": self._current_report_text}
+        findings_json = ""
+        pipeline_kind = "single_pass"
+        specialist_count = 0
+        accuracy_score: float | None = None
+        cost_usd = 0.0
+        if isinstance(report, _StructuredReport):
+            full_results_payload["report_struct"] = report.to_dict()
+            findings_json = report.to_json()
+            pipeline_kind = report.pipeline_kind
+            specialist_count = report.specialist_count
+            accuracy_score = report.accuracy_score
+            cost_usd = report.cost_usd
         try:
             self.db.save_report(
                 page="ai_reports",
@@ -1285,9 +1347,14 @@ class AIReportsPage(QWidget):
                              "date_from": self._date_from.date().toString("yyyy-MM-dd"),
                              "date_to": self._date_to.date().toString("yyyy-MM-dd")},
                 summary=self._current_report_text[:500],
-                full_results=json.dumps({"report_text": self._current_report_text}),
+                full_results=json.dumps(full_results_payload),
                 report_type="standard",
                 chat_history=chat_history,
+                findings_json=findings_json,
+                pipeline_kind=pipeline_kind,
+                specialist_count=specialist_count,
+                accuracy_score=accuracy_score,
+                cost_usd=cost_usd,
             )
             self.report_summary.refresh()
             self._save_history_btn.setText("Saved!")

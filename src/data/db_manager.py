@@ -1509,13 +1509,24 @@ class DatabaseManager:
 
     def save_report(self, page, parameters, summary, full_results="",
                     ticket_count=0, duration_ms=0, notes="",
-                    report_type="standard", chat_history=""):
-        """Persist an analysis report. Trims to 500 reports per page."""
+                    report_type="standard", chat_history="",
+                    findings_json="", pipeline_kind="single_pass",
+                    specialist_count=0, accuracy_score=None,
+                    cost_usd=0.0):
+        """Persist an analysis report. Trims to 500 reports per page.
+
+        Migration 026 (R1.1, 2026-05-06) extended the schema with structured-
+        output columns: ``findings_json``, ``pipeline_kind``, ``specialist_count``,
+        ``accuracy_score``, ``cost_usd``. All five default safely so legacy
+        callers (Smart Reports, A/B Compare, pre-026 DBs) keep working unchanged.
+        """
         self.conn.execute("""
             INSERT INTO analysis_reports
                 (page, run_at, parameters, summary, full_results,
-                 ticket_count, duration_ms, notes, report_type, chat_history)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ticket_count, duration_ms, notes, report_type, chat_history,
+                 findings_json, pipeline_kind, specialist_count,
+                 accuracy_score, cost_usd)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             page,
             datetime.now().isoformat(),
@@ -1527,6 +1538,11 @@ class DatabaseManager:
             notes,
             report_type,
             chat_history,
+            findings_json,
+            pipeline_kind,
+            specialist_count,
+            accuracy_score,
+            cost_usd,
         ))
 
         # Trim: keep only the latest 500 per page

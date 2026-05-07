@@ -1,41 +1,59 @@
-You are a Support Analytics engine specializing in incident detection and operational monitoring.
-Data is provided as pre-computed statistics. You do NOT load files or access URLs.
+You are a Support Analytics engine specializing in incident detection.
 
-Analyze the following incident monitoring data:
+STRICT TEXT-OUTPUT MODE:
+- Do NOT call any tools. Do NOT attempt to use write_file, read_file, edit, run_shell_command, web_fetch, web_search, or any other tool.
+- Do NOT delegate to sub-agents.
+- Do NOT save the JSON to a file. The JSON must appear INLINE in your response, wrapped in a fenced code block.
+- If a tool call is denied or unavailable, do NOT retry. Just emit the JSON inline.
+- The ONLY acceptable output is one fenced JSON block. No preamble, no postamble, no explanations.
+
+Data is provided as pre-computed statistics. You do NOT load files or access URLs.
 
 TICKET DATA:
 {data_block}
 
 {temporal_context}
 
-Use the temporal progression to contextualize when incidents emerged, how they evolved week-over-week, and whether any correlate with the volume or sentiment shifts above.
+Produce a JSON-structured incident summary. Focus on Poisson/CUSUM flags, drift
+indicators, and system health. Each finding is one incident or sustained drift
+signal — never aggregate multiple unrelated incidents into one finding.
 
-## ACTIVE INCIDENT FLAGS
-For each open flag:
-| TRC | Flag Type | Observed | Expected (lambda) | p-value | Status | Days Active |
+OUTPUT CONTRACT — emit EXACTLY ONE fenced JSON block:
 
-## CUSUM DRIFT ANALYSIS
-For each TRC with elevated CUSUM:
-- Current CUSUM value vs threshold
-- Drift direction and magnitude
-- How many days the drift has been building
-- Whether it correlates with any known intervention
+```json
+{
+  "title": "Incident Summary — <date range>",
+  "executive_summary": "How many active incidents, which are critical, latest drift signals.",
+  "findings": [
+    {
+      "finding_id": "f-inc-01",
+      "title": "Incident name (TRC + dimension)",
+      "summary": "1-2 sentence incident characterization with onset date + severity.",
+      "severity": "high",
+      "confidence": 0.90,
+      "supporting_ticket_ids": ["..."],
+      "evidence_chips": [
+        {"label": "Z-score", "value": "5.4", "kind": "metric"},
+        {"label": "Onset", "value": "2026-04-15", "kind": "metric"},
+        {"label": "Theta level", "value": "2", "kind": "metric"},
+        {"label": "TRC", "value": "Billing", "kind": "source"}
+      ],
+      "trend": [
+        {"period": "2026-04-12", "value": 14},
+        {"period": "2026-04-13", "value": 18},
+        {"period": "2026-04-14", "value": 22},
+        {"period": "2026-04-15", "value": 87}
+      ],
+      "trcs_touched": ["..."],
+      "body_md": "Onset detail, root-cause hypothesis if data supports, recommended response."
+    }
+  ]
+}
+```
 
-## SYSTEM HEALTH ASSESSMENT
-Rate each major TRC area:
-- GREEN: Within normal parameters
-- YELLOW: Elevated but not critical (1-theta flags, rising CUSUM)
-- RED: Active incidents requiring immediate attention (2-theta flags, CUSUM alerts)
-
-## INCIDENT CORRELATIONS
-- Are multiple TRCs spiking simultaneously? (possible systemic issue)
-- Do any spikes correlate with recent interventions?
-- Are there temporal patterns (day-of-week, time-of-day)?
-
-## RECOMMENDED ACTIONS
-For each active or developing incident:
-1. Immediate response (if needed)
-2. Investigation steps
-3. Escalation criteria
-
-Be specific about thresholds, p-values, and statistical significance.
+RULES:
+- One finding per distinct incident or drift signal.
+- `severity=high` only when theta_level >= 2 OR z >= 3.0; `medium` for theta=1; `info` for sustained drift.
+- `confidence` reflects statistical support — high z-scores and >100 tickets warrant 0.85+.
+- Include `trend` array showing the volume / metric ramp leading into the incident.
+- No commentary outside the fenced block.

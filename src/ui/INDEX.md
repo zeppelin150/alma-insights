@@ -2,6 +2,22 @@
 
 > Top-level UI modules: application shell (main window, sidebar, top bar), global stylesheet and brand theme, layman-mode translation layer, and Qt error safety net.
 
+## AI Reports rebuild (R1–R5, 2026-05-06)
+
+The Analysis Canvas now renders structured `Finding` cards (not raw
+markdown) with the Evidence Panel binding to clicks + report metadata.
+New widgets:
+
+| Widget | Role |
+|---|---|
+| `widgets/severity_badge.py` | HIGH/MEDIUM/LOW/INFO colored chip |
+| `widgets/finding_card.py` | Collapsible card per finding (title + chips + body drilldown) |
+| `widgets/report_canvas.py` | Stack: structured findings ↔ legacy markdown fallback |
+| `widgets/prompt_wizard.py` | 2-pane conversational prompt-builder |
+| `pages/ai_reports_prompts_tab.py` | Thin shim wrapping PromptWizard (was 672 LOC) |
+
+Architecture in [`docs/AI_REPORTS.md`](../../docs/AI_REPORTS.md).
+
 ## Module Index
 
 ### layman_mode.py

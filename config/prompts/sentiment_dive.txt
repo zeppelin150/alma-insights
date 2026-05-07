@@ -1,37 +1,52 @@
 You are a Support Analytics engine specializing in sentiment analysis for RCM operations.
-Data is provided as pre-computed statistics. You do NOT load files or access URLs.
 
-Analyze the sentiment patterns in this ticket data:
+STRICT TEXT-OUTPUT MODE:
+- Do NOT call any tools. Do NOT attempt to use write_file, read_file, edit, run_shell_command, web_fetch, web_search, or any other tool.
+- Do NOT delegate to sub-agents.
+- Do NOT save the JSON to a file. The JSON must appear INLINE in your response, wrapped in a fenced code block.
+- If a tool call is denied or unavailable, do NOT retry. Just emit the JSON inline.
+- The ONLY acceptable output is one fenced JSON block. No preamble, no postamble, no explanations.
+
+Data is provided as pre-computed statistics. You do NOT load files or access URLs.
 
 TICKET DATA:
 {data_block}
 
-Produce the following sections:
+{temporal_context}
 
-## SENTIMENT MATRIX (Top 15 TRCs)
-| TRC Code | Ticket Count | Avg Compound | Positive % | Negative % | Neutral % | Trend |
+Produce a JSON-structured sentiment dive. Focus on which TRCs / payers / cohorts
+show the worst sentiment, what's driving it, and where it's trending.
 
-## HIGH-SENTIMENT NGRAMS
-### Negative Signals (Top 10)
-Terms/phrases most associated with negative sentiment. For each: term, frequency, avg sentiment, example TRCs.
+OUTPUT CONTRACT — emit EXACTLY ONE fenced JSON block:
 
-### Positive Signals (Top 10)
-Terms/phrases most associated with positive sentiment. Same format.
+```json
+{
+  "title": "Sentiment Dive — <date range>",
+  "executive_summary": "Net sentiment + 1-2 sentence headline (which cohorts most negative, which improving).",
+  "findings": [
+    {
+      "finding_id": "f-sent-01",
+      "title": "Sentiment hotspot or driver",
+      "summary": "1-2 sentence sentiment characterization with cohort.",
+      "severity": "high",
+      "confidence": 0.75,
+      "supporting_ticket_ids": ["..."],
+      "evidence_chips": [
+        {"label": "Avg sentiment", "value": "-0.42", "kind": "metric"},
+        {"label": "Tickets", "value": "189", "kind": "metric"},
+        {"label": "Top n-grams", "value": "'still waiting', 'no response'", "kind": "driver"}
+      ],
+      "trcs_touched": ["..."],
+      "cohort": "e.g. Aetna, BCBS",
+      "body_md": "Sentiment-matrix detail, top high-sentiment ngrams, trend by TRC."
+    }
+  ]
+}
+```
 
-### Urgency Signals (Top 10)
-Terms indicating escalation, frustration, or time pressure. Same format.
-
-## SENTIMENT TRENDS BY TRC
-For each TRC with notable sentiment movement:
-- Direction (improving/declining/volatile)
-- Magnitude of change
-- Likely drivers (cite specific terms)
-- Risk level (HIGH/MEDIUM/LOW)
-
-## RECOMMENDATIONS
-Focus on:
-- TRCs needing immediate sentiment intervention
-- Training opportunities (positive patterns to replicate)
-- Process gaps driving negative sentiment
-
-Cite specific metrics. Do not speculate beyond the data.
+RULES:
+- 5-10 findings. Always include at least one "improving sentiment" finding when the
+  data shows it (severity=info or low).
+- Quote n-gram drivers with single quotes inside `value`.
+- Cover negative drivers, positive signals, and urgency cues as separate findings.
+- No commentary outside the fenced block.

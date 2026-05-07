@@ -2,6 +2,24 @@
 
 > Data layer for Alma Insights: database management, ingestion pipelines, NLP analysis engines, statistical anomaly detection, Guru KB integration, Zendesk connectivity, report generation, and configuration persistence. This package contains all business logic that does not depend on the UI framework.
 
+## AI Reports rebuild (R1–R5, 2026-05-06)
+
+Structured-output report stack — full architecture in
+[`docs/AI_REPORTS.md`](../../docs/AI_REPORTS.md). New / rebuilt modules:
+
+| Module | Role |
+|---|---|
+| `report_schema.py` | `Report` / `Finding` / `EvidenceChip` dataclasses + JSON-Schema |
+| `report_parser.py` | JSON-fenced parser + legacy markdown fallback |
+| `report_grounding.py` | Accuracy harness (count / entity / time fidelity, warn-only) |
+| `specialist_pipeline.py` | Multi-bridge fan-out + convergence (universal default) |
+| `prompt_authoring.py` | Conversational prompt-builder state machine |
+| `ai_report_pipeline.py` | Phases 1 → 2c → 3 (REBUILT) |
+
+Migration `migrations/026_report_findings.sql` extends `analysis_reports`
+with `findings_json`, `pipeline_kind`, `specialist_count`,
+`accuracy_score`, `cost_usd`.
+
 ## Module Index
 
 ### ab_analysis.py
