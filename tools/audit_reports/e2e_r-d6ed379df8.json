@@ -1,0 +1,44 @@
+{
+  "report_id": "r-d6ed379df8",
+  "title": "Executive Summary",
+  "executive_summary": "",
+  "findings": [
+    {
+      "finding_id": "f-data-only",
+      "title": "Data summary (LLM unavailable)",
+      "summary": "LLM call failed or was disabled; raw analytics retained.",
+      "severity": "info",
+      "confidence": 0.0,
+      "supporting_ticket_ids": [],
+      "evidence_chips": [
+        {
+          "label": "Status",
+          "value": "data-only",
+          "kind": "source"
+        }
+      ],
+      "trend": [],
+      "body_md": "## Data Summary (LLM unavailable)\n\nThe analytics block was assembled, but no narrative was produced.\n\n```\nTOPLINE: 1778 tickets, Date range: 2025-01-01 to 2025-04-15\n\nTRC DISTRIBUTION:\n  Refund cash pay invoice OR Charge cancellation fee: 212 tickets, CSAT=3.46\n  Client cannot locate EAP benefit information: 182 tickets, CSAT=3.55\n  Client portal access issue: 134 tickets, CSAT=3.42\n  Provider availability settings not saving: 59 tickets, CSAT=3.4\n  Claims ineligible for Payout Confidence: 57 tickets, CSAT=3.8\n  Provider account setup issue: 55 tickets, CSAT=3.95\n  Client shows ineligible but has active coverage: 54 tickets, CSAT=3.94\n  Provider appeal of medical audit denials: 50 tickets, CSAT=3.42\n  Provider payout rate dissatisfaction: 47 tickets, CSAT=3.72\n  EAP care coordination with an Alma provider (client matching): 47 tickets, CSAT=3.66\n  Provider Alma deduction due to medical audits: 38 tickets, CSAT=4.0\n  Client receives an unexpected cancellation fee invoice: 37 tickets, CSAT=3.95\n  Client receives insurance invoice from a provider they do not know: 34 tickets, CSAT=3.23\n  Remove State License: 24 tickets, CSAT=3.59\n  Client receives an insurance invoice 45+ days after session: 23 tickets, CSAT=3.67\n\nCSAT SUMMARY: avg=3.59, range=1.0-5.0, rated=1064 tickets\n\nRESOLUTION TIMES: assignment-to-resolution=21.2h, total=26.0h, first-reply=2.5h\n\nSAMPLE CONVERSATIONS (redacted):\n  [1] [2019-12-31 23:59 \u23f1] CUSTOMER:\n**[Technical Issue]**: Hi, this is Lady Lemonade. The portal link for my upcoming session with Dr. Snickerdoodle appears to be broken. I click it and it just goes to a b...\n  [2] [2019-12-31 23:59 \u23f1] CUSTOMER:\nI was charged a cancellation fee of $25 but I cancelled more than 24 hours in advance per your policy.\n  [3] [2019-12-31 23:59 \u23f1] CUSTOMER:\nDirectory shows wrong insurance panels for Dr. Jellybean.\n  [4] [2019-12-31 23:59 \u23f1] CUSTOMER:\n**[Billing & Refunds]**: Hello, this is client Sir Fluffykins. I'm requesting a reimbursement for two duplicate charges of $138.34 and $53.46 that appeared on my card. A...\n  [5] [2019-12-31 23:59 \u23f1] CUSTOMER:\nClient cannot sign into the member portal. Getting authentication error.\n  [6] [2019-12-31 23:59 \u23f1] CUSTOMER:\nRefund request: $50 for no-show cancellation fee that was waived.\n  [7] [2019-12-31 23:59 \u23f1] CUSTOMER:\n**[Tax Form 1099]**: Hello, I am Dr. Wobbleton. I'm having trouble accessing my 1099 tax form for the last tax year. The link I have for the Stripe dashboard doesn't see...\n  [8] [2019-12-31 23:59 \u23f1] CUSTOMER:\nI keep getting invoices for sessions I already paid for. This is the third time. Invoice #642337 for $200.\n  [9] [2019-12-31 23:59 \u23f1] CUSTOMER:\nHi, I'm writing about a charge on my account. I was billed $50 on [DOB] but I don't recognize this charge. My member ID is FAKE-5314. Can someone help?\n  [10] [2019-12-31 23:59 \u23f1] CUSTOMER:\n**[Eligibility Dispute]**: Hi, I'm Dr. Barnaby Bumblesnoop. I'm experiencing an issue with client Baron Von Snickerdoodle's insurance eligibility (ID: FAKE-391X). WackyC...\n```",
+      "trcs_touched": [],
+      "cohort": ""
+    }
+  ],
+  "generated_at": "2026-05-07T04:09:46.952543+00:00",
+  "scope": {
+    "ticket_count": 1778,
+    "date_range": "2025-01-01/2025-04-15",
+    "trc_filter": "all"
+  },
+  "pipeline_kind": "single_pass",
+  "specialist_count": 0,
+  "bridges_used": 1,
+  "cost_usd": 0.0,
+  "duration_sec": 46.7,
+  "accuracy_score": 0.0,
+  "accuracy_flags": [
+    "llm_error: ACP initialize handshake failed: ACP: no response for message 1 within 30s",
+    "f-data-only:entity:unresolved=data-only",
+    "low_accuracy"
+  ],
+  "raw_markdown": "## Data Summary (LLM unavailable)\n\nThe analytics block was assembled, but no narrative was produced.\n\n```\nTOPLINE: 1778 tickets, Date range: 2025-01-01 to 2025-04-15\n\nTRC DISTRIBUTION:\n  Refund cash pay invoice OR Charge cancellation fee: 212 tickets, CSAT=3.46\n  Client cannot locate EAP benefit information: 182 tickets, CSAT=3.55\n  Client portal access issue: 134 tickets, CSAT=3.42\n  Provider availability settings not saving: 59 tickets, CSAT=3.4\n  Claims ineligible for Payout Confidence: 57 tickets, CSAT=3.8\n  Provider account setup issue: 55 tickets, CSAT=3.95\n  Client shows ineligible but has active coverage: 54 tickets, CSAT=3.94\n  Provider appeal of medical audit denials: 50 tickets, CSAT=3.42\n  Provider payout rate dissatisfaction: 47 tickets, CSAT=3.72\n  EAP care coordination with an Alma provider (client matching): 47 tickets, CSAT=3.66\n  Provider Alma deduction due to medical audits: 38 tickets, CSAT=4.0\n  Client receives an unexpected cancellation fee invoice: 37 tickets, CSAT=3.95\n  Client receives insurance invoice from a provider they do not know: 34 tickets, CSAT=3.23\n  Remove State License: 24 tickets, CSAT=3.59\n  Client receives an insurance invoice 45+ days after session: 23 tickets, CSAT=3.67\n\nCSAT SUMMARY: avg=3.59, range=1.0-5.0, rated=1064 tickets\n\nRESOLUTION TIMES: assignment-to-resolution=21.2h, total=26.0h, first-reply=2.5h\n\nSAMPLE CONVERSATIONS (redacted):\n  [1] [2019-12-31 23:59 \u23f1] CUSTOMER:\n**[Technical Issue]**: Hi, this is Lady Lemonade. The portal link for my upcoming session with Dr. Snickerdoodle appears to be broken. I click it and it just goes to a b...\n  [2] [2019-12-31 23:59 \u23f1] CUSTOMER:\nI was charged a cancellation fee of $25 but I cancelled more than 24 hours in advance per your policy.\n  [3] [2019-12-31 23:59 \u23f1] CUSTOMER:\nDirectory shows wrong insurance panels for Dr. Jellybean.\n  [4] [2019-12-31 23:59 \u23f1] CUSTOMER:\n**[Billing & Refunds]**: Hello, this is client Sir Fluffykins. I'm requesting a reimbursement for two duplicate charges of $138.34 and $53.46 that appeared on my card. A...\n  [5] [2019-12-31 23:59 \u23f1] CUSTOMER:\nClient cannot sign into the member portal. Getting authentication error.\n  [6] [2019-12-31 23:59 \u23f1] CUSTOMER:\nRefund request: $50 for no-show cancellation fee that was waived.\n  [7] [2019-12-31 23:59 \u23f1] CUSTOMER:\n**[Tax Form 1099]**: Hello, I am Dr. Wobbleton. I'm having trouble accessing my 1099 tax form for the last tax year. The link I have for the Stripe dashboard doesn't see...\n  [8] [2019-12-31 23:59 \u23f1] CUSTOMER:\nI keep getting invoices for sessions I already paid for. This is the third time. Invoice #642337 for $200.\n  [9] [2019-12-31 23:59 \u23f1] CUSTOMER:\nHi, I'm writing about a charge on my account. I was billed $50 on [DOB] but I don't recognize this charge. My member ID is FAKE-5314. Can someone help?\n  [10] [2019-12-31 23:59 \u23f1] CUSTOMER:\n**[Eligibility Dispute]**: Hi, I'm Dr. Barnaby Bumblesnoop. I'm experiencing an issue with client Baron Von Snickerdoodle's insurance eligibility (ID: FAKE-391X). WackyC...\n```"
+}

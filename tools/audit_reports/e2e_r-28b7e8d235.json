@@ -1,0 +1,225 @@
+{
+  "report_id": "r-28b7e8d235",
+  "title": "Alma \u2014 2025-01-01 to 2025-04-15",
+  "executive_summary": "RCM operations leadership is facing significant challenges across client billing, access, and invoicing, impacting client satisfaction and operational efficiency. Specific areas of concern include high volumes of cancellation fee disputes, client portal access issues, and unresolved eligibility discrepancies. Proactive measures are needed to streamline these processes and improve overall client and provider experience.",
+  "findings": [
+    {
+      "finding_id": "f-exec-01",
+      "title": "Billing & Cancellation Fee Discrepancies",
+      "summary": "A high volume of tickets are related to refunding cash payments and disputing cancellation fees, often leading to low client satisfaction. Financial discrepancies and unexpected charges are a recurring theme that impacts client trust.",
+      "severity": "high",
+      "confidence": 0.9,
+      "supporting_ticket_ids": [
+        "8",
+        "10"
+      ],
+      "evidence_chips": [
+        {
+          "label": "Tickets",
+          "value": "249+",
+          "kind": "metric"
+        },
+        {
+          "label": "CSAT (Refunds)",
+          "value": "3.46",
+          "kind": "metric"
+        },
+        {
+          "label": "Driver",
+          "value": "Billing errors, policy communication",
+          "kind": "driver"
+        }
+      ],
+      "trend": [],
+      "body_md": "## Detail\n\nThis category represents a significant source of client dissatisfaction and operational overhead, totaling over 249 tickets directly linked to billing and cancellation fees. The primary driver is 'Refund cash pay invoice OR Charge cancellation fee' (212 tickets) with a notably low CSAT of 3.46, indicating client frustration with financial adjustments and perceived incorrect charges. Additionally, 'Client receives an unexpected cancellation fee invoice' (37 tickets) points to issues in communicating cancellation policies or applying fees incorrectly. Sample conversations also highlight recurring payment issues (ID 8) and instances where waived fees are incorrectly billed (ID 10). Improving clarity around billing, cancellation policies, and ensuring accurate system processing is critical to reducing these incidents and boosting client trust.",
+      "trcs_touched": [
+        "Refund cash pay invoice OR Charge cancellation fee",
+        "Client receives an unexpected cancellation fee invoice"
+      ],
+      "cohort": "All clients"
+    },
+    {
+      "finding_id": "f-exec-02",
+      "title": "Client Access & Eligibility Barriers",
+      "summary": "A substantial number of clients encounter difficulties accessing benefit information, logging into the Alma portal, or verifying eligibility despite having active coverage, leading to significant friction in accessing care.",
+      "severity": "high",
+      "confidence": 0.9,
+      "supporting_ticket_ids": [
+        "3",
+        "5",
+        "6",
+        "7"
+      ],
+      "evidence_chips": [
+        {
+          "label": "Tickets",
+          "value": "370+",
+          "kind": "metric"
+        },
+        {
+          "label": "CSAT (Portal)",
+          "value": "3.42",
+          "kind": "metric"
+        },
+        {
+          "label": "Driver",
+          "value": "System access, EAP data sync",
+          "kind": "driver"
+        }
+      ],
+      "trend": [],
+      "body_md": "## Detail\n\nAggregating issues related to client access and eligibility reveals over 370 tickets, making this a high-impact area for client experience. 'Client cannot locate EAP benefit information' (182 tickets, CSAT=3.55) and 'Client portal access issue' (134 tickets, CSAT=3.42) are major contributors, often exacerbated by authentication lockouts as seen in samples (IDs 3, 6). Even when clients have active coverage, a significant number (54 tickets) are incorrectly shown as ineligible (ID 5). These barriers directly hinder clients from utilizing their benefits and accessing care. Urgent attention is required to improve user experience and system reliability for portal and eligibility checks, including addressing broken links (ID 7) and authentication processes.",
+      "trcs_touched": [
+        "Client cannot locate EAP benefit information",
+        "Client portal access issue",
+        "Client shows ineligible but has active coverage"
+      ],
+      "cohort": "All clients"
+    },
+    {
+      "finding_id": "f-exec-03",
+      "title": "Unexpected & Delayed Client Invoices",
+      "summary": "Clients are receiving invoices for services from unknown providers or experiencing significant delays (45+ days) in receiving invoices, leading to confusion, distrust, and negative billing experiences.",
+      "severity": "high",
+      "confidence": 0.7,
+      "supporting_ticket_ids": [
+        "2"
+      ],
+      "evidence_chips": [
+        {
+          "label": "Tickets",
+          "value": "57+",
+          "kind": "metric"
+        },
+        {
+          "label": "CSAT (Unknown provider)",
+          "value": "3.23",
+          "kind": "metric"
+        },
+        {
+          "label": "Driver",
+          "value": "Billing accuracy, timing",
+          "kind": "driver"
+        }
+      ],
+      "trend": [],
+      "body_md": "## Detail\n\nThis finding covers 57 tickets related to problematic client invoicing. The most critical issue is 'Client receives an insurance invoice from a provider they do not know' (34 tickets), which has the lowest CSAT of all observed TRCs at 3.23. This not only causes confusion but also erodes trust and raises potential fraud concerns, as exemplified by sample ID 2. Additionally, 'Client receives an insurance invoice 45+ days after session' (23 tickets) indicates significant delays in the billing cycle, which can complicate client financial planning and lead to increased inquiries. Streamlining the invoicing process, ensuring accuracy, and providing timely bills are essential to mitigate these issues and improve client satisfaction.",
+      "trcs_touched": [
+        "Client receives an insurance invoice from a provider they do not know",
+        "Client receives an insurance invoice 45+ days after session"
+      ],
+      "cohort": "All clients"
+    },
+    {
+      "finding_id": "f-exec-04",
+      "title": "Provider Setup & Platform Issues",
+      "summary": "Providers experience frustration with account setup and persistent issues with saving availability settings, indicating underlying platform instability and inefficiencies in the provider onboarding and management process.",
+      "severity": "medium",
+      "confidence": 0.85,
+      "supporting_ticket_ids": [],
+      "evidence_chips": [
+        {
+          "label": "Tickets",
+          "value": "114",
+          "kind": "metric"
+        },
+        {
+          "label": "CSAT (Settings)",
+          "value": "3.40",
+          "kind": "metric"
+        },
+        {
+          "label": "Driver",
+          "value": "Platform stability, onboarding flow",
+          "kind": "driver"
+        }
+      ],
+      "trend": [],
+      "body_md": "## Detail\n\nIssues directly affecting providers total 114 tickets, highlighting areas where operational improvements can significantly reduce friction. The primary concern is 'Provider availability settings not saving' (59 tickets) which has a low CSAT of 3.40, pointing to significant frustration with platform functionality and data persistence. While 'Provider account setup issue' (55 tickets) has a higher CSAT (3.95), streamlining this process could still reduce initial onboarding hurdles and free up support resources. Addressing the root causes of settings not saving is crucial for retaining provider satisfaction and ensuring accurate service delivery through the platform.",
+      "trcs_touched": [
+        "Provider availability settings not saving",
+        "Provider account setup issue"
+      ],
+      "cohort": "All providers"
+    },
+    {
+      "finding_id": "f-exec-05",
+      "title": "Claims Ineligibility & Rejection",
+      "summary": "A consistent number of tickets indicate issues with claims being deemed ineligible despite client expectations or internal verification, requiring investigation into claim processing rules and communication.",
+      "severity": "medium",
+      "confidence": 0.7,
+      "supporting_ticket_ids": [
+        "1"
+      ],
+      "evidence_chips": [
+        {
+          "label": "Tickets",
+          "value": "57+",
+          "kind": "metric"
+        },
+        {
+          "label": "CSAT",
+          "value": "3.80",
+          "kind": "metric"
+        },
+        {
+          "label": "Driver",
+          "value": "Claim processing, benefit mapping",
+          "kind": "driver"
+        }
+      ],
+      "trend": [],
+      "body_md": "## Detail\n\n'Claims ineligible for Alma' accounts for 57 tickets, with a moderate CSAT of 3.80. This indicates a recurring challenge where claims are not being processed as expected. The sample conversation (ID 1) further illustrates scenarios where patient copays match plans, but claims are still rejected due to Alma's processing. Understanding the specific reasons for ineligibility and rejection, whether due to system configuration, benefit mapping, or communication gaps, is vital. Improving the accuracy of initial eligibility checks and providing clear explanations for rejections can reduce client and provider confusion and subsequent support requests.",
+      "trcs_touched": [
+        "Claims ineligible for Alma"
+      ],
+      "cohort": "Clients with claims, specific plans"
+    },
+    {
+      "finding_id": "f-exec-06",
+      "title": "Appointment Reminder System Flaws",
+      "summary": "Clients report issues with appointment reminders not sending or missing crucial session links, leading to missed appointments and difficulties in joining scheduled sessions.",
+      "severity": "medium",
+      "confidence": 0.5,
+      "supporting_ticket_ids": [
+        "4",
+        "9"
+      ],
+      "evidence_chips": [
+        {
+          "label": "Ticket Source",
+          "value": "Sample conversations",
+          "kind": "source"
+        },
+        {
+          "label": "Driver",
+          "value": "System notifications, integration",
+          "kind": "driver"
+        }
+      ],
+      "trend": [],
+      "body_md": "## Detail\n\nAlthough not directly represented by a high-volume TRC, sample conversations (IDs 4 and 9) highlight critical issues with the appointment reminder system. Clients are either not receiving reminders at all (ID 4) or are getting reminders that lack the necessary session links (ID 9), preventing them from joining their appointments. These failures directly impact appointment adherence and client experience, potentially leading to missed sessions and billing complications. Investigation into the reminder system's reliability, integration with scheduling platforms, and content generation is recommended to ensure clients receive timely and actionable appointment information.",
+      "trcs_touched": [],
+      "cohort": "Clients with appointments"
+    }
+  ],
+  "generated_at": "",
+  "scope": {
+    "ticket_count": 1778,
+    "date_range": "2025-01-01/2025-04-15",
+    "trc_filter": "all"
+  },
+  "pipeline_kind": "single_pass",
+  "specialist_count": 0,
+  "bridges_used": 1,
+  "cost_usd": 0.003394,
+  "duration_sec": 100.6,
+  "accuracy_score": 0.5,
+  "accuracy_flags": [
+    "f-exec-03:entity:unresolved=All clients,Client receives an insurance invoice from a provider they do not know",
+    "f-exec-05:entity:unresolved=Claims ineligible for Alma,Clients with claims,specific plans",
+    "f-exec-06:entity:unresolved=Clients with appointments,Sample conversations",
+    "low_accuracy"
+  ],
+  "raw_markdown": "```json\n{\n  \"title\": \"Alma \u2014 2025-01-01 to 2025-04-15\",\n  \"executive_summary\": \"RCM operations leadership is facing significant challenges across client billing, access, and invoicing, impacting client satisfaction and operational efficiency. Specific areas of concern include high volumes of cancellation fee disputes, client portal access issues, and unresolved eligibility discrepancies. Proactive measures are needed to streamline these processes and improve overall client and provider experience.\",\n  \"findings\": [\n    {\n      \"finding_id\": \"f-exec-01\",\n      \"title\": \"Billing & Cancellation Fee Discrepancies\",\n      \"summary\": \"A high volume of tickets are related to refunding cash payments and disputing cancellation fees, often leading to low client satisfaction. Financial discrepancies and unexpected charges are a recurring theme that impacts client trust.\",\n      \"severity\": \"high\",\n      \"confidence\": 0.9,\n      \"supporting_ticket_ids\": [\"8\", \"10\"],\n      \"evidence_chips\": [\n        {\"label\": \"Tickets\", \"value\": \"249+\", \"kind\": \"metric\"},\n        {\"label\": \"CSAT (Refunds)\", \"value\": \"3.46\", \"kind\": \"metric\"},\n        {\"label\": \"Driver\", \"value\": \"Billing errors, policy communication\", \"kind\": \"driver\"}\n      ],\n      \"trcs_touched\": [\"Refund cash pay invoice OR Charge cancellation fee\", \"Client receives an unexpected cancellation fee invoice\"],\n      \"cohort\": \"All clients\",\n      \"body_md\": \"## Detail\\n\\nThis category represents a significant source of client dissatisfaction and operational overhead, totaling over 249 tickets directly linked to billing and cancellation fees. The primary driver is 'Refund cash pay invoice OR Charge cancellation fee' (212 tickets) with a notably low CSAT of 3.46, indicating client frustration with financial adjustments and perceived incorrect charges. Additionally, 'Client receives an unexpected cancellation fee invoice' (37 tickets) points to issues in communicating cancellation policies or applying fees incorrectly. Sample conversations also highlight recurring payment issues (ID 8) and instances where waived fees are incorrectly billed (ID 10). Improving clarity around billing, cancellation policies, and ensuring accurate system processing is critical to reducing these incidents and boosting client trust.\"\n    },\n    {\n      \"finding_id\": \"f-exec-02\",\n      \"title\": \"Client Access & Eligibility Barriers\",\n      \"summary\": \"A substantial number of clients encounter difficulties accessing benefit information, logging into the Alma portal, or verifying eligibility despite having active coverage, leading to significant friction in accessing care.\",\n      \"severity\": \"high\",\n      \"confidence\": 0.9,\n      \"supporting_ticket_ids\": [\"3\", \"5\", \"6\", \"7\"],\n      \"evidence_chips\": [\n        {\"label\": \"Tickets\", \"value\": \"370+\", \"kind\": \"metric\"},\n        {\"label\": \"CSAT (Portal)\", \"value\": \"3.42\", \"kind\": \"metric\"},\n        {\"label\": \"Driver\", \"value\": \"System access, EAP data sync\", \"kind\": \"driver\"}\n      ],\n      \"trcs_touched\": [\"Client cannot locate EAP benefit information\", \"Client portal access issue\", \"Client shows ineligible but has active coverage\"],\n      \"cohort\": \"All clients\",\n      \"body_md\": \"## Detail\\n\\nAggregating issues related to client access and eligibility reveals over 370 tickets, making this a high-impact area for client experience. 'Client cannot locate EAP benefit information' (182 tickets, CSAT=3.55) and 'Client portal access issue' (134 tickets, CSAT=3.42) are major contributors, often exacerbated by authentication lockouts as seen in samples (IDs 3, 6). Even when clients have active coverage, a significant number (54 tickets) are incorrectly shown as ineligible (ID 5). These barriers directly hinder clients from utilizing their benefits and accessing care. Urgent attention is required to improve user experience and system reliability for portal and eligibility checks, including addressing broken links (ID 7) and authentication processes.\"\n    },\n    {\n      \"finding_id\": \"f-exec-03\",\n      \"title\": \"Unexpected & Delayed Client Invoices\",\n      \"summary\": \"Clients are receiving invoices for services from unknown providers or experiencing significant delays (45+ days) in receiving invoices, leading to confusion, distrust, and negative billing experiences.\",\n      \"severity\": \"high\",\n      \"confidence\": 0.7,\n      \"supporting_ticket_ids\": [\"2\"],\n      \"evidence_chips\": [\n        {\"label\": \"Tickets\", \"value\": \"57+\", \"kind\": \"metric\"},\n        {\"label\": \"CSAT (Unknown provider)\", \"value\": \"3.23\", \"kind\": \"metric\"},\n        {\"label\": \"Driver\", \"value\": \"Billing accuracy, timing\", \"kind\": \"driver\"}\n      ],\n      \"trcs_touched\": [\"Client receives an insurance invoice from a provider they do not know\", \"Client receives an insurance invoice 45+ days after session\"],\n      \"cohort\": \"All clients\",\n      \"body_md\": \"## Detail\\n\\nThis finding covers 57 tickets related to problematic client invoicing. The most critical issue is 'Client receives an insurance invoice from a provider they do not know' (34 tickets), which has the lowest CSAT of all observed TRCs at 3.23. This not only causes confusion but also erodes trust and raises potential fraud concerns, as exemplified by sample ID 2. Additionally, 'Client receives an insurance invoice 45+ days after session' (23 tickets) indicates significant delays in the billing cycle, which can complicate client financial planning and lead to increased inquiries. Streamlining the invoicing process, ensuring accuracy, and providing timely bills are essential to mitigate these issues and improve client satisfaction.\"\n    },\n    {\n      \"finding_id\": \"f-exec-04\",\n      \"title\": \"Provider Setup & Platform Issues\",\n      \"summary\": \"Providers experience frustration with account setup and persistent issues with saving availability settings, indicating underlying platform instability and inefficiencies in the provider onboarding and management process.\",\n      \"severity\": \"medium\",\n      \"confidence\": 0.85,\n      \"supporting_ticket_ids\": [],\n      \"evidence_chips\": [\n        {\"label\": \"Tickets\", \"value\": \"114\", \"kind\": \"metric\"},\n        {\"label\": \"CSAT (Settings)\", \"value\": \"3.40\", \"kind\": \"metric\"},\n        {\"label\": \"Driver\", \"value\": \"Platform stability, onboarding flow\", \"kind\": \"driver\"}\n      ],\n      \"trcs_touched\": [\"Provider availability settings not saving\", \"Provider account setup issue\"],\n      \"cohort\": \"All providers\",\n      \"body_md\": \"## Detail\\n\\nIssues directly affecting providers total 114 tickets, highlighting areas where operational improvements can significantly reduce friction. The primary concern is 'Provider availability settings not saving' (59 tickets) which has a low CSAT of 3.40, pointing to significant frustration with platform functionality and data persistence. While 'Provider account setup issue' (55 tickets) has a higher CSAT (3.95), streamlining this process could still reduce initial onboarding hurdles and free up support resources. Addressing the root causes of settings not saving is crucial for retaining provider satisfaction and ensuring accurate service delivery through the platform.\"\n    },\n    {\n      \"finding_id\": \"f-exec-05\",\n      \"title\": \"Claims Ineligibility & Rejection\",\n      \"summary\": \"A consistent number of tickets indicate issues with claims being deemed ineligible despite client expectations or internal verification, requiring investigation into claim processing rules and communication.\",\n      \"severity\": \"medium\",\n      \"confidence\": 0.7,\n      \"supporting_ticket_ids\": [\"1\"],\n      \"evidence_chips\": [\n        {\"label\": \"Tickets\", \"value\": \"57+\", \"kind\": \"metric\"},\n        {\"label\": \"CSAT\", \"value\": \"3.80\", \"kind\": \"metric\"},\n        {\"label\": \"Driver\", \"value\": \"Claim processing, benefit mapping\", \"kind\": \"driver\"}\n      ],\n      \"trcs_touched\": [\"Claims ineligible for Alma\"],\n      \"cohort\": \"Clients with claims, specific plans\",\n      \"body_md\": \"## Detail\\n\\n'Claims ineligible for Alma' accounts for 57 tickets, with a moderate CSAT of 3.80. This indicates a recurring challenge where claims are not being processed as expected. The sample conversation (ID 1) further illustrates scenarios where patient copays match plans, but claims are still rejected due to Alma's processing. Understanding the specific reasons for ineligibility and rejection, whether due to system configuration, benefit mapping, or communication gaps, is vital. Improving the accuracy of initial eligibility checks and providing clear explanations for rejections can reduce client and provider confusion and subsequent support requests.\"\n    },\n    {\n      \"finding_id\": \"f-exec-06\",\n      \"title\": \"Appointment Reminder System Flaws\",\n      \"summary\": \"Clients report issues with appointment reminders not sending or missing crucial session links, leading to missed appointments and difficulties in joining scheduled sessions.\",\n      \"severity\": \"medium\",\n      \"confidence\": 0.5,\n      \"supporting_ticket_ids\": [\"4\", \"9\"],\n      \"evidence_chips\": [\n        {\"label\": \"Ticket Source\", \"value\": \"Sample conversations\", \"kind\": \"source\"},\n        {\"label\": \"Driver\", \"value\": \"System notifications, integration\", \"kind\": \"driver\"}\n      ],\n      \"trcs_touched\": [],\n      \"cohort\": \"Clients with appointments\",\n      \"body_md\": \"## Detail\\n\\nAlthough not directly represented by a high-volume TRC, sample conversations (IDs 4 and 9) highlight critical issues with the appointment reminder system. Clients are either not receiving reminders at all (ID 4) or are getting reminders that lack the necessary session links (ID 9), preventing them from joining their appointments. These failures directly impact appointment adherence and client experience, potentially leading to missed sessions and billing complications. Investigation into the reminder system's reliability, integration with scheduling platforms, and content generation is recommended to ensure clients receive timely and actionable appointment information.\"\n    }\n  ]\n}\n```"
+}

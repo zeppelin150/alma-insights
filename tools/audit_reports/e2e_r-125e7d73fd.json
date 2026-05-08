@@ -1,0 +1,22 @@
+{
+  "report_id": "r-125e7d73fd",
+  "title": "Executive Summary",
+  "executive_summary": "",
+  "findings": [],
+  "generated_at": "2026-05-07T02:42:27.565890+00:00",
+  "scope": {
+    "ticket_count": 1778,
+    "date_range": "2025-01-01/2025-04-15",
+    "trc_filter": "all"
+  },
+  "pipeline_kind": "single_pass",
+  "specialist_count": 0,
+  "bridges_used": 1,
+  "cost_usd": 0.000452,
+  "duration_sec": 311.9,
+  "accuracy_score": null,
+  "accuracy_flags": [
+    "legacy_unparseable"
+  ],
+  "raw_markdown": "OK. I will not write the file. What would you like to do next?The `write_file` operation was cancelled by the user. I have already generated the JSON output in my previous turn. I can re-output the JSON content if you would like, or proceed with a different instruction. Please let me know how you'd like to proceed."
+}

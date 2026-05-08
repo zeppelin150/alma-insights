@@ -1,0 +1,44 @@
+{
+  "report_id": "r-f4501d31f3",
+  "title": "Executive Summary",
+  "executive_summary": "",
+  "findings": [
+    {
+      "finding_id": "f-data-only",
+      "title": "Data summary (LLM unavailable)",
+      "summary": "LLM call failed or was disabled; raw analytics retained.",
+      "severity": "info",
+      "confidence": 0.0,
+      "supporting_ticket_ids": [],
+      "evidence_chips": [
+        {
+          "label": "Status",
+          "value": "data-only",
+          "kind": "source"
+        }
+      ],
+      "trend": [],
+      "body_md": "## Data Summary (LLM unavailable)\n\nThe analytics block was assembled, but no narrative was produced.\n\n```\nTOPLINE: 1778 tickets, Date range: 2025-01-01 to 2025-04-15\n\nTRC DISTRIBUTION:\n  Refund cash pay invoice OR Charge cancellation fee: 212 tickets, CSAT=3.46\n  Client cannot locate EAP benefit information: 182 tickets, CSAT=3.55\n  Client portal access issue: 134 tickets, CSAT=3.42\n  Provider availability settings not saving: 59 tickets, CSAT=3.4\n  Claims ineligible for Payout Confidence: 57 tickets, CSAT=3.8\n  Provider account setup issue: 55 tickets, CSAT=3.95\n  Client shows ineligible but has active coverage: 54 tickets, CSAT=3.94\n  Provider appeal of medical audit denials: 50 tickets, CSAT=3.42\n  Provider payout rate dissatisfaction: 47 tickets, CSAT=3.72\n  EAP care coordination with an Alma provider (client matching): 47 tickets, CSAT=3.66\n  Provider Alma deduction due to medical audits: 38 tickets, CSAT=4.0\n  Client receives an unexpected cancellation fee invoice: 37 tickets, CSAT=3.95\n  Client receives insurance invoice from a provider they do not know: 34 tickets, CSAT=3.23\n  Remove State License: 24 tickets, CSAT=3.59\n  Client receives an insurance invoice 45+ days after session: 23 tickets, CSAT=3.67\n\nCSAT SUMMARY: avg=3.59, range=1.0-5.0, rated=1064 tickets\n\nRESOLUTION TIMES: assignment-to-resolution=21.2h, total=26.0h, first-reply=2.5h\n\nSAMPLE CONVERSATIONS (redacted):\n  [1] [2019-12-31 23:59 \u23f1] CUSTOMER:\nLicense upload not processing, getting validation error on state board form.\n  [2] [2019-12-31 23:59 \u23f1] CUSTOMER:\nEOB shows copay of $100 but benefits say $30. Please audit this ticket.\n  [3] [2019-12-31 23:59 \u23f1] CUSTOMER:\nPlease issue refund for duplicate charge on Lord Biscuit account.\n  [4] [2019-12-31 23:59 \u23f1] CUSTOMER:\nAuto-charge error: payment did not go through for monthly session fees.\n  [5] [2019-12-31 23:59 \u23f1] CUSTOMER:\n**[Profile Update]**: Hi, I'm Dr. McSprinkles. I recently completed my MD certification and would like to have this professional designation added to my account name on ...\n  [6] [2019-12-31 23:59 \u23f1] CUSTOMER:\nAutomatic payment rejected by bank. Member ID FAKE-8499X, amount $400.\n  [7] [2019-12-31 23:59 \u23f1] CUSTOMER:\n**[Billing & Refunds]**: Hello, this is client Lord Jellybean. I'm requesting a reimbursement for two duplicate charges of $71.53 and $126.35 that appeared on my card. A...\n  [8] [2019-12-31 23:59 \u23f1] CUSTOMER:\nNeed to process refund for overpayment, cash pay invoice should have been insurance.\n  [9] [2019-12-31 23:59 \u23f1] CUSTOMER:\nMember ID on Pegasus PPO card (FAKE-423X) does not match what portal accepts.\n  [10] [2019-12-31 23:59 \u23f1] CUSTOMER:\nPortal login fails repeatedly. Duchess Dewdrop confirmed credentials are correct.\n```",
+      "trcs_touched": [],
+      "cohort": ""
+    }
+  ],
+  "generated_at": "2026-05-07T02:30:36.337756+00:00",
+  "scope": {
+    "ticket_count": 1778,
+    "date_range": "2025-01-01/2025-04-15",
+    "trc_filter": "all"
+  },
+  "pipeline_kind": "single_pass",
+  "specialist_count": 0,
+  "bridges_used": 1,
+  "cost_usd": 0.0,
+  "duration_sec": 185.3,
+  "accuracy_score": 0.0,
+  "accuracy_flags": [
+    "llm_error: Command '\"C:\\Users\\Chris\\AppData\\Roaming\\npm\\gemini.CMD\" --model gemini-2.5-flash-lite -p \"\" < \"C:\\Users\\Chris\\AppData\\L",
+    "f-data-only:entity:unresolved=data-only",
+    "low_accuracy"
+  ],
+  "raw_markdown": "## Data Summary (LLM unavailable)\n\nThe analytics block was assembled, but no narrative was produced.\n\n```\nTOPLINE: 1778 tickets, Date range: 2025-01-01 to 2025-04-15\n\nTRC DISTRIBUTION:\n  Refund cash pay invoice OR Charge cancellation fee: 212 tickets, CSAT=3.46\n  Client cannot locate EAP benefit information: 182 tickets, CSAT=3.55\n  Client portal access issue: 134 tickets, CSAT=3.42\n  Provider availability settings not saving: 59 tickets, CSAT=3.4\n  Claims ineligible for Payout Confidence: 57 tickets, CSAT=3.8\n  Provider account setup issue: 55 tickets, CSAT=3.95\n  Client shows ineligible but has active coverage: 54 tickets, CSAT=3.94\n  Provider appeal of medical audit denials: 50 tickets, CSAT=3.42\n  Provider payout rate dissatisfaction: 47 tickets, CSAT=3.72\n  EAP care coordination with an Alma provider (client matching): 47 tickets, CSAT=3.66\n  Provider Alma deduction due to medical audits: 38 tickets, CSAT=4.0\n  Client receives an unexpected cancellation fee invoice: 37 tickets, CSAT=3.95\n  Client receives insurance invoice from a provider they do not know: 34 tickets, CSAT=3.23\n  Remove State License: 24 tickets, CSAT=3.59\n  Client receives an insurance invoice 45+ days after session: 23 tickets, CSAT=3.67\n\nCSAT SUMMARY: avg=3.59, range=1.0-5.0, rated=1064 tickets\n\nRESOLUTION TIMES: assignment-to-resolution=21.2h, total=26.0h, first-reply=2.5h\n\nSAMPLE CONVERSATIONS (redacted):\n  [1] [2019-12-31 23:59 \u23f1] CUSTOMER:\nLicense upload not processing, getting validation error on state board form.\n  [2] [2019-12-31 23:59 \u23f1] CUSTOMER:\nEOB shows copay of $100 but benefits say $30. Please audit this ticket.\n  [3] [2019-12-31 23:59 \u23f1] CUSTOMER:\nPlease issue refund for duplicate charge on Lord Biscuit account.\n  [4] [2019-12-31 23:59 \u23f1] CUSTOMER:\nAuto-charge error: payment did not go through for monthly session fees.\n  [5] [2019-12-31 23:59 \u23f1] CUSTOMER:\n**[Profile Update]**: Hi, I'm Dr. McSprinkles. I recently completed my MD certification and would like to have this professional designation added to my account name on ...\n  [6] [2019-12-31 23:59 \u23f1] CUSTOMER:\nAutomatic payment rejected by bank. Member ID FAKE-8499X, amount $400.\n  [7] [2019-12-31 23:59 \u23f1] CUSTOMER:\n**[Billing & Refunds]**: Hello, this is client Lord Jellybean. I'm requesting a reimbursement for two duplicate charges of $71.53 and $126.35 that appeared on my card. A...\n  [8] [2019-12-31 23:59 \u23f1] CUSTOMER:\nNeed to process refund for overpayment, cash pay invoice should have been insurance.\n  [9] [2019-12-31 23:59 \u23f1] CUSTOMER:\nMember ID on Pegasus PPO card (FAKE-423X) does not match what portal accepts.\n  [10] [2019-12-31 23:59 \u23f1] CUSTOMER:\nPortal login fails repeatedly. Duchess Dewdrop confirmed credentials are correct.\n```"
+}

@@ -35,11 +35,14 @@ jobs:
           cache: 'pip'
           cache-dependency-path: requirements.txt
 
+<<<<<<< HEAD
       - name: Set up Node (for Snyk CLI)
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
+=======
+>>>>>>> b6b2173 (snyk: pre-install CPU-only torch + enable pip cache)
       # Install CPU-only torch FIRST so the subsequent resolution for
       # sentence-transformers reuses the ~200 MB CPU wheel instead of
       # pulling the ~2.5 GB CUDA build (+ nvidia-cuda-* drivers).

@@ -1,0 +1,1053 @@
+# [NAME] — 2025-01-01 to 2025-04-15
+
+Analysis of recent support tickets reveals critical issues predominantly around billing discrepancies and eligibility confirmations, directly impacting client satisfaction. Operational inefficiencies in provider platform management and client portal access further exacerbate negative experiences. Addressing these areas is crucial for improving CSAT and reducing resolution times.
+
+## 1. Client Billing & Charge Discrepancies  _[HIGH]_ 
+A significant volume of tickets highlights client dissatisfaction with unexpected charges, double billing, and invoices for services already paid or unrecognized. This impacts trust and reflects negatively on operational accuracy.
+
+**Ticket count**: 306 · **Avg CSAT**: 3.46 · **Top TRCs**: Refund cash pay, unexpected cancellation fee, unrecognized invoices
+
+## Detail
+Billing and charge discrepancies represent the highest volume of client-facing issues, totaling 306 tickets. The primary driver, 'Refund cash pay invoice OR Charge cancellation fee' (212 tickets), has an unacceptably low CSAT of 3.46. Other significant contributors include unexpected cancellation fees (37 tickets) and unrecognized insurance invoices (34 tickets, CSAT=3.23). This indicates systemic issues within the billing process, leading to client frustration and potential churn. Examples from sample conversations include double billing, unauthorized charges post-cancellation, and invoices for unrendered or paid services. Streamlining billing reconciliation and improving communication around charges are imperative.
+
+## 2. EAP & Eligibility Confirmation Challenges  _[MEDIUM]_ 
+Clients frequently struggle with locating EAP benefit information and encounter eligibility discrepancies, leading to confusion and delayed access to care. This points to gaps in benefit communication and real-time eligibility verification.
+
+**Ticket count**: 340 · **Avg CSAT**: 3.55 · **Top TRC**: Client cannot locate EAP benefit information
+
+## Detail
+EAP and eligibility-related inquiries collectively account for 340 tickets, making it a substantial area of client concern. The leading issue, 'Client cannot locate EAP benefit information', generates 182 tickets with an average CSAT of 3.55. Additionally, 54 tickets address situations where clients are shown as ineligible despite having active coverage, and 57 tickets concern claims being deemed ineligible for [NAME]. These findings suggest a need for clearer communication regarding EAP benefits and a more robust, real-time eligibility verification system to prevent client frustration and ensure seamless access to services.
+
+## 3. Client Portal Access Barriers  _[MEDIUM]_ 
+A notable volume of tickets indicates clients are experiencing persistent difficulties accessing their client portal, despite being eligible. This directly impedes self-service and creates unnecessary support overhead.
+
+**Ticket count**: 134 · **Avg CSAT**: 3.42 · **TRC**: Client portal access issue
+
+## Detail
+The 'Client portal access issue' accounts for 134 tickets with a low CSAT of 3.42. This indicates a consistent problem preventing clients from utilizing self-service features. The inability to access the portal, even when eligible, creates a poor user experience and drives clients to support, increasing operational load. Investigating root causes for login failures and improving user authentication flows are critical steps to alleviate this pressure and enhance client autonomy.
+
+## 4. Provider Platform Usability & Payout Dissatisfaction  _[MEDIUM]_ 
+Providers are encountering issues with platform settings not saving and expressing dissatisfaction with payout rates and deductions from medical audits. This impacts provider experience and operational efficiency.
+
+**Ticket count**: 249 · **Avg CSAT (availability)**: 3.4 · **Top TRCs**: Provider availability settings not saving, payout rate dissatisfaction
+
+## Detail
+Provider-centric issues sum to 249 tickets. The most pressing concerns include 'Provider availability settings not saving' (59 tickets, CSAT=3.4), 'Provider payout rate dissatisfaction' (47 tickets, CSAT=3.72), and 'Provider appeal of medical audit denials' (50 tickets, CSAT=3.42). While 'Provider Alma deduction due to medical audits' has a high CSAT of 4.0, its 38 tickets suggest a need for clearer communication around these processes. The inability to save settings points to a direct usability flaw, while payout-related issues could impact provider retention. Improving platform stability and transparency in financial processes are key.
+
+## 5. Licensing & Appointment Communication Gaps  _[LOW]_ 
+While lower in volume, tickets related to [NAME] license status and appointment reminder misdelivery indicate potential compliance risks and administrative errors.
+
+**Ticket count (License)**: 24 · **Avg CSAT (License)**: 3.59 · **TRC (License)**: [NAME] License
+
+## Detail
+Issues regarding '[NAME] License' account for 24 tickets with an average CSAT of 3.59. Although this is a smaller volume, ensuring providers' licensing is correctly handled and reflected is critical for compliance and uninterrupted service. Additionally, a sample conversation highlights 'Appointment reminder sent to wrong email address for [NAME]', indicating a potential gap in client communication preferences or data accuracy. While not directly tied to a high-volume TRC, these administrative issues can escalate if not proactively managed, posing risks to client experience and regulatory adherence.
+
+---
+
+## Analyst Reports
+
+### Cross-TRC Synthesis
+
+> A systemic failure in the automated invoicing export module is causing clients to receive financial documents from unknown providers. This issue generates significant friction via automation loops and repeat contacts, resulting in a below-average sentiment of 2.9/5.
+
+**Shared Root Causes**
+
+- **Data mapping failure within the automated PDF generation and export pipeline.**
+  - Affected TRCs: `Client receives insurance invoice from a provider they do not know`
+  - Evidence: Direct link between technical export errors and the receipt of invoices from unrecognized entities.
+
+**Systemic Issues**
+
+| Issue | Scope | Severity |
+|-------|-------|----------|
+| Unvalidated automated invoicing loops. | Billing and Document Export System | high |
+| Broken provider-client relationship integrity. | Entity Registry / Database Mapping | medium |
+
+**Cross-TRC Correlations**
+
+- `Invoice PDF Generation and Export Errors` ↔ `Client receives insurance invoice from a provider they do not know`: The technical failure in export logic is the primary driver for the delivery of incorrect insurance documentation.
+
+### Quality Audit
+
+**Overall Quality Score**: 65%
+
+**Grade Distribution**
+
+| Grade | Count |
+|-------|-------|
+| PARTIAL | 13 |
+
+**Common Errors**
+
+- TRC Hallucination: Every ticket is forced into the 'unknown provider' TRC despite the content clearly describing technical PDF generation/corruption issues.
+- Sentiment Pessimism: Tickets with clear 'Thanks, that worked' resolutions are frequently graded with negative or mixed sentiment rather than positive/neutral.
+- Name Misinterpretation: Nicknames/Pet names like 'Lady Snickerdoodle' may be confusing the engine into thinking these are unrecognized entities rather than specific accounts.
+
+**Recommendations**
+
+- Re-train or prompt-engineer the TRC classifier to better distinguish between 'Identity/Entity' issues and 'Technical/Formatting' issues.
+- Weight the final customer response more heavily in sentiment analysis to capture successful resolutions.
+- Implement a 'Technical Error' TRC to capture corruption, blank files, and saving failures which currently lack a dedicated high-level bucket.
+
+### Novelty Validation
+
+**Results**: 13 patterns evaluated
+
+| Verdict | Count |
+|---------|-------|
+| VALID | 1 |
+| DUPLICATE | 0 |
+| MERGE | 12 |
+
+**Notable Findings**
+
+- `11815` → **MERGE** (matches: 11813) — Describes the same root technical failure as 11813 (PDF generation), specifically focusing on file-save errors.
+- `11816` → **MERGE** (matches: 11813) — A symptom variant (blank content) of the same PDF generation service failure identified in 11813.
+- `11818` → **MERGE** (matches: 11813) — Direct duplicate of the technical export/corruption issue identified in 11813.
+- `11819` → **MERGE** (matches: 11813) — Same technical root cause involving encoding/metadata corruption during export.
+- `11821` → **MERGE** (matches: 11813) — Persistent saving error related to the same technical PDF generation pipeline.
+- `11822` → **MERGE** (matches: 11813) — Systemic save-handler failure; belongs in the same technical export sub-cluster.
+- `11825` → **MERGE** (matches: 11813) — Variant symptom (garbage characters) of the same binary encoding issue in PDF generation.
+- `11829` → **MERGE** (matches: 11813) — Rendering failure where only headers appear; same root technical bucket as 11813.
+- `11830` → **MERGE** (matches: 11813) — Recurring corruption pattern; should be merged into the primary technical export cluster.
+- `11831` → **MERGE** (matches: 11813) — While it captures an agent communication gap, the underlying trigger is the same PDF corruption issue.
+- *...and 2 more*
+
+### Pattern Merge Suggestions
+
+**5 merge suggestion(s) identified**
+
+- **Keep**: `Portal and technical access friction` ← merge `portal_feature_malfunction`, `platform_access_issues`, `platform_technical_access_failures`, `portal_technical_glitches`, `Platform technical access and link issues`, `Technical: Broken Links & Sync`, `Platform technical issue` (95% confidence)
+  - These patterns all describe various forms of technical failures, broken links, or platform glitches that prevent users from successfully accessing or utilizing the Alma portal.
+- **Keep**: `Billing errors and unauthorized transactions` ← merge `billing_charge_discrepancy`, `erroneous_client_billing`, `erroneous_billing_and_duplicate_charges`, `billing_and_refunds`, `Client Billing and Fee Disputes`, `Billing & Cancellation Fee Disputes` (90% confidence)
+  - These labels overlap significantly, covering incorrect patient charges, duplicate billing instances, and general disputes regarding invoice accuracy.
+- **Keep**: `Insurance eligibility and coverage validation` ← merge `claim_eligibility_issue`, `claim_eligibility_discrepancies`, `Eligibility discrepancy`, `eligibility_and_claims`, `Insurance Eligibility & Copay Discrepancies` (90% confidence)
+  - These patterns capture the friction caused by mismatches between recorded insurance benefits and actual claim adjudication results.
+- **Keep**: `Tax and document portal access friction` ← merge `tax_form_access_failure`, `tax_form_access_issues`, `tax_document_portal_access_friction`, `Tax & Document Access` (98% confidence)
+  - These sub-patterns specifically address the recurring issue of providers or clients being unable to retrieve 1099s or other critical financial documents.
+- **Keep**: `Copay and claim adjudication discrepancies` ← merge `Claim Adjudication & Payout Adjustments`, `claim_outcome_differs_from_ec` (85% confidence)
+  - Both relate to the variance between estimated costs and the final adjudicated amounts from the insurance payer.
+
+
+---
+
+## Technical Process Summary
+
+| Metric | Value |
+|--------|-------|
+| Total API Calls | 4 |
+| Input Tokens | 3,339 |
+| Output Tokens | 2,957 |
+| Estimated Cost | $0.0023 |
+|   Input Cost | $0.0005 |
+|   Output Cost | $0.0018 |
+| Model | gemini-2.5-flash |
+| Duration | 4m 44s |
+
+### Pipeline Stages
+
+| Stage | Status | Duration |
+|-------|--------|----------|
+| preflight | info | — |
+| preflight | running | — |
+| preflight | complete | 12676ms |
+| preflight | complete | — |
+| preflight | running | — |
+| preflight | complete | 3828ms |
+| preflight | complete | — |
+| preflight | complete | — |
+| preflight | complete | — |
+| preflight | complete | — |
+| preflight | complete | — |
+| preflight | complete | — |
+| preflight | complete | — |
+| preflight | complete | — |
+| preflight | complete | — |
+| preflight | complete | — |
+| preflight | complete | — |
+| preflight | complete | — |
+| preflight | complete | — |
+| preflight | complete | — |
+| preflight | complete | — |
+| preflight | complete | — |
+| preflight | complete | — |
+| preflight | complete | — |
+| preflight | complete | — |
+| info | complete | — |
+| batch_start | running | — |
+| batch_complete | complete | 329ms |
+| batch_start | running | — |
+| batch_complete | complete | 351ms |
+| batch_start | running | — |
+| batch_complete | complete | 252ms |
+| batch_start | running | — |
+| batch_complete | complete | 291ms |
+| batch_start | running | — |
+| batch_complete | complete | 303ms |
+| batch_start | running | — |
+| batch_complete | complete | 306ms |
+| batch_start | running | — |
+| batch_complete | complete | 314ms |
+| batch_start | running | — |
+| batch_complete | complete | 313ms |
+| batch_start | running | — |
+| batch_complete | complete | 318ms |
+| batch_start | running | — |
+| batch_complete | complete | 238ms |
+| batch_start | running | — |
+| batch_complete | complete | 287ms |
+| batch_start | running | — |
+| batch_complete | complete | 252ms |
+| batch_start | running | — |
+| batch_complete | complete | 306ms |
+| batch_start | running | — |
+| batch_complete | complete | 271ms |
+| batch_start | running | — |
+| batch_start | running | — |
+| batch_complete | complete | 242ms |
+| batch_start | running | — |
+| batch_complete | complete | 291ms |
+| batch_start | running | — |
+| batch_complete | complete | 294ms |
+| batch_start | running | — |
+| batch_complete | complete | 253ms |
+| batch_start | running | — |
+| batch_complete | complete | 301ms |
+| batch_start | running | — |
+| batch_complete | complete | 231ms |
+| batch_start | running | — |
+| batch_complete | complete | 249ms |
+| batch_start | running | — |
+| batch_complete | complete | 383ms |
+| batch_start | running | — |
+| batch_complete | complete | 493ms |
+| batch_start | running | — |
+| batch_complete | complete | 379ms |
+| batch_start | running | — |
+| batch_complete | complete | 268ms |
+| batch_start | running | — |
+| batch_complete | complete | 391ms |
+| batch_start | running | — |
+| batch_complete | complete | 401ms |
+| batch_start | running | — |
+| batch_start | running | — |
+| batch_complete | complete | 492ms |
+| batch_complete | complete | 369ms |
+| batch_start | running | — |
+| batch_complete | complete | 400ms |
+| batch_start | running | — |
+| batch_complete | complete | 253ms |
+| batch_start | running | — |
+| batch_complete | complete | 313ms |
+| batch_start | running | — |
+| batch_complete | complete | 279ms |
+| batch_start | running | — |
+| batch_complete | complete | 401ms |
+| batch_start | running | — |
+| batch_complete | complete | 391ms |
+| batch_start | running | — |
+| batch_complete | complete | 388ms |
+| batch_start | running | — |
+| batch_complete | complete | 266ms |
+| batch_start | running | — |
+| batch_complete | complete | 304ms |
+| batch_start | running | — |
+| batch_complete | complete | 312ms |
+| batch_start | running | — |
+| batch_complete | complete | 281ms |
+| batch_start | running | — |
+| batch_complete | complete | 322ms |
+| batch_start | running | — |
+| batch_start | running | — |
+| batch_complete | complete | 543ms |
+| batch_start | running | — |
+| batch_complete | complete | 423ms |
+| batch_start | running | — |
+| batch_complete | complete | 542ms |
+| batch_complete | complete | 349ms |
+| batch_start | running | — |
+| batch_start | running | — |
+| batch_complete | complete | 525ms |
+| batch_complete | complete | 335ms |
+| batch_start | running | — |
+| batch_complete | complete | 331ms |
+| batch_start | running | — |
+| batch_complete | complete | 378ms |
+| batch_start | running | — |
+| batch_complete | complete | 298ms |
+| batch_complete | warn | 39750ms |
+| delivery_drop | warn | — |
+| sweep_start | running | — |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 258ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 237ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 220ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 226ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 238ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 236ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 231ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 207ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 247ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 233ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 210ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 228ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 205ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 215ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 278ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 215ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 214ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 240ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 227ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 214ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 247ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 214ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 244ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 217ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 217ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 202ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 211ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 221ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 225ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 224ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 203ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 202ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 219ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 218ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 212ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 222ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 256ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 226ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 259ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 201ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 235ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 232ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 236ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 211ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 206ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 211ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 255ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 207ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 226ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 219ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 212ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 215ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 210ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 216ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 227ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 211ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 209ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 207ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 237ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 212ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 222ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 204ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 227ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 204ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 222ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 226ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 202ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 223ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 216ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 227ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 227ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 212ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 211ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 230ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 212ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 219ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 227ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 207ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 208ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 211ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 213ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 243ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 215ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 216ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 236ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 214ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 217ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 220ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 212ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 209ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 251ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 206ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 235ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 243ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 227ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 212ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 225ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 212ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 219ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 216ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 218ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 223ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 213ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 211ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 212ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 266ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 205ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 218ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 217ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 221ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 206ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 224ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 207ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 214ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 321ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 227ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 246ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 222ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 215ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 223ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 234ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 225ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 204ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 211ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 235ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 220ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 208ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 220ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 199ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 209ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 211ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 223ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 218ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 216ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 334ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 268ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 254ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 272ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 303ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 453ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 327ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 267ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 213ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 209ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 242ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 233ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 214ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 223ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 236ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 210ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 216ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 233ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 208ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 241ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 222ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 212ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 211ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 226ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 212ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 206ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 204ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 207ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 202ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 217ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 206ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 215ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 254ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 213ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 210ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 209ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 204ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 218ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 214ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 206ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 208ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 209ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 215ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 205ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 216ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 235ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 235ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 216ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 217ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 206ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 265ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 213ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 249ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 233ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 214ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 223ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 215ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 208ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 215ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 214ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 215ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 214ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 209ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 226ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 361ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 240ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 237ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 227ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 215ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 218ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 281ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 220ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 218ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 212ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 211ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 211ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 217ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 224ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 223ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 216ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 213ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 236ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 222ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 207ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 201ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 208ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 260ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 214ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 215ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 223ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 218ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 216ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 271ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 214ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 220ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 211ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 260ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 238ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 210ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 258ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 343ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 246ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 294ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 206ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 222ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 236ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 226ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 221ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 218ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 213ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 236ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 216ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 235ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 317ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 217ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 205ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 217ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 208ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 219ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 208ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 247ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 255ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 222ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 207ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 213ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 203ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 230ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 238ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 260ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 216ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 219ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 265ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 208ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 205ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 206ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 238ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 211ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 212ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 225ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 204ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 213ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 208ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 216ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 210ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 354ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 218ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 213ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 205ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 214ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 229ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 211ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 209ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 211ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 214ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 213ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 212ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 211ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 243ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 279ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 214ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 235ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 216ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 218ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 262ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 213ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 231ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 218ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 245ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 207ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 206ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 214ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 207ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 229ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 208ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 220ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 212ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 215ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 219ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 228ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 216ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 220ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 406ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 216ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 205ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 204ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 207ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 211ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 218ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 210ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 238ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 204ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 207ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 216ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 240ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 242ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 214ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 223ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 217ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 209ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 225ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 244ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 209ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 201ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 215ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 204ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 229ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 206ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 217ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 208ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 233ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 215ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 235ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 214ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 210ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 206ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 223ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 209ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 214ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 217ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 205ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 247ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 209ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 395ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 212ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 214ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 213ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 214ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 211ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 236ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 269ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 210ms |
+| sweep_chunk | running | — |
+| sweep_chunk | complete | 206ms |
+| sweep_end | complete | 90401ms |
+| info | complete | — |
+| analyst | running | — |
+| analyst | complete | 11956ms |
+| analyst | running | — |
+| analyst | complete | 34531ms |
+| analyst | complete | 22551ms |
+| analyst | complete | 21041ms |
+| info | running | — |
+| info | complete | 57ms |
+| info | running | — |
+| info | running | — |
+| info | running | — |
+| info | running | — |
+| info | complete | — |
+| scan_audit | warn | — |
+| info | complete | — |
+| warning | running | — |
+| warning | running | — |
+| warning | running | — |
+| warning | running | — |
+| warning | running | — |
+| warning | running | — |
+| warning | running | — |
+| warning | running | — |
+| warning | running | — |
+| warning | running | — |
+| warning | running | — |
+| warning | running | — |
+| warning | running | — |
+| warning | running | — |
+| warning | running | — |
+| warning | running | — |
+
+### Bridge Health
+
+| Metric | Value |
+|--------|-------|
+| Total Probes | 3 |
+| Successful | 0 |
+| Failed | 3 |

@@ -1,0 +1,89 @@
+{
+  "report_id": "r-d38a865657",
+  "title": "Stub Executive Summary",
+  "executive_summary": "Net negative trajectory driven by billing disputes; CSAT degraded 0.3 points across primary cohorts.",
+  "findings": [
+    {
+      "finding_id": "f-stub-01",
+      "title": "Billing & charge discrepancies",
+      "summary": "Auto-pay duplicate charges across 3 payers.",
+      "severity": "high",
+      "confidence": 0.9,
+      "supporting_ticket_ids": [
+        "t1",
+        "t2"
+      ],
+      "evidence_chips": [
+        {
+          "label": "Tickets",
+          "value": "3",
+          "kind": "metric"
+        },
+        {
+          "label": "Cohort",
+          "value": "Cigna, Humana",
+          "kind": "cohort"
+        },
+        {
+          "label": "Trend",
+          "value": "+20% WoW",
+          "kind": "trend"
+        }
+      ],
+      "trend": [],
+      "body_md": "## Detail\n\nDup charges on monthly auto-pay cycle.",
+      "trcs_touched": [
+        "BILL"
+      ],
+      "cohort": "Cigna, Humana"
+    },
+    {
+      "finding_id": "f-stub-02",
+      "title": "Portal access incidents",
+      "summary": "Sustained portal failures since Apr 1.",
+      "severity": "medium",
+      "confidence": 0.8,
+      "supporting_ticket_ids": [
+        "t6",
+        "t7",
+        "t8"
+      ],
+      "evidence_chips": [
+        {
+          "label": "Tickets",
+          "value": "3",
+          "kind": "metric"
+        },
+        {
+          "label": "Onset",
+          "value": "2026-04-01",
+          "kind": "metric"
+        }
+      ],
+      "trend": [],
+      "body_md": "## Detail\n\nSAML config drift suspected.",
+      "trcs_touched": [
+        "PORTAL"
+      ],
+      "cohort": ""
+    }
+  ],
+  "generated_at": "",
+  "scope": {
+    "ticket_count": 1778,
+    "date_range": "2025-01-01/2025-04-15",
+    "trc_filter": "all"
+  },
+  "pipeline_kind": "single_pass",
+  "specialist_count": 0,
+  "bridges_used": 1,
+  "cost_usd": 0.0,
+  "duration_sec": 37.1,
+  "accuracy_score": 0.25,
+  "accuracy_flags": [
+    "f-stub-01:entity:unresolved=Cigna,Humana",
+    "f-stub-02:time:out_of_range=2026-04-01",
+    "low_accuracy"
+  ],
+  "raw_markdown": "Here is your report:\n\n```json\n{\n  \"title\": \"Stub Executive Summary\",\n  \"executive_summary\": \"Net negative trajectory driven by billing disputes; CSAT degraded 0.3 points across primary cohorts.\",\n  \"findings\": [\n    {\n      \"finding_id\": \"f-stub-01\",\n      \"title\": \"Billing & charge discrepancies\",\n      \"summary\": \"Auto-pay duplicate charges across 3 payers.\",\n      \"severity\": \"high\",\n      \"confidence\": 0.9,\n      \"supporting_ticket_ids\": [\n        \"t1\",\n        \"t2\"\n      ],\n      \"evidence_chips\": [\n        {\n          \"label\": \"Tickets\",\n          \"value\": \"3\",\n          \"kind\": \"metric\"\n        },\n        {\n          \"label\": \"Cohort\",\n          \"value\": \"Cigna, Humana\",\n          \"kind\": \"cohort\"\n        },\n        {\n          \"label\": \"Trend\",\n          \"value\": \"+20% WoW\",\n          \"kind\": \"trend\"\n        }\n      ],\n      \"trcs_touched\": [\n        \"BILL\"\n      ],\n      \"cohort\": \"Cigna, Humana\",\n      \"body_md\": \"## Detail\\n\\nDup charges on monthly auto-pay cycle.\"\n    },\n    {\n      \"finding_id\": \"f-stub-02\",\n      \"title\": \"Portal access incidents\",\n      \"summary\": \"Sustained portal failures since Apr 1.\",\n      \"severity\": \"medium\",\n      \"confidence\": 0.8,\n      \"supporting_ticket_ids\": [\n        \"t6\",\n        \"t7\",\n        \"t8\"\n      ],\n      \"evidence_chips\": [\n        {\n          \"label\": \"Tickets\",\n          \"value\": \"3\",\n          \"kind\": \"metric\"\n        },\n        {\n          \"label\": \"Onset\",\n          \"value\": \"2026-04-01\",\n          \"kind\": \"metric\"\n        }\n      ],\n      \"trcs_touched\": [\n        \"PORTAL\"\n      ],\n      \"body_md\": \"## Detail\\n\\nSAML config drift suspected.\"\n    }\n  ]\n}\n```\n"
+}

@@ -1,0 +1,44 @@
+{
+  "report_id": "r-7343f82fe6",
+  "title": "Executive Summary",
+  "executive_summary": "",
+  "findings": [
+    {
+      "finding_id": "f-data-only",
+      "title": "Data summary (LLM unavailable)",
+      "summary": "LLM call failed or was disabled; raw analytics retained.",
+      "severity": "info",
+      "confidence": 0.0,
+      "supporting_ticket_ids": [],
+      "evidence_chips": [
+        {
+          "label": "Status",
+          "value": "data-only",
+          "kind": "source"
+        }
+      ],
+      "trend": [],
+      "body_md": "## Data Summary (LLM unavailable)\n\nThe analytics block was assembled, but no narrative was produced.\n\n```\nTOPLINE: 1778 tickets, Date range: 2025-01-01 to 2025-04-15\n\nTRC DISTRIBUTION:\n  Refund cash pay invoice OR Charge cancellation fee: 212 tickets, CSAT=3.46\n  Client cannot locate EAP benefit information: 182 tickets, CSAT=3.55\n  Client portal access issue: 134 tickets, CSAT=3.42\n  Provider availability settings not saving: 59 tickets, CSAT=3.4\n  Claims ineligible for Payout Confidence: 57 tickets, CSAT=3.8\n  Provider account setup issue: 55 tickets, CSAT=3.95\n  Client shows ineligible but has active coverage: 54 tickets, CSAT=3.94\n  Provider appeal of medical audit denials: 50 tickets, CSAT=3.42\n  Provider payout rate dissatisfaction: 47 tickets, CSAT=3.72\n  EAP care coordination with an Alma provider (client matching): 47 tickets, CSAT=3.66\n  Provider Alma deduction due to medical audits: 38 tickets, CSAT=4.0\n  Client receives an unexpected cancellation fee invoice: 37 tickets, CSAT=3.95\n  Client receives insurance invoice from a provider they do not know: 34 tickets, CSAT=3.23\n  Remove State License: 24 tickets, CSAT=3.59\n  Client receives an insurance invoice 45+ days after session: 23 tickets, CSAT=3.67\n\nCSAT SUMMARY: avg=3.59, range=1.0-5.0, rated=1064 tickets\n\nRESOLUTION TIMES: assignment-to-resolution=21.2h, total=26.0h, first-reply=2.5h\n\nSAMPLE CONVERSATIONS (redacted):\n  [1] [2019-12-31 23:59 \u23f1] CUSTOMER:\nCorrect copay applied but claim came back as not covered.\n  [2] [2019-12-31 23:59 \u23f1] CUSTOMER:\nI was charged a cancellation fee of $75 but I cancelled more than 24 hours in advance per your policy.\n  [3] [2019-12-31 23:59 \u23f1] CUSTOMER:\nClaim denied for prior authorization but I had the auth. Auth number AUTH-7750. Patient DOB is FAKE-DOB.\n  [4] [2019-12-31 23:59 \u23f1] CUSTOMER:\nCannot access client portal, Lord Fizzlewick eligible but blocked at login screen.\n  [5] [2019-12-31 23:59 \u23f1] CUSTOMER:\nI keep getting invoices for sessions I already paid for. This is the third time. Invoice #820480 for $250.\n  [6] [2019-12-31 23:59 \u23f1] CUSTOMER:\nMy payout seems wrong. Expected about $832 but received $250. Can you break it down?\n  [7] [2019-12-31 23:59 \u23f1] CUSTOMER:\n**[Tax Form 1099]**: Hello, I am Dr. Bubblegum McSnazz. I'm having trouble accessing my 1099 tax form for the last tax year. The link I have for the Stripe dashboard doe...\n  [8] [2019-12-31 23:59 \u23f1] CUSTOMER:\nThree claims from last month denied for 'inactive coverage'. Client was definitely eligible. Client ID FAKE-8101.\n  [9] [2019-12-31 23:59 \u23f1] CUSTOMER:\nClient Duke Waffles requesting refund of $400 for cancelled session.\n  [10] [2019-12-31 23:59 \u23f1] CUSTOMER:\nDirectory shows wrong insurance panels for Dr. Barnaby Bumblesnoop.\n```",
+      "trcs_touched": [],
+      "cohort": ""
+    }
+  ],
+  "generated_at": "2026-05-07T02:34:47.814794+00:00",
+  "scope": {
+    "ticket_count": 1778,
+    "date_range": "2025-01-01/2025-04-15",
+    "trc_filter": "all"
+  },
+  "pipeline_kind": "single_pass",
+  "specialist_count": 0,
+  "bridges_used": 1,
+  "cost_usd": 0.0,
+  "duration_sec": 146.7,
+  "accuracy_score": 0.0,
+  "accuracy_flags": [
+    "llm_error: ACP call report_1_1778121167 timed out after 120s",
+    "f-data-only:entity:unresolved=data-only",
+    "low_accuracy"
+  ],
+  "raw_markdown": "## Data Summary (LLM unavailable)\n\nThe analytics block was assembled, but no narrative was produced.\n\n```\nTOPLINE: 1778 tickets, Date range: 2025-01-01 to 2025-04-15\n\nTRC DISTRIBUTION:\n  Refund cash pay invoice OR Charge cancellation fee: 212 tickets, CSAT=3.46\n  Client cannot locate EAP benefit information: 182 tickets, CSAT=3.55\n  Client portal access issue: 134 tickets, CSAT=3.42\n  Provider availability settings not saving: 59 tickets, CSAT=3.4\n  Claims ineligible for Payout Confidence: 57 tickets, CSAT=3.8\n  Provider account setup issue: 55 tickets, CSAT=3.95\n  Client shows ineligible but has active coverage: 54 tickets, CSAT=3.94\n  Provider appeal of medical audit denials: 50 tickets, CSAT=3.42\n  Provider payout rate dissatisfaction: 47 tickets, CSAT=3.72\n  EAP care coordination with an Alma provider (client matching): 47 tickets, CSAT=3.66\n  Provider Alma deduction due to medical audits: 38 tickets, CSAT=4.0\n  Client receives an unexpected cancellation fee invoice: 37 tickets, CSAT=3.95\n  Client receives insurance invoice from a provider they do not know: 34 tickets, CSAT=3.23\n  Remove State License: 24 tickets, CSAT=3.59\n  Client receives an insurance invoice 45+ days after session: 23 tickets, CSAT=3.67\n\nCSAT SUMMARY: avg=3.59, range=1.0-5.0, rated=1064 tickets\n\nRESOLUTION TIMES: assignment-to-resolution=21.2h, total=26.0h, first-reply=2.5h\n\nSAMPLE CONVERSATIONS (redacted):\n  [1] [2019-12-31 23:59 \u23f1] CUSTOMER:\nCorrect copay applied but claim came back as not covered.\n  [2] [2019-12-31 23:59 \u23f1] CUSTOMER:\nI was charged a cancellation fee of $75 but I cancelled more than 24 hours in advance per your policy.\n  [3] [2019-12-31 23:59 \u23f1] CUSTOMER:\nClaim denied for prior authorization but I had the auth. Auth number AUTH-7750. Patient DOB is FAKE-DOB.\n  [4] [2019-12-31 23:59 \u23f1] CUSTOMER:\nCannot access client portal, Lord Fizzlewick eligible but blocked at login screen.\n  [5] [2019-12-31 23:59 \u23f1] CUSTOMER:\nI keep getting invoices for sessions I already paid for. This is the third time. Invoice #820480 for $250.\n  [6] [2019-12-31 23:59 \u23f1] CUSTOMER:\nMy payout seems wrong. Expected about $832 but received $250. Can you break it down?\n  [7] [2019-12-31 23:59 \u23f1] CUSTOMER:\n**[Tax Form 1099]**: Hello, I am Dr. Bubblegum McSnazz. I'm having trouble accessing my 1099 tax form for the last tax year. The link I have for the Stripe dashboard doe...\n  [8] [2019-12-31 23:59 \u23f1] CUSTOMER:\nThree claims from last month denied for 'inactive coverage'. Client was definitely eligible. Client ID FAKE-8101.\n  [9] [2019-12-31 23:59 \u23f1] CUSTOMER:\nClient Duke Waffles requesting refund of $400 for cancelled session.\n  [10] [2019-12-31 23:59 \u23f1] CUSTOMER:\nDirectory shows wrong insurance panels for Dr. Barnaby Bumblesnoop.\n```"
+}

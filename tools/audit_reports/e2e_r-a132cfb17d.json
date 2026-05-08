@@ -1,0 +1,204 @@
+{
+  "report_id": "r-a132cfb17d",
+  "title": "[NAME] \u2014 2025-01-01 to 2025-04-15",
+  "executive_summary": "Analysis of recent support tickets reveals critical issues predominantly around billing discrepancies and eligibility confirmations, directly impacting client satisfaction. Operational inefficiencies in provider platform management and client portal access further exacerbate negative experiences. Addressing these areas is crucial for improving CSAT and reducing resolution times.",
+  "findings": [
+    {
+      "finding_id": "f-exec-01",
+      "title": "Client Billing & Charge Discrepancies",
+      "summary": "A significant volume of tickets highlights client dissatisfaction with unexpected charges, double billing, and invoices for services already paid or unrecognized. This impacts trust and reflects negatively on operational accuracy.",
+      "severity": "high",
+      "confidence": 0.9,
+      "supporting_ticket_ids": [
+        "3",
+        "4",
+        "5",
+        "7",
+        "9"
+      ],
+      "evidence_chips": [
+        {
+          "label": "Ticket count",
+          "value": "306",
+          "kind": "metric"
+        },
+        {
+          "label": "Avg CSAT",
+          "value": "3.46",
+          "kind": "metric"
+        },
+        {
+          "label": "Top TRCs",
+          "value": "Refund cash pay, unexpected cancellation fee, unrecognized invoices",
+          "kind": "source"
+        }
+      ],
+      "trend": [],
+      "body_md": "## Detail\nBilling and charge discrepancies represent the highest volume of client-facing issues, totaling 306 tickets. The primary driver, 'Refund cash pay invoice OR Charge cancellation fee' (212 tickets), has an unacceptably low CSAT of 3.46. Other significant contributors include unexpected cancellation fees (37 tickets) and unrecognized insurance invoices (34 tickets, CSAT=3.23). This indicates systemic issues within the billing process, leading to client frustration and potential churn. Examples from sample conversations include double billing, unauthorized charges post-cancellation, and invoices for unrendered or paid services. Streamlining billing reconciliation and improving communication around charges are imperative.",
+      "trcs_touched": [
+        "Refund cash pay invoice OR Charge cancellation fee",
+        "Client receives an unexpected cancellation fee invoice",
+        "Client receives insurance invoice from a provider they do not know",
+        "Client receives an insurance invoice 45+ days after session"
+      ],
+      "cohort": "Clients experiencing billing issues"
+    },
+    {
+      "finding_id": "f-exec-02",
+      "title": "EAP & Eligibility Confirmation Challenges",
+      "summary": "Clients frequently struggle with locating EAP benefit information and encounter eligibility discrepancies, leading to confusion and delayed access to care. This points to gaps in benefit communication and real-time eligibility verification.",
+      "severity": "medium",
+      "confidence": 0.85,
+      "supporting_ticket_ids": [
+        "2",
+        "8"
+      ],
+      "evidence_chips": [
+        {
+          "label": "Ticket count",
+          "value": "340",
+          "kind": "metric"
+        },
+        {
+          "label": "Avg CSAT",
+          "value": "3.55",
+          "kind": "metric"
+        },
+        {
+          "label": "Top TRC",
+          "value": "Client cannot locate EAP benefit information",
+          "kind": "source"
+        }
+      ],
+      "trend": [],
+      "body_md": "## Detail\nEAP and eligibility-related inquiries collectively account for 340 tickets, making it a substantial area of client concern. The leading issue, 'Client cannot locate EAP benefit information', generates 182 tickets with an average CSAT of 3.55. Additionally, 54 tickets address situations where clients are shown as ineligible despite having active coverage, and 57 tickets concern claims being deemed ineligible for [NAME]. These findings suggest a need for clearer communication regarding EAP benefits and a more robust, real-time eligibility verification system to prevent client frustration and ensure seamless access to services.",
+      "trcs_touched": [
+        "Client cannot locate EAP benefit information",
+        "Client shows ineligible but has active coverage",
+        "Claims ineligible for [NAME]",
+        "EAP care coordination with an Alma provider (client matching)"
+      ],
+      "cohort": "Clients with EAP benefits or eligibility questions"
+    },
+    {
+      "finding_id": "f-exec-03",
+      "title": "Client Portal Access Barriers",
+      "summary": "A notable volume of tickets indicates clients are experiencing persistent difficulties accessing their client portal, despite being eligible. This directly impedes self-service and creates unnecessary support overhead.",
+      "severity": "medium",
+      "confidence": 0.8,
+      "supporting_ticket_ids": [
+        "10"
+      ],
+      "evidence_chips": [
+        {
+          "label": "Ticket count",
+          "value": "134",
+          "kind": "metric"
+        },
+        {
+          "label": "Avg CSAT",
+          "value": "3.42",
+          "kind": "metric"
+        },
+        {
+          "label": "TRC",
+          "value": "Client portal access issue",
+          "kind": "source"
+        }
+      ],
+      "trend": [],
+      "body_md": "## Detail\nThe 'Client portal access issue' accounts for 134 tickets with a low CSAT of 3.42. This indicates a consistent problem preventing clients from utilizing self-service features. The inability to access the portal, even when eligible, creates a poor user experience and drives clients to support, increasing operational load. Investigating root causes for login failures and improving user authentication flows are critical steps to alleviate this pressure and enhance client autonomy.",
+      "trcs_touched": [
+        "Client portal access issue"
+      ],
+      "cohort": "Clients attempting portal login"
+    },
+    {
+      "finding_id": "f-exec-04",
+      "title": "Provider Platform Usability & Payout Dissatisfaction",
+      "summary": "Providers are encountering issues with platform settings not saving and expressing dissatisfaction with payout rates and deductions from medical audits. This impacts provider experience and operational efficiency.",
+      "severity": "medium",
+      "confidence": 0.75,
+      "supporting_ticket_ids": [],
+      "evidence_chips": [
+        {
+          "label": "Ticket count",
+          "value": "249",
+          "kind": "metric"
+        },
+        {
+          "label": "Avg CSAT (availability)",
+          "value": "3.4",
+          "kind": "metric"
+        },
+        {
+          "label": "Top TRCs",
+          "value": "Provider availability settings not saving, payout rate dissatisfaction",
+          "kind": "source"
+        }
+      ],
+      "trend": [],
+      "body_md": "## Detail\nProvider-centric issues sum to 249 tickets. The most pressing concerns include 'Provider availability settings not saving' (59 tickets, CSAT=3.4), 'Provider payout rate dissatisfaction' (47 tickets, CSAT=3.72), and 'Provider appeal of medical audit denials' (50 tickets, CSAT=3.42). While 'Provider Alma deduction due to medical audits' has a high CSAT of 4.0, its 38 tickets suggest a need for clearer communication around these processes. The inability to save settings points to a direct usability flaw, while payout-related issues could impact provider retention. Improving platform stability and transparency in financial processes are key.",
+      "trcs_touched": [
+        "Provider availability settings not saving",
+        "Provider account setup issue",
+        "Provider appeal of medical audit denials",
+        "Provider payout rate dissatisfaction",
+        "Provider Alma deduction due to medical audits"
+      ],
+      "cohort": "Providers interacting with platform/payouts"
+    },
+    {
+      "finding_id": "f-exec-05",
+      "title": "Licensing & Appointment Communication Gaps",
+      "summary": "While lower in volume, tickets related to [NAME] license status and appointment reminder misdelivery indicate potential compliance risks and administrative errors.",
+      "severity": "low",
+      "confidence": 0.5,
+      "supporting_ticket_ids": [
+        "1",
+        "6"
+      ],
+      "evidence_chips": [
+        {
+          "label": "Ticket count (License)",
+          "value": "24",
+          "kind": "metric"
+        },
+        {
+          "label": "Avg CSAT (License)",
+          "value": "3.59",
+          "kind": "metric"
+        },
+        {
+          "label": "TRC (License)",
+          "value": "[NAME] License",
+          "kind": "source"
+        }
+      ],
+      "trend": [],
+      "body_md": "## Detail\nIssues regarding '[NAME] License' account for 24 tickets with an average CSAT of 3.59. Although this is a smaller volume, ensuring providers' licensing is correctly handled and reflected is critical for compliance and uninterrupted service. Additionally, a sample conversation highlights 'Appointment reminder sent to wrong email address for [NAME]', indicating a potential gap in client communication preferences or data accuracy. While not directly tied to a high-volume TRC, these administrative issues can escalate if not proactively managed, posing risks to client experience and regulatory adherence.",
+      "trcs_touched": [
+        "[NAME] License"
+      ],
+      "cohort": "Clients/Providers with licensing or communication concerns"
+    }
+  ],
+  "generated_at": "",
+  "scope": {
+    "ticket_count": 1778,
+    "date_range": "2025-01-01/2025-04-15",
+    "trc_filter": "all"
+  },
+  "pipeline_kind": "single_pass",
+  "specialist_count": 0,
+  "bridges_used": 1,
+  "cost_usd": 0.002938,
+  "duration_sec": 50.1,
+  "accuracy_score": 0.7,
+  "accuracy_flags": [
+    "f-exec-02:count:claim=340_actual=287_err=18%",
+    "f-exec-05:entity:unresolved=Clients,Providers with licensing or communication concerns,[NAME] License",
+    "low_accuracy"
+  ],
+  "raw_markdown": "```json\n{\n  \"title\": \"[NAME] \u2014 2025-01-01 to 2025-04-15\",\n  \"executive_summary\": \"Analysis of recent support tickets reveals critical issues predominantly around billing discrepancies and eligibility confirmations, directly impacting client satisfaction. Operational inefficiencies in provider platform management and client portal access further exacerbate negative experiences. Addressing these areas is crucial for improving CSAT and reducing resolution times.\",\n  \"findings\": [\n    {\n      \"finding_id\": \"f-exec-01\",\n      \"title\": \"Client Billing & Charge Discrepancies\",\n      \"summary\": \"A significant volume of tickets highlights client dissatisfaction with unexpected charges, double billing, and invoices for services already paid or unrecognized. This impacts trust and reflects negatively on operational accuracy.\",\n      \"severity\": \"high\",\n      \"confidence\": 0.9,\n      \"supporting_ticket_ids\": [\"3\", \"4\", \"5\", \"7\", \"9\"],\n      \"evidence_chips\": [\n        {\"label\": \"Ticket count\", \"value\": \"306\", \"kind\": \"metric\"},\n        {\"label\": \"Avg CSAT\", \"value\": \"3.46\", \"kind\": \"metric\"},\n        {\"label\": \"Top TRCs\", \"value\": \"Refund cash pay, unexpected cancellation fee, unrecognized invoices\", \"kind\": \"source\"}\n      ],\n      \"trcs_touched\": [\"Refund cash pay invoice OR Charge cancellation fee\", \"Client receives an unexpected cancellation fee invoice\", \"Client receives insurance invoice from a provider they do not know\", \"Client receives an insurance invoice 45+ days after session\"],\n      \"cohort\": \"Clients experiencing billing issues\",\n      \"body_md\": \"## Detail\\nBilling and charge discrepancies represent the highest volume of client-facing issues, totaling 306 tickets. The primary driver, 'Refund cash pay invoice OR Charge cancellation fee' (212 tickets), has an unacceptably low CSAT of 3.46. Other significant contributors include unexpected cancellation fees (37 tickets) and unrecognized insurance invoices (34 tickets, CSAT=3.23). This indicates systemic issues within the billing process, leading to client frustration and potential churn. Examples from sample conversations include double billing, unauthorized charges post-cancellation, and invoices for unrendered or paid services. Streamlining billing reconciliation and improving communication around charges are imperative.\"\n    },\n    {\n      \"finding_id\": \"f-exec-02\",\n      \"title\": \"EAP & Eligibility Confirmation Challenges\",\n      \"summary\": \"Clients frequently struggle with locating EAP benefit information and encounter eligibility discrepancies, leading to confusion and delayed access to care. This points to gaps in benefit communication and real-time eligibility verification.\",\n      \"severity\": \"medium\",\n      \"confidence\": 0.85,\n      \"supporting_ticket_ids\": [\"2\", \"8\"],\n      \"evidence_chips\": [\n        {\"label\": \"Ticket count\", \"value\": \"340\", \"kind\": \"metric\"},\n        {\"label\": \"Avg CSAT\", \"value\": \"3.55\", \"kind\": \"metric\"},\n        {\"label\": \"Top TRC\", \"value\": \"Client cannot locate EAP benefit information\", \"kind\": \"source\"}\n      ],\n      \"trcs_touched\": [\"Client cannot locate EAP benefit information\", \"Client shows ineligible but has active coverage\", \"Claims ineligible for [NAME]\", \"EAP care coordination with an Alma provider (client matching)\"],\n      \"cohort\": \"Clients with EAP benefits or eligibility questions\",\n      \"body_md\": \"## Detail\\nEAP and eligibility-related inquiries collectively account for 340 tickets, making it a substantial area of client concern. The leading issue, 'Client cannot locate EAP benefit information', generates 182 tickets with an average CSAT of 3.55. Additionally, 54 tickets address situations where clients are shown as ineligible despite having active coverage, and 57 tickets concern claims being deemed ineligible for [NAME]. These findings suggest a need for clearer communication regarding EAP benefits and a more robust, real-time eligibility verification system to prevent client frustration and ensure seamless access to services.\"\n    },\n    {\n      \"finding_id\": \"f-exec-03\",\n      \"title\": \"Client Portal Access Barriers\",\n      \"summary\": \"A notable volume of tickets indicates clients are experiencing persistent difficulties accessing their client portal, despite being eligible. This directly impedes self-service and creates unnecessary support overhead.\",\n      \"severity\": \"medium\",\n      \"confidence\": 0.8,\n      \"supporting_ticket_ids\": [\"10\"],\n      \"evidence_chips\": [\n        {\"label\": \"Ticket count\", \"value\": \"134\", \"kind\": \"metric\"},\n        {\"label\": \"Avg CSAT\", \"value\": \"3.42\", \"kind\": \"metric\"},\n        {\"label\": \"TRC\", \"value\": \"Client portal access issue\", \"kind\": \"source\"}\n      ],\n      \"trcs_touched\": [\"Client portal access issue\"],\n      \"cohort\": \"Clients attempting portal login\",\n      \"body_md\": \"## Detail\\nThe 'Client portal access issue' accounts for 134 tickets with a low CSAT of 3.42. This indicates a consistent problem preventing clients from utilizing self-service features. The inability to access the portal, even when eligible, creates a poor user experience and drives clients to support, increasing operational load. Investigating root causes for login failures and improving user authentication flows are critical steps to alleviate this pressure and enhance client autonomy.\"\n    },\n    {\n      \"finding_id\": \"f-exec-04\",\n      \"title\": \"Provider Platform Usability & Payout Dissatisfaction\",\n      \"summary\": \"Providers are encountering issues with platform settings not saving and expressing dissatisfaction with payout rates and deductions from medical audits. This impacts provider experience and operational efficiency.\",\n      \"severity\": \"medium\",\n      \"confidence\": 0.75,\n      \"supporting_ticket_ids\": [],\n      \"evidence_chips\": [\n        {\"label\": \"Ticket count\", \"value\": \"249\", \"kind\": \"metric\"},\n        {\"label\": \"Avg CSAT (availability)\", \"value\": \"3.4\", \"kind\": \"metric\"},\n        {\"label\": \"Top TRCs\", \"value\": \"Provider availability settings not saving, payout rate dissatisfaction\", \"kind\": \"source\"}\n      ],\n      \"trcs_touched\": [\"Provider availability settings not saving\", \"Provider account setup issue\", \"Provider appeal of medical audit denials\", \"Provider payout rate dissatisfaction\", \"Provider Alma deduction due to medical audits\"],\n      \"cohort\": \"Providers interacting with platform/payouts\",\n      \"body_md\": \"## Detail\\nProvider-centric issues sum to 249 tickets. The most pressing concerns include 'Provider availability settings not saving' (59 tickets, CSAT=3.4), 'Provider payout rate dissatisfaction' (47 tickets, CSAT=3.72), and 'Provider appeal of medical audit denials' (50 tickets, CSAT=3.42). While 'Provider Alma deduction due to medical audits' has a high CSAT of 4.0, its 38 tickets suggest a need for clearer communication around these processes. The inability to save settings points to a direct usability flaw, while payout-related issues could impact provider retention. Improving platform stability and transparency in financial processes are key.\"\n    },\n    {\n      \"finding_id\": \"f-exec-05\",\n      \"title\": \"Licensing & Appointment Communication Gaps\",\n      \"summary\": \"While lower in volume, tickets related to [NAME] license status and appointment reminder misdelivery indicate potential compliance risks and administrative errors.\",\n      \"severity\": \"low\",\n      \"confidence\": 0.5,\n      \"supporting_ticket_ids\": [\"1\", \"6\"],\n      \"evidence_chips\": [\n        {\"label\": \"Ticket count (License)\", \"value\": \"24\", \"kind\": \"metric\"},\n        {\"label\": \"Avg CSAT (License)\", \"value\": \"3.59\", \"kind\": \"metric\"},\n        {\"label\": \"TRC (License)\", \"value\": \"[NAME] License\", \"kind\": \"source\"}\n      ],\n      \"trcs_touched\": [\"[NAME] License\"],\n      \"cohort\": \"Clients/Providers with licensing or communication concerns\",\n      \"body_md\": \"## Detail\\nIssues regarding '[NAME] License' account for 24 tickets with an average CSAT of 3.59. Although this is a smaller volume, ensuring providers' licensing is correctly handled and reflected is critical for compliance and uninterrupted service. Additionally, a sample conversation highlights 'Appointment reminder sent to wrong email address for [NAME]', indicating a potential gap in client communication preferences or data accuracy. While not directly tied to a high-volume TRC, these administrative issues can escalate if not proactively managed, posing risks to client experience and regulatory adherence.\"\n    }\n  ]\n}\n```"
+}
