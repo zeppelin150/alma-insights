@@ -1,0 +1,194 @@
+name: Snyk Security Scan
+
+# Fires on:
+#   - Pushes to main that change pinned dependencies
+#   - PRs that change pinned dependencies (covers Dependabot-style PRs)
+#   - Weekly — catches newly-disclosed CVEs against pinned versions
+#   - Manual — ad-hoc deep scans from the Actions tab
+# Rationale: CVE scans don't need to re-run on every code-only push; running
+# them on every commit produced noisy duplicate entries in the run list.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'requirements.txt'
+      - 'requirements.lock'
+      - '.github/workflows/snyk.yml'
+  pull_request:
+    paths:
+      - 'requirements.txt'
+      - 'requirements.lock'
+  schedule:
+    - cron: '0 6 * * 1'     # Monday 06:00 UTC — weekly cron
+  workflow_dispatch:
+
+jobs:
+  security:
+    runs-on: ubuntu-latest
+    # security-events: write is required for github/codeql-action/upload-sarif
+    # to push results to the Security tab. Without it, the SARIF upload step
+    # fails with "Resource not accessible by integration".
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
+
+      - name: Set up Node (for Snyk CLI)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Install CPU-only torch FIRST so the subsequent resolution for
+      # sentence-transformers reuses the ~200 MB CPU wheel instead of
+      # pulling the ~2.5 GB CUDA build (+ nvidia-cuda-* drivers).
+      # Saves ~7 minutes per scan.
+      - name: Install CPU-only PyTorch
+        run: |
+          pip install --index-url https://download.pytorch.org/whl/cpu torch
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Snyk CLI
+        run: npm install -g snyk
+
+      # Run Snyk on the host runner (not in a Docker container) so it sees
+      # packages we installed above. --skip-unresolved avoids 422 errors
+      # from the CPU-only torch wheel (pulled from download.pytorch.org,
+      # not PyPI) that Snyk's resolver can't look up.
+      - name: Run Snyk vulnerability scan (JSON)
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          snyk test \
+            --file=requirements.txt \
+            --package-manager=pip \
+            --command=python3 \
+            --skip-unresolved \
+            --json-file-output=snyk-results.json \
+            --severity-threshold=low || true
+
+      - name: Run Snyk vulnerability scan (SARIF)
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          snyk test \
+            --file=requirements.txt \
+            --package-manager=pip \
+            --command=python3 \
+            --skip-unresolved \
+            --sarif-file-output=snyk.sarif || true
+
+      - name: Generate readable report
+        if: always()
+        run: |
+          echo "## Snyk Security Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Scan date:** $(date -u)" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ ! -f snyk-results.json ]; then
+            echo "⚠️ No results file generated — Snyk may have failed to run." >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
+          VULN_COUNT=$(cat snyk-results.json | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          vulns = data.get('vulnerabilities', [])
+          print(len(vulns))
+          " 2>/dev/null || echo "0")
+
+          if [ "$VULN_COUNT" = "0" ]; then
+            echo "✅ **No vulnerabilities found!**" >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
+          echo "🚨 **Found $VULN_COUNT vulnerabilities**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Generate summary table
+          python3 << 'EOF' >> $GITHUB_STEP_SUMMARY
+          import json
+
+          with open("snyk-results.json") as f:
+              data = json.load(f)
+
+          vulns = data.get("vulnerabilities", [])
+          if not vulns:
+              print("No vulnerabilities to report.")
+              exit()
+
+          # Count by severity
+          severity_counts = {}
+          for v in vulns:
+              sev = v.get("severity", "unknown")
+              severity_counts[sev] = severity_counts.get(sev, 0) + 1
+
+          severity_emoji = {
+              "critical": "🔴",
+              "high": "🟠",
+              "medium": "🟡",
+              "low": "🔵",
+              "unknown": "⚪"
+          }
+
+          print("### Severity Breakdown")
+          print("")
+          print("| Severity | Count |")
+          print("|----------|-------|")
+          for sev in ["critical", "high", "medium", "low"]:
+              if sev in severity_counts:
+                  emoji = severity_emoji.get(sev, "")
+                  print(f"| {emoji} {sev.capitalize()} | {severity_counts[sev]} |")
+          print("")
+
+          # Detail table
+          print("### Vulnerability Details")
+          print("")
+          print("| Package | Severity | Title | Fix Available |")
+          print("|---------|----------|-------|---------------|")
+
+          seen = set()
+          for v in sorted(vulns, key=lambda x: ["critical","high","medium","low"].index(x.get("severity","low")) if x.get("severity","low") in ["critical","high","medium","low"] else 99):
+              pkg = v.get("packageName", "?")
+              sev = v.get("severity", "?")
+              title = v.get("title", "?")
+              fix = "✅ Yes" if v.get("isUpgradable") or v.get("isPatchable") else "❌ No"
+              key = f"{pkg}-{title}"
+
+              if key in seen:
+                  continue
+              seen.add(key)
+
+              emoji = severity_emoji.get(sev, "")
+              print(f"| `{pkg}` | {emoji} {sev.capitalize()} | {title} | {fix} |")
+          EOF
+
+      - name: Upload results as artifact
+        if: always() && hashFiles('snyk-results.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: snyk-report
+          path: snyk-results.json
+          retention-days: 30
+
+      - name: Upload SARIF file
+        if: always() && hashFiles('snyk.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v4
+        continue-on-error: true
+        with:
+          sarif_file: snyk.sarif

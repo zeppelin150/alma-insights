@@ -32,14 +32,32 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-_BATCH_SIZE = 64           # doubled — CPU inference amortizes well up to 64-128
+_DEFAULT_BATCH_SIZE = 64    # used when no hardware profile is available
 _RAW_BODY_MAX_CHARS = 8192  # lean into Qwen3's long context; multi-turn threads
 _COMMENTS_LIMIT = 8          # was 3 — allow more back-and-forth per ticket
 
 # Qwen3 supports 32k tokens but attention is quadratic in seq length. 2048 tokens
 # holds our 8192-char bodies with headroom (~3.5-4 chars/token) and keeps CPU
 # inference tractable. Bump this together with _RAW_BODY_MAX_CHARS when changing.
-_MAX_SEQ_LENGTH = 2048
+_DEFAULT_MAX_SEQ_LENGTH = 2048
+
+
+def _resolve_batch_and_seq() -> tuple[int, int]:
+    """Read embedding_batch_size + embedding_max_seq_length from the
+    cached hardware profile. Falls back to the documented defaults
+    (batch=64, max_seq=2048) if the profile is missing or malformed."""
+    try:
+        import json
+        from pathlib import Path
+        path = Path("data") / "hardware_profile.json"
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            batch = int(data.get("embedding_batch_size", _DEFAULT_BATCH_SIZE))
+            max_seq = int(data.get("embedding_max_seq_length", _DEFAULT_MAX_SEQ_LENGTH))
+            return max(1, batch), max(128, max_seq)
+    except Exception:
+        pass
+    return _DEFAULT_BATCH_SIZE, _DEFAULT_MAX_SEQ_LENGTH
 
 # Cache redaction engine at module level — construction parses JSON files.
 _redactor = None
@@ -103,17 +121,26 @@ def build_embeddings(conn, force: bool = False, composition_mode: str = "raw_bod
 
     logger.info("Embedding %d tickets (of %d total)", len(to_embed), len(tickets))
 
+    # Resolve batch + max_seq from the cached hardware profile so M1/M2,
+    # CUDA, and CPU all get appropriate values without code changes.
+    batch_size, max_seq_length = _resolve_batch_and_seq()
+
     # Cap model.max_seq_length before encoding — otherwise sentence-transformers
     # pads each batch to the model's 32k default, killing CPU throughput.
     from src.data.embedding.model_loader import get_model
     _m = get_model()
-    if _m is not None and getattr(_m, "max_seq_length", 0) > _MAX_SEQ_LENGTH:
+    if _m is not None and getattr(_m, "max_seq_length", 0) > max_seq_length:
         logger.info("Capping model.max_seq_length %s -> %d",
-                     _m.max_seq_length, _MAX_SEQ_LENGTH)
-        _m.max_seq_length = _MAX_SEQ_LENGTH
-    # Log device for visibility (mps/cuda/cpu — affects throughput dramatically)
-    if _m is not None and hasattr(_m, "device"):
-        logger.info("Embedding device: %s", _m.device)
+                     _m.max_seq_length, max_seq_length)
+        _m.max_seq_length = max_seq_length
+    # Single log line that captures everything support tickets ask for:
+    # device, batch size, max seq length. Grep target.
+    if _m is not None:
+        device = getattr(_m, "device", "unknown")
+        logger.info(
+            "Embedding pipeline: device=%s  batch=%d  max_seq=%d",
+            device, batch_size, max_seq_length,
+        )
 
     # Encode in chunks so progress is visible in the log instead of one
     # 30+ minute black-box call. Chunk size is many batches' worth so the
@@ -121,7 +148,7 @@ def build_embeddings(conn, force: bool = False, composition_mode: str = "raw_bod
     from src.data.embedding.encoder import embed_documents
     import time as _time
     texts = [t[1] for t in to_embed]
-    chunk_size = max(_BATCH_SIZE * 4, 128)   # ~4 batches per progress tick
+    chunk_size = max(batch_size * 4, 128)   # ~4 batches per progress tick
     pieces: list = []
     n_total = len(texts)
     n_chunks = (n_total + chunk_size - 1) // chunk_size
@@ -129,7 +156,7 @@ def build_embeddings(conn, force: bool = False, composition_mode: str = "raw_bod
     for ci, start in enumerate(range(0, n_total, chunk_size), 1):
         end = min(start + chunk_size, n_total)
         t0 = _time.perf_counter()
-        chunk_emb = embed_documents(texts[start:end], batch_size=_BATCH_SIZE)
+        chunk_emb = embed_documents(texts[start:end], batch_size=batch_size)
         pieces.append(chunk_emb)
         elapsed = _time.perf_counter() - t_start
         chunk_dt = _time.perf_counter() - t0

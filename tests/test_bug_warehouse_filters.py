@@ -154,3 +154,24 @@ class TestFilterQueryLayer:
         wq, _ = wq_with_data
         rows, total = wq.get_conversations_paged()
         assert total == 5, f"Expected 5 total rows, got {total}"
+
+    def test_ticket_ids_filter_single(self, wq_with_data):
+        """Ticket-id filter narrows results to a single ID."""
+        wq, _ = wq_with_data
+        rows, total = wq.get_conversations_paged(ticket_ids=["T-3"])
+        assert total == 1, f"Expected 1 row for T-3, got {total}"
+        assert rows[0]["ticket_id"] == "T-3"
+
+    def test_ticket_ids_filter_multiple(self, wq_with_data):
+        """Ticket-id filter accepts a list of IDs."""
+        wq, _ = wq_with_data
+        rows, total = wq.get_conversations_paged(ticket_ids=["T-1", "T-4", "T-5"])
+        assert total == 3, f"Expected 3 rows, got {total}"
+        assert {r["ticket_id"] for r in rows} == {"T-1", "T-4", "T-5"}
+
+    def test_ticket_ids_filter_unknown_id(self, wq_with_data):
+        """Unknown ticket IDs return zero rows, no error."""
+        wq, _ = wq_with_data
+        rows, total = wq.get_conversations_paged(ticket_ids=["T-DOES-NOT-EXIST"])
+        assert total == 0
+        assert rows == []

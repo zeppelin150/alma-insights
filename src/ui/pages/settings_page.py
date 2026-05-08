@@ -404,6 +404,12 @@ class SettingsPage(QWidget):
         self._build_claude_section(lay)
         lay.addSpacing(24)
 
+        # ── Hardware Profile ──
+        lay.addWidget(self._section_label("HARDWARE PROFILE"))
+        lay.addSpacing(8)
+        self._build_hardware_profile_section(lay)
+        lay.addSpacing(24)
+
         # ── Task Routing ──
         lay.addWidget(self._section_label("TASK ROUTING"))
         lay.addSpacing(8)
@@ -1729,23 +1735,60 @@ class SettingsPage(QWidget):
             QDesktopServices.openUrl(QUrl(url))
 
     def _on_install_update(self):
-        """Download and stage the update."""
-        url = getattr(self, "_latest_download_url", "")
-        if not url:
+        """Download and stage the update.
+
+        2026-05-07 (Piece 1): the install path now resolves the
+        platform-specific zip + its SHA-256 from the release's
+        ``manifest.json`` before calling :meth:`Updater.stage`. This
+        closes the long-standing gap where ``Updater.stage`` was
+        invoked with no checksum and the ``require_checksum=True``
+        guard immediately refused the install.
+        """
+        new_ver = getattr(self, "_latest_new_version", "")
+
+        # Show progress + hide install button up front — keeps the UI
+        # responsive even if the manifest fetch takes a moment.
+        self._install_btn.setVisible(False)
+        self._update_progress.setValue(0)
+        self._update_progress.setVisible(True)
+        self._progress_label.setText("Resolving release manifest...")
+        self._progress_label.setVisible(True)
+
+        try:
+            url, sha, _size = self._resolve_install_artifact()
+        except Exception as exc:  # noqa: BLE001 — surface the message
+            self._on_update_failed(str(exc))
             return
+
         from src.updater.updater import Updater
         self._updater = Updater(parent=self)
         self._updater.progress.connect(self._on_update_progress)
         self._updater.complete.connect(self._on_update_complete)
         self._updater.failed.connect(self._on_update_failed)
-        # Show progress, hide install button
-        self._install_btn.setVisible(False)
-        self._update_progress.setValue(0)
-        self._update_progress.setVisible(True)
         self._progress_label.setText("Starting download...")
-        self._progress_label.setVisible(True)
-        new_ver = getattr(self, "_latest_new_version", "")
-        self._updater.stage(url, new_version=new_ver)
+        self._updater.stage(url, expected_sha256=sha, new_version=new_ver)
+
+    def _resolve_install_artifact(self):
+        """Look up download URL + SHA-256 for the running platform.
+
+        Centralizes the manifest fetch so :meth:`_on_install_update` and
+        any future caller (the splash flow, in particular) don't repeat
+        themselves.
+
+        Returns ``(download_url, sha256, size_bytes_or_none)``. Raises
+        :class:`ManifestFetchError` (or a generic Exception with a
+        readable message) on any failure — caller funnels that into
+        :meth:`_on_update_failed`.
+        """
+        from src.updater.manifest_fetcher import resolve_release_artifact
+
+        # Pull the assets array + token straight off the checker that
+        # last fired `update_available`. Avoids a redundant GitHub call.
+        checker = getattr(self, "_update_checker", None)
+        assets = getattr(checker, "last_assets", None) if checker else None
+        token = getattr(checker, "last_token", "") if checker else ""
+
+        return resolve_release_artifact(assets, token=token)
 
     def _on_update_progress(self, pct, msg):
         self._update_progress.setValue(pct)
@@ -1764,10 +1807,38 @@ class SettingsPage(QWidget):
         self._install_btn.setVisible(True)
 
     def _on_restart_app(self):
-        """Restart the application to apply the staged update."""
-        import sys
-        from PySide6.QtWidgets import QApplication
-        QApplication.quit()
+        """Restart the application to apply the staged update.
+
+        2026-05-07 (Piece 2B): switched from a bare ``QApplication.quit()``
+        to :func:`src.updater.restart.restart_app`, which spawns the
+        replacement process before quitting so the user lands back in
+        the running app rather than having to re-launch by hand. We
+        also confirm intent via a small modal — relaunching while a
+        scan is mid-flight would lose work.
+        """
+        from PySide6.QtWidgets import QMessageBox
+        reply = QMessageBox.question(
+            self,
+            "Restart to apply update",
+            "Restart Alma Insights now to apply the staged update?\n\n"
+            "Any in-progress work in this session will be discarded.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        from src.updater.restart import restart_app
+        try:
+            restart_app()
+        except OSError as exc:
+            QMessageBox.warning(
+                self,
+                "Restart failed",
+                f"Could not restart automatically: {exc}\n\n"
+                "Please close Alma Insights and reopen it manually — "
+                "the staged update will apply on next launch.",
+            )
 
     def _save_last_checked(self):
         from datetime import datetime
@@ -1941,6 +2012,171 @@ class SettingsPage(QWidget):
         self.debug_toggle.toggled.connect(self._persist_debug_toggle)
 
     # ── Helpers ──
+
+    def _build_hardware_profile_section(self, lay):
+        """Read-only panel showing detected hardware + active model device.
+
+        Sourced from ``data/hardware_profile.json`` (written by
+        ``src.startup.hardware``). Includes a ``Re-profile now`` button
+        that forces fresh detection. Power-users who need to override
+        can edit the JSON directly — no UI knobs to keep the surface
+        area small.
+        """
+        card = self._card()
+        cl = QVBoxLayout(card)
+        cl.setContentsMargins(20, 18, 20, 18)
+        cl.setSpacing(10)
+
+        desc = QLabel(
+            "Detected at startup and used by the embedding pipeline. "
+            "If you move this install to a different machine, the profile "
+            "regenerates automatically on next launch."
+        )
+        desc.setStyleSheet(f"font-size: 12px; color: {ALMA_TEXT_LIGHT};")
+        desc.setWordWrap(True)
+        cl.addWidget(desc)
+
+        # Two-column key/value grid of detected values
+        from PySide6.QtWidgets import QGridLayout
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(20)
+        grid.setVerticalSpacing(6)
+
+        self._hw_value_labels: dict[str, QLabel] = {}
+        rows = [
+            ("Accelerator", "accelerator_display"),
+            ("Embedding device", "embedding_device_display"),
+            ("Batch size", "embedding_batch_size"),
+            ("Max sequence length", "embedding_max_seq_length"),
+            ("RAM", "ram_display"),
+            ("CPU cores", "cpu_count"),
+            ("Architecture", "arch"),
+        ]
+        for r, (label_text, key) in enumerate(rows):
+            k_lbl = QLabel(label_text)
+            k_lbl.setStyleSheet(
+                f"font-size: 12px; font-weight: 600; color: {ALMA_TEXT_MID};"
+            )
+            v_lbl = QLabel("—")
+            v_lbl.setStyleSheet(
+                f"font-size: 12px; color: {ALMA_TEXT_DARK}; "
+                f"font-family: 'Cascadia Code', Consolas, 'SF Mono', monospace;"
+            )
+            grid.addWidget(k_lbl, r, 0)
+            grid.addWidget(v_lbl, r, 1)
+            self._hw_value_labels[key] = v_lbl
+        cl.addLayout(grid)
+
+        # Action row
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+
+        self._hw_status_label = QLabel("")
+        self._hw_status_label.setStyleSheet(
+            f"font-size: 11px; color: {ALMA_TEXT_LIGHT};"
+        )
+        btn_row.addWidget(self._hw_status_label)
+
+        reprofile_btn = QPushButton("Re-profile now")
+        reprofile_btn.setCursor(Qt.PointingHandCursor)
+        reprofile_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {ALMA_GREEN_DARK};
+                border: 1px solid {ALMA_GREEN_DARK}; border-radius: 6px;
+                padding: 6px 14px; font-size: 12px; font-weight: 600;
+            }}
+            QPushButton:hover {{ background: rgba(20, 87, 63, 0.06); }}
+        """)
+        reprofile_btn.setToolTip(
+            "Force fresh hardware detection. Writes data/hardware_profile.json "
+            "with current CPU / RAM / accelerator values. Effective on next "
+            "embedding model load."
+        )
+        reprofile_btn.clicked.connect(self._on_reprofile_clicked)
+        btn_row.addWidget(reprofile_btn)
+        cl.addLayout(btn_row)
+
+        lay.addWidget(card)
+
+        # Populate fields from current profile on first build
+        self._refresh_hardware_profile_panel()
+
+    def _refresh_hardware_profile_panel(self):
+        """Re-read data/hardware_profile.json and populate the labels."""
+        if not hasattr(self, "_hw_value_labels"):
+            return
+        try:
+            import json
+            from pathlib import Path
+            profile_path = Path("data") / "hardware_profile.json"
+            if not profile_path.exists():
+                self._hw_status_label.setText(
+                    "No profile cached — click 'Re-profile now' to detect."
+                )
+                return
+            data = json.loads(profile_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            self._hw_status_label.setText(f"Could not read profile: {exc}")
+            return
+
+        # Friendly accelerator label with device name + arch
+        acc = data.get("accelerator", "unknown")
+        arch = data.get("arch", "")
+        gpu = data.get("gpu_name") or ""
+        if acc == "mps":
+            acc_display = f"Apple Silicon (MPS)  {arch}"
+        elif acc == "cuda":
+            vram = data.get("vram_gb", 0)
+            acc_display = f"NVIDIA CUDA — {gpu} ({vram} GB VRAM)"
+        else:
+            acc_display = f"CPU only  {arch}"
+
+        device = data.get("embedding_device", "cpu")
+        fb = data.get("embedding_device_fallback_reason")
+        if fb:
+            device_display = f"{device}  ({fb})"
+        else:
+            device_display = device
+
+        ram = data.get("ram_gb")
+        ram_display = f"{ram} GB" if ram else "unknown"
+
+        values = {
+            "accelerator_display": acc_display,
+            "embedding_device_display": device_display,
+            "embedding_batch_size": str(data.get("embedding_batch_size", "—")),
+            "embedding_max_seq_length": str(data.get("embedding_max_seq_length", "—")),
+            "ram_display": ram_display,
+            "cpu_count": str(data.get("cpu_count", "—")),
+            "arch": data.get("arch", "—"),
+        }
+        for key, val in values.items():
+            lbl = self._hw_value_labels.get(key)
+            if lbl is not None:
+                lbl.setText(val)
+
+        profiled = data.get("profiled_at", "")
+        if profiled:
+            self._hw_status_label.setText(f"Profiled {profiled[:19]} UTC")
+
+    def _on_reprofile_clicked(self):
+        """Force fresh hardware detection + refresh the panel."""
+        try:
+            from src.startup import hardware as hw
+            fresh = hw.profile(current_version=getattr(self, "_app_version", "unknown"))
+            hw.save(fresh)
+            # Reset the cached embedding model singleton so next encode picks
+            # up the new device on the next call.
+            try:
+                from src.data.embedding import model_loader
+                model_loader._model = None
+                model_loader._active_device = None
+            except Exception:
+                pass
+            self._refresh_hardware_profile_panel()
+            self._hw_status_label.setText("Re-profiled successfully.")
+        except Exception as exc:
+            self._hw_status_label.setText(f"Re-profile failed: {exc}")
 
     def _section_label(self, text):
         lbl = QLabel(text)

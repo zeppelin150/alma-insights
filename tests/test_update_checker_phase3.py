@@ -28,13 +28,19 @@ from src.updater import update_checker as uc
 # ──────────────────────────────────────────────────────────────────
 
 class TestResolveConfig:
-    def test_defaults_to_disabled_when_no_settings(self, monkeypatch):
+    def test_defaults_to_pat_when_no_settings(self, monkeypatch):
+        # 2026-05-07: default flipped from "disabled" to "pat" so the
+        # bundled-token fallback activates out of the box. Token is
+        # still empty here because we haven't populated keyring or
+        # bundled in this test.
         monkeypatch.setattr(
             "src.data.settings_manager.get_section",
             lambda section, default=None: default if default is not None else {},
         )
+        # Stub out token loaders so the test isolates the mode resolution.
+        monkeypatch.setattr(uc, "_load_token", lambda *_a, **_kw: "")
         mode, url, token = uc._resolve_config_and_token()
-        assert mode == "disabled"
+        assert mode == "pat"
         assert "alma-health/alma-insights" in url
         assert token == ""
 
@@ -95,11 +101,15 @@ class TestResolveConfig:
         assert token == ""
 
     def test_settings_exception_does_not_break_resolution(self, monkeypatch):
+        # When settings fail, we fall through to the new "pat" default.
+        # Token resolution is isolated here so a missing keyring on the
+        # CI box doesn't accidentally pull in a real value.
         def boom(*a, **kw):
             raise RuntimeError("settings broken")
         monkeypatch.setattr("src.data.settings_manager.get_section", boom)
+        monkeypatch.setattr(uc, "_load_token", lambda *_a, **_kw: "")
         mode, url, token = uc._resolve_config_and_token()
-        assert mode == "disabled"
+        assert mode == "pat"
         assert url  # still a valid URL
         assert token == ""
 

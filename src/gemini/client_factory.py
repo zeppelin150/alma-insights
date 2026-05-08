@@ -98,17 +98,38 @@ def build_client_for_task(task_type: str, use_bridge: bool = False) -> Any | Non
 
 
 def _build_claude_client_from_registry():
-    """Build a ClaudeClient using the first available Claude model in registry."""
+    """Build a Claude client.
+
+    Prefers ClaudeClient (Anthropic Messages API) when ``anthropic_api_key``
+    is configured in pat_store. Otherwise falls back to ClaudeCliClient,
+    which uses the local ``claude`` CLI subprocess and inherits whatever auth
+    the user has logged into the CLI with (OAuth/keychain/Bedrock env).
+
+    The CLI fallback is the path that makes ``override_all=claude`` work
+    end-to-end on machines without an Anthropic API key.
+    """
+    from src.data.pat_store import load_setting
+    api_key = load_setting("anthropic_api_key", "")
+
+    if api_key:
+        try:
+            from src.llm.model_registry import ModelRegistry
+            registry = ModelRegistry.instance()
+            for m in registry.available():
+                if m.provider == "claude":
+                    client = _build_claude_client(m)
+                    if client is not None:
+                        return client
+        except Exception as e:
+            logger.debug("Claude API path failed: %s", e)
+
     try:
-        from src.llm.model_registry import ModelRegistry
-        registry = ModelRegistry.instance()
-        # Find first enabled Claude model
-        for m in registry.available():
-            if m.provider == "claude":
-                return _build_claude_client(m)
-    except Exception:
-        pass
-    return None
+        from src.llm.claude_cli_client import ClaudeCliClient
+        alias = _resolve_claude_cli_alias()
+        return ClaudeCliClient(model=alias)
+    except Exception as e:
+        logger.warning(f"Failed to build Claude CLI client: {e}")
+        return None
 
 
 def build_client_for_model(model_id: str | None = None, use_bridge: bool = False) -> Any | None:
@@ -146,6 +167,83 @@ def build_gemini_client(use_bridge: bool = False) -> Any | None:
     still returns a Claude client — seamless multi-provider.
     """
     return build_client_for_model(use_bridge=use_bridge)
+
+
+def build_bridge_for_task(task_type: str, model: str | None = None) -> Any | None:
+    """Build a streaming bridge object routed by task type.
+
+    Used by ScanOrchestrator / ReportOrchestrator / ReportBridgeClient — any
+    caller that needs the persistent-streaming bridge interface
+    (call_streaming, call_blocking, is_alive, probe, shutdown, set_on_death).
+
+    Args:
+        task_type: One of the defined task types (e.g. 'nlp_classification').
+        model: Explicit model id. For Gemini routes this is honored as-is.
+            For Claude routes the parameter is overridden — Gemini model ids
+            (e.g. 'gemini-2.5-flash') are not valid for the claude CLI, so we
+            resolve a Claude alias from the registry instead.
+
+    Returns:
+        ACPBridge for Gemini-routed tasks; ClaudeCliBridge for Claude-routed.
+    """
+    provider = resolve_provider_for_task(task_type)
+    logger.debug("Bridge for task '%s' → provider '%s'", task_type, provider)
+
+    if provider == "claude":
+        claude_model = _resolve_claude_cli_alias()
+        from src.agents.claude_cli_bridge import ClaudeCliBridge
+        return ClaudeCliBridge(model=claude_model)
+
+    from src.agents.acp_bridge import ACPBridge
+    return ACPBridge(model=model)
+
+
+def is_provider_available_for_task(task_type: str = "report_generation") -> bool:
+    """Return True if the routed provider for ``task_type`` is reachable.
+
+    Replaces the pattern ``GeminiClient().is_available()`` at status-check
+    sites — those silently report False when the active provider is Claude
+    but Gemini isn't configured. Routing through the factory makes the
+    check honor the user's ``override_all`` setting.
+    """
+    try:
+        client = build_client_for_task(task_type)
+        if client is None:
+            return False
+        check = getattr(client, "is_available", None)
+        return bool(check()) if callable(check) else True
+    except Exception:
+        return False
+
+
+def _resolve_claude_cli_alias() -> str:
+    """Pick a CLI-valid model alias ('sonnet'|'opus'|'haiku').
+
+    The model registry stores ids like 'claude-sonnet-4-6' that the claude
+    CLI does not accept directly. We map by substring; default sonnet.
+    """
+    try:
+        from src.llm.model_registry import ModelRegistry
+        registry = ModelRegistry.instance()
+        active = registry.active()
+        if active and active.provider == "claude":
+            mid = active.id.lower()
+            if "haiku" in mid:
+                return "haiku"
+            if "opus" in mid:
+                return "opus"
+            return "sonnet"
+        for m in registry.available():
+            if m.provider == "claude":
+                mid = m.id.lower()
+                if "haiku" in mid:
+                    return "haiku"
+                if "opus" in mid:
+                    return "opus"
+                return "sonnet"
+    except Exception:
+        pass
+    return "sonnet"
 
 
 # ── Claude builder ────────────────────────────────────────────────

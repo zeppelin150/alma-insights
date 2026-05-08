@@ -373,21 +373,16 @@ def _get_latest_date(db):
 
 
 def _build_gemini_client():
-    """Build a GeminiClient from settings."""
+    """Build the routed LLM client for VOC-style synthesis tasks.
+
+    Despite the legacy name, this now routes through the task-aware factory
+    so ``override_all=claude`` is honored. Returns whatever provider is
+    configured for ``voc_analysis`` (Gemini by default, Claude when
+    overridden).
+    """
     try:
-        gemini_cfg = get_section("gemini", {})
-        cli_path = gemini_cfg.get("cli_path", "")
-        model = gemini_cfg.get("model", "gemini-2.5-flash")
-        pii = gemini_cfg.get("pii_redaction", True)
-
-        from src.data.pat_store import load_setting
-        api_key = load_setting("gemini_api_key", "")
-
-        from src.gemini.gemini_client import GeminiClient
-        client = GeminiClient(cli_path=cli_path, model=model, aggressive_pii=pii)
-        if api_key:
-            client._api_key = api_key
-        return client
+        from src.gemini.client_factory import build_client_for_task
+        return build_client_for_task("voc_analysis")
     except Exception:
         return None
 

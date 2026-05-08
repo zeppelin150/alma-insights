@@ -38,6 +38,36 @@ def qapp():
     yield app
 
 
+@pytest.fixture
+def make_splash(qapp):
+    """Factory that builds a SplashWindow and *destroys* it at teardown.
+
+    Plain ``win.close()`` only hides a QDialog — Qt keeps the widget
+    alive, which on Windows can leave a stray top-level window visible
+    when the test process doesn't fully exit (e.g. pytest worker hung
+    by another widget). Setting ``WA_DeleteOnClose`` + explicit
+    ``deleteLater()`` + an event-loop pump guarantees the widget
+    really goes away.
+    """
+    from PySide6.QtCore import Qt
+    created: list[SplashWindow] = []
+
+    def _make(*args, **kwargs):
+        win = SplashWindow(*args, **kwargs)
+        win.setAttribute(Qt.WA_DeleteOnClose, True)
+        created.append(win)
+        return win
+
+    yield _make
+    for win in created:
+        try:
+            win.close()
+            win.deleteLater()
+        except Exception:  # noqa: BLE001
+            pass
+    qapp.processEvents()
+
+
 def _pump(app, deadline_seconds: float = 2.0, until=None):
     """Spin the Qt event loop until `until()` is truthy or deadline passes."""
     end = time.monotonic() + deadline_seconds
@@ -95,17 +125,15 @@ class TestSplashRow:
 # ──────────────────────────────────────────────────────────────────
 
 class TestSplashConstruction:
-    def test_constructs_without_errors(self, qapp):
-        win = SplashWindow(app_version="v9.3.0-test")
+    def test_constructs_without_errors(self, make_splash):
+        win = make_splash(app_version="v9.3.0-test")
         assert win.windowTitle().startswith("Alma Insights")
         assert win._continue_btn is not None
         assert win._continue_btn.isEnabled() is False
-        win.close()
 
-    def test_continue_disabled_before_run(self, qapp):
-        win = SplashWindow()
+    def test_continue_disabled_before_run(self, make_splash):
+        win = make_splash()
         assert not win._continue_btn.isEnabled()
-        win.close()
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -113,13 +141,13 @@ class TestSplashConstruction:
 # ──────────────────────────────────────────────────────────────────
 
 class TestStreaming:
-    def test_run_streams_rows(self, qapp):
+    def test_run_streams_rows(self, qapp, make_splash):
         checker = Checker([
             ("a", lambda: _pass("a")),
             ("b", lambda: _pass("b")),
             ("c", lambda: _pass("c")),
         ])
-        win = SplashWindow(app_version="v1")
+        win = make_splash(app_version="v1")
         win.show()
         win.run(checker, step_delay_ms=5)
 
@@ -130,28 +158,26 @@ class TestStreaming:
         # A row is a SplashRow child of the scroll's inner container.
         rows = win.findChildren(SplashRow)
         assert len(rows) == 3
-        win.close()
 
-    def test_continue_enabled_when_all_critical_pass(self, qapp):
+    def test_continue_enabled_when_all_critical_pass(self, qapp, make_splash):
         checker = Checker([
             ("a", lambda: _pass("a", critical=True)),
             ("b", lambda: _pass("b", critical=True)),
             ("c", lambda: _warn("c")),   # non-critical
         ])
-        win = SplashWindow()
+        win = make_splash()
         win.show()
         win.run(checker, step_delay_ms=5)
 
         _pump(qapp, until=lambda: win._continue_btn.isEnabled())
         assert win._continue_btn.isEnabled()
-        win.close()
 
-    def test_continue_blocked_by_critical_failure(self, qapp):
+    def test_continue_blocked_by_critical_failure(self, qapp, make_splash):
         checker = Checker([
             ("a", lambda: _pass("a", critical=True)),
             ("b", lambda: _fail("b", critical=True)),
         ])
-        win = SplashWindow()
+        win = make_splash()
         win.show()
         win.run(checker, step_delay_ms=5)
 
@@ -159,7 +185,6 @@ class TestStreaming:
         _pump(qapp, deadline_seconds=0.3)
 
         assert not win._continue_btn.isEnabled()
-        win.close()
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -167,24 +192,21 @@ class TestStreaming:
 # ──────────────────────────────────────────────────────────────────
 
 class TestSummary:
-    def test_all_pass_message(self, qapp):
-        win = SplashWindow()
+    def test_all_pass_message(self, make_splash):
+        win = make_splash()
         text = win._summary_text({"pass": 3, "warn": 0, "fail": 0}, True)
         assert "All systems" in text
-        win.close()
 
-    def test_warn_only_message(self, qapp):
-        win = SplashWindow()
+    def test_warn_only_message(self, make_splash):
+        win = make_splash()
         text = win._summary_text({"pass": 2, "warn": 1, "fail": 0}, True)
         assert "1 warning" in text
         assert "App will continue" in text
-        win.close()
 
-    def test_critical_failure_message(self, qapp):
-        win = SplashWindow()
+    def test_critical_failure_message(self, make_splash):
+        win = make_splash()
         text = win._summary_text({"pass": 2, "warn": 0, "fail": 1}, False)
         assert "Cannot continue" in text
-        win.close()
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -192,9 +214,9 @@ class TestSummary:
 # ──────────────────────────────────────────────────────────────────
 
 class TestContinueSignal:
-    def test_click_emits_and_accepts(self, qapp):
+    def test_click_emits_and_accepts(self, make_splash):
         emitted = []
-        win = SplashWindow()
+        win = make_splash()
         win.continue_clicked.connect(lambda: emitted.append(True))
         win._continue_btn.setEnabled(True)
         win._on_continue()

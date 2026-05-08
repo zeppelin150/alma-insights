@@ -49,12 +49,16 @@ class ScanWorker:
         self.db_path = str(Path(db_path).resolve())
         self.scan_id = scan_id
         self.worker_id = worker_id
-        self.gemini = GeminiClient()
+        # Route through the factory so override_all=claude honors the swap.
+        # Attribute kept as ``gemini`` for backward-compat with downstream
+        # callers; value may be a ClaudeCliClient under override.
+        from src.gemini.client_factory import build_client_for_task
+        self.gemini = build_client_for_task("nlp_classification")
         self.running = True
 
-        # Verify Gemini CLI is available
-        if not self.gemini.is_available():
-            logger.error("Gemini CLI not found. Cannot proceed.")
+        # Verify the routed provider is available
+        if self.gemini is None or not self.gemini.is_available():
+            logger.error("LLM provider not available. Cannot proceed.")
             self._open_conn()
             self._update_status('failed')
             self.conn.close()

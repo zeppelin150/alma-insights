@@ -27,6 +27,7 @@ from src.ui.pages.smart_reporting import SmartReportingPage
 from src.ui.pages.settings_page import SettingsPage
 from src.ui.pages.source_monitor_page import SourceMonitorPage
 from src.ui.pages.guru_page import GuruPage
+from src.ui.pages.guru_wip_page import GuruWipPage
 from src.ui.pages.data_warehouse_page import DataWarehousePage
 from src.ui.pages.gemini_chats_page import GeminiChatsPage
 from src.ui.dialogs.help_dialog import HelpDialog
@@ -504,7 +505,11 @@ class MainWindow(QMainWindow):
         self._page_widgets[self.PAGE_SOURCE_MONITOR] = self.source_monitor_page
 
         # Page 9: Guru Knowledge Base (Phase 4)
-        self.guru_page = GuruPage(self.db)
+        # As of 2026-05-07 the user-facing default is the WIP placeholder
+        # (`GuruWipPage`) — the legacy interactive `GuruPage` is preserved
+        # behind the `guru.experimental_ui_enabled` settings flag so we
+        # don't lose the build-out work while the redesign lands.
+        self.guru_page = self._make_guru_page()
         self.content_stack.addWidget(self.guru_page)
         self._page_widgets[self.PAGE_GURU] = self.guru_page
 
@@ -627,8 +632,36 @@ class MainWindow(QMainWindow):
     #  GURU INTEGRATION (Phase 4)
     # ═══════════════════════════════════════════
 
+    def _make_guru_page(self):
+        """Construct either the WIP placeholder or the legacy interactive page.
+
+        Routing is gated by ``guru.experimental_ui_enabled`` in
+        settings.yaml. Default is False → WIP placeholder. Setting True
+        falls through to the legacy ``GuruPage`` (interactive, all 6
+        tabs work but UI polish is incomplete).
+        """
+        try:
+            from src.data.settings_manager import get_section
+            guru_cfg = get_section("guru", {})
+            if guru_cfg.get("experimental_ui_enabled", False):
+                return GuruPage(self.db)
+        except Exception:
+            # If settings load fails, default to the safer WIP page.
+            pass
+        return GuruWipPage(self.db)
+
     def _setup_guru(self):
-        """Initialize Guru client and pipelines if credentials are configured."""
+        """Initialize Guru client and pipelines if credentials are configured.
+
+        When the WIP placeholder is mounted (default), pipelines are
+        skipped — the placeholder accepts the setter calls as no-ops
+        so the rest of the wiring stays simple.
+        """
+        # The WIP placeholder defines the same setter API as GuruPage
+        # but ignores everything. Skip the pipeline construction entirely
+        # to avoid running unnecessary DB queries at startup.
+        if isinstance(self.guru_page, GuruWipPage):
+            return
         try:
             from src.data.guru_client import GuruClient
             from src.data.guru_friction_pipeline import GuruFrictionPipeline

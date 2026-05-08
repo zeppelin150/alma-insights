@@ -50,6 +50,12 @@ _SECRET_KEYS: frozenset[str] = frozenset({
     "guru_api_token",
     "zendesk_api_key",
     "github_update_token",
+    # AWS credentials for Bedrock-backed Claude CLI calls. Used only when
+    # bedrock.use_environment=false in settings; otherwise the standard AWS
+    # credential chain (env vars, profile, IAM role) is honored.
+    "aws_access_key_id",
+    "aws_secret_access_key",
+    "aws_session_token",
 })
 
 _CONFIG_DIR = Path.home() / ".alma-insights"

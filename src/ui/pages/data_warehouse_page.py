@@ -16,7 +16,7 @@ import logging
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QComboBox, QLineEdit, QFrame, QScrollArea, QSizePolicy,
-    QDateEdit, QSplitter,
+    QDateEdit, QSplitter, QGridLayout,
 )
 from PySide6.QtCore import Qt, QDate, Signal
 
@@ -143,113 +143,107 @@ class DataWarehousePage(QWidget):
         bar = QFrame()
         bar.setStyleSheet(
             f"QFrame {{ background: {ALMA_WHITE}; border: 1px solid {ALMA_BORDER_LIGHT}; "
-            f"border-radius: 6px; padding: 8px 12px; }}"
+            f"border-radius: 6px; }}"
         )
-        layout = QHBoxLayout(bar)
-        layout.setContentsMargins(8, 6, 8, 6)
-        layout.setSpacing(8)
+        outer = QVBoxLayout(bar)
+        outer.setContentsMargins(12, 10, 12, 10)
+        outer.setSpacing(8)
 
         lbl_style = f"font-size: 11px; color: {ALMA_TEXT_MID}; font-weight: 600;"
         input_style = (
-            f"font-size: 12px; padding: 4px 6px; border: 1px solid {ALMA_BORDER}; "
-            f"border-radius: 3px; background: {ALMA_WHITE};"
+            f"QComboBox, QLineEdit, QDateEdit {{ "
+            f"font-size: 12px; padding: 4px 8px; border: 1px solid {ALMA_BORDER}; "
+            f"border-radius: 4px; background: {ALMA_WHITE}; min-height: 20px; "
+            f"}}"
         )
 
-        # Source
-        lbl = QLabel("Source:")
-        lbl.setStyleSheet(lbl_style)
-        layout.addWidget(lbl)
-        self._source_selector = SourceSelector(self)
-        self._source_selector.setStyleSheet(input_style)
-        self._source_selector.setFixedWidth(140)
-        layout.addWidget(self._source_selector)
+        # Two rows: 1) Source / dates / search button   2) Ticket IDs / TRC / keyword / payer / state / tag
+        row1 = QHBoxLayout()
+        row1.setSpacing(8)
+        row2 = QHBoxLayout()
+        row2.setSpacing(8)
 
-        # Date From
-        lbl = QLabel("From:")
-        lbl.setStyleSheet(lbl_style)
-        layout.addWidget(lbl)
+        def _field(label_text, widget, min_w=120):
+            lbl = QLabel(label_text)
+            lbl.setStyleSheet(lbl_style)
+            widget.setStyleSheet(input_style)
+            widget.setMinimumWidth(min_w)
+            widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            col = QVBoxLayout()
+            col.setContentsMargins(0, 0, 0, 0)
+            col.setSpacing(2)
+            col.addWidget(lbl)
+            col.addWidget(widget)
+            return col
+
+        # ── Row 1: Source, Date From, Date To, Search button ──
+        self._source_selector = SourceSelector(self)
+        row1.addLayout(_field("SOURCE", self._source_selector, 160), 2)
+
         self._date_from = QDateEdit()
         self._date_from.setCalendarPopup(True)
         self._date_from.setDate(QDate.currentDate().addYears(-2))
         self._date_from.setDisplayFormat("MMM d, yyyy")
-        self._date_from.setStyleSheet(input_style)
-        self._date_from.setFixedWidth(120)
-        layout.addWidget(self._date_from)
+        row1.addLayout(_field("FROM", self._date_from, 130), 1)
 
-        # Date To
-        lbl = QLabel("To:")
-        lbl.setStyleSheet(lbl_style)
-        layout.addWidget(lbl)
         self._date_to = QDateEdit()
         self._date_to.setCalendarPopup(True)
         self._date_to.setDate(QDate.currentDate())
         self._date_to.setDisplayFormat("MMM d, yyyy")
-        self._date_to.setStyleSheet(input_style)
-        self._date_to.setFixedWidth(120)
-        layout.addWidget(self._date_to)
+        row1.addLayout(_field("TO", self._date_to, 130), 1)
 
-        # TRC
-        lbl = QLabel("TRC:")
-        lbl.setStyleSheet(lbl_style)
-        layout.addWidget(lbl)
-        self._trc_combo = QComboBox()
-        self._trc_combo.addItem("All TRCs", None)
-        self._trc_combo.setStyleSheet(input_style)
-        self._trc_combo.setFixedWidth(100)
-        layout.addWidget(self._trc_combo)
+        # Ticket IDs (NEW) — accepts a single ID or comma/space-separated list
+        self._ticket_id_input = QLineEdit()
+        self._ticket_id_input.setPlaceholderText("e.g. 11704, 11657 …")
+        self._ticket_id_input.setToolTip(
+            "Search by one or more ticket IDs. Separate multiple IDs with commas or spaces."
+        )
+        self._ticket_id_input.setClearButtonEnabled(True)
+        row1.addLayout(_field("TICKET IDS", self._ticket_id_input, 200), 2)
 
-        # Keyword
-        lbl = QLabel("Keyword:")
-        lbl.setStyleSheet(lbl_style)
-        layout.addWidget(lbl)
-        self._keyword_input = QLineEdit()
-        self._keyword_input.setPlaceholderText("Search...")
-        self._keyword_input.setStyleSheet(input_style)
-        self._keyword_input.setFixedWidth(100)
-        layout.addWidget(self._keyword_input)
-
-        # ── Phase 1 enrichment filters ──
-        # Insurance payer
-        lbl = QLabel("Payer:")
-        lbl.setStyleSheet(lbl_style)
-        layout.addWidget(lbl)
-        self._payer_combo = QComboBox()
-        self._payer_combo.addItem("All payers", None)
-        self._payer_combo.setStyleSheet(input_style)
-        self._payer_combo.setFixedWidth(140)
-        layout.addWidget(self._payer_combo)
-
-        # Service state
-        lbl = QLabel("State:")
-        lbl.setStyleSheet(lbl_style)
-        layout.addWidget(lbl)
-        self._state_combo = QComboBox()
-        self._state_combo.addItem("All states", None)
-        self._state_combo.setStyleSheet(input_style)
-        self._state_combo.setFixedWidth(80)
-        layout.addWidget(self._state_combo)
-
-        # Tag
-        lbl = QLabel("Tag:")
-        lbl.setStyleSheet(lbl_style)
-        layout.addWidget(lbl)
-        self._tag_combo = QComboBox()
-        self._tag_combo.addItem("All tags", None)
-        self._tag_combo.setStyleSheet(input_style)
-        self._tag_combo.setFixedWidth(180)
-        layout.addWidget(self._tag_combo)
-
-        # Search button
-        search_btn = QPushButton("\U0001F50D Search")
+        # Search button (aligned with input row, sits below an invisible-label spacer)
+        search_btn = QPushButton("\U0001F50D  Search")
         search_btn.setStyleSheet(
             f"QPushButton {{ background: {ALMA_GREEN_DARK}; color: {ALMA_CREAM}; "
-            f"padding: 5px 12px; border-radius: 4px; font-size: 12px; font-weight: 600; "
-            f"border: none; }}"
+            f"padding: 6px 16px; border-radius: 4px; font-size: 12px; font-weight: 600; "
+            f"border: none; min-height: 22px; }}"
             f"QPushButton:hover {{ background: {ALMA_GREEN_LIGHT}; }}"
         )
         search_btn.setCursor(Qt.PointingHandCursor)
         search_btn.clicked.connect(self._apply_filters)
-        layout.addWidget(search_btn)
+        btn_col = QVBoxLayout()
+        btn_col.setContentsMargins(0, 0, 0, 0)
+        btn_col.setSpacing(2)
+        spacer = QLabel(" ")
+        spacer.setStyleSheet(lbl_style)
+        btn_col.addWidget(spacer)
+        btn_col.addWidget(search_btn)
+        row1.addLayout(btn_col)
+
+        # ── Row 2: TRC, Keyword, Payer, State, Tag ──
+        self._trc_combo = QComboBox()
+        self._trc_combo.addItem("All TRCs", None)
+        row2.addLayout(_field("TRC", self._trc_combo, 120), 1)
+
+        self._keyword_input = QLineEdit()
+        self._keyword_input.setPlaceholderText("Search subject / preview…")
+        self._keyword_input.setClearButtonEnabled(True)
+        row2.addLayout(_field("KEYWORD", self._keyword_input, 160), 2)
+
+        self._payer_combo = QComboBox()
+        self._payer_combo.addItem("All payers", None)
+        row2.addLayout(_field("PAYER", self._payer_combo, 140), 1)
+
+        self._state_combo = QComboBox()
+        self._state_combo.addItem("All states", None)
+        row2.addLayout(_field("STATE", self._state_combo, 100), 1)
+
+        self._tag_combo = QComboBox()
+        self._tag_combo.addItem("All tags", None)
+        row2.addLayout(_field("TAG", self._tag_combo, 160), 2)
+
+        outer.addLayout(row1)
+        outer.addLayout(row2)
 
         # Auto-apply filters on change (Bug 4 fix)
         self._source_selector.source_changed.connect(self._apply_filters)
@@ -257,11 +251,11 @@ class DataWarehousePage(QWidget):
         self._date_to.dateChanged.connect(self._apply_filters)
         self._trc_combo.currentIndexChanged.connect(self._apply_filters)
         self._keyword_input.returnPressed.connect(self._apply_filters)
+        self._ticket_id_input.returnPressed.connect(self._apply_filters)
         self._payer_combo.currentIndexChanged.connect(self._apply_filters)
         self._state_combo.currentIndexChanged.connect(self._apply_filters)
         self._tag_combo.currentIndexChanged.connect(self._apply_filters)
 
-        layout.addStretch()
         return bar
 
     # ═══════════════════════════════════════════
@@ -424,6 +418,14 @@ class DataWarehousePage(QWidget):
         keyword = self._keyword_input.text().strip()
         if keyword:
             filters["keyword"] = keyword
+
+        # Ticket IDs — comma/space/newline separated; case-insensitive whitespace strip
+        raw_ids = self._ticket_id_input.text().strip()
+        if raw_ids:
+            import re as _re
+            ids = [t for t in _re.split(r"[\s,;]+", raw_ids) if t]
+            if ids:
+                filters["ticket_ids"] = ids
 
         # Phase 1 enrichment filters
         payer = self._payer_combo.currentData()

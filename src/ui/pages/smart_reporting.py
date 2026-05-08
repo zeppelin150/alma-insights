@@ -22,7 +22,8 @@ from PySide6.QtWidgets import (
     QComboBox, QFrame, QScrollArea, QSpinBox, QDoubleSpinBox, QCheckBox,
     QTimeEdit, QTableWidget, QTableWidgetItem, QHeaderView,
     QAbstractItemView, QMessageBox, QSizePolicy, QApplication,
-    QLineEdit, QFileDialog,
+    QLineEdit, QFileDialog, QDialog, QDialogButtonBox, QFormLayout,
+    QPlainTextEdit,
 )
 from PySide6.QtCore import Qt, QTime, QThread, QTimer, Signal
 from PySide6.QtGui import QFont, QColor
@@ -30,7 +31,7 @@ from PySide6.QtGui import QFont, QColor
 from src.ui.theme import (
     ALMA_GREEN_DARK, ALMA_GREEN_MID, ALMA_GREEN_LIGHT, ALMA_GREEN_SUBTLE,
     ALMA_WHITE, ALMA_CREAM, ALMA_TEXT_DARK, ALMA_TEXT_MID, ALMA_TEXT_LIGHT,
-    ALMA_TEXT_ON_DARK, ALMA_BORDER, ALMA_BORDER_LIGHT,
+    ALMA_TEXT_ON_DARK, ALMA_BORDER, ALMA_BORDER_LIGHT, ALMA_HOVER_LIGHT,
     ALMA_SUCCESS, ALMA_WARNING, ALMA_ERROR, ALMA_INFO,
     ALMA_BG_ELEVATED, ALMA_BG_INSET,
     apply_card_shadow, apply_card_shadow_soft,
@@ -38,12 +39,21 @@ from src.ui.theme import (
 
 logger = logging.getLogger("alma.smart_reporting")
 
-# Reusable styles
+# Reusable styles — match the canonical input style from theme.py so
+# Smart Reporting blends with the rest of the app.
 _FIELD_STYLE = f"""
-    QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit, QTimeEdit {{
-        background: {ALMA_WHITE}; border: 1px solid {ALMA_BORDER};
-        border-radius: 8px; padding: 8px 12px; font-size: 13px;
-        color: {ALMA_TEXT_DARK};
+    QComboBox, QLineEdit, QTimeEdit {{
+        background: {ALMA_WHITE};
+        border: 1px solid rgba(214, 210, 202, 0.7);
+        border-radius: 8px;
+        padding: 8px 14px; font-size: 13px;
+        color: {ALMA_TEXT_DARK}; min-height: 22px;
+    }}
+    QComboBox:hover, QLineEdit:hover, QTimeEdit:hover {{
+        border-color: {ALMA_GREEN_LIGHT};
+    }}
+    QComboBox:focus, QLineEdit:focus, QTimeEdit:focus {{
+        border-color: {ALMA_GREEN_LIGHT};
     }}
 """
 _LBL_STYLE = f"font-size: 11px; font-weight: 600; color: {ALMA_TEXT_MID}; letter-spacing: 0.5px;"
@@ -64,6 +74,57 @@ _CARD_STYLE = f"""
         border-radius: 12px;
     }}
 """
+
+# Canonical dropdown options — used by both the inline pipeline config and
+# the PipelineEditDialog so values stay in sync.
+LOOKBACK_OPTIONS = [
+    ("Last 7 days", 7),
+    ("Last 14 days", 14),
+    ("Last 30 days", 30),
+    ("Last 60 days", 60),
+    ("Last 90 days", 90),
+    ("Last 180 days", 180),
+    ("Last 365 days", 365),
+]
+DEFAULT_LOOKBACK_DAYS = 30
+
+NLP_BUDGET_OPTIONS = [
+    ("$5", 5.0),
+    ("$10", 10.0),
+    ("$25", 25.0),
+    ("$50", 50.0),
+    ("$100", 100.0),
+    ("$250", 250.0),
+    ("$500", 500.0),
+]
+DEFAULT_NLP_BUDGET = 50.0
+
+def _resolve_nlp_workers() -> int:
+    """Single source of truth for NLP scan worker count.
+
+    Read `nlp_scan.parallel_workers` from settings.yaml — same setting the
+    Cost Dashboard worker spinbox writes and trc_analytics reads. Falls
+    back to 8 (DEFAULT_PARALLEL_WORKERS) and caps at 32
+    (MAX_PARALLEL_WORKERS) per scan_orchestrator.
+    """
+    try:
+        from src.data.settings_manager import get_section
+        n = int(get_section("nlp_scan", {}).get("parallel_workers", 8))
+    except Exception:
+        n = 8
+    return max(1, min(n, 32))
+
+
+def _populate_combo(combo, options, default_value):
+    """Add (label, data) pairs to a combo and select default_value."""
+    combo.clear()
+    for label, value in options:
+        combo.addItem(label, value)
+    for i in range(combo.count()):
+        if combo.itemData(i) == default_value:
+            combo.setCurrentIndex(i)
+            return
+    combo.setCurrentIndex(0)
 
 
 def _load_prompt_text(filename):
@@ -119,11 +180,7 @@ class SmartReportingPage(QWidget):
             client = build_client_for_task("report_generation")
             return client is not None and client.is_available()
         except Exception:
-            try:
-                from src.gemini.gemini_client import GeminiClient
-                return GeminiClient().is_available()
-            except Exception:
-                return False
+            return False
 
     # ═══════════════════════════════════════
     #  UI CONSTRUCTION
@@ -185,92 +242,130 @@ class SmartReportingPage(QWidget):
     # ── Build 11.0: Report Pipeline Cards ──
 
     def _build_pipeline_cards_section(self):
-        """Build the report pipeline cards row (from report_definitions table)."""
+        """Build the report pipeline cards row (from report_definitions table).
+
+        Stored as an instance attribute so we can refresh the cards in place
+        after the user adds / edits / deletes a pipeline.
+        """
         section = QFrame()
         section_layout = QVBoxLayout(section)
         section_layout.setContentsMargins(0, 0, 0, 0)
         section_layout.setSpacing(8)
 
+        # Header with "+ New Pipeline" action
+        header_row = QHBoxLayout()
         lbl = QLabel("Report pipelines")
         lbl.setStyleSheet(f"font-size: 14px; font-weight: 700; color: {ALMA_TEXT_DARK};")
-        section_layout.addWidget(lbl)
+        header_row.addWidget(lbl)
+        header_row.addStretch()
 
-        cards_row = QHBoxLayout()
-        cards_row.setSpacing(12)
+        new_btn = QPushButton("+ New Pipeline")
+        new_btn.setCursor(Qt.PointingHandCursor)
+        new_btn.setStyleSheet(_OUTLINE_BTN_STYLE)
+        new_btn.clicked.connect(self._on_new_pipeline)
+        header_row.addWidget(new_btn)
+        section_layout.addLayout(header_row)
 
-        # Load report definitions from DB
-        pipelines = self._load_report_definitions()
-        if not pipelines:
-            # Show default cards even without DB data
-            pipelines = [
-                {"name": "VOC Root Cause", "description": "Full 3-bridge analysis with Pattern, Friction, Novelty specialists", "is_active": True},
-                {"name": "Monthly Billing", "description": "Billing VOC analysis with charge discrepancy focus", "is_active": False},
-                {"name": "Eng Bug Tracker", "description": "Platform bug analysis for engineering triage", "is_active": False},
-            ]
+        # Cards container (populated by _refresh_pipeline_cards)
+        self._pipeline_cards_container = QWidget()
+        self._pipeline_cards_layout = QHBoxLayout(self._pipeline_cards_container)
+        self._pipeline_cards_layout.setContentsMargins(0, 0, 0, 0)
+        self._pipeline_cards_layout.setSpacing(12)
+        section_layout.addWidget(self._pipeline_cards_container)
 
-        for p in pipelines[:4]:  # Max 4 cards
-            card = self._build_single_pipeline_card(p)
-            cards_row.addWidget(card)
-        cards_row.addStretch()
-
-        section_layout.addLayout(cards_row)
+        self._refresh_pipeline_cards()
         return section
 
     def _load_report_definitions(self):
-        """Load report definitions from the database."""
+        """Load report definitions from the database via the db helper."""
         try:
-            rows = self.db.conn.execute(
-                "SELECT definition_id, name, description, is_active, last_run_date, schedule "
-                "FROM report_definitions ORDER BY name"
-            ).fetchall()
+            rows = self.db.list_report_definitions()
             return [
                 {
-                    "definition_id": r[0],
-                    "name": r[1],
-                    "description": r[2],
-                    "is_active": bool(r[3]),
-                    "last_run_date": r[4],
-                    "schedule": r[5],
+                    "definition_id": r["definition_id"],
+                    "name": r["name"],
+                    "description": r["description"],
+                    "is_active": bool(r.get("is_active", 1)),
+                    "last_run_date": r.get("last_run_date"),
+                    "schedule": r.get("schedule"),
+                    "config": r.get("config_dict") or {},
                 }
                 for r in rows
             ]
-        except Exception:
+        except Exception as e:
+            logger.warning("load_report_definitions failed: %s", e)
             return []
+
+    def _refresh_pipeline_cards(self):
+        """Repopulate the pipeline cards row from current DB state."""
+        # Clear existing cards
+        while self._pipeline_cards_layout.count():
+            item = self._pipeline_cards_layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+
+        pipelines = self._load_report_definitions()
+        if not pipelines:
+            # Fallback example so the section never looks empty on first launch
+            pipelines = [{
+                "name": "VOC Root Cause",
+                "description": "Full 3-bridge analysis with Pattern, Friction, Novelty specialists",
+                "is_active": True,
+                "definition_id": "voc_root_cause",
+                "config": {},
+                "_seed": True,
+            }]
+
+        for p in pipelines[:4]:
+            card = self._build_single_pipeline_card(p)
+            self._pipeline_cards_layout.addWidget(card)
+        self._pipeline_cards_layout.addStretch()
 
     def _build_single_pipeline_card(self, pipeline):
         """Build a single pipeline card widget."""
         card = QFrame()
         card.setMinimumWidth(220)
-        card.setMaximumWidth(300)
+        card.setMaximumWidth(320)
 
         is_active = pipeline.get("is_active", False)
-        border_color = ALMA_GREEN_MID if is_active else ALMA_BORDER_LIGHT
-
-        card.setStyleSheet(f"""
-            QFrame {{
-                background: {ALMA_BG_ELEVATED};
-                border: 1px solid {border_color};
-                border-radius: 10px;
-            }}
-        """)
+        # Active cards use a left-edge accent (matching the KPICard pattern in
+        # theme.py) instead of a full green outline that reads as a hard "box".
+        if is_active:
+            card.setStyleSheet(f"""
+                QFrame {{
+                    background: {ALMA_BG_ELEVATED};
+                    border: 1px solid rgba(214, 210, 202, 0.55);
+                    border-left: 4px solid {ALMA_GREEN_LIGHT};
+                    border-radius: 10px;
+                }}
+            """)
+        else:
+            card.setStyleSheet(f"""
+                QFrame {{
+                    background: {ALMA_BG_ELEVATED};
+                    border: 1px solid rgba(214, 210, 202, 0.55);
+                    border-radius: 10px;
+                }}
+            """)
         apply_card_shadow_soft(card)
 
         cl = QVBoxLayout(card)
         cl.setContentsMargins(14, 12, 14, 12)
         cl.setSpacing(6)
 
-        # Header row
+        # Header row: name + status badge
         hdr = QHBoxLayout()
         name_lbl = QLabel(pipeline.get("name", ""))
-        name_lbl.setStyleSheet(f"font-size: 13px; font-weight: 700; color: {ALMA_TEXT_DARK};")
+        name_lbl.setStyleSheet(f"font-size: 13px; font-weight: 700; color: {ALMA_TEXT_DARK}; border: none;")
         hdr.addWidget(name_lbl)
         hdr.addStretch()
 
         status_lbl = QLabel("Enabled" if is_active else "Disabled")
         status_lbl.setStyleSheet(f"""
-            font-size: 10px; font-weight: 600;
+            font-size: 10px; font-weight: 600; border: none;
             color: {ALMA_SUCCESS if is_active else ALMA_TEXT_LIGHT};
-            background: {'rgba(52,168,83,0.1)' if is_active else 'transparent'};
+            background: {'rgba(22,118,58,0.10)' if is_active else 'transparent'};
             border-radius: 8px; padding: 2px 8px;
         """)
         hdr.addWidget(status_lbl)
@@ -279,35 +374,161 @@ class SmartReportingPage(QWidget):
         # Description
         desc = QLabel(pipeline.get("description", ""))
         desc.setWordWrap(True)
-        desc.setStyleSheet(f"font-size: 11px; color: {ALMA_TEXT_MID};")
+        desc.setStyleSheet(f"font-size: 11px; color: {ALMA_TEXT_MID}; border: none;")
         cl.addWidget(desc)
 
         # Last run
         last_run = pipeline.get("last_run_date")
         if last_run:
             run_lbl = QLabel(f"Last run: {str(last_run)[:10]}")
-            run_lbl.setStyleSheet(f"font-size: 10px; color: {ALMA_TEXT_LIGHT};")
+            run_lbl.setStyleSheet(f"font-size: 10px; color: {ALMA_TEXT_LIGHT}; border: none;")
             cl.addWidget(run_lbl)
 
         # Actions
         btn_row = QHBoxLayout()
         btn_row.setSpacing(6)
 
+        definition_id = pipeline.get("definition_id")
+        is_seed = pipeline.get("_seed", False)
+
         run_btn = QPushButton("Run Now")
         run_btn.setCursor(Qt.PointingHandCursor)
         run_btn.setStyleSheet(_OUTLINE_BTN_STYLE)
-        run_btn.setEnabled(is_active)
+        run_btn.setEnabled(is_active and self._gemini_available and not is_seed)
+        if not is_seed:
+            run_btn.clicked.connect(lambda _, did=definition_id: self._on_run_pipeline_card(did))
+        else:
+            run_btn.setToolTip("This is the seeded fallback example. Click '+ New Pipeline' to save your own.")
         btn_row.addWidget(run_btn)
 
         edit_btn = QPushButton("Edit")
         edit_btn.setCursor(Qt.PointingHandCursor)
         edit_btn.setStyleSheet(_OUTLINE_BTN_STYLE)
+        edit_btn.clicked.connect(
+            lambda _, did=definition_id, seed=is_seed: self._on_edit_pipeline_card(did, seed)
+        )
         btn_row.addWidget(edit_btn)
+
+        if not is_seed:
+            del_btn = QPushButton("Delete")
+            del_btn.setCursor(Qt.PointingHandCursor)
+            del_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: transparent; color: {ALMA_ERROR};
+                    border: 1px solid {ALMA_ERROR}; border-radius: 6px;
+                    padding: 4px 12px; font-size: 11px; font-weight: 600;
+                }}
+                QPushButton:hover {{ background: rgba(196, 30, 30, 0.06); }}
+            """)
+            del_btn.clicked.connect(
+                lambda _, did=definition_id, nm=pipeline.get("name", ""):
+                    self._on_delete_pipeline_card(did, nm)
+            )
+            btn_row.addWidget(del_btn)
 
         btn_row.addStretch()
         cl.addLayout(btn_row)
 
         return card
+
+    # ── Pipeline-card actions ──────────────────────────────
+
+    def _on_new_pipeline(self):
+        """Open dialog for a brand-new pipeline."""
+        dlg = PipelineEditDialog(self.db, definition=None, parent=self)
+        if dlg.exec() == QDialog.Accepted:
+            self._refresh_pipeline_cards()
+
+    def _on_edit_pipeline_card(self, definition_id, is_seed=False):
+        """Open dialog pre-filled with the selected pipeline's settings."""
+        if is_seed or not definition_id:
+            # Seed example → just open a fresh dialog with friendly defaults
+            dlg = PipelineEditDialog(self.db, definition=None, parent=self)
+        else:
+            try:
+                row = self.db.get_report_definition(definition_id)
+            except Exception as e:
+                QMessageBox.warning(self, "Edit failed", f"Could not load pipeline: {e}")
+                return
+            dlg = PipelineEditDialog(self.db, definition=row, parent=self)
+        if dlg.exec() == QDialog.Accepted:
+            self._refresh_pipeline_cards()
+
+    def _on_delete_pipeline_card(self, definition_id, name):
+        if not definition_id:
+            return
+        reply = QMessageBox.question(
+            self, "Delete pipeline",
+            f"Delete pipeline '{name}'? This cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        try:
+            self.db.delete_report_definition(definition_id)
+        except Exception as e:
+            QMessageBox.warning(self, "Delete failed", str(e))
+            return
+        self._refresh_pipeline_cards()
+
+    def _on_run_pipeline_card(self, definition_id):
+        """Build a pipeline config from the saved definition and start a run."""
+        if not definition_id:
+            return
+        if self._smart_worker and self._smart_worker.isRunning():
+            QMessageBox.information(
+                self, "Pipeline busy",
+                "Another pipeline run is already in progress."
+            )
+            return
+        try:
+            row = self.db.get_report_definition(definition_id)
+        except Exception as e:
+            QMessageBox.warning(self, "Run failed", str(e))
+            return
+        if not row:
+            return
+        cfg = self._build_pipeline_config_from_definition(row)
+        self._smart_run_btn.setEnabled(False)
+        self._smart_run_btn.setText("  Running Pipeline...  ")
+        self._smart_status.setText(f"[{row.get('name','pipeline')}] Initializing...")
+        self._start_pipeline_worker(cfg)
+
+    def _build_pipeline_config_from_definition(self, definition):
+        """Materialize a flat pipeline config dict from a saved definition row.
+
+        Falls back to the page's current form values for anything the
+        definition doesn't explicitly set, so saved pipelines stay usable
+        even if the schema grows new fields.
+        """
+        cfg_extra = definition.get("config_dict") or {}
+        prompt_id = cfg_extra.get("prompt_id")
+        prompt_data = None
+        if prompt_id is not None:
+            try:
+                prompt_data = self.db.get_prompt(prompt_id)
+            except Exception:
+                prompt_data = None
+        if not prompt_data:
+            prompt_data = {
+                "prompt_text": _load_prompt_text("general_trend.txt"),
+                "system_prompt": "You are a Support Analytics engine.",
+            }
+        return {
+            "prompt_data": prompt_data,
+            "prompt_id": prompt_id,
+            "lookback_days": int(cfg_extra.get("lookback_days", DEFAULT_LOOKBACK_DAYS)),
+            "trigger_source": "pipeline_card",
+            "db_path": str(self.db.db_path),
+            "nlp_scan": bool(cfg_extra.get("nlp_scan", False)),
+            "nlp_budget_cap": float(cfg_extra.get("nlp_budget_cap", DEFAULT_NLP_BUDGET)),
+            # nlp_workers always comes from settings.yaml (single source of
+            # truth). Saved-pipeline values are intentionally ignored.
+            "nlp_workers": _resolve_nlp_workers(),
+            "source_id": cfg_extra.get("source_id"),
+            "definition_id": definition.get("definition_id"),
+            "definition_name": definition.get("name"),
+        }
 
     # ── Pipeline Config Card ──
 
@@ -346,11 +567,10 @@ class SmartReportingPage(QWidget):
         lbl = QLabel("LOOKBACK DAYS")
         lbl.setStyleSheet(_LBL_STYLE)
         col.addWidget(lbl)
-        self._smart_days_spin = QSpinBox()
-        self._smart_days_spin.setRange(7, 365)
-        self._smart_days_spin.setValue(30)
-        self._smart_days_spin.setStyleSheet(_FIELD_STYLE)
-        col.addWidget(self._smart_days_spin)
+        self._smart_days_combo = QComboBox()
+        _populate_combo(self._smart_days_combo, LOOKBACK_OPTIONS, DEFAULT_LOOKBACK_DAYS)
+        self._smart_days_combo.setStyleSheet(_FIELD_STYLE)
+        col.addWidget(self._smart_days_combo)
         row.addLayout(col, 1)
 
         # Source selector (Session 5)
@@ -394,26 +614,32 @@ class SmartReportingPage(QWidget):
         lbl = QLabel("NLP BUDGET CAP")
         lbl.setStyleSheet(_LBL_STYLE)
         col.addWidget(lbl)
-        self._nlp_budget = QDoubleSpinBox()
-        self._nlp_budget.setRange(1.0, 500.0)
-        self._nlp_budget.setValue(50.0)
-        self._nlp_budget.setPrefix("$")
-        self._nlp_budget.setDecimals(2)
-        self._nlp_budget.setStyleSheet(_FIELD_STYLE)
-        col.addWidget(self._nlp_budget)
+        self._nlp_budget_combo = QComboBox()
+        _populate_combo(self._nlp_budget_combo, NLP_BUDGET_OPTIONS, DEFAULT_NLP_BUDGET)
+        self._nlp_budget_combo.setStyleSheet(_FIELD_STYLE)
+        col.addWidget(self._nlp_budget_combo)
         nlp_row.addLayout(col, 1)
 
+        # NLP worker count is configured in Settings → Cost Dashboard
+        # (single source of truth: settings.yaml > nlp_scan.parallel_workers).
+        # Show a read-only hint so the user knows where to change it.
         col = QVBoxLayout()
         col.setSpacing(4)
         lbl = QLabel("NLP WORKERS")
         lbl.setStyleSheet(_LBL_STYLE)
         col.addWidget(lbl)
-        self._nlp_workers = QSpinBox()
-        self._nlp_workers.setRange(1, 3)
-        self._nlp_workers.setValue(1)
-        self._nlp_workers.setToolTip("Parallel worker subprocesses (1-3)")
-        self._nlp_workers.setStyleSheet(_FIELD_STYLE)
-        col.addWidget(self._nlp_workers)
+        self._nlp_workers_hint = QLabel("")
+        self._nlp_workers_hint.setStyleSheet(
+            f"font-size: 12px; color: {ALMA_TEXT_MID}; padding: 8px 12px; "
+            f"border: 1px dashed {ALMA_BORDER}; border-radius: 8px; "
+            f"background: {ALMA_BG_INSET}; min-height: 22px;"
+        )
+        self._nlp_workers_hint.setToolTip(
+            "Configured in Settings → Cost Dashboard. "
+            "ACP-mode pipelines support up to 32 parallel workers."
+        )
+        self._refresh_workers_hint()
+        col.addWidget(self._nlp_workers_hint)
         nlp_row.addLayout(col, 1)
 
         cc.addLayout(nlp_row)
@@ -1003,12 +1229,13 @@ class SmartReportingPage(QWidget):
                 "prompt_text": _load_prompt_text("general_trend.txt"),
                 "system_prompt": "You are a Support Analytics engine.",
             },
-            "lookback_days": self._smart_days_spin.value(),
+            "prompt_id": prompt_id,
+            "lookback_days": int(self._smart_days_combo.currentData() or DEFAULT_LOOKBACK_DAYS),
             "trigger_source": trigger_source,
             "db_path": str(self.db.db_path),
             "nlp_scan": self._nlp_enabled.isChecked(),
-            "nlp_budget_cap": self._nlp_budget.value(),
-            "nlp_workers": self._nlp_workers.value(),
+            "nlp_budget_cap": float(self._nlp_budget_combo.currentData() or DEFAULT_NLP_BUDGET),
+            "nlp_workers": _resolve_nlp_workers(),
             "source_id": source_id,
         }
         # Attach auto-import config if enabled (Phase 2)
@@ -1502,3 +1729,254 @@ class SmartReportingPage(QWidget):
     def refresh_gemini_status(self):
         self._gemini_available = self._check_gemini()
         self._smart_run_btn.setEnabled(self._gemini_available)
+
+    def _refresh_workers_hint(self):
+        """Re-read parallel_workers from settings and show it on the hint label."""
+        if not hasattr(self, "_nlp_workers_hint"):
+            return
+        n = _resolve_nlp_workers()
+        self._nlp_workers_hint.setText(
+            f"{n} worker{'s' if n != 1 else ''} — change in Settings"
+        )
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Worker setting may have been changed elsewhere (Cost Dashboard) since
+        # the page was last built; refresh the hint each time the page is shown.
+        self._refresh_workers_hint()
+
+
+# ═════════════════════════════════════════════════════════
+#  Pipeline Edit Dialog
+# ═════════════════════════════════════════════════════════
+
+class PipelineEditDialog(QDialog):
+    """Modal dialog for creating or editing a saved report pipeline.
+
+    The pipeline's flat editable settings are stored in the JSON `config`
+    column of `report_definitions`. The dialog never touches richer keys
+    (specialists, convergence, sampling) that other tools may put there —
+    those round-trip untouched.
+    """
+
+    def __init__(self, db, definition=None, parent=None):
+        super().__init__(parent)
+        self.db = db
+        self.definition = definition or {}
+        self.setWindowTitle("Edit Pipeline" if definition else "New Pipeline")
+        self.setMinimumWidth(520)
+        self.setStyleSheet(f"QDialog {{ background: {ALMA_CREAM}; }}")
+        self._build_ui()
+        self._load_from_definition()
+
+    # ── UI ────────────────────────────────────────────────
+
+    def _build_ui(self):
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(20, 18, 20, 18)
+        outer.setSpacing(12)
+
+        title = QLabel(self.windowTitle())
+        title.setStyleSheet(f"font-size: 16px; font-weight: 700; color: {ALMA_TEXT_DARK};")
+        outer.addWidget(title)
+
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignLeft)
+        form.setSpacing(10)
+        form.setContentsMargins(0, 0, 0, 0)
+
+        self._name_edit = QLineEdit()
+        self._name_edit.setPlaceholderText("e.g. Weekly Billing Pulse")
+        self._name_edit.setStyleSheet(_FIELD_STYLE)
+        form.addRow(self._mk_label("NAME"), self._name_edit)
+
+        self._desc_edit = QPlainTextEdit()
+        self._desc_edit.setPlaceholderText("Short description shown on the pipeline card")
+        self._desc_edit.setFixedHeight(58)
+        self._desc_edit.setStyleSheet(
+            f"QPlainTextEdit {{ background: {ALMA_WHITE}; "
+            f"border: 1px solid rgba(214,210,202,0.7); border-radius: 8px; "
+            f"padding: 8px 12px; font-size: 12px; color: {ALMA_TEXT_DARK}; }}"
+        )
+        form.addRow(self._mk_label("DESCRIPTION"), self._desc_edit)
+
+        self._prompt_combo = QComboBox()
+        self._prompt_combo.setStyleSheet(_FIELD_STYLE)
+        self._populate_prompts()
+        form.addRow(self._mk_label("PROMPT"), self._prompt_combo)
+
+        self._lookback_combo = QComboBox()
+        _populate_combo(self._lookback_combo, LOOKBACK_OPTIONS, DEFAULT_LOOKBACK_DAYS)
+        self._lookback_combo.setStyleSheet(_FIELD_STYLE)
+        form.addRow(self._mk_label("LOOKBACK DAYS"), self._lookback_combo)
+
+        # Source selector — reuse the canonical widget
+        from src.ui.widgets.source_selector import SourceSelector
+        self._source_selector = SourceSelector(self)
+        self._source_selector.setStyleSheet(_FIELD_STYLE)
+        try:
+            from src.data.connection_factory import get_connection
+            conn = get_connection(self.db.db_path)
+            self._source_selector.refresh_sources(conn)
+            conn.close()
+        except Exception:
+            pass
+        form.addRow(self._mk_label("SOURCE"), self._source_selector)
+
+        # NLP toggle + budget + workers
+        self._nlp_checkbox = QCheckBox("Include NLP scan before report")
+        self._nlp_checkbox.setStyleSheet(
+            f"font-size: 12px; color: {ALMA_TEXT_DARK}; font-weight: 500;"
+        )
+        form.addRow(self._mk_label("NLP SCAN"), self._nlp_checkbox)
+
+        self._nlp_budget_combo = QComboBox()
+        _populate_combo(self._nlp_budget_combo, NLP_BUDGET_OPTIONS, DEFAULT_NLP_BUDGET)
+        self._nlp_budget_combo.setStyleSheet(_FIELD_STYLE)
+        form.addRow(self._mk_label("NLP BUDGET CAP"), self._nlp_budget_combo)
+
+        # NLP worker count lives in Settings → Cost Dashboard now (single source
+        # of truth). Show it read-only here for context.
+        worker_hint = QLabel(
+            f"{_resolve_nlp_workers()} workers — change in Settings"
+        )
+        worker_hint.setStyleSheet(
+            f"font-size: 12px; color: {ALMA_TEXT_MID}; padding: 8px 12px; "
+            f"border: 1px dashed {ALMA_BORDER}; border-radius: 8px; "
+            f"background: {ALMA_BG_INSET};"
+        )
+        worker_hint.setToolTip(
+            "Configured in Settings → Cost Dashboard. "
+            "ACP-mode pipelines support up to 32 parallel workers."
+        )
+        form.addRow(self._mk_label("NLP WORKERS"), worker_hint)
+
+        self._enabled_checkbox = QCheckBox("Enabled (Run Now button is active)")
+        self._enabled_checkbox.setChecked(True)
+        self._enabled_checkbox.setStyleSheet(
+            f"font-size: 12px; color: {ALMA_TEXT_DARK}; font-weight: 500;"
+        )
+        form.addRow(self._mk_label("STATUS"), self._enabled_checkbox)
+
+        outer.addLayout(form)
+
+        # Footer buttons
+        btn_box = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        save_btn = btn_box.button(QDialogButtonBox.Save)
+        save_btn.setText("Save Pipeline")
+        save_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {ALMA_GREEN_DARK}; color: {ALMA_CREAM};
+                border: none; border-radius: 6px;
+                padding: 8px 18px; font-size: 12px; font-weight: 600;
+            }}
+            QPushButton:hover {{ background: {ALMA_GREEN_MID}; }}
+        """)
+        cancel_btn = btn_box.button(QDialogButtonBox.Cancel)
+        cancel_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {ALMA_TEXT_MID};
+                border: 1px solid {ALMA_BORDER}; border-radius: 6px;
+                padding: 8px 18px; font-size: 12px; font-weight: 600;
+            }}
+            QPushButton:hover {{ background: {ALMA_HOVER_LIGHT}; }}
+        """)
+        btn_box.accepted.connect(self._on_save)
+        btn_box.rejected.connect(self.reject)
+        outer.addWidget(btn_box)
+
+    @staticmethod
+    def _mk_label(text):
+        lbl = QLabel(text)
+        lbl.setStyleSheet(_LBL_STYLE)
+        return lbl
+
+    def _populate_prompts(self):
+        self._prompt_combo.clear()
+        self._prompt_combo.addItem("(use default)", None)
+        try:
+            for p in self.db.get_prompts():
+                self._prompt_combo.addItem(p["name"], p["prompt_id"])
+        except Exception as e:
+            logger.warning("PipelineEditDialog: get_prompts failed: %s", e)
+
+    # ── Load / Save ───────────────────────────────────────
+
+    def _load_from_definition(self):
+        if not self.definition:
+            return
+        self._name_edit.setText(self.definition.get("name", ""))
+        self._desc_edit.setPlainText(self.definition.get("description", "") or "")
+        cfg = self.definition.get("config_dict") or {}
+        prompt_id = cfg.get("prompt_id")
+        for i in range(self._prompt_combo.count()):
+            if self._prompt_combo.itemData(i) == prompt_id:
+                self._prompt_combo.setCurrentIndex(i)
+                break
+        _populate_combo(self._lookback_combo, LOOKBACK_OPTIONS,
+                        cfg.get("lookback_days", DEFAULT_LOOKBACK_DAYS))
+        _populate_combo(self._nlp_budget_combo, NLP_BUDGET_OPTIONS,
+                        cfg.get("nlp_budget_cap", DEFAULT_NLP_BUDGET))
+        # nlp_workers lives in settings.yaml; ignore any saved value
+        self._nlp_checkbox.setChecked(bool(cfg.get("nlp_scan", False)))
+        self._enabled_checkbox.setChecked(bool(self.definition.get("is_active", 1)))
+        # Source selector — iterate items to re-select the saved source_id
+        sid = cfg.get("source_id")
+        if sid:
+            for i in range(self._source_selector.count()):
+                if self._source_selector.itemData(i) == sid:
+                    self._source_selector.setCurrentIndex(i)
+                    break
+
+    def _on_save(self):
+        name = self._name_edit.text().strip()
+        if not name:
+            QMessageBox.warning(self, "Name required", "Pipeline name cannot be empty.")
+            return
+        description = self._desc_edit.toPlainText().strip()
+
+        # Preserve any existing rich keys (specialists, convergence, etc.)
+        cfg = dict(self.definition.get("config_dict") or {})
+        cfg.update({
+            "prompt_id": self._prompt_combo.currentData(),
+            "lookback_days": int(self._lookback_combo.currentData() or DEFAULT_LOOKBACK_DAYS),
+            "nlp_scan": self._nlp_checkbox.isChecked(),
+            "nlp_budget_cap": float(self._nlp_budget_combo.currentData() or DEFAULT_NLP_BUDGET),
+            # nlp_workers intentionally omitted — sourced from settings.yaml at
+            # run time so a single Settings change applies to every pipeline.
+            "source_id": self._source_selector.selected_source_id()
+                         if hasattr(self._source_selector, "selected_source_id") else None,
+        })
+        # Drop any stale nlp_workers key from previous saves
+        cfg.pop("nlp_workers", None)
+
+        # New definition_id = slugified name; existing keeps its id
+        definition_id = self.definition.get("definition_id")
+        if not definition_id:
+            import re as _re
+            slug = _re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") or "pipeline"
+            # Append numeric suffix if collision
+            base, n = slug, 1
+            while True:
+                try:
+                    if not self.db.get_report_definition(slug):
+                        break
+                except Exception:
+                    break
+                n += 1
+                slug = f"{base}_{n}"
+            definition_id = slug
+
+        try:
+            self.db.save_report_definition(
+                definition_id=definition_id,
+                name=name,
+                description=description,
+                config=cfg,
+                is_active=self._enabled_checkbox.isChecked(),
+                schedule=self.definition.get("schedule"),
+            )
+        except Exception as e:
+            QMessageBox.warning(self, "Save failed", f"Could not save pipeline: {e}")
+            return
+        self.accept()

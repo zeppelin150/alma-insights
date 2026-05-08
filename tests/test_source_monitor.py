@@ -677,12 +677,14 @@ class TestSourceMonitorPageInit:
         page.connection_changed.connect(handler)
 
     def test_trc_field_combo_exists(self):
+        """TRC field combo lives on the ConnectionTab after the
+        2026-05-07 page decomposition."""
         from src.ui.pages.source_monitor_page import SourceMonitorPage
         db = MagicMock()
         with patch("src.data.pat_store.load_setting", return_value=""):
             page = SourceMonitorPage(db)
 
-        combo = page._trc_field_combo
+        combo = page._connection_tab._trc_field_combo
         assert combo is not None
         # Should have at least the 6 built-in options
         assert combo.count() >= 6
@@ -693,31 +695,33 @@ class TestSourceMonitorPageInit:
         assert combo.itemData(4) == "priority"
         assert combo.itemData(5) == "status"
 
-    def test_set_monitor_clears_old_state(self):
+    def test_set_monitor_wires_signals(self):
+        """After 2026-05-07 redesign, the Live Feed shows a rate chart
+        rather than ticket cards. Verify set_monitor still installs the
+        signal handlers without crashing."""
         from src.ui.pages.source_monitor_page import SourceMonitorPage
         from src.data.zendesk_monitor import ZendeskMonitor
         db = MagicMock()
         with patch("src.data.pat_store.load_setting", return_value=""):
             page = SourceMonitorPage(db)
 
-        # Simulate having some ticket cards
-        from PySide6.QtWidgets import QFrame
-        fake_card = QFrame()
-        page._ticket_cards.append(fake_card)
-        page._feed_layout.addWidget(fake_card)
-        page._feed_placeholder.hide()
-
-        # Now set a new monitor — should clear
         monitor = ZendeskMonitor(db)
         page.set_monitor(monitor)
-        assert len(page._ticket_cards) == 0
-        # isHidden() checks the widget's own hidden flag, not parent visibility
-        assert not page._feed_placeholder.isHidden()
+        # The shell stores the wired monitor for re-wiring on credential
+        # change; verify it's the same instance.
+        assert page._monitor is monitor
+
+        # Set a SECOND monitor — should disconnect the first cleanly
+        # (no exceptions from duplicate signal connections).
+        monitor2 = ZendeskMonitor(db)
+        page.set_monitor(monitor2)
+        assert page._monitor is monitor2
 
     def test_trc_field_combo_restores_saved_value(self):
+        """Saved trc_field 'tags' should be restored on the ConnectionTab combo."""
         from src.ui.pages.source_monitor_page import SourceMonitorPage
         db = MagicMock()
-        # Simulate: credentials exist, trc_field is "tags"
+
         def mock_load(key, default=""):
             vals = {
                 "zendesk_subdomain": "acme",
@@ -727,9 +731,10 @@ class TestSourceMonitorPageInit:
                 "zendesk_trc_field": "tags",
             }
             return vals.get(key, default)
+
         with patch("src.data.pat_store.load_setting", side_effect=mock_load):
             page = SourceMonitorPage(db)
-        assert page._trc_field_combo.currentData() == "tags"
+        assert page._connection_tab._trc_field_combo.currentData() == "tags"
 
 
 # ═══════════════════════════════════════

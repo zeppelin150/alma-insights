@@ -24,6 +24,54 @@ Alma Insights is a PySide6 desktop application for analyzing healthcare RCM (Rev
 - Known: `test_reporting_foundation::test_bridge_fallback` pre-existing failure
 - Known: `test_feature_integration` has live-DB-dependent failures (expected)
 
+## Source Monitor — Rate-Chart Redesign (2026-05-07)
+
+The Source Monitor page was rebuilt with a rate-per-hour control chart
+replacing the old ticket-card "Live Feed" + separate "TRC Spikes" tab.
+The 1508-LOC `source_monitor_page.py` god file was decomposed into a
+package at `src/ui/pages/source_monitor/` with one module per tab. The
+old import path still works via a 6-line shim.
+
+Key new modules:
+- [`src/data/source_baseline.py`](src/data/source_baseline.py) —
+  `compute_rate_baseline(conn, source, trc_code=None, *, window_hours=24,
+  baseline_days=7, spike_sigma=2.0)` returning a `RateBaseline` dataclass.
+  Per-hour-of-day trailing mean ± 2σ. Fixed 7-day window.
+- [`src/ui/widgets/rate_chart.py`](src/ui/widgets/rate_chart.py) —
+  `RateChartWidget`, QPainter control chart with cold-start banner and
+  hover tooltips.
+- [`src/ui/pages/source_monitor/`](src/ui/pages/source_monitor/) —
+  package with `rate_tab.py`, `alerts_tab.py`, `watchlist_tab.py`,
+  `connection_tab.py`, `rule_dialog.py`, `_styles.py`, and `page.py`
+  (the shell). None over ~340 LOC.
+- [`src/ui/pages/guru_wip_page.py`](src/ui/pages/guru_wip_page.py) —
+  WIP placeholder for the Guru KB page; legacy `GuruPage` preserved
+  intact and routed via `guru.experimental_ui_enabled` settings flag.
+
+**Documentation policy override (this redesign only)**: per explicit
+user direction, files in this redesign carry full per-function
+docstrings + inline math comments — heavier than CLAUDE.md's general
+"no comments" rule. **Do not strip them on a future cleanup pass.**
+Specifically: `src/data/source_baseline.py`, `src/ui/widgets/rate_chart.py`,
+the `src/ui/pages/source_monitor/` package, and
+`src/ui/pages/guru_wip_page.py`.
+
+Settings (`data/settings.yaml`):
+- `source_monitor.rate_chart.window_hours` — `24` | `48` (user toggle)
+- `source_monitor.rate_chart.baseline_days` — fixed `7`
+- `source_monitor.rate_chart.default_view` — `"aggregate"` | `"per_trc"`
+- `guru.experimental_ui_enabled` — default `false`; flips Guru page to legacy interactive UI
+
+Test suite: 113 new tests across `test_source_baseline.py` (43),
+`test_rate_chart.py` (25), `test_source_monitor_pages.py` (26),
+`test_watchlist_ui.py` (18), `test_guru_wip_placeholder.py` (13),
+`test_source_monitor_e2e.py` (8). All existing
+`test_source_monitor.py` (64) + `test_watchlist_engine.py` (39)
+regressions still pass. Total: 236 tests, all green.
+
+Full architecture: [`docs/SOURCE_MONITOR.md`](docs/SOURCE_MONITOR.md).
+Plan: `~/.claude/plans/source-monitor-redesign.md`.
+
 ## AI Reports — Structured-output rebuild (R1–R5, 2026-05-06)
 
 The Analysis Canvas, Evidence Panel, and Prompt Builder were rebuilt

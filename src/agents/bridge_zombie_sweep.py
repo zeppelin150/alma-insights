@@ -49,6 +49,23 @@ from dataclasses import dataclass, field
 logger = logging.getLogger("alma.bridge_zombie_sweep")
 
 
+def _no_window_kwargs() -> dict:
+    """Return subprocess kwargs that hide the console window on Windows.
+
+    GUI-launched apps that shell out to `wmic` / `taskkill` flash a black
+    cmd window for each call unless `CREATE_NO_WINDOW` is set. Mirrors the
+    pattern used in `acp_bridge.py`, `scan_server_manager.py`, and
+    `scan_worker_manager.py`. No-op on non-Windows.
+    """
+    if sys.platform != "win32":
+        return {}
+    # CREATE_NO_WINDOW = 0x08000000 (constant available on subprocess
+    # since 3.7 on Windows; fall back to literal in case of attribute
+    # absence on stripped builds).
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+    return {"creationflags": flags}
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Public types
 # ──────────────────────────────────────────────────────────────────────
@@ -154,6 +171,7 @@ def _wmic_processes(where: str, result: SweepResult) -> list[int]:
     try:
         proc = subprocess.run(
             cmd, capture_output=True, text=True, timeout=15, check=False,
+            **_no_window_kwargs(),
         )
     except FileNotFoundError:
         result.errors.append("wmic not found")
@@ -183,7 +201,10 @@ def _wmic_processes(where: str, result: SweepResult) -> list[int]:
 def _terminate_pid(pid: int) -> None:
     """Kill a single PID via ``taskkill /F /T /PID``. Raises on failure."""
     cmd = ["taskkill", "/F", "/T", "/PID", str(pid)]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=10, check=False)
+    proc = subprocess.run(
+        cmd, capture_output=True, text=True, timeout=10, check=False,
+        **_no_window_kwargs(),
+    )
     if proc.returncode not in (0, 128):
         # 128 = "process not found" — tolerable, treat as success.
         raise RuntimeError(

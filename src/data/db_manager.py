@@ -20,7 +20,7 @@ class DatabaseManager:
     """Manages the local SQLite database for ticket and conversation data."""
 
     def __init__(self, db_path=None):
-        self.db_path = db_path or DB_PATH
+        self.db_path = Path(db_path) if db_path is not None else DB_PATH
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = None
         # Restrict DB file permissions on Unix
@@ -2544,6 +2544,88 @@ class DatabaseManager:
         """Delete a report schedule by ID."""
         self.conn.execute(
             "DELETE FROM report_schedules WHERE schedule_id = ?", (schedule_id,)
+        )
+        self.conn.commit()
+
+    # ─── Report Definitions (Pipeline Cards) ───
+
+    def list_report_definitions(self, active_only=False):
+        """Return all report pipeline definitions. Each row's `config` field
+        is parsed from JSON into a dict for callers' convenience."""
+        import json as _json
+        sql = "SELECT * FROM report_definitions"
+        if active_only:
+            sql += " WHERE is_active = 1"
+        sql += " ORDER BY name"
+        rows = self.conn.execute(sql).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["config_dict"] = _json.loads(d.get("config") or "{}")
+            except Exception:
+                d["config_dict"] = {}
+            out.append(d)
+        return out
+
+    def get_report_definition(self, definition_id):
+        """Get one report pipeline definition by definition_id."""
+        import json as _json
+        row = self.conn.execute(
+            "SELECT * FROM report_definitions WHERE definition_id = ?",
+            (definition_id,),
+        ).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        try:
+            d["config_dict"] = _json.loads(d.get("config") or "{}")
+        except Exception:
+            d["config_dict"] = {}
+        return d
+
+    def save_report_definition(self, definition_id, name, description,
+                                config, is_active=True, schedule=None):
+        """Insert or update a report pipeline definition.
+
+        `config` is stored as JSON in the `config` TEXT column. Callers can
+        embed any keys they need (lookback_days, prompt_id, source_id,
+        nlp_workers, nlp_budget_cap, specialists, etc.). Returns the
+        definition_id (passed in unchanged) so callers can chain.
+        """
+        import json as _json
+        now = datetime.now().isoformat()
+        config_str = _json.dumps(config) if isinstance(config, dict) else (config or "{}")
+        existing = self.conn.execute(
+            "SELECT id FROM report_definitions WHERE definition_id = ?",
+            (definition_id,),
+        ).fetchone()
+        if existing:
+            self.conn.execute(
+                """UPDATE report_definitions
+                   SET name = ?, description = ?, config = ?, schedule = ?,
+                       is_active = ?, updated_at = ?
+                   WHERE definition_id = ?""",
+                (name, description or "", config_str, schedule,
+                 1 if is_active else 0, now, definition_id),
+            )
+        else:
+            self.conn.execute(
+                """INSERT INTO report_definitions
+                   (definition_id, name, description, config, schedule,
+                    is_active, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (definition_id, name, description or "", config_str, schedule,
+                 1 if is_active else 0, now, now),
+            )
+        self.conn.commit()
+        return definition_id
+
+    def delete_report_definition(self, definition_id):
+        """Delete a report pipeline definition by definition_id."""
+        self.conn.execute(
+            "DELETE FROM report_definitions WHERE definition_id = ?",
+            (definition_id,),
         )
         self.conn.commit()
 

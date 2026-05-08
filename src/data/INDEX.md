@@ -2,6 +2,27 @@
 
 > Data layer for Alma Insights: database management, ingestion pipelines, NLP analysis engines, statistical anomaly detection, Guru KB integration, Zendesk connectivity, report generation, and configuration persistence. This package contains all business logic that does not depend on the UI framework.
 
+## Source Monitor — Rate-Chart Redesign (2026-05-07)
+
+The "Live Feed" tab now shows a rate-per-hour control chart against a
+trailing-baseline band. New module:
+
+| Module | Role |
+|---|---|
+| `source_baseline.py` | Pure-function baseline computation (per-hour-of-day mean ± 2σ) |
+
+**Public API** of `source_baseline.py`:
+- `compute_rate_baseline(conn, source, trc_code=None, *, window_hours=24, baseline_days=7, spike_sigma=2.0, std_floor=1.0, now=None) -> RateBaseline`
+- `list_active_trcs(conn, source, *, lookback_hours=48) -> list[str]`
+- `RateBaseline` dataclass — frozen, length-aligned arrays for chart input
+
+**Depends on:** `source_trc_hourly` table (migration 002, no new schema).
+**Depended by:** `src.ui.pages.source_monitor.rate_tab`, `tests.test_source_baseline`, `tests.test_source_monitor_e2e`.
+
+Architecture reference: [`docs/SOURCE_MONITOR.md`](../../docs/SOURCE_MONITOR.md).
+
+---
+
 ## AI Reports rebuild (R1–R5, 2026-05-06)
 
 Structured-output report stack — full architecture in

@@ -9,8 +9,13 @@ Runs synchronously during the splash with a short timeout. Honours the
     github_app   → same, but mint an installation token first
 
 Non-critical by design: on network failure, misconfiguration, or a
-timeout, we warn and let the user continue. No staging happens here —
-that is a user-initiated action from Settings → Updates.
+timeout, we warn and let the user continue.
+
+2026-05-07 (Piece 2A): when a newer release is found we stash the
+release JSON's ``assets`` array, the auth token, and the new-version
+tag in this module's :func:`get_pending_update` cache. The splash
+window's "Install & Restart" widget reads that to drive the staging
+flow without re-hitting GitHub.
 """
 
 from __future__ import annotations
@@ -26,8 +31,30 @@ logger = logging.getLogger("alma.updater")
 
 _TIMEOUT_SECONDS = 5
 
+# Populated by check_for_update() iff a newer release was found. Read
+# by src.startup.update_action_widget. Reset on every check.
+_PENDING_UPDATE: dict | None = None
+
+
+def get_pending_update() -> dict | None:
+    """Return the cached pending-update payload, or ``None`` if no
+    update was detected on the last check.
+
+    Payload keys:
+        new_version (str)        — tag without leading 'v'
+        html_url    (str)        — GitHub release page URL
+        assets      (list[dict]) — release ``assets[]`` from the API
+        token       (str)        — bearer token used for the original
+                                    fetch (so the manifest call can
+                                    re-use it for private repos)
+    """
+    return _PENDING_UPDATE
+
 
 def check_for_update() -> CheckResult:
+    global _PENDING_UPDATE
+    _PENDING_UPDATE = None  # always reset so a stale payload can't leak
+
     try:
         from src.updater.update_checker import (
             _resolve_config_and_token,
@@ -64,12 +91,21 @@ def check_for_update() -> CheckResult:
         return _warn("Release feed missing tag_name")
 
     if _is_newer(VERSION, tag):
+        # Cache for the splash "Install & Restart" widget. Includes the
+        # auth token so the manifest fetcher can re-use it for private
+        # repos. Lifetime ends on next call to check_for_update.
+        _PENDING_UPDATE = {
+            "new_version": tag.lstrip("vV"),
+            "html_url": latest.get("html_url", ""),
+            "assets": latest.get("assets") or [],
+            "token": token,
+        }
         return CheckResult(
             id="update",
             name="Checking for updates",
             status="warn",
             message=f"Update available: v{tag.lstrip('vV')} (current v{VERSION})",
-            remediation="Open Settings → Updates to install.",
+            remediation="Click 'Install & Restart' below to apply now.",
             critical=False,
         )
 

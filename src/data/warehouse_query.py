@@ -191,7 +191,7 @@ class WarehouseQuery:
                                 date_start=None, date_end=None, trc_filter=None,
                                 provider_id=None, client_id=None, keyword=None,
                                 insurance_payer=None, service_state=None, tag=None,
-                                agent_id=None):
+                                agent_id=None, ticket_ids=None):
         """Fetch a page of conversations for virtual scroll.
 
         Returns (rows: list[dict], total_count: int).
@@ -225,7 +225,7 @@ class WarehouseQuery:
             conditions, params = self._build_where_extended(
                 date_start, date_end, trc_filter, provider_id, client_id, keyword, table,
                 insurance_payer=insurance_payer, service_state=service_state,
-                tag=tag, agent_id=agent_id,
+                tag=tag, agent_id=agent_id, ticket_ids=ticket_ids,
             )
             where = "WHERE " + " AND ".join(conditions) if conditions else ""
 
@@ -393,7 +393,7 @@ class WarehouseQuery:
                               provider_id=None, client_id=None, keyword=None,
                               table=None, *,
                               insurance_payer=None, service_state=None,
-                              tag=None, agent_id=None):
+                              tag=None, agent_id=None, ticket_ids=None):
         """Build WHERE conditions for paginated queries with extended filters.
 
         Phase 1 enrichment filters (insurance_payer, service_state, tag,
@@ -424,6 +424,13 @@ class WarehouseQuery:
             conditions.append("(subject LIKE ? OR thread_preview LIKE ?)")
             kw = f"%{keyword}%"
             params.extend([kw, kw])
+        if ticket_ids:
+            ids = ticket_ids if isinstance(ticket_ids, (list, tuple, set)) else [ticket_ids]
+            ids = [str(i).strip() for i in ids if str(i).strip()]
+            if ids:
+                placeholders = ",".join("?" * len(ids))
+                conditions.append(f"ticket_id IN ({placeholders})")
+                params.extend(ids)
 
         # Enrichment filters against ticket_index (Phase 1). EXISTS avoids
         # changing the SELECT list; ticket_id is the shared join key.

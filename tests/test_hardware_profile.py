@@ -99,7 +99,9 @@ class TestProfile:
     @patch("src.startup.hardware.multiprocessing.cpu_count", return_value=8)
     def test_m1_full_profile(self, *_):
         p = hardware.profile(current_version="v9.3.0")
-        assert p["schema_version"] == 1
+        # Schema bumped to v2 (2026-05-07) when the embedding pipeline
+        # started consuming the profile. Update this when bumping again.
+        assert p["schema_version"] == 2
         assert p["app_version"] == "v9.3.0"
         assert p["cpu_count"] == 8
         assert p["ram_gb"] == 16
@@ -162,12 +164,15 @@ class TestNeedsReprofile:
     def test_missing_cache(self):
         assert hardware.needs_reprofile(None, "v1") is True
 
-    def test_matching_version_and_schema(self):
-        cached = {"schema_version": 1, "app_version": "v1"}
+    def test_matching_version_and_schema(self, monkeypatch):
+        # Phase 2 added a machine-state drift check. Pin _machine_changed
+        # to False so this test exercises only version + schema matching.
+        monkeypatch.setattr(hardware, "_machine_changed", lambda c: False)
+        cached = {"schema_version": hardware._SCHEMA_VERSION, "app_version": "v1"}
         assert hardware.needs_reprofile(cached, "v1") is False
 
     def test_version_changed(self):
-        cached = {"schema_version": 1, "app_version": "v1"}
+        cached = {"schema_version": hardware._SCHEMA_VERSION, "app_version": "v1"}
         assert hardware.needs_reprofile(cached, "v2") is True
 
     def test_schema_changed(self):
@@ -195,10 +200,13 @@ class TestLoadOrProfile:
     def test_uses_cache_on_second_run(self, tmp_path, monkeypatch):
         monkeypatch.setattr(hardware, "_PROFILE_PATH", tmp_path / "hw.json")
         self._mock_detection(monkeypatch)
+        # Phase 2 added a machine-drift check — disable for this test so
+        # it can verify the version/schema short-circuit independently.
+        monkeypatch.setattr(hardware, "_machine_changed", lambda c: False)
         with patch("src.startup.hardware.multiprocessing.cpu_count", return_value=4) as mock_cpu:
             hardware.load_or_profile(current_version="v1")
             mock_cpu.reset_mock()
-            # Second call should short-circuit to the cached profile
+            # Second call should short-circuit to the cached profile.
             hardware.load_or_profile(current_version="v1")
             mock_cpu.assert_not_called()
 

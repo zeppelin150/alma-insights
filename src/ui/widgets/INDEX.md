@@ -2,6 +2,24 @@
 
 > Reusable UI building blocks: chart widgets (bar, box, heatmap, line, sparkline), layout scaffolding (page header, filter bar, tab scroll, KPI cards), interactive panels (drill-down, chat, term manager), and utility widgets (toast, skeleton, animation, pagination).
 
+## Source Monitor — Rate-Chart Redesign (2026-05-07)
+
+| Module | Role |
+|---|---|
+| `rate_chart.py` | `RateChartWidget` — QPainter time-series with trailing baseline band |
+
+**Public API** of `rate_chart.py`:
+- `RateChartWidget(parent=None) -> QWidget` — control-chart widget, consumes `RateBaseline`
+  - `set_baseline(baseline: RateBaseline) -> None` — push new data + repaint
+  - `clear() -> None` — drop baseline, render empty state
+  - Tooltips on hover, cold-start banner support, 24h / 48h windows
+
+**Depends on:** `src.data.source_baseline.RateBaseline`, `src.ui.theme`.
+**Depended by:** `src.ui.pages.source_monitor.rate_tab`, `tests.test_rate_chart`.
+
+Notes: distinct from `control_chart.py` (Poisson-band scalar model) — rate
+chart uses per-bucket arrays for trailing-mean ± 2σ rendering.
+
 ## Module Index
 
 ### analysis_page_base.py

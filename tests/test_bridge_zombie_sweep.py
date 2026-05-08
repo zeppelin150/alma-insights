@@ -156,6 +156,61 @@ class TestSweep:
 # SweepResult dataclass
 # ──────────────────────────────────────────────────────────────────────
 
+class TestNoConsoleFlash:
+    """Verify subprocess invocations pass CREATE_NO_WINDOW on Windows so
+    the GUI app doesn't flash a black cmd.exe window during the splash
+    sweep (bug-bash 2026-05-07)."""
+
+    def test_no_window_kwargs_set_on_windows(self, monkeypatch):
+        monkeypatch.setattr("sys.platform", "win32")
+        kw = zs._no_window_kwargs()
+        assert "creationflags" in kw
+        # CREATE_NO_WINDOW = 0x08000000
+        assert kw["creationflags"] & 0x08000000
+
+    def test_no_window_kwargs_empty_on_posix(self, monkeypatch):
+        monkeypatch.setattr("sys.platform", "linux")
+        assert zs._no_window_kwargs() == {}
+
+    def test_wmic_call_passes_creationflags(self, monkeypatch):
+        """Spy on subprocess.run to confirm wmic invocations include the flag."""
+        captured = []
+
+        def _spy(cmd, **kw):
+            captured.append(kw)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(zs, "_is_windows", lambda: True)
+        monkeypatch.setattr("sys.platform", "win32")
+        monkeypatch.setattr(subprocess, "run", _spy)
+        zs.sweep_zombie_bridges()
+
+        # All wmic calls should pass creationflags
+        assert len(captured) >= 4, "expected 4 wmic queries"
+        for kw in captured:
+            assert "creationflags" in kw, \
+                "wmic subprocess.run missing creationflags — cmd window will flash"
+            assert kw["creationflags"] & 0x08000000
+
+    def test_taskkill_call_passes_creationflags(self, monkeypatch):
+        """Verify _terminate_pid also suppresses the console window."""
+        captured = []
+
+        def _spy(cmd, **kw):
+            captured.append((tuple(cmd), kw))
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr("sys.platform", "win32")
+        monkeypatch.setattr(subprocess, "run", _spy)
+        zs._terminate_pid(1234)
+
+        assert any("taskkill" in c[0] for c in captured)
+        for cmd, kw in captured:
+            if "taskkill" in cmd:
+                assert "creationflags" in kw
+                assert kw["creationflags"] & 0x08000000
+
+
 class TestSweepResult:
     def test_as_dict_includes_total(self):
         r = zs.SweepResult(

@@ -167,9 +167,11 @@ class ABComparePage(QWidget):
         self._build_ui()
 
     def _check_gemini(self):
+        # Legacy method name; now routes through the factory so it reflects
+        # whichever provider is active under task_routing / override_all.
         try:
-            from src.gemini.gemini_client import GeminiClient
-            return GeminiClient().is_available()
+            from src.gemini.client_factory import is_provider_available_for_task
+            return is_provider_available_for_task("ab_comparison")
         except Exception:
             return False
 

@@ -129,9 +129,9 @@ class AIEnhancementWorker(QThread):
 
     def run(self):
         try:
-            from src.gemini.gemini_client import GeminiClient
-            client = GeminiClient()
-            if not client.is_available():
+            from src.gemini.client_factory import build_client_for_task
+            client = build_client_for_task("voc_analysis")
+            if client is None or not client.is_available():
                 self.finished_all.emit()
                 return
 
@@ -1772,9 +1772,8 @@ class TrendingTopicsPage(AnalysisPageBase):
 
             # Quick availability check (fast -- no CLI call)
             try:
-                from src.gemini.gemini_client import GeminiClient
-                client = GeminiClient()
-                if not client.is_available():
+                from src.gemini.client_factory import is_provider_available_for_task
+                if not is_provider_available_for_task("voc_analysis"):
                     return
             except Exception:
                 return
@@ -2191,12 +2190,14 @@ class TrendingTopicsPage(AnalysisPageBase):
         date_end = self._hyp_date_to.date().toString("yyyy-MM-dd")
         window_size = "Weekly"  # use a sensible default
 
-        # Load Gemini client if configured
+        # Load routed provider client for hypothesis testing.
+        # Variable kept as ``gemini_client`` for downstream compat — value
+        # may now be a ClaudeCliClient when override_all=claude.
         gemini_client = None
         try:
-            from src.gemini.gemini_client import GeminiClient
-            gc = GeminiClient()
-            if gc.is_available():
+            from src.gemini.client_factory import build_client_for_task
+            gc = build_client_for_task("ab_comparison")
+            if gc is not None and gc.is_available():
                 gemini_client = gc
         except Exception:
             pass

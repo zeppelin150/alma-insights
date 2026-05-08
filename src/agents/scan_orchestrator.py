@@ -2503,8 +2503,9 @@ class ScanOrchestrator:
         self._workers = []
 
         # Phase 1: Create and configure all bridges (fast, no subprocess)
+        from src.gemini.client_factory import build_bridge_for_task
         for i in range(num_workers):
-            bridge = ACPBridge(model=self._model)
+            bridge = build_bridge_for_task("nlp_classification", model=self._model)
             bridge.set_mcp_config([])  # No MCP — model outputs NDJSON, worker stores locally
             try:
                 from src.data.db_manager import DatabaseManager
@@ -2589,7 +2590,8 @@ class ScanOrchestrator:
 
     def _boot_analyst(self):
         """Create analyst ACP bridge + agent (no MCP — analyst uses call_blocking only)."""
-        self._analyst_bridge = ACPBridge(model=self._model)
+        from src.gemini.client_factory import build_bridge_for_task
+        self._analyst_bridge = build_bridge_for_task("nlp_classification", model=self._model)
         self._analyst_bridge.ensure_running()
         self._analyst = AnalystAgent(
             self._analyst_bridge, self.db_path

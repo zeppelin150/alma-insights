@@ -119,6 +119,38 @@ class SplashWindow(QDialog):
             self._continue_btn.setEnabled(True)
             self._continue_btn.setDefault(True)
             self._continue_btn.setFocus()
+        # Mount the "Install & Restart" widget if check #4 stashed a
+        # pending update payload. Done here (not during _build_layout)
+        # so the widget only appears once we have data — and so we
+        # don't have to duplicate the cache-read logic in two places.
+        self._maybe_mount_update_action()
+
+    def _maybe_mount_update_action(self) -> None:
+        """Mount the update action widget if check #4 found a newer release.
+
+        No-op when there is no pending update or one was already
+        mounted (idempotent — safe to call multiple times).
+        """
+        if self._update_action_widget is not None:
+            return
+        try:
+            from src.startup.checks.updates import get_pending_update
+            payload = get_pending_update()
+        except Exception as exc:  # noqa: BLE001 — splash must never crash here
+            return
+        if not payload:
+            return
+
+        from src.startup.update_action_widget import UpdateActionWidget
+        widget = UpdateActionWidget(payload, parent=self)
+        widget.busy_changed.connect(self._on_update_action_busy)
+        self._update_action_layout.addWidget(widget)
+        self._update_action_widget = widget
+
+    def _on_update_action_busy(self, busy: bool) -> None:
+        """While an install is staging, don't let the user dismiss the splash."""
+        if self._continue_btn is not None:
+            self._continue_btn.setEnabled(not busy)
 
     # ──────────────────────────────────────────────────────────────
     # Layout
@@ -128,7 +160,12 @@ class SplashWindow(QDialog):
         palette = self.palette()
         palette.setColor(QPalette.Window, Qt.GlobalColor.transparent)
         self.setPalette(palette)
-        self.setStyleSheet(f"background-color: {ALMA_GREEN_DARK};")
+        # Scope to the dialog itself so descendants (labels, buttons) don't
+        # inherit the dark-green background and render as banded boxes.
+        self.setObjectName("splashDialog")
+        self.setStyleSheet(
+            f"#splashDialog {{ background-color: {ALMA_GREEN_DARK}; }}"
+        )
 
     def _build_layout(self) -> None:
         root = QVBoxLayout(self)
@@ -213,6 +250,15 @@ class SplashWindow(QDialog):
             f"color: {ALMA_TEXT_ON_DARK}; opacity: 0.70; font-size: 12px;"
         )
         footer.addWidget(self._summary_label)
+
+        # Slot for the "Install & Restart" widget. We keep a reference
+        # to the layout so _maybe_mount_update_action() can insert a
+        # widget here after checks finish (only when a pending update
+        # was found by check #4).
+        self._update_action_layout = QVBoxLayout()
+        self._update_action_layout.setContentsMargins(0, 0, 0, 0)
+        self._update_action_widget: QWidget | None = None
+        footer.addLayout(self._update_action_layout)
 
         buttons = QHBoxLayout()
         buttons.setSpacing(12)

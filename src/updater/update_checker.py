@@ -88,6 +88,13 @@ class UpdateChecker(QObject):
         self._url = releases_url or _default_releases_url()
         self._pat = github_pat or ""
         self._auth_mode: AuthMode = auth_mode
+        # Last successful release JSON's assets array — populated only
+        # after `update_available` has fired. Consumers (Settings UI's
+        # Install handler, splash) read this to feed the manifest fetcher
+        # without re-hitting the GitHub API. None until the first check
+        # succeeds.
+        self.last_assets: list[dict] | None = None
+        self.last_token: str = ""    # so consumers can authenticate the manifest fetch
 
     # ── public ──────────────────────────────────────────────────
 
@@ -112,6 +119,12 @@ class UpdateChecker(QObject):
         if not tag:
             self.check_failed.emit("No tag_name in GitHub release response")
             return
+
+        # Stash the assets list + token so the install path can resolve
+        # the manifest without a second GitHub round-trip. Set BEFORE
+        # emitting so synchronous slots can read it.
+        self.last_assets = response_json.get("assets") or []
+        self.last_token = self._pat
 
         if _is_newer(VERSION, tag):
             html_url = response_json.get("html_url", "")
@@ -165,7 +178,13 @@ def _resolve_config_and_token() -> tuple[AuthMode, str, str]:
     except Exception:  # noqa: BLE001 — settings must never block updates logic
         cfg = {}
 
-    mode_raw = str(cfg.get("auth_mode", "disabled")).lower().strip()
+    # 2026-05-07: default flipped from "disabled" to "pat" once the bundled-
+    # token loader landed. With a bundled token an out-of-the-box install
+    # polls for updates — the security boundary is the token's GitHub
+    # permissions (Contents: Read-only on a single repo), not its presence.
+    # Existing installs with `auth_mode: disabled` explicitly set keep that
+    # value; the change only affects fresh installs / wiped settings.
+    mode_raw = str(cfg.get("auth_mode", "pat")).lower().strip()
     mode: AuthMode = mode_raw if mode_raw in ("disabled", "pat", "github_app") else "disabled"
 
     repo = str(cfg.get("github_repo", "")).strip() or f"{DEFAULT_OWNER}/{DEFAULT_REPO}"
@@ -188,17 +207,61 @@ def _load_token(mode: AuthMode, cfg: dict) -> str:
             logger.warning("GitHub App auth unavailable: %s", exc)
             return ""
 
-    # mode == "pat"
+    # mode == "pat" — three-tier fallback:
+    #   1) keyring under DEFAULT_TOKEN_KEY (admin/user override pasted in
+    #      Settings → Updates → Advanced)
+    #   2) legacy keyring under "github_pat" (pre-Phase-3 Settings UI)
+    #   3) bundled token shipped with the build (zero-friction for end
+    #      users). The bundled token is the lowest priority so a paste
+    #      override always wins.
+    return _load_pat_token()
+
+
+def _load_pat_token() -> str:
+    """Three-tier PAT lookup. Pure function pulled out for testability.
+
+    Each tier is its own try/except so a transient failure on one (e.g.
+    the keyring is locked) doesn't block the next.
+    """
+    # Tier 1 + 2: keyring
     try:
         from src.data import pat_store
         token = pat_store.load_setting(DEFAULT_TOKEN_KEY)
         if token:
+            _log_token_source("keyring", token)
             return token
-        # Legacy fallbacks: the pre-Phase-3 Settings UI used "github_pat"
-        return pat_store.load_setting("github_pat") or ""
+        legacy = pat_store.load_setting("github_pat")
+        if legacy:
+            _log_token_source("keyring (legacy)", legacy)
+            return legacy
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Token lookup failed: %s", exc)
-        return ""
+        logger.warning("Keyring token lookup failed: %s", exc)
+
+    # Tier 3: bundled token
+    try:
+        from src.updater._bundled_token import get_bundled_token
+        bundled = get_bundled_token()
+        if bundled:
+            _log_token_source("bundled", bundled)
+            return bundled
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Bundled token lookup failed: %s", exc)
+
+    return ""
+
+
+def _log_token_source(source: str, token: str) -> None:
+    """One-line INFO log identifying which token tier won.
+
+    Logs only the safe fingerprint, never the token itself. Lets
+    support engineers answer "which release PAT is this install using?"
+    from the user's log file without asking them to dig in keyrings.
+    """
+    try:
+        from src.updater._token_obfuscation import fingerprint
+        logger.info("Update auth: using %s token (%s)", source, fingerprint(token))
+    except Exception:  # noqa: BLE001 — logging must never raise
+        pass
 
 
 def _default_releases_url() -> str:

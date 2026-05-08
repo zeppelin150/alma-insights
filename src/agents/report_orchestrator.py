@@ -78,7 +78,7 @@ class ReportOrchestrator:
         if self._booted:
             return
 
-        from src.agents.acp_bridge import ACPBridge
+        from src.gemini.client_factory import build_bridge_for_task
 
         logger.info(
             "ReportOrchestrator: booting %d bridges (model=%s)",
@@ -86,7 +86,7 @@ class ReportOrchestrator:
         )
 
         for i in range(self._num_bridges):
-            bridge = ACPBridge(model=self._model)
+            bridge = build_bridge_for_task("report_generation", model=self._model)
             bridge.ensure_running()
             self._bridges.append(bridge)
             logger.info("ReportOrchestrator: bridge_%d ready", i)

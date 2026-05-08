@@ -1,11 +1,21 @@
-"""Singleton model loader for EmbeddingGemma-300M.
+"""Singleton model loader for Qwen3-Embedding-0.6B.
 
 Loads the model once on first access with air-gap verification.
 All subsequent calls return the cached instance.
+
+Hardware profile integration (2026-05-07): the model is loaded onto the
+device chosen by `src.startup.hardware` and persisted in
+`data/hardware_profile.json` (`embedding_device`). On Apple Silicon this
+is `mps`; on CUDA boxes it's `cuda`; everything else is `cpu`. If the
+chosen device fails to actually load the model (some PyTorch builds
+report `mps.is_available() == True` but throw on the first encode), we
+fall back to CPU and rewrite the profile so subsequent launches don't
+repeat the failing attempt.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -17,7 +27,84 @@ MODEL_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data" / "mod
 EMBEDDING_DIM = 1024
 MAX_SEQ_LENGTH = 32768
 
+_PROFILE_PATH = Path("data") / "hardware_profile.json"
+
 _model = None
+_active_device: str | None = None  # what we actually loaded onto
+
+
+def _read_profile() -> dict:
+    """Read the cached hardware profile. Returns {} on any failure."""
+    try:
+        if _PROFILE_PATH.exists():
+            return json.loads(_PROFILE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        pass
+    return {}
+
+
+def _resolve_device() -> str:
+    """Pick the device to load the model onto.
+
+    Reads `embedding_device` from `data/hardware_profile.json`, then
+    validates it against torch's runtime view — a profile that says
+    "cuda" on a machine without torch.cuda available is silently
+    downgraded to "cpu". Same for "mps". Defaults to "cpu" if the
+    profile is missing or unreadable.
+    """
+    profile = _read_profile()
+    requested = profile.get("embedding_device", "cpu")
+
+    try:
+        import torch
+    except ImportError:
+        return "cpu"
+
+    if requested == "cuda":
+        try:
+            if torch.cuda.is_available():
+                return "cuda"
+        except Exception:
+            pass
+        logger.info("Profile asked for cuda but torch.cuda.is_available()=False; falling back to cpu")
+        return "cpu"
+
+    if requested == "mps":
+        try:
+            if torch.backends.mps.is_available():
+                return "mps"
+        except Exception:
+            pass
+        logger.info("Profile asked for mps but torch MPS is unavailable; falling back to cpu")
+        return "cpu"
+
+    return "cpu"
+
+
+def _persist_device_fallback(device: str) -> None:
+    """If MPS or CUDA load fails, rewrite the profile so the next launch
+    doesn't repeat the failing attempt. Best-effort: any I/O error is
+    swallowed (we're already in a fallback path)."""
+    try:
+        profile = _read_profile()
+        if not profile:
+            return
+        # Record the OLD device in the reason BEFORE overwriting it.
+        prior = profile.get("embedding_device", "unknown")
+        profile["embedding_device"] = device
+        profile["embedding_device_fallback_reason"] = (
+            f"auto-downgraded from {prior} to {device} after first-load failure"
+        )
+        _PROFILE_PATH.write_text(json.dumps(profile, indent=2), encoding="utf-8")
+        logger.warning("Rewrote hardware_profile.json: embedding_device=%s", device)
+    except Exception as exc:  # noqa: BLE001 — best-effort
+        logger.warning("Could not persist device fallback: %s", exc)
+
+
+def get_active_device() -> str | None:
+    """Return the device the model actually loaded onto, or None if the
+    model hasn't been instantiated yet. Used by tests + Settings UI."""
+    return _active_device
 
 
 def is_available() -> bool:
@@ -37,9 +124,12 @@ def is_available() -> bool:
 def get_model():
     """Get the singleton SentenceTransformer model.
 
-    Enforces air-gap before loading. Returns None if unavailable.
+    Enforces air-gap before loading. Loads onto the device chosen by the
+    hardware profile (`embedding_device`) with a CPU fallback if the
+    accelerator-specific load throws. Returns None if the model is
+    structurally unavailable (missing files or library).
     """
-    global _model
+    global _model, _active_device
     if _model is not None:
         return _model
 
@@ -52,15 +142,50 @@ def get_model():
 
     try:
         from sentence_transformers import SentenceTransformer
-        model_path = _find_model_path()
-        if model_path is None:
-            logger.error("Model path not found in %s", MODEL_DIR)
-            return None
-        _model = SentenceTransformer(str(model_path))
-        logger.info("Loaded embedding model from %s", model_path)
+    except ImportError:
+        logger.error("sentence_transformers not installed")
+        return None
+
+    model_path = _find_model_path()
+    if model_path is None:
+        logger.error("Model path not found in %s", MODEL_DIR)
+        return None
+
+    device = _resolve_device()
+
+    try:
+        _model = SentenceTransformer(str(model_path), device=device)
+        # Defensive: some sentence_transformers versions don't honor the
+        # device kwarg when the model has multiple modules. Force the move.
+        if device != "cpu":
+            try:
+                _model = _model.to(device)
+            except Exception as move_err:
+                logger.warning(
+                    "model.to(%s) failed (%s); attempting CPU fallback.",
+                    device, move_err,
+                )
+                raise
+        _active_device = device
+        logger.info("Loaded embedding model on device=%s from %s", device, model_path)
         return _model
-    except Exception as e:
-        logger.error("Failed to load embedding model: %s", e)
+    except Exception as exc:
+        # If we asked for cuda/mps and it failed, try cpu before giving up
+        if device != "cpu":
+            logger.warning(
+                "Loading embedding model on %s failed (%s); falling back to CPU.",
+                device, exc,
+            )
+            try:
+                _model = SentenceTransformer(str(model_path), device="cpu")
+                _active_device = "cpu"
+                _persist_device_fallback("cpu")
+                logger.info("Loaded embedding model on device=cpu (fallback)")
+                return _model
+            except Exception as cpu_exc:  # noqa: BLE001
+                logger.error("CPU fallback also failed: %s", cpu_exc)
+                return None
+        logger.error("Failed to load embedding model: %s", exc)
         return None
 
 

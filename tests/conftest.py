@@ -11,7 +11,7 @@ Provides reusable fixtures for all test modules:
 import sqlite3
 import tempfile
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -179,6 +179,83 @@ def seeded_db(empty_db):
 def seeded_conn(seeded_db):
     """Raw SQLite connection from seeded_db (for functions that take conn)."""
     yield seeded_db.conn
+
+
+# ── Source Monitor Rate-Chart Fixtures (2026-05-07 redesign) ──────────
+
+@pytest.fixture
+def rate_baseline_now():
+    """Anchor time for rate-baseline tests.
+
+    Returns a fixed UTC datetime so tests are deterministic regardless
+    of when the suite runs. Picked to be a "Wednesday 14:00 UTC" so
+    bucket math wraps clean across days.
+    """
+    return datetime(2026, 5, 6, 14, 0, 0, tzinfo=timezone.utc)
+
+
+@pytest.fixture
+def seeded_rate_db(empty_db, rate_baseline_now):
+    """empty_db plus 8 days of source_trc_hourly data with a synthetic spike.
+
+    Pattern:
+      - 8 days × 24 hours × 2 TRCs ('TRC-100', 'TRC-200') of baseline
+      - Baseline rate: 5 tickets/hour (deterministic, no diurnal pattern)
+      - Synthetic spike: bucket at (now - 1h) for TRC-100 has 30 tickets
+        (5x the baseline — well outside 2σ for a tight baseline)
+
+    Why 8 days, not 7: the rate-baseline algorithm needs the trailing
+    7-day window for each foreground bucket. With foreground covering
+    24 hours, the earliest baseline bucket needed is now - 8 days. We
+    seed exactly that to exercise the boundary condition.
+
+    Yields the same ``empty_db`` (DatabaseManager) — connection is
+    closed by the empty_db fixture's teardown.
+    """
+    from datetime import timezone as _tz  # local alias to avoid shadow
+
+    now = rate_baseline_now
+    cur = empty_db.conn
+
+    rows: list[tuple[str, str, str, int]] = []
+    # Walk back 8 days × 24 hours (= 192 buckets).
+    for h in range(1, 8 * 24 + 1):
+        bucket = (now - timedelta(hours=h)).strftime("%Y-%m-%dT%H:00:00")
+        rows.append(("zendesk", "TRC-100", bucket, 5))
+        rows.append(("zendesk", "TRC-200", bucket, 5))
+
+    # Inject the spike: TRC-100 at (now - 1h) bumped to 30 tickets.
+    spike_bucket = (now - timedelta(hours=1)).strftime("%Y-%m-%dT%H:00:00")
+
+    cur.executemany(
+        """
+        INSERT OR REPLACE INTO source_trc_hourly
+            (source, trc_code, hour_bucket, count)
+        VALUES (?, ?, ?, ?)
+        """,
+        rows,
+    )
+    cur.execute(
+        """
+        UPDATE source_trc_hourly
+        SET count = 30
+        WHERE source = 'zendesk' AND trc_code = 'TRC-100'
+          AND hour_bucket = ?
+        """,
+        (spike_bucket,),
+    )
+    empty_db.conn.commit()
+    yield empty_db
+
+
+@pytest.fixture
+def seeded_rate_conn(seeded_rate_db):
+    """Raw SQLite connection from seeded_rate_db.
+
+    Most rate-baseline tests want the conn directly (the algorithm is
+    a pure function, not a method on DatabaseManager).
+    """
+    yield seeded_rate_db.conn
 
 
 # ── Settings Fixtures ─────────────────────────────────────────────────
