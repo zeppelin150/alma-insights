@@ -171,3 +171,62 @@ class TestChecksums:
         for path in written["files"]:
             assert "__pycache__" not in path
             assert not path.startswith("data/")
+
+
+# ──────────────────────────────────────────────────────────────────
+# Build step ordering — SBOM must precede pip-stripping cleanup
+# ──────────────────────────────────────────────────────────────────
+
+class TestBuildStepOrdering:
+    """Guard against the regression where clean_python_dir removes pip
+    and a later write_sbom shells out to `python -m pip list`, producing
+    'No module named pip' and aborting the CI build.
+
+    Uses AST so docstring/comment mentions of the function names don't
+    poison the ordering check.
+    """
+
+    @staticmethod
+    def _call_linenos(fn, name: str) -> list[int]:
+        import ast
+        import inspect
+        import textwrap
+        src = textwrap.dedent(inspect.getsource(fn))
+        tree = ast.parse(src)
+        out: list[int] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                if node.func.id == name:
+                    out.append(node.lineno)
+        return sorted(out)
+
+    def _first_call_lineno(self, fn, name: str) -> int:
+        linenos = self._call_linenos(fn, name)
+        assert linenos, f"{name}() call not found in {fn.__name__}"
+        return linenos[0]
+
+    def test_build_windows_writes_sbom_before_cleanup(self, build_release):
+        fn = build_release.build_windows
+        assert self._first_call_lineno(fn, "write_sbom") < \
+               self._first_call_lineno(fn, "clean_python_dir"), (
+            "build_windows must call write_sbom before clean_python_dir; "
+            "cleanup strips pip and the SBOM step depends on it."
+        )
+
+    def test_build_macos_writes_sbom_before_cleanup(self, build_release):
+        fn = build_release.build_macos
+        assert self._first_call_lineno(fn, "write_sbom") < \
+               self._first_call_lineno(fn, "clean_python_dir"), (
+            "build_macos must call write_sbom before clean_python_dir; "
+            "cleanup strips pip and the SBOM step depends on it."
+        )
+
+    def test_sbom_called_exactly_once_per_builder(self, build_release):
+        for fn_name in ("build_windows", "build_macos"):
+            fn = getattr(build_release, fn_name)
+            linenos = self._call_linenos(fn, "write_sbom")
+            assert len(linenos) == 1, (
+                f"{fn_name} should call write_sbom exactly once; "
+                f"found {len(linenos)} at lines {linenos}. "
+                "Did the fix accidentally leave a duplicate?"
+            )

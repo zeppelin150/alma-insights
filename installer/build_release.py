@@ -758,6 +758,10 @@ def build_windows():
         # 6. Pre-download sentence-transformers model
         download_st_model(python_exe, staging)
 
+        # SBOM must run before cleanup — clean_python_dir() strips pip below,
+        # and write_sbom() shells out to `python -m pip list`.
+        write_sbom(python_exe, staging)
+
         # 7. Clean up
         log_step("Step 7: Clean up bundled Python")
         clean_python_dir(python_dir)
@@ -776,8 +780,7 @@ def build_windows():
         log_step("Step 11: Copy installer files")
         copy_installer_files(staging, "windows")
 
-        # 12. SBOM + integrity
-        write_sbom(python_exe, staging)
+        # 12. Integrity checksums (SBOM was written above, before cleanup)
         write_checksums(staging)
 
         # 13. Verify build manifest
@@ -866,6 +869,10 @@ def build_macos():
         # 5. Pre-download sentence-transformers model
         download_st_model(python_exe, staging)
 
+        # SBOM must run before cleanup — clean_python_dir() strips pip below,
+        # and write_sbom() shells out to `python -m pip list`.
+        write_sbom(python_exe, staging)
+
         # 6. Clean up
         log_step("Step 6: Clean up bundled Python")
         clean_python_dir(python_dir)
@@ -884,8 +891,7 @@ def build_macos():
         log_step("Step 10: Copy installer files")
         copy_installer_files(staging, "macos")
 
-        # 11. SBOM + integrity
-        write_sbom(python_exe, staging)
+        # 11. Integrity checksums (SBOM was written above, before cleanup)
         write_checksums(staging)
 
         # 12. Verify build manifest
