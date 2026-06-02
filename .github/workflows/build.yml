@@ -25,12 +25,9 @@ jobs:
           - os: windows-latest
             platform: windows
             artifact: AlmaInsights-win64.zip
-          - os: macos-14
-            platform: macos
-            artifact: AlmaInsights-macOS-arm64.zip
           - os: macos-15
             platform: macos
-            artifact: AlmaInsights-macOS-15-x64.zip
+            artifact: AlmaInsights-macOS-arm64.zip
 
     runs-on: ${{ matrix.os }}
 
