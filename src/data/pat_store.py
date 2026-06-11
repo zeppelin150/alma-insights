@@ -51,6 +51,11 @@ _SECRET_KEYS: frozenset[str] = frozenset({
     "zendesk_api_key",
     "asana_api_key",
     "github_update_token",
+    # Per-user Google OAuth: the minimal authorized_user record
+    # (client_id, client_secret, refresh_token, token_uri) — NOT the
+    # access/id tokens, which can overflow the Windows Credential
+    # Manager blob cap (~2.5 KB). See src/data/google_oauth.py.
+    "google_oauth_user",
     # AWS credentials for Bedrock-backed Claude CLI calls. Used only when
     # bedrock.use_environment=false in settings; otherwise the standard AWS
     # credential chain (env vars, profile, IAM role) is honored.

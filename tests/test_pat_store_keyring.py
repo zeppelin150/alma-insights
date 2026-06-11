@@ -145,6 +145,57 @@ class TestSecretRouting:
 
 
 # ──────────────────────────────────────────────────────────────────
+# P1 — Google OAuth record (google_oauth_user)
+# ──────────────────────────────────────────────────────────────────
+
+class TestGoogleOAuthKey:
+    def test_key_is_a_secret(self):
+        from src.data import pat_store
+        assert "google_oauth_user" in pat_store._SECRET_KEYS
+
+    def test_authorized_user_record_round_trips(self, fake_home, in_memory_keyring):
+        from src.data import pat_store
+        record = json.dumps({
+            "client_id": "123.apps.googleusercontent.com",
+            "client_secret": "GOCSPX-secret",
+            "refresh_token": "1//0gFAKErefreshTOKENvalue-longish-string",
+            "token_uri": "https://oauth2.googleapis.com/token",
+        })
+        assert pat_store.save_setting("google_oauth_user", record) is True
+        assert pat_store.load_setting("google_oauth_user") == record
+        assert in_memory_keyring.get_password(
+            pat_store._SERVICE, "google_oauth_user") == record
+
+    def test_record_stays_under_windows_blob_cap(self):
+        """A minimal 4-key record must fit the WCM ~2.5 KB (UTF-16) cap."""
+        record = json.dumps({
+            "client_id": "1234567890-abcdefghijklmnop.apps.googleusercontent.com",
+            "client_secret": "GOCSPX-abcdefghijklmnopqrstuvwx",
+            # refresh tokens are ~100-220 chars; use a generous upper bound
+            "refresh_token": "1//" + "x" * 240,
+            "token_uri": "https://oauth2.googleapis.com/token",
+        })
+        # UTF-16 ≈ 2 bytes/char; keep well under 2560 bytes
+        assert len(record) < 1280
+
+    def test_never_plaintext_on_broken_keyring(self, fake_home, broken_keyring):
+        from src.data import pat_store
+        ok = pat_store.save_setting("google_oauth_user", '{"refresh_token":"x"}')
+        assert ok is False  # keyring failed; do NOT fall back to JSON
+        if pat_store._STATE_FILE.exists():
+            assert "refresh_token" not in pat_store._STATE_FILE.read_text()
+
+    def test_migration_covers_new_key(self, fake_home, in_memory_keyring):
+        from src.data import pat_store
+        legacy = pat_store._LEGACY_FILE
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_text(json.dumps({"google_oauth_user": '{"refresh_token":"r"}'}))
+        moved = pat_store.migrate_legacy_credentials()
+        assert moved == 1
+        assert pat_store.load_setting("google_oauth_user") == '{"refresh_token":"r"}'
+
+
+# ──────────────────────────────────────────────────────────────────
 # Non-secret path (→ JSON file)
 # ──────────────────────────────────────────────────────────────────
 
