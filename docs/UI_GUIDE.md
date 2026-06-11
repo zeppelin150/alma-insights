@@ -371,3 +371,26 @@ guard.attach_to_status_bar(status_label)
 - `docs/ARCHITECTURE.md` — System architecture (Layer 1: UI)
 - `docs/CONFIGURATION.md` — Settings reference (display section)
 - `src/ui/INDEX.md` — Full API signatures for UI shell modules
+
+---
+
+## Design System (2026-06-11 redesign, P3)
+
+The theme was split into a structured design system under `src/ui/design/`;
+`src/ui/theme.py` is now a compatibility facade (every existing
+`from src.ui.theme import *` call site keeps working).
+
+| Module | Contents |
+|--------|----------|
+| `design/tokens.py` | `LIGHT` palette dict (semantic keys, dark-ready), `SPACING` 4px grid, `RADIUS`, `TYPE_SCALE`, `ELEVATION`, and the flat legacy `ALMA_*` constants derived from `LIGHT`. |
+| `design/icons.py` | `icon(name, size=18, color=None) -> QIcon` — inline-SVG glyph registry (Feather-style strokes) rendered at 2x via QtSvg. No emoji / symbol-font glyphs anywhere new (offscreen tofu + professionalism). `glyph_names()` lists the set. |
+| `design/anim.py` | `DUR` / `EASE` presets + `fade_in(widget)`. Page fade and sidebar collapse use these. |
+| `design/qss.py` | `build_stylesheet(theme=None)` = `_legacy_sections()` (the original stylesheet, moved verbatim) + `_extras()` (menus, message boxes, icon sizing). New styling goes in new section functions — do not grow the legacy block. |
+
+Rules:
+- New colors enter `LIGHT` with a semantic key; the flat `ALMA_*` alias is
+  only added when legacy code needs to import it.
+- Sidebar nav entries come from `src/ui/app_modes.py` PageSpecs whose
+  `icon` field is a glyph NAME (validated by `tests/test_icons.py`).
+- QIcons cannot be recolored by QSS — bake the color at creation
+  (`icon("home", 18, "#E7E4DC")` for on-dark sidebar use).

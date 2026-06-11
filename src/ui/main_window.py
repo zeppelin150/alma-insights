@@ -18,7 +18,10 @@ from PySide6.QtGui import QIcon, QFont
 
 from src.ui.theme import *
 from src.ui import app_modes
+from src.ui.design.anim import DUR, EASE
 from src.ui.dialogs.help_dialog import HelpDialog
+
+_SIDEBAR_ICON_COLOR = "#E7E4DC"  # light glyphs on the dark green sidebar
 from src.data.db_manager import DatabaseManager
 from src.data.settings_manager import get_section
 from src.data.job_queue import JobQueue, JobDescriptor
@@ -217,9 +220,14 @@ class MainWindow(QMainWindow):
         layout.addStretch()
 
         # ── Collapse toggle (Build 10.0: T10) ──
-        self._collapse_btn = QPushButton("◀  Collapse")
+        from src.ui.design.icons import icon as design_icon
+        self._collapse_btn = QPushButton("Collapse")
         self._collapse_btn.setObjectName("SidebarCollapseBtn")
         self._collapse_btn.setCursor(Qt.PointingHandCursor)
+        self._collapse_btn.setIcon(
+            design_icon("chevron-left", 16, _SIDEBAR_ICON_COLOR)
+        )
+        self._collapse_btn.setIconSize(QSize(16, 16))
         self._collapse_btn.clicked.connect(self._toggle_sidebar)
         layout.addWidget(self._collapse_btn)
 
@@ -262,9 +270,7 @@ class MainWindow(QMainWindow):
                     nav.addWidget(section_label)
                     self._sidebar_text_widgets.append(section_label)
                 current_section = spec.section
-            btn = self._sidebar_btn(
-                f"{spec.icon}  {spec.title}", spec.page_id, spec.icon
-            )
+            btn = self._sidebar_btn(spec.title, spec.page_id, spec.icon)
             if spec.hidden:
                 btn.setVisible(False)
             nav.addWidget(btn)
@@ -292,14 +298,19 @@ class MainWindow(QMainWindow):
                 btn.style().unpolish(btn)
                 btn.style().polish(btn)
 
-    def _sidebar_btn(self, text, page_id, icon_char=None):
+    def _sidebar_btn(self, text, page_id, icon_name=None):
         btn = QPushButton(text)
         btn.setObjectName("SidebarButton")
         btn.setCursor(Qt.PointingHandCursor)
         btn.clicked.connect(lambda: self._set_active_page(page_id))
-        # Store icon and full text for collapse/expand (Build 10.0: T10)
+        if icon_name:
+            from src.ui.design.icons import icon as design_icon
+            btn.setIcon(design_icon(icon_name, 18, _SIDEBAR_ICON_COLOR))
+            btn.setIconSize(QSize(18, 18))
+        # full_text restores the label after collapse/expand; icon_char is
+        # "" since glyphs are QIcons now (collapsed buttons show icon only).
         btn.setProperty("full_text", text)
-        btn.setProperty("icon_char", icon_char or "")
+        btn.setProperty("icon_char", "")
         self._sidebar_buttons.append((btn, page_id))
         return btn
 
@@ -344,17 +355,8 @@ class MainWindow(QMainWindow):
         # ── Page transition fade-in (Build 10.0: T16) ── skipped when only
         # switching tabs on the same host widget (no full-page change).
         if not same_widget:
-            effect = QGraphicsOpacityEffect(widget)
-            widget.setGraphicsEffect(effect)
-            self._page_anim = QPropertyAnimation(effect, b"opacity")
-            self._page_anim.setDuration(200)
-            self._page_anim.setStartValue(0.0)
-            self._page_anim.setEndValue(1.0)
-            self._page_anim.setEasingCurve(QEasingCurve.OutCubic)
-            self._page_anim.finished.connect(
-                lambda p=widget: p.setGraphicsEffect(None)
-            )
-            self._page_anim.start(QAbstractAnimation.KeepWhenStopped)
+            from src.ui.design.anim import fade_in
+            self._page_anim = fade_in(widget)
 
     # ── Sidebar Collapse / Expand (Build 10.0: T10) ──────────
 
@@ -364,17 +366,17 @@ class MainWindow(QMainWindow):
         target_width = 56 if self._sidebar_collapsed else 220
 
         anim = QPropertyAnimation(self._sidebar, b"maximumWidth")
-        anim.setDuration(250)
+        anim.setDuration(DUR["slow"])
         anim.setStartValue(self._sidebar.maximumWidth())
         anim.setEndValue(target_width)
-        anim.setEasingCurve(QEasingCurve.OutCubic)
+        anim.setEasingCurve(EASE["out"])
 
         # Also animate minimumWidth to keep them in sync
         anim2 = QPropertyAnimation(self._sidebar, b"minimumWidth")
-        anim2.setDuration(250)
+        anim2.setDuration(DUR["slow"])
         anim2.setStartValue(self._sidebar.minimumWidth())
         anim2.setEndValue(target_width)
-        anim2.setEasingCurve(QEasingCurve.OutCubic)
+        anim2.setEasingCurve(EASE["out"])
 
         # Store refs to prevent GC
         self._sidebar_anim = anim
@@ -399,14 +401,22 @@ class MainWindow(QMainWindow):
                 div.setProperty("collapsed", "true")
                 div.style().unpolish(div)
                 div.style().polish(div)
-            self._collapse_btn.setText("▶")
+            from src.ui.design.icons import icon as design_icon
+            self._collapse_btn.setText("")
+            self._collapse_btn.setIcon(
+                design_icon("chevron-right", 16, _SIDEBAR_ICON_COLOR)
+            )
             self._collapse_btn.setProperty("collapsed", "true")
             self._collapse_btn.style().unpolish(self._collapse_btn)
             self._collapse_btn.style().polish(self._collapse_btn)
         else:
             # Expand: restore full text after animation finishes
+            from src.ui.design.icons import icon as design_icon
             anim.finished.connect(self._restore_sidebar_text)
-            self._collapse_btn.setText("◀  Collapse")
+            self._collapse_btn.setText("Collapse")
+            self._collapse_btn.setIcon(
+                design_icon("chevron-left", 16, _SIDEBAR_ICON_COLOR)
+            )
             self._collapse_btn.setProperty("collapsed", "false")
 
         # One bulk re-style instead of per-widget unpolish/polish
@@ -1518,12 +1528,10 @@ class MainWindow(QMainWindow):
 
     def _update_incident_badge(self, count_2theta: int = 0):
         """Update sidebar badge for Incidents with 2θ flag count."""
-        spec = app_modes.spec_for("incidents")
-        icon = spec.icon if spec else ""
         for btn, pid in self._sidebar_buttons:
             if pid == "incidents":
-                text = (f"{icon}  Incidents ({count_2theta})"
-                        if count_2theta > 0 else f"{icon}  Incidents")
+                text = (f"Incidents ({count_2theta})"
+                        if count_2theta > 0 else "Incidents")
                 btn.setText(text)
                 btn.setProperty("full_text", text)
                 break

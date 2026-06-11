@@ -22,7 +22,7 @@ _ENABLEMENT = frozenset({MODE_ENABLEMENT})
 class PageSpec:
     page_id: str
     title: str
-    icon: str                      # emoji until the design-system icon pass
+    icon: str                      # glyph name in src.ui.design.icons
     section: str
     modes: frozenset
     factory: str                   # MainWindow method name
@@ -42,49 +42,49 @@ class ServiceSpec:
 
 PAGES: tuple[PageSpec, ...] = (
     # ── Shared: landing page (empty section → no header label) ──
-    PageSpec("home", "Home", "\U0001F3E0", "",
+    PageSpec("home", "Home", "home", "",
              _BOTH, "_create_home_page"),
     # ── Product: SOURCES ──
-    PageSpec("conversations", "Conversations", "\U0001F4AC", "SOURCES",
+    PageSpec("conversations", "Conversations", "chat", "SOURCES",
              _PRODUCT, "_create_conversations_page", wants_drilldown=True),
-    PageSpec("source_monitor", "Source Monitor", "\U0001F4E1", "SOURCES",
+    PageSpec("source_monitor", "Source Monitor", "antenna", "SOURCES",
              _PRODUCT, "_create_source_monitor_page"),
-    PageSpec("guru_legacy", "Guru KB", "\U0001F9F0", "SOURCES",
+    PageSpec("guru_legacy", "Guru KB", "book", "SOURCES",
              _PRODUCT, "_create_legacy_guru_page", wants_drilldown=True,
              settings_flag=("guru", "experimental_ui_enabled")),
     # ── Product: ANALYSIS ──
-    PageSpec("trc_analytics", "TRC Analytics", "\U0001F4CA", "ANALYSIS",
+    PageSpec("trc_analytics", "TRC Analytics", "bars", "ANALYSIS",
              _PRODUCT, "_create_dashboard_page", wants_drilldown=True),
-    PageSpec("trending", "Trending Topics", "\U0001F4C8", "ANALYSIS",
+    PageSpec("trending", "Trending Topics", "trend", "ANALYSIS",
              _PRODUCT, "_create_trending_page", wants_drilldown=True),
-    PageSpec("incidents", "Incidents", "\U0001F6A8", "ANALYSIS",
+    PageSpec("incidents", "Incidents", "alert", "ANALYSIS",
              _PRODUCT, "_create_incidents_page", wants_drilldown=True),
     # ── Product: REPORTS ──
-    PageSpec("reports", "AI Reports", "\U0001F916", "REPORTS",
+    PageSpec("reports", "AI Reports", "doc", "REPORTS",
              _PRODUCT, "_create_reports_page", wants_drilldown=True),
-    PageSpec("ab_compare", "A/B Compare", "\U0001F504", "REPORTS",
+    PageSpec("ab_compare", "A/B Compare", "repeat", "REPORTS",
              _PRODUCT, "_create_ab_compare_page", wants_drilldown=True,
              hidden=True),
-    PageSpec("smart_reporting", "Smart Reporting", "⚡", "REPORTS",
+    PageSpec("smart_reporting", "Smart Reporting", "zap", "REPORTS",
              _PRODUCT, "_create_smart_reporting_page"),
-    PageSpec("gemini_chats", "Gemini Chats", "\U0001F4AC", "REPORTS",
+    PageSpec("gemini_chats", "Gemini Chats", "chat", "REPORTS",
              _PRODUCT, "_create_gemini_chats_page", wants_drilldown=True),
     # ── Product: SYSTEM ──
-    PageSpec("data_warehouse", "Data Warehouse", "\U0001F5C4️", "SYSTEM",
+    PageSpec("data_warehouse", "Data Warehouse", "database", "SYSTEM",
              _PRODUCT, "_create_data_warehouse_page", wants_drilldown=True),
-    PageSpec("settings", "Settings", "⚙️", "SYSTEM",
+    PageSpec("settings", "Settings", "sliders", "SYSTEM",
              _PRODUCT, "_create_settings_page"),
     # ── Enablement (one host page, sidebar entries select tabs) ──
-    PageSpec("en_calendar", "Calendar", "\U0001F4C5", "ENABLEMENT",
+    PageSpec("en_calendar", "Calendar", "calendar", "ENABLEMENT",
              _ENABLEMENT, "_create_enablement_page", tab_key="calendar",
              wants_drilldown=True),
-    PageSpec("en_tasks", "Tasks", "☑️", "ENABLEMENT",
+    PageSpec("en_tasks", "Tasks", "tasks", "ENABLEMENT",
              _ENABLEMENT, "_create_enablement_page", tab_key="tasks",
              wants_drilldown=True),
-    PageSpec("en_workbench", "Workbench", "\U0001F9F0", "ENABLEMENT",
+    PageSpec("en_workbench", "Workbench", "pen", "ENABLEMENT",
              _ENABLEMENT, "_create_enablement_page", tab_key="workbench",
              wants_drilldown=True),
-    PageSpec("en_settings", "Settings", "⚙️", "ENABLEMENT",
+    PageSpec("en_settings", "Settings", "sliders", "ENABLEMENT",
              _ENABLEMENT, "_create_enablement_page", tab_key="settings",
              wants_drilldown=True),
 )
