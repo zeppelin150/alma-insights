@@ -256,10 +256,11 @@ class MainWindow(QMainWindow):
                     div.setObjectName("SidebarDivider")
                     nav.addWidget(div)
                     self._sidebar_dividers.append(div)
-                section_label = QLabel(spec.section)
-                section_label.setObjectName("SidebarSection")
-                nav.addWidget(section_label)
-                self._sidebar_text_widgets.append(section_label)
+                if spec.section:  # empty section (Home) renders no header
+                    section_label = QLabel(spec.section)
+                    section_label.setObjectName("SidebarSection")
+                    nav.addWidget(section_label)
+                    self._sidebar_text_widgets.append(section_label)
                 current_section = spec.section
             btn = self._sidebar_btn(
                 f"{spec.icon}  {spec.title}", spec.page_id, spec.icon
@@ -528,6 +529,8 @@ class MainWindow(QMainWindow):
             self._mount_mode_pages(mode)
             self._populate_sidebar(mode)
             self._start_services_for_mode(mode)
+            if getattr(self, "home_page", None) is not None:
+                self.home_page.set_mode(mode)
             if mode == app_modes.MODE_PRODUCT:
                 self._after_product_pages_mounted()
             try:
@@ -552,6 +555,34 @@ class MainWindow(QMainWindow):
     # ── Page factories ──────────────────────────────────────────────
     # One per page; imports are deferred so a mode never loads the other
     # mode's page modules.
+
+    def _create_home_page(self):
+        from src.ui.pages.home_page import HomePage
+        self.home_page = HomePage(self.db, current_mode=self._mode)
+        self.home_page.mode_selected.connect(self.switch_mode)
+        self.home_page.quick_action.connect(self._on_home_quick_action)
+        return self.home_page
+
+    def _on_home_quick_action(self, action: str):
+        """Route a Home quick-action chip to its page (+ optional call)."""
+        routes = {
+            "search": ("conversations",
+                       lambda: self.conversations_page.run_search()),
+            "reports": ("reports", None),
+            "workbench": ("en_workbench", None),
+            "calendar": ("en_calendar", None),
+            "renn": ("en_workbench",
+                     lambda: self.guru_page._open_chat()),
+        }
+        page_id, follow_up = routes.get(action, (None, None))
+        if page_id is None:
+            return
+        self._set_active_page(page_id)
+        if follow_up is not None:
+            try:
+                follow_up()
+            except Exception:
+                pass
 
     def _create_conversations_page(self):
         from src.ui.pages.conversation_search import ConversationSearchPage

@@ -69,6 +69,8 @@ class TestRegistryIntegrity:
 
     def test_enablement_tab_keys(self):
         for s in pages_for_mode(MODE_ENABLEMENT):
+            if s.page_id == "home":
+                continue
             assert s.factory == "_create_enablement_page"
             assert s.tab_key in {"calendar", "tasks", "workbench", "settings"}
 
@@ -80,13 +82,23 @@ class TestRegistryIntegrity:
 class TestModeRouting:
     def test_product_pages(self):
         ids = {s.page_id for s in pages_for_mode(MODE_PRODUCT)}
+        assert "home" in ids
         assert "conversations" in ids
         assert "settings" in ids
         assert not any(i.startswith("en_") for i in ids)
 
     def test_enablement_pages(self):
         ids = {s.page_id for s in pages_for_mode(MODE_ENABLEMENT)}
-        assert ids == {"en_calendar", "en_tasks", "en_workbench", "en_settings"}
+        assert ids == {"home", "en_calendar", "en_tasks",
+                       "en_workbench", "en_settings"}
+
+    def test_home_shared_and_first(self):
+        home = spec_for("home")
+        assert home is not None
+        assert home.modes == frozenset(MODES)
+        assert home.section == ""  # renders without a section header
+        for mode in MODES:
+            assert first_page_id(mode) == "home"
 
     def test_product_services(self):
         ids = {s.service_id for s in services_for_mode(MODE_PRODUCT)}

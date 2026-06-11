@@ -41,6 +41,9 @@ class ServiceSpec:
 
 
 PAGES: tuple[PageSpec, ...] = (
+    # ── Shared: landing page (empty section → no header label) ──
+    PageSpec("home", "Home", "\U0001F3E0", "",
+             _BOTH, "_create_home_page"),
     # ── Product: SOURCES ──
     PageSpec("conversations", "Conversations", "\U0001F4AC", "SOURCES",
              _PRODUCT, "_create_conversations_page", wants_drilldown=True),
@@ -116,7 +119,7 @@ LEGACY_PAGE_IDS: dict[int, str] = {
     11: "data_warehouse",
 }
 
-_FIRST_PAGE = {MODE_PRODUCT: "conversations", MODE_ENABLEMENT: "en_workbench"}
+_FIRST_PAGE = {MODE_PRODUCT: "home", MODE_ENABLEMENT: "home"}
 
 _current_mode = MODE_PRODUCT
 _cli_override: str | None = None

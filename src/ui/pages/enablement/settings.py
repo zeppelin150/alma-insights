@@ -103,6 +103,8 @@ class SettingsPage(QWidget):
         h.addWidget(field("15 min", w=86))
         h.addWidget(self._text("Provider"))
         h.addWidget(self._provider_combo())
+        h.addWidget(self._text("Start in"))
+        h.addWidget(self._default_mode_combo())
         return card
 
     def set_connection_status(self, key: str, ok: bool, detail: str = ""):
@@ -138,6 +140,33 @@ class SettingsPage(QWidget):
         cfg = dict(get_section("enablement", {}) or {})
         cfg["provider"] = provider
         set_section("enablement", cfg)
+
+    def _default_mode_combo(self):
+        """Startup-mode choice — same setting as the product Settings page."""
+        combo = QComboBox()
+        combo.addItem("Product", "product")
+        combo.addItem("Enablement", "enablement")
+        combo.addItem("Last used", "last")
+        combo.setFixedHeight(30)
+        combo.setStyleSheet(
+            f"QComboBox{{background:{ALMA_BG_ELEVATED}; border:1px solid {ALMA_BORDER}; "
+            f"border-radius:7px; padding:2px 10px; font-size:12px; color:{ALMA_TEXT_DARK}; min-width:104px;}}"
+        )
+        from src.data.settings_manager import get_section
+        current = (get_section("app", {}) or {}).get("default_mode", "product")
+        idx = combo.findData(current)
+        combo.setCurrentIndex(idx if idx >= 0 else 0)
+        combo.currentIndexChanged.connect(
+            lambda _i: self._save_default_mode(combo.currentData())
+        )
+        return combo
+
+    def _save_default_mode(self, mode: str):
+        from src.data.settings_manager import update_section
+        try:
+            update_section("app", {"default_mode": mode or "product"})
+        except Exception:
+            pass
 
     def _asana(self):
         card, v = self._section("ASANA BOARDS  ·  2 configured", "+ Add board")
