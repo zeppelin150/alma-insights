@@ -12,8 +12,9 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QFileDialog, QFrame, QHBoxLayout, QLabel, QMenu, QPushButton, QSizePolicy,
-    QTextBrowser, QVBoxLayout, QWidget,
+    QFileDialog, QFrame, QHBoxLayout, QLabel, QMenu, QPlainTextEdit,
+    QPushButton, QSizePolicy, QStackedWidget, QTextBrowser, QVBoxLayout,
+    QWidget,
 )
 
 from src.ui.theme import (
@@ -120,6 +121,8 @@ class WorkbenchPage(QWidget):
     load_file_requested = Signal(str)   # dropped file path → load content
     open_chat_requested = Signal()      # request the Assistant chat in the drilldown
     existing_cards_requested = Signal() # "Existing Guru card" submenu opened → host fetches real cards
+    import_requested = Signal(str)      # "drive" | "guru" → host runs the import
+    content_edited = Signal(int, str)   # (draft_id, markdown) from the Edit view
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -127,6 +130,7 @@ class WorkbenchPage(QWidget):
         self._active_draft_id = 1
         self._current_drafts = []
         self._chip_widgets = []
+        self._current_md = ""
         self._build()
         self.set_pending_drafts(_SAMPLE_DRAFTS)
         self.show_draft(_SAMPLE_CARD)
@@ -218,6 +222,12 @@ class WorkbenchPage(QWidget):
         _upd.setStyleSheet(f"color:{ALMA_TEXT_LIGHT}; font-size:12px; border:none;")
         meta.addWidget(_upd)
         meta.addStretch(1)
+        self._preview_btn = self._view_toggle_btn("Guru preview")
+        self._preview_btn.clicked.connect(lambda: self._set_view("preview"))
+        meta.addWidget(self._preview_btn)
+        self._edit_btn = self._view_toggle_btn("Edit markdown")
+        self._edit_btn.clicked.connect(lambda: self._set_view("edit"))
+        meta.addWidget(self._edit_btn)
         v.addLayout(meta)
 
         self._body = QTextBrowser()
@@ -225,7 +235,16 @@ class WorkbenchPage(QWidget):
         self._body.setStyleSheet(
             f"QTextBrowser{{background:{ALMA_BG_ELEVATED}; border:none; color:{ALMA_TEXT_DARK}; font-size:13.5px;}}"
         )
-        v.addWidget(self._body, 1)
+        self._editor = QPlainTextEdit()
+        self._editor.setStyleSheet(
+            f"QPlainTextEdit{{background:{ALMA_BG_INSET}; border:1px solid {ALMA_BORDER_LIGHT}; "
+            f"border-radius:8px; color:{ALMA_TEXT_DARK}; "
+            f"font-family:Consolas,monospace; font-size:12.5px; padding:8px;}}"
+        )
+        self._body_stack = QStackedWidget()
+        self._body_stack.addWidget(self._body)
+        self._body_stack.addWidget(self._editor)
+        v.addWidget(self._body_stack, 1)
 
         strip = QFrame()
         strip.setStyleSheet(f"QFrame{{border:none; border-top:1px solid {ALMA_BORDER_LIGHT};}}")
@@ -246,6 +265,44 @@ class WorkbenchPage(QWidget):
         sl.addStretch(1)
         v.addWidget(strip)
         return card
+
+    # ── preview / edit toggle ─────────────────────────────────────
+    def _view_toggle_btn(self, text: str) -> QPushButton:
+        b = QPushButton(text)
+        b.setCursor(Qt.PointingHandCursor)
+        self._style_view_btn(b, active=False)
+        return b
+
+    def _style_view_btn(self, b: QPushButton, *, active: bool):
+        bg = "#DCEFEC" if active else ALMA_BG_ELEVATED
+        fg = _TEAL if active else ALMA_TEXT_MID
+        border = _TEAL if active else ALMA_BORDER
+        b.setStyleSheet(
+            f"QPushButton{{background:{bg}; color:{fg}; border:1px solid {border}; "
+            f"border-radius:7px; padding:4px 12px; font-size:11px; font-weight:600;}}"
+        )
+
+    def _set_view(self, mode: str):
+        if mode == "edit":
+            self._editor.setPlainText(self._current_md)
+            self._body_stack.setCurrentWidget(self._editor)
+        else:
+            if self._body_stack.currentWidget() is self._editor:
+                new_md = self._editor.toPlainText()
+                if new_md != self._current_md:
+                    self._current_md = new_md
+                    self.content_edited.emit(self._active_draft_id, new_md)
+            self._render_body()
+            self._body_stack.setCurrentWidget(self._body)
+        self._style_view_btn(self._preview_btn, active=mode == "preview")
+        self._style_view_btn(self._edit_btn, active=mode == "edit")
+
+    def _render_body(self):
+        try:
+            from src.ui.pages.enablement.guru_preview import render_preview
+            render_preview(self._body, self._current_md)
+        except Exception:
+            self._body.setMarkdown(self._current_md)
 
     # Demo placeholder Guru cards offered under "Push to Guru › Existing card".
     _DEMO_CARDS = ("Setting up SSO for Providers", "Returns & Refunds Policy", "Payments v2 Overview")
@@ -280,6 +337,20 @@ class WorkbenchPage(QWidget):
         )
         up.clicked.connect(self._on_upload)
         h.addWidget(up)
+
+        # Import ▾  (Google Doc by URL / existing Guru card in native format)
+        imp = self._secondary_btn("Import")
+        imenu = QMenu(imp)
+        imenu.addAction(
+            "Google Doc / Drive URL…",
+            lambda: self.import_requested.emit("drive"),
+        )
+        imenu.addAction(
+            "Existing Guru card…",
+            lambda: self.import_requested.emit("guru"),
+        )
+        imp.setMenu(imenu)
+        h.addWidget(imp)
 
         # Push to Guru ▾  (New card / Existing card → inline edit)
         guru = self._secondary_btn("Push to Guru")
@@ -334,7 +405,11 @@ class WorkbenchPage(QWidget):
         self._breadcrumb.setText(card.get("breadcrumb", ""))
         self._title.setText(card.get("title", ""))
         self._source.setText(card.get("source", ""))
-        self._body.setMarkdown(card.get("markdown", ""))
+        self._current_md = card.get("markdown", "")
+        self._render_body()
+        self._body_stack.setCurrentWidget(self._body)
+        self._style_view_btn(self._preview_btn, active=True)
+        self._style_view_btn(self._edit_btn, active=False)
 
     def set_active_draft(self, draft_id):
         self.set_pending_drafts(self._current_drafts, active_id=draft_id)

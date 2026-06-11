@@ -107,3 +107,47 @@ def test_select_tab_and_tab_bar_visibility(qapp, empty_db):
     assert page.tabs.tabBar().isHidden()
     page.set_tab_bar_visible(True)
     assert not page.tabs.tabBar().isHidden()
+
+
+def test_demo_guru_import_publish_keeps_card_id(qapp, empty_db):
+    """P4 gate: import fixture card -> draft linked -> publish UPDATES it."""
+    from src.data import enablement_store as store
+    page = _page(empty_db, demo=True)
+    page._demo_import("guru")
+    drafts = store.list_drafts(page._conn(), status="pending")
+    imported = [d for d in drafts if (d.get("source_ref") or "").startswith("guru:")]
+    assert imported, "demo guru import should create a linked pending draft"
+    did = imported[0]["id"]
+    assert imported[0]["card_id"] == "demo-card-payments"
+    res = store.publish_draft(page._conn(), did)
+    assert res["ok"] and res["card_id"] == "demo-card-payments"
+
+
+def test_demo_style_guide_action(qapp, empty_db, monkeypatch):
+    """P4 gate: the demo style-guide action stores a guide the generator sees."""
+    state = {}
+    import src.data.settings_manager as sm
+    monkeypatch.setattr(sm, "get_section",
+                        lambda name, default=None: state.get(name, default if default is not None else {}))
+    monkeypatch.setattr(sm, "set_section",
+                        lambda name, value: state.__setitem__(name, dict(value)) or True)
+    from src.data import enablement_store as store
+    page = _page(empty_db, demo=True)
+    page._on_style_guide_action("drive")
+    assert "numbered steps" in store.get_style_guide(page._conn())
+    block = store.style_guide_block(page._conn())
+    assert "STYLE GUIDE START" in block
+
+
+def test_workbench_edit_view_roundtrip(qapp, empty_db):
+    """Edit view commits content back through content_edited on toggle."""
+    page = _page(empty_db, demo=True)
+    wb = page.workbench
+    got = []
+    wb.content_edited.connect(lambda did, md: got.append((did, md)))
+    wb.show_draft({"title": "T", "markdown": "original"})
+    wb._set_view("edit")
+    wb._editor.setPlainText("edited body")
+    wb._set_view("preview")
+    assert got and got[0][1] == "edited body"
+    assert wb._current_md == "edited body"

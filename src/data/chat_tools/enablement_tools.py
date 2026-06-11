@@ -72,10 +72,15 @@ def _revise_draft_impl(conn, draft_id, instruction) -> dict:
     client = build_client_for_task("enablement_card_gen")
     if client is None:
         return {"ok": False, "error": "no_llm_client"}
+    try:
+        style_block = store.style_guide_block(conn)
+    except Exception:
+        style_block = ""
     prompt = (
         "You are revising a Guru knowledge-base card. Apply the requested change "
         "and return the COMPLETE revised card in this exact format:\n"
-        "TITLE: <card title>\n---\n<card body in Markdown>\n\n"
+        "TITLE: <card title>\n---\n<card body in Markdown>\n"
+        f"{style_block}\n"
         f"REQUESTED CHANGE:\n{instruction}\n\n"
         f"CURRENT CARD:\nTITLE: {draft.get('title', '')}\n---\n{draft.get('content', '')}\n"
     )

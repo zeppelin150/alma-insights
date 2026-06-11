@@ -206,6 +206,143 @@ def set_draft_card_id(conn: sqlite3.Connection, draft_id: int, card_id: str) -> 
         )
 
 
+# ── imports (Workbench: bring outside content in) ────────────────────
+
+_GURU_CARD_URL = re.compile(r"app\.getguru\.com/card/([A-Za-z0-9_-]+)")
+_DRIVE_FILE_URL = re.compile(r"(?:/d/|[?&]id=)([A-Za-z0-9_-]{20,})")
+
+
+def parse_guru_card_ref(ref: str) -> str:
+    """Accept a raw Guru card id or an app.getguru.com card URL."""
+    ref = (ref or "").strip()
+    m = _GURU_CARD_URL.search(ref)
+    if m:
+        return m.group(1)
+    return ref.rstrip("/").split("/")[-1] if "/" in ref else ref
+
+
+def parse_drive_file_ref(ref: str) -> str:
+    """Accept a raw Drive file id or a docs.google.com / drive URL."""
+    ref = (ref or "").strip()
+    m = _DRIVE_FILE_URL.search(ref)
+    return m.group(1) if m else ref
+
+
+def import_guru_card_to_draft(conn: sqlite3.Connection, guru_client, card_ref: str) -> dict:
+    """Import an existing Guru card as an editable draft.
+
+    The card's HTML is converted to markdown for editing and the draft is
+    linked via set_draft_card_id, so publish_draft takes the UPDATE branch
+    (never silently creating a duplicate card). A lossy conversion is
+    recoverable: publish stays human-gated and source_ref records the
+    origin card.
+    """
+    from src.data.html_markdown import html_to_markdown
+
+    card_id = parse_guru_card_ref(card_ref)
+    if not card_id:
+        return {"ok": False, "error": "card_ref_required"}
+    try:
+        card = guru_client.get_card(card_id)
+    except Exception as exc:  # noqa: BLE001 — surface as a failed import
+        return {"ok": False, "error": f"guru_fetch_failed: {exc}"}
+    if not card or not card.get("id"):
+        return {"ok": False, "error": f"card_not_found: {card_id}"}
+
+    markdown = html_to_markdown(card.get("content", ""))
+    draft_id = save_card_draft(
+        conn,
+        title=card.get("title") or "Untitled card",
+        content=markdown,
+        source_ref=f"guru:{card['id']}",
+        draft_type="card_update",
+    )
+    set_draft_card_id(conn, draft_id, card["id"])
+    return {"ok": True, "draft_id": draft_id, "card_id": card["id"],
+            "title": card.get("title", ""), "content": markdown}
+
+
+def import_drive_doc(conn: sqlite3.Connection, drive_reader, drive_ref: str) -> dict:
+    """Import a Google Doc / Drive file by URL or file id into the store."""
+    file_id = parse_drive_file_ref(drive_ref)
+    if not file_id:
+        return {"ok": False, "error": "drive_ref_required"}
+    try:
+        meta = drive_reader.get_file(file_id)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"drive_fetch_failed: {exc}"}
+    if not meta or not meta.get("id"):
+        return {"ok": False, "error": f"file_not_found: {file_id}"}
+    try:
+        text = drive_reader.export_text(meta["id"], meta.get("mime_type", ""))
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"drive_export_failed: {exc}"}
+    doc_id = save_document(
+        conn,
+        source="drive",
+        name=meta.get("name") or "Untitled",
+        source_ref=meta["id"],
+        mime_type=meta.get("mime_type", ""),
+        web_url=meta.get("url", ""),
+        modified_time=meta.get("modified_time"),
+        full_text=text or "",
+    )
+    return {"ok": True, "doc_id": doc_id, "name": meta.get("name", ""),
+            "chars": len(text or "")}
+
+
+# ── style guide (first-class input to card generation/revision) ──────
+
+_STYLE_GUIDE_KEY = "style_guide_doc_id"
+
+
+def get_style_guide(conn: sqlite3.Connection) -> str:
+    """The operator's card style guide text ('' when unset)."""
+    try:
+        from src.data.settings_manager import get_section
+        doc_id = (get_section("enablement", {}) or {}).get(_STYLE_GUIDE_KEY, "")
+        if not doc_id:
+            return ""
+        doc = get_document(conn, str(doc_id))
+        return (doc or {}).get("full_text", "") or ""
+    except Exception:
+        return ""
+
+
+def set_style_guide(conn: sqlite3.Connection, text: str, *,
+                    name: str = "Card style guide") -> str:
+    """Store/replace the style guide as an enablement document + pointer."""
+    from src.data.settings_manager import get_section, set_section
+    cfg = dict(get_section("enablement", {}) or {})
+    doc_id = str(cfg.get(_STYLE_GUIDE_KEY) or "style-guide")
+    doc_id = save_document(
+        conn, source="manual", name=name, doc_id=doc_id, full_text=text or ""
+    )
+    cfg[_STYLE_GUIDE_KEY] = doc_id
+    set_section("enablement", cfg)
+    return doc_id
+
+
+def clear_style_guide() -> None:
+    from src.data.settings_manager import get_section, set_section
+    cfg = dict(get_section("enablement", {}) or {})
+    if cfg.pop(_STYLE_GUIDE_KEY, None) is not None:
+        set_section("enablement", cfg)
+
+
+def style_guide_block(conn: sqlite3.Connection) -> str:
+    """The prompt block injected into card-gen/revise ('' when unset)."""
+    text = get_style_guide(conn)
+    if not text.strip():
+        return ""
+    return (
+        "\nSTYLE GUIDE — follow it strictly for tone, structure and formatting:\n"
+        "--- STYLE GUIDE START ---\n"
+        f"{text.strip()}\n"
+        "--- STYLE GUIDE END ---\n"
+    )
+
+
 # ── generation + publish ─────────────────────────────────────────────
 
 def _parse_card(response: str, fallback_title: str) -> tuple[str, str]:
@@ -243,12 +380,14 @@ def draft_card_from_document(
 
     template = _CARD_PROMPT.read_text(encoding="utf-8") if _CARD_PROMPT.exists() else (
         "Turn this document into a Guru card.\nSOURCE: {doc_name}\n{doc_text}\n"
+        "{style_guide}"
         "Return:\nTITLE: <title>\n---\n<body>"
     )
     prompt = template.format(
         doc_name=doc.get("name", "Untitled"),
         doc_text=doc.get("full_text", ""),
         collection=collection,
+        style_guide=style_guide_block(conn),
     )
     response = llm_client.generate(prompt)
     title, content = _parse_card(response, fallback_title=doc.get("name", "Untitled"))

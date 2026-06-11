@@ -23,6 +23,7 @@ class SettingsPage(QWidget):
 
     asana_setup_requested = Signal()       # "Set up with Renn" clicked
     drive_folder_added = Signal(str, str)  # (folder_id, display_name) from "+ Add folder"
+    style_guide_action = Signal(str)       # "paste" | "drive" | "clear"
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -35,6 +36,7 @@ class SettingsPage(QWidget):
         outer.addWidget(self._asana())
         outer.addWidget(self._drive())
         outer.addWidget(self._guru())
+        outer.addWidget(self._style_guide())
         outer.addStretch(1)
 
     # ── helpers ───────────────────────────────────────────────────
@@ -140,6 +142,48 @@ class SettingsPage(QWidget):
         cfg = dict(get_section("enablement", {}) or {})
         cfg["provider"] = provider
         set_section("enablement", cfg)
+
+    def _style_guide(self):
+        """Style guide card — the first-class input to card generation."""
+        card, v = self._section(
+            "STYLE GUIDE", "Paste…",
+            lambda: self.style_guide_action.emit("paste"),
+        )
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self._style_guide_status = self._text("Not set", color=ALMA_TEXT_LIGHT)
+        row.addWidget(self._style_guide_status)
+        row.addStretch(1)
+        from_drive = QPushButton("From Drive…")
+        from_drive.setCursor(Qt.PointingHandCursor)
+        from_drive.setStyleSheet(
+            f"QPushButton{{background:{ALMA_BG_ELEVATED}; color:{ALMA_TEXT_DARK}; "
+            f"border:1px solid {ALMA_BORDER}; border-radius:7px; padding:5px 12px; "
+            f"font-size:11px; font-weight:600;}}"
+        )
+        from_drive.clicked.connect(lambda: self.style_guide_action.emit("drive"))
+        row.addWidget(from_drive)
+        clear = QPushButton("Clear")
+        clear.setCursor(Qt.PointingHandCursor)
+        clear.setStyleSheet(
+            f"QPushButton{{background:transparent; color:{ALMA_TEXT_LIGHT}; "
+            f"border:none; padding:5px 8px; font-size:11px; font-weight:600;}}"
+        )
+        clear.clicked.connect(lambda: self.style_guide_action.emit("clear"))
+        row.addWidget(clear)
+        v.addLayout(row)
+        hint = self._text(
+            "Card generation and Renn's revisions follow this guide when set.",
+            color=ALMA_TEXT_LIGHT,
+        )
+        v.addWidget(hint)
+        return card
+
+    def set_style_guide_status(self, text: str):
+        try:
+            self._style_guide_status.setText(text)
+        except Exception:
+            pass
 
     def _default_mode_combo(self):
         """Startup-mode choice — same setting as the product Settings page."""

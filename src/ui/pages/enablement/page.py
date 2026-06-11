@@ -62,11 +62,32 @@ RENN_SYSTEM_PROMPT = (
 )
 
 
+class _DemoGuruClient:
+    """Canned get_card for the demo-mode 'import existing Guru card' flow —
+    exercises the real store/converter path with fake content."""
+
+    def get_card(self, card_id):
+        return {
+            "id": card_id,
+            "title": "Payments v2 Overview",
+            "content": (
+                "<h2>What changed</h2>"
+                "<ol><li>Unified remittance ledger across payers</li>"
+                "<li>Auto-matching for ERA lines</li></ol>"
+                "<p><strong>Rollout:</strong> June 30, 2026.</p>"
+                "<h2>FAQ</h2>"
+                "<p><strong>Do saved replies change?</strong> Yes — update "
+                "links to the new ledger view.</p>"
+            ),
+        }
+
+
 class EnablementPage(QWidget):
     """The Enablement tab: Calendar · Tasks · Workbench · Settings."""
 
     connection_changed = Signal()   # compat with GuruPage/GuruWipPage
     connection_status_ready = Signal(str, bool, str)  # (source_key, ok, detail) from the check worker
+    import_finished = Signal(dict)  # off-thread import result → UI refresh
 
     def __init__(self, db=None, demo: bool = True, parent=None):
         super().__init__(parent)
@@ -136,9 +157,14 @@ class EnablementPage(QWidget):
         self.calendar.event_clicked.connect(self._on_calendar_event)
         self.settings.asana_setup_requested.connect(self._on_asana_setup)
         self.workbench.existing_cards_requested.connect(self._fetch_existing_cards)
+        self.workbench.import_requested.connect(self._on_import_requested)
+        self.workbench.content_edited.connect(self._on_content_edited)
         self.settings.drive_folder_added.connect(self._add_drive_folder)
+        self.settings.style_guide_action.connect(self._on_style_guide_action)
+        self.import_finished.connect(self._on_import_finished)
         self.connection_status_ready.connect(
             lambda key, ok, detail: self.settings.set_connection_status(key, ok, detail))
+        self._refresh_style_guide_status()
 
         if not self.demo:
             try:
@@ -662,6 +688,195 @@ class EnablementPage(QWidget):
             f"  •  Save it to Google Drive\n"
             f"Tell me what you'd like, or use the buttons below.")])
         self._open_chat()
+
+    # ── workbench imports (Google Doc / existing Guru card) ────────
+
+    def _on_import_requested(self, kind: str):
+        if self.demo:
+            self._demo_import(kind)
+            return
+        if kind == "guru":
+            if self._guru_client is None:
+                self._set_status("Connect Guru first (Settings → Guru).")
+                return
+            from src.ui.pages.enablement.card_picker import GuruCardPickerDialog
+            dlg = GuruCardPickerDialog(self._guru_client, self)
+            if dlg.exec() and dlg.selected_card_id:
+                self._run_import("guru", dlg.selected_card_id)
+        else:
+            from PySide6.QtWidgets import QInputDialog
+            ref, ok = QInputDialog.getText(
+                self, "Import from Drive", "Google Doc / Drive URL or file id:"
+            )
+            if ok and ref.strip():
+                self._run_import("drive", ref.strip())
+
+    def _run_import(self, kind: str, ref: str):
+        """Network imports run off-thread; results come back via the
+        import_finished signal (same pattern as check_connections)."""
+        import threading
+        self._set_status("Importing…")
+        db_path = self._engine_db_path()
+        client = self._guru_client
+
+        def worker():
+            from src.data import enablement_store as store
+            from src.data.connection_factory import get_connection
+            res = {"ok": False, "error": "unknown"}
+            conn = None
+            try:
+                conn = get_connection(db_path)
+                if kind == "guru":
+                    res = store.import_guru_card_to_draft(conn, client, ref)
+                else:
+                    from src.data.drive_reader import DriveReader
+                    reader = DriveReader()
+                    if not reader.is_configured():
+                        res = {"ok": False, "error":
+                               "Drive read is not configured (Settings → Drive)."}
+                    else:
+                        res = store.import_drive_doc(conn, reader, ref)
+                        if res.get("ok") and kind == "style":
+                            doc = store.get_document(conn, res["doc_id"]) or {}
+                            store.set_style_guide(
+                                conn, doc.get("full_text", ""),
+                                name=doc.get("name") or "Card style guide",
+                            )
+                        elif res.get("ok"):
+                            try:
+                                from src.gemini.client_factory import build_client_for_task
+                                llm = build_client_for_task("enablement_card_gen")
+                                draft = store.draft_card_from_document(
+                                    conn, res["doc_id"], llm
+                                )
+                                res["draft_id"] = draft.get("id")
+                            except Exception as exc:  # noqa: BLE001
+                                res["draft_error"] = str(exc)
+            except Exception as exc:  # noqa: BLE001
+                res = {"ok": False, "error": str(exc)}
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+            res["kind"] = kind
+            self.import_finished.emit(res)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_import_finished(self, res: dict):
+        if not res.get("ok"):
+            self._set_status(f"Import failed: {res.get('error')}")
+            self.chat.add_message("a", f"Import failed: {res.get('error')}")
+            return
+        kind = res.get("kind")
+        if kind == "style":
+            self._set_status("Style guide imported from Drive — generation now follows it.")
+            self._refresh_style_guide_status()
+            return
+        if kind == "guru":
+            self._set_status(
+                f"Imported Guru card “{res.get('title', '')}” as an editable draft — "
+                "publishing will update the same card."
+            )
+        else:
+            note = f"Imported “{res.get('name', 'document')}” ({res.get('chars', 0):,} chars)"
+            if res.get("draft_id"):
+                note += f" and drafted a card from it"
+            elif res.get("draft_error"):
+                note += f" (auto-draft skipped: {res['draft_error']})"
+            self._set_status(note + ".")
+        self._load_live(prefer_draft_id=res.get("draft_id"))
+
+    def _demo_import(self, kind: str):
+        """Scripted imports against the demo DB — same store code, canned data."""
+        from src.data import enablement_store as store
+        conn = self._conn()
+        if kind == "guru":
+            res = store.import_guru_card_to_draft(
+                conn, _DemoGuruClient(), "demo-card-payments"
+            )
+            self._set_status("Imported demo Guru card as an editable draft (demo).")
+            self._load_live(prefer_draft_id=res.get("draft_id"))
+        else:
+            doc_id = store.save_document(
+                conn, source="drive", name="Q3 Pricing Update.gdoc",
+                full_text=(
+                    "Alma is updating provider pricing tiers effective Aug 1, 2026. "
+                    "Tier A keeps current rates; Tier B moves to usage-based billing. "
+                    "Support owners should update saved replies by July 15."
+                ),
+            )
+            from src.data.enablement_sim import _StubLLM
+            draft = store.draft_card_from_document(conn, doc_id, _StubLLM())
+            self._set_status("Imported demo Google Doc and drafted a card (demo).")
+            self._load_live(prefer_draft_id=draft.get("id"))
+
+    def _on_content_edited(self, draft_id, md: str):
+        """Persist Edit-view changes to the draft (pushed drafts stay frozen)."""
+        from src.data import enablement_store as store
+        try:
+            did = int(draft_id)
+            draft = store.get_draft(self._conn(), did)
+            if draft and draft.get("status") != "pushed":
+                store.update_draft_content(self._conn(), did, content=md)
+                self._set_status(f"Draft {did} updated from the editor.")
+        except Exception as exc:  # noqa: BLE001
+            self._set_status(f"Edit save failed: {exc}")
+
+    # ── style guide ─────────────────────────────────────────────────
+
+    def _on_style_guide_action(self, action: str):
+        from src.data import enablement_store as store
+        conn = self._conn()
+        if action == "paste":
+            from PySide6.QtWidgets import QInputDialog
+            text, ok = QInputDialog.getMultiLineText(
+                self, "Card style guide",
+                "Paste the style guide card generation should follow:",
+                store.get_style_guide(conn),
+            )
+            if ok:
+                if text.strip():
+                    store.set_style_guide(conn, text)
+                    self._set_status("Style guide saved — card generation and revisions now follow it.")
+                else:
+                    store.clear_style_guide()
+                    self._set_status("Style guide cleared.")
+        elif action == "drive":
+            if self.demo:
+                store.set_style_guide(
+                    conn,
+                    "Tone: confident, plain language. Cards open with a one-line "
+                    "summary, use numbered steps for any process, and end with a "
+                    "short FAQ.",
+                    name="Enablement style guide (demo)",
+                )
+                self._set_status("Demo style guide loaded.")
+            else:
+                from PySide6.QtWidgets import QInputDialog
+                ref, ok = QInputDialog.getText(
+                    self, "Style guide from Drive", "Google Doc URL or file id:"
+                )
+                if ok and ref.strip():
+                    self._run_import("style", ref.strip())
+                    return
+        elif action == "clear":
+            store.clear_style_guide()
+            self._set_status("Style guide cleared.")
+        self._refresh_style_guide_status()
+
+    def _refresh_style_guide_status(self):
+        try:
+            from src.data import enablement_store as store
+            text = store.get_style_guide(self._conn())
+            if text.strip():
+                self.settings.set_style_guide_status(f"Set — {len(text):,} chars")
+            else:
+                self.settings.set_style_guide_status("Not set")
+        except Exception:
+            pass
 
     def _on_asana_setup(self):
         """Setup mode: Renn discovers Asana GIDs and writes the (scoped) board config."""

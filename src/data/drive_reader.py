@@ -93,6 +93,19 @@ class DriveReader:
                 break
         return files
 
+    def get_file(self, file_id: str) -> dict:
+        """Metadata for a single file (the import-by-URL Workbench path)."""
+        svc = self._build_service()
+        f = svc.files().get(
+            fileId=file_id,
+            fields="id, name, mimeType, webViewLink, modifiedTime",
+        ).execute()
+        return {
+            "id": f.get("id"), "name": f.get("name"),
+            "mime_type": f.get("mimeType"), "url": f.get("webViewLink"),
+            "modified_time": f.get("modifiedTime"),
+        }
+
     def export_text(self, file_id: str, mime_type: str) -> str:
         """Plain text of a doc: native Google Docs via export, others via download."""
         svc = self._build_service()

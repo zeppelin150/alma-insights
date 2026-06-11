@@ -14,7 +14,7 @@ Write a Guru card that:
 2. Calls out any rollout or due dates in a short callout.
 3. Uses clear headings, numbered steps where there is a process, and a brief FAQ.
 4. Stays faithful to the document — do not invent facts.
-
+{style_guide}
 Return exactly:
 TITLE: <card title>
 ---
