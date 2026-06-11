@@ -33,9 +33,15 @@ class SettingsPage(QWidget):
         outer.setSpacing(12)
         outer.addLayout(self._intro())
         outer.addWidget(self._connections())
+        # Shared credentials/LLM panel — Claude+Gemini keys, model, routing,
+        # Guru email+PAT, Google service-account + per-user OAuth. Same widget
+        # the product Settings embeds (External section), so configuration
+        # carries over between both modes via one keyring/settings store.
+        from src.ui.widgets.credentials_panel import CredentialsPanel
+        self.credentials = CredentialsPanel(sections=("llm", "external"))
+        outer.addWidget(self.credentials)
         outer.addWidget(self._asana())
         outer.addWidget(self._drive())
-        outer.addWidget(self._guru())
         outer.addWidget(self._style_guide())
         outer.addStretch(1)
 

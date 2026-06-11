@@ -902,6 +902,17 @@ class SettingsPage(QWidget):
     def _build_integrations_tab(self, lay):
         """Build Integrations tab: Lightdash, Datasets, Google Drive, Interventions."""
 
+        # ── Guru + Google credentials (shared panel) ──
+        # The same widget the enablement Settings embeds — Guru email+PAT,
+        # Google service-account file, and the per-user "Connect my Google
+        # account" OAuth flow. LLM provider config stays in the AI Provider
+        # tab here; both write the same keyring/settings store.
+        from src.ui.widgets.credentials_panel import CredentialsPanel
+        self.credentials = CredentialsPanel(sections=("external",))
+        self.credentials.settings_changed.connect(self.settings_changed.emit)
+        lay.addWidget(self.credentials)
+        lay.addSpacing(24)
+
         # ── Lightdash Connection ──
         lay.addWidget(self._section_label("LIGHTDASH CONNECTION"))
         lay.addSpacing(8)
