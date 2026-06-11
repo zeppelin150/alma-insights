@@ -84,6 +84,7 @@ def _ensure_registered():
         handle_query_business_drive,
         handle_asana_discover,
         handle_set_asana_board_config,
+        handle_create_card_draft,
         handle_revise_draft,
         handle_push_guru_draft,
         handle_render_card_preview,
@@ -107,6 +108,8 @@ def _ensure_registered():
     _register("set_asana_board_config", handle_set_asana_board_config,
               phi_level=0, desc="Save an Asana board's config using resolved GIDs (the assistant's only write)")
     # ── Enablement Workbench action tools ──
+    _register("create_card_draft", handle_create_card_draft,
+              phi_level=0, desc="Create a new Guru card draft from a title + Markdown content")
     _register("revise_draft", handle_revise_draft,
               phi_level=0, desc="Revise a Guru card draft with an instruction and re-render it")
     _register("push_guru_draft", handle_push_guru_draft,

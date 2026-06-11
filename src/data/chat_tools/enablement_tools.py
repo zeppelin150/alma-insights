@@ -111,6 +111,17 @@ def _push_guru_draft_impl(conn, draft_id, collection_id=None) -> dict:
     return store.publish_draft(conn, did, guru_client=client, collection_id=collection_id)
 
 
+def _create_card_draft_impl(conn, title, content) -> dict:
+    from src.data import enablement_store as store
+    title = (title or "").strip()
+    content = (content or "").strip()
+    if not title or not content:
+        return {"ok": False, "error": "title_and_content_required"}
+    did = store.save_card_draft(conn, title=title, content=content)
+    return {"ok": True, "draft_id": did, "status": "pending",
+            "note": "Draft saved for review. Publish with push_guru_draft."}
+
+
 def _render_card_preview_impl(conn, draft_id) -> dict:
     from src.data import enablement_store as store
     try:
@@ -234,6 +245,10 @@ def handle_revise_draft(conn, args, filters):
 
 def handle_push_guru_draft(conn, args, filters):
     return _push_guru_draft_impl(conn, args.get("draft_id"), args.get("collection_id"))
+
+
+def handle_create_card_draft(conn, args, filters):
+    return _create_card_draft_impl(conn, args.get("title", ""), args.get("content", ""))
 
 
 def handle_render_card_preview(conn, args, filters):

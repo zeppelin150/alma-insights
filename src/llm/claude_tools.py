@@ -319,6 +319,22 @@ TOOL_DEFINITIONS = [
         },
     },
     {
+        "name": "create_card_draft",
+        "description": (
+            "Create a NEW Guru card draft from a title and Markdown content. The draft is "
+            "saved pending review — publish it with push_guru_draft. Use this to author a "
+            "card from scratch (not from a Drive document)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "The card title."},
+                "content": {"type": "string", "description": "The card body in Markdown."},
+            },
+            "required": ["title", "content"],
+        },
+    },
+    {
         "name": "revise_draft",
         "description": (
             "Revise an existing Guru card draft per an instruction (e.g. 'tighten the "
@@ -782,6 +798,11 @@ def _ent_conn(db):
     return db.get_connection() if hasattr(db, 'get_connection') else db.conn
 
 
+def _create_card_draft(args: dict, db) -> dict:
+    from src.data.chat_tools.enablement_tools import _create_card_draft_impl
+    return _create_card_draft_impl(_ent_conn(db), args.get("title", ""), args.get("content", ""))
+
+
 def _revise_draft(args: dict, db) -> dict:
     from src.data.chat_tools.enablement_tools import _revise_draft_impl
     return _revise_draft_impl(_ent_conn(db), args.get("draft_id"), args.get("instruction", ""))
@@ -865,6 +886,7 @@ _DISPATCH = {
     "query_business_drive": _query_business_drive,
     "asana_discover": _asana_discover,
     "set_asana_board_config": _set_asana_board_config,
+    "create_card_draft": _create_card_draft,
     "revise_draft": _revise_draft,
     "push_guru_draft": _push_guru_draft,
     "render_card_preview": _render_card_preview,

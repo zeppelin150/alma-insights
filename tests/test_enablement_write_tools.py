@@ -105,6 +105,30 @@ def test_push_guru_draft_with_creds(empty_db, mock_guru_client):
     assert S.get_draft(conn, did)["status"] == "pushed"
 
 
+def test_create_card_draft_from_scratch_then_push(empty_db, mock_guru_client):
+    """The MCP from-scratch flow: create_card_draft -> push_guru_draft."""
+    conn = empty_db.conn
+    out = _call(conn, "create_card_draft",
+                {"title": "VS Code authored card", "content": "# Body\nWritten by Claude."})
+    assert out["ok"] and out["status"] == "pending"
+    assert conn.in_transaction is False
+    d = S.get_draft(conn, out["draft_id"])
+    assert d["title"] == "VS Code authored card"
+
+    guru_mock = MagicMock()
+    guru_mock.load_credentials.return_value = ("ops@alma.com", "tok")
+    guru_mock.return_value = mock_guru_client
+    with patch("src.data.guru_client.GuruClient", guru_mock):
+        pub = _call(conn, "push_guru_draft", {"draft_id": out["draft_id"], "collection_id": "coll-1"})
+    assert pub["ok"] and pub["status"] == "pushed"
+    mock_guru_client.create_card.assert_called_once()
+
+
+def test_create_card_draft_requires_title_and_content(empty_db):
+    assert _call(empty_db.conn, "create_card_draft", {"title": "x"})["ok"] is False
+    assert _call(empty_db.conn, "create_card_draft", {"content": "y"})["ok"] is False
+
+
 def test_push_guru_draft_defaults_collection_from_settings(empty_db, mock_guru_client):
     """A chat-initiated push without a collection_id falls back to the operator's
     configured publish target (Renn rarely knows the Guru collection id)."""

@@ -362,6 +362,22 @@ TOOL_SCHEMAS = [
         },
     },
     {
+        "name": "create_card_draft",
+        "description": (
+            "Create a NEW Guru card draft from a title and Markdown content. The draft "
+            "is saved pending review — publish it with push_guru_draft. Use this to "
+            "author a card from scratch (not from a Drive document)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "The card title."},
+                "content": {"type": "string", "description": "The card body in Markdown."},
+            },
+            "required": ["title", "content"],
+        },
+    },
+    {
         "name": "revise_draft",
         "description": (
             "Revise an existing Guru card draft per an instruction (e.g. 'tighten "
