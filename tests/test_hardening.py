@@ -34,14 +34,19 @@ class TestTaskRouting(unittest.TestCase):
     """H1: Task routing config and build_client_for_task()."""
 
     def test_default_routes_defined(self):
-        """Default route map covers all 8 task types."""
+        """Default route map covers the core task types + the enablement lanes."""
         from src.gemini.client_factory import _DEFAULT_ROUTES
-        expected = {
+        keys = set(_DEFAULT_ROUTES.keys())
+        core = {
             "nlp_classification", "voc_analysis", "report_generation",
             "guru_analysis", "guru_content_generation",
             "watchlist_triage", "meta_analytics", "ab_comparison",
         }
-        self.assertEqual(set(_DEFAULT_ROUTES.keys()), expected)
+        self.assertTrue(core.issubset(keys))
+        # Enablement Workbench lanes (added with the live back-end build).
+        enablement = {"enablement_card_gen", "enablement_extract", "enablement_triage",
+                      "enablement_subtasks", "enablement_chat"}
+        self.assertTrue(enablement.issubset(keys))
 
     def test_phi_tasks_default_to_gemini(self):
         """PHI-bearing tasks default to Gemini."""
@@ -444,12 +449,22 @@ class TestSettingsTaskRouting(unittest.TestCase):
         self.assertIn("routes", routing)
 
     def test_task_routing_has_all_tasks(self):
-        """settings.yaml task_routing.routes has all 8 task types."""
+        """settings.yaml task_routing.routes ships the core task types.
+
+        The enablement_* lanes are intentionally NOT in the settings routes
+        table — they default via _DEFAULT_ROUTES and the enablement.provider
+        toggle (see resolve_provider_for_task), so the operator flips them with
+        one control instead of per-lane rows.
+        """
         from src.data.settings_manager import get_section
-        from src.gemini.client_factory import _DEFAULT_ROUTES
         ai_cfg = get_section("ai", {})
         routes = ai_cfg.get("task_routing", {}).get("routes", {})
-        for task in _DEFAULT_ROUTES:
+        core = {
+            "nlp_classification", "voc_analysis", "report_generation",
+            "guru_analysis", "guru_content_generation",
+            "watchlist_triage", "meta_analytics", "ab_comparison",
+        }
+        for task in core:
             self.assertIn(task, routes,
                           f"Task '{task}' missing from settings routes")
 
@@ -496,8 +511,16 @@ class TestClaudeToolDefinitions(unittest.TestCase):
     """H4: Tool definitions are valid and complete."""
 
     def test_eight_tools_defined(self):
+        # The 8 core H4 tools must always be present; the tool set has since grown
+        # (query_issues, audit_tag_correlation, enablement doc/drive/asana tools),
+        # so assert the core subset + a lower bound rather than an exact count.
         from src.llm.claude_tools import TOOL_DEFINITIONS
-        self.assertEqual(len(TOOL_DEFINITIONS), 8)
+        names = {t["name"] for t in TOOL_DEFINITIONS}
+        core = {"read_scan_summary", "get_friction_gaps", "get_sub_pattern_trends",
+                "search_guru_cards", "get_card_detail", "get_card_relationships",
+                "get_effectiveness_report", "propose_guru_edit"}
+        self.assertTrue(core.issubset(names), f"missing core tools: {core - names}")
+        self.assertGreaterEqual(len(TOOL_DEFINITIONS), 8)
 
     def test_all_tools_have_required_fields(self):
         from src.llm.claude_tools import TOOL_DEFINITIONS

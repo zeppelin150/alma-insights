@@ -217,7 +217,7 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(self._sidebar_btn("\U0001F4AC  Conversations", self.PAGE_CONVERSATIONS, "\U0001F4AC"))
         layout.addWidget(self._sidebar_btn("\U0001F4E1  Source Monitor", self.PAGE_SOURCE_MONITOR, "\U0001F4E1"))
-        layout.addWidget(self._sidebar_btn("\U0001F4DA  Guru KB", self.PAGE_GURU, "\U0001F4DA"))
+        layout.addWidget(self._sidebar_btn("\U0001F9F0  Enablement", self.PAGE_GURU, "\U0001F9F0"))
 
         # Divider
         div0 = QFrame()
@@ -642,6 +642,11 @@ class MainWindow(QMainWindow):
         """
         try:
             from src.data.settings_manager import get_section
+            en_cfg = get_section("enablement", {}) or {}
+            # New Enablement Workbench (4-tab ETL) is the default front door.
+            if en_cfg.get("workbench_enabled", True):
+                from src.ui.pages.enablement import EnablementPage
+                return EnablementPage(self.db, demo=en_cfg.get("demo_mode", True))
             guru_cfg = get_section("guru", {})
             if guru_cfg.get("experimental_ui_enabled", False):
                 return GuruPage(self.db)
@@ -649,6 +654,27 @@ class MainWindow(QMainWindow):
             # If settings load fails, default to the safer WIP page.
             pass
         return GuruWipPage(self.db)
+
+    def _wire_enablement_monitor(self):
+        """Build + start the Enablement source monitor (live mode only).
+
+        Demo mode never polls real Asana/Drive. The monitor's ``changed`` signal
+        refreshes the four pages; its background timers poll each configured source.
+        """
+        if getattr(self, "_enablement_monitor", None):
+            return
+        try:
+            from src.data.settings_manager import get_section
+            en = get_section("enablement", {}) or {}
+            if en.get("demo_mode", True):
+                return
+            from src.data.enablement_monitor import EnablementMonitor
+            self._enablement_monitor = EnablementMonitor(self.db)
+            self.guru_page.set_monitor(self._enablement_monitor)
+            self._enablement_monitor.start(int(en.get("poll_interval_seconds", 300)))
+        except Exception as exc:  # noqa: BLE001
+            import logging
+            logging.getLogger("alma.main").debug("enablement monitor skipped: %s", exc)
 
     def _setup_guru(self):
         """Initialize Guru client and pipelines if credentials are configured.
@@ -660,6 +686,28 @@ class MainWindow(QMainWindow):
         # The WIP placeholder defines the same setter API as GuruPage
         # but ignores everything. Skip the pipeline construction entirely
         # to avoid running unnecessary DB queries at startup.
+        if type(self.guru_page).__name__ == "EnablementPage":
+            # Enablement Workbench publishes via guru_content_drafts; it needs only
+            # the Guru client, not the friction/content/effectiveness pipelines.
+            try:
+                from src.data.guru_client import GuruClient
+                email, token = GuruClient.load_credentials()
+                if email and token:
+                    self.guru_page.set_guru_client(GuruClient(email, token))
+            except Exception:
+                pass
+            self._wire_enablement_monitor()
+            try:
+                self.guru_page.check_connections()
+            except Exception:
+                pass
+            if not getattr(self, "_guru_signal_wired", False):
+                try:
+                    self.guru_page.connection_changed.connect(self._setup_guru)
+                    self._guru_signal_wired = True
+                except Exception:
+                    pass
+            return
         if isinstance(self.guru_page, GuruWipPage):
             return
         try:

@@ -1,0 +1,108 @@
+"""Shared widget helpers for the Enablement pages (Alma theme)."""
+
+from __future__ import annotations
+
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QFrame, QLabel, QSizePolicy
+
+from src.ui.theme import (
+    ALMA_BG_ELEVATED, ALMA_BORDER, ALMA_BORDER_LIGHT, ALMA_ERROR, ALMA_GREEN_LIGHT,
+    ALMA_INFO, ALMA_SUCCESS, ALMA_TEXT_DARK, ALMA_TEXT_LIGHT, ALMA_TEXT_MID, ALMA_WARNING,
+)
+
+_TEAL = "#0D7D72"
+
+# kind → (tint background, text colour)
+TINT = {
+    "drive": ("#E4ECF5", ALMA_INFO), "guru": ("#DCEFEC", _TEAL),
+    "asana": ("#F8E6E1", "#C2543F"), "high": ("#F7E2E2", ALMA_ERROR),
+    "normal": ("#ECEAE5", ALMA_TEXT_LIGHT), "low": ("#E6EDEF", "#5A7A86"),
+    "open": ("#E2ECF4", ALMA_INFO), "in_progress": ("#F6EBDD", ALMA_WARNING),
+    "done": ("#E4EFE9", ALMA_SUCCESS), "draft": ("#F6EBDD", ALMA_WARNING),
+}
+DOT = {"open": ALMA_INFO, "in_progress": ALMA_WARNING, "done": ALMA_SUCCESS}
+
+
+def badge(text: str, kind: str) -> QLabel:
+    bg, fg = TINT.get(kind, ("#ECEAE5", ALMA_TEXT_LIGHT))
+    lbl = QLabel(text)
+    lbl.setStyleSheet(
+        f"background:{bg}; color:{fg}; border-radius:10px; padding:2px 10px; "
+        f"font-size:11px; font-weight:600; border:none;"
+    )
+    lbl.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+    return lbl
+
+
+def pill(text: str, bg: str, fg: str) -> QLabel:
+    lbl = QLabel(text)
+    lbl.setStyleSheet(
+        f"background:{bg}; color:{fg}; border-radius:12px; padding:4px 11px; "
+        f"font-size:12px; font-weight:600; border:none;"
+    )
+    lbl.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+    return lbl
+
+
+def card_frame() -> QFrame:
+    f = QFrame()
+    f.setStyleSheet(
+        f"QFrame{{background:{ALMA_BG_ELEVATED}; border:1px solid {ALMA_BORDER_LIGHT}; "
+        f"border-radius:12px;}}"
+    )
+    return f
+
+
+def section_label(text: str) -> QLabel:
+    lbl = QLabel(text)
+    lbl.setStyleSheet(
+        f"color:{ALMA_TEXT_LIGHT}; font-size:11px; font-weight:700; "
+        f"letter-spacing:0.7px; border:none;"
+    )
+    return lbl
+
+
+def field(text: str, w: int | None = None, strong: bool = False) -> QLabel:
+    """A read-only widget that looks like a form field / dropdown value."""
+    lbl = QLabel(text)
+    lbl.setFixedHeight(30)
+    if w:
+        lbl.setFixedWidth(w)
+        lbl.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+    else:
+        lbl.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+    color = ALMA_TEXT_DARK if strong else ALMA_TEXT_MID
+    lbl.setStyleSheet(
+        f"background:{ALMA_BG_ELEVATED}; color:{color}; border:1px solid {ALMA_BORDER}; "
+        f"border-radius:7px; padding:4px 12px; font-size:12.5px;"
+    )
+    return lbl
+
+
+class Toggle(QFrame):
+    """A clickable on/off switch (track + knob, no glyphs). Flips on click."""
+
+    def __init__(self, on: bool = True, parent=None):
+        super().__init__(parent)
+        self.on = on
+        self.setFixedSize(34, 18)
+        self.setCursor(Qt.PointingHandCursor)
+        self._knob = QLabel(self)
+        self._knob.setFixedSize(14, 14)
+        self._render()
+
+    def _render(self):
+        self.setStyleSheet(
+            f"background:{ALMA_GREEN_LIGHT if self.on else ALMA_BORDER}; border-radius:9px; border:none;"
+        )
+        self._knob.setStyleSheet("background:white; border-radius:7px;")
+        self._knob.move(18 if self.on else 2, 2)
+
+    def mousePressEvent(self, e):
+        self.on = not self.on
+        self._render()
+        super().mousePressEvent(e)
+
+
+def toggle(on: bool = True) -> "Toggle":
+    return Toggle(on)

@@ -689,6 +689,22 @@ class ScanOrchestrator:
         except Exception as e:
             logger.debug(f"Failed to emit scan event: {e}")
 
+    def _provider_label(self) -> str:
+        """Human-readable provider name for scan event messages.
+
+        Prefers the provider resolved at scan start (``self._provider`` when
+        present); otherwise derives it from the active model string. This keeps
+        delivery_drop / status messages truthful under both Gemini and Claude
+        without threading provider state through every call site.
+        """
+        prov = getattr(self, "_provider", None)
+        if not prov:
+            model = (self._model or "").lower()
+            prov = "claude" if any(
+                tok in model for tok in ("claude", "haiku", "sonnet", "opus")
+            ) else "gemini"
+        return "Claude" if prov == "claude" else "Gemini"
+
     def _load_model_from_config(self):
         """Resolve the active Gemini model.
 
@@ -1659,7 +1675,7 @@ class ScanOrchestrator:
             )
             self._emit_event(
                 scan_id, 'delivery_drop', 'warn',
-                f'Batch {batch_num}: Gemini signaled done but '
+                f'Batch {batch_num}: {self._provider_label()} signaled done but '
                 f'{len(dropped_ids)} tickets were not persisted — '
                 f'queued for sweep',
                 metadata={

@@ -367,3 +367,20 @@ def mock_guru_client():
     client.update_card.return_value = {"id": "card-1", "preferredPhrase": "Updated"}
     client.create_card.return_value = {"id": "card-new", "preferredPhrase": "New card"}
     return client
+
+
+# ── Call tracing (ALMA_TRACE=1) ───────────────────────────────────────
+
+@pytest.fixture(scope="session", autouse=True)
+def _alma_call_trace():
+    """When ALMA_TRACE=1, record every enablement back-end call's input/output
+    to a JSONL trace file for the whole session. No-op otherwise."""
+    from src.data import call_trace
+    if call_trace.trace_enabled():
+        path = call_trace.add_file_sink()
+        summary = call_trace.install_enablement_tracing()
+        import logging
+        logging.getLogger("alma.trace").warning(
+            "ALMA_TRACE on — recording calls to %s (%s)", path, summary)
+        print(f"\n[call_trace] recording calls → {path}")
+    yield

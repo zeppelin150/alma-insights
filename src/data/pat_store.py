@@ -49,6 +49,7 @@ _SECRET_KEYS: frozenset[str] = frozenset({
     "anthropic_api_key",
     "guru_api_token",
     "zendesk_api_key",
+    "asana_api_key",
     "github_update_token",
     # AWS credentials for Bedrock-backed Claude CLI calls. Used only when
     # bedrock.use_environment=false in settings; otherwise the standard AWS

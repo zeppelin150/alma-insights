@@ -1,0 +1,21 @@
+You are an enablement content specialist at Alma Health. Turn the product
+document below into a clear, publish-ready Guru knowledge card for the
+enablement team.
+
+SOURCE DOCUMENT: {doc_name}
+TARGET GURU COLLECTION: {collection}
+
+--- DOCUMENT START ---
+{doc_text}
+--- DOCUMENT END ---
+
+Write a Guru card that:
+1. Opens with a 1-2 sentence summary of what changed / what this covers.
+2. Calls out any rollout or due dates in a short callout.
+3. Uses clear headings, numbered steps where there is a process, and a brief FAQ.
+4. Stays faithful to the document — do not invent facts.
+
+Return exactly:
+TITLE: <card title>
+---
+<card body in markdown>

@@ -78,6 +78,62 @@ def _ensure_registered():
     _register("audit_tag_correlation", handle_audit_tag_correlation,
               phi_level=1, desc="Audit a tag against canonical clusters + rank likely mis-tags")
 
+    # ── Enablement: local doc search + business Drive query + Asana setup ──
+    from src.data.chat_tools.enablement_tools import (
+        handle_search_local_documents,
+        handle_query_business_drive,
+        handle_asana_discover,
+        handle_set_asana_board_config,
+        handle_revise_draft,
+        handle_push_guru_draft,
+        handle_render_card_preview,
+        handle_draft_subtasks,
+        handle_add_subtask,
+        handle_toggle_subtask,
+        handle_update_scratchpad,
+        handle_create_task,
+        handle_update_task,
+        handle_list_tasks,
+        handle_search_drive_docs,
+        handle_get_drive_doc,
+        handle_run_monitor_now,
+    )
+    _register("search_local_documents", handle_search_local_documents,
+              phi_level=0, desc="Find stored enablement documents + card drafts by name/topic")
+    _register("query_business_drive", handle_query_business_drive,
+              phi_level=0, desc="Query the business Google Drive (live or local mirror) for documents")
+    _register("asana_discover", handle_asana_discover,
+              phi_level=0, desc="Discover Asana projects + custom-field/enum-value GIDs")
+    _register("set_asana_board_config", handle_set_asana_board_config,
+              phi_level=0, desc="Save an Asana board's config using resolved GIDs (the assistant's only write)")
+    # ── Enablement Workbench action tools ──
+    _register("revise_draft", handle_revise_draft,
+              phi_level=0, desc="Revise a Guru card draft with an instruction and re-render it")
+    _register("push_guru_draft", handle_push_guru_draft,
+              phi_level=0, desc="Publish a card draft to Guru (creates a new card or updates an existing one)")
+    _register("render_card_preview", handle_render_card_preview,
+              phi_level=0, desc="Return a draft's current title + content for preview")
+    _register("draft_subtasks", handle_draft_subtasks,
+              phi_level=0, desc="Attach a checklist of subtasks to a task")
+    _register("add_subtask", handle_add_subtask,
+              phi_level=0, desc="Add one subtask to a task")
+    _register("toggle_subtask", handle_toggle_subtask,
+              phi_level=0, desc="Check or uncheck a subtask")
+    _register("update_scratchpad", handle_update_scratchpad,
+              phi_level=0, desc="Write freeform notes on a task")
+    _register("create_task", handle_create_task,
+              phi_level=0, desc="Create an enablement task")
+    _register("update_task", handle_update_task,
+              phi_level=0, desc="Update an enablement task's status/priority/due date/etc.")
+    _register("list_tasks", handle_list_tasks,
+              phi_level=0, desc="List enablement tasks with optional filters")
+    _register("search_drive_docs", handle_search_drive_docs,
+              phi_level=0, desc="Search indexed Drive documents")
+    _register("get_drive_doc", handle_get_drive_doc,
+              phi_level=0, desc="Get one indexed Drive document by id")
+    _register("run_monitor_now", handle_run_monitor_now,
+              phi_level=0, desc="Run a one-off poll of the configured Asana/Drive monitors")
+
     # ── Backward-compat aliases for old tool names ──
     # These map old names to new handlers so existing prompts keep working
     from src.data.chat_tools.fast_path import (
@@ -258,4 +314,12 @@ def _persist_tool_execution(
         )
         conn.commit()
     except Exception as e:
+        # A failed telemetry write (e.g. a FOREIGN KEY violation on an adhoc/probe
+        # session_id) must NOT leave the connection mid-transaction — the dangling
+        # transaction would make the next atomic() on a reused connection raise
+        # "atomic() cannot be nested". Roll back defensively so failure is inert.
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         logger.debug("Failed to persist tool execution: %s", e)

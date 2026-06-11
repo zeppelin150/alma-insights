@@ -38,6 +38,13 @@ _DEFAULT_ROUTES = {
     "watchlist_triage": "claude",
     "meta_analytics": "claude",
     "ab_comparison": "gemini",
+    # Enablement Workbench lanes — default Gemini; the operator can flip the whole
+    # set via the enablement.provider toggle (see resolve_provider_for_task).
+    "enablement_card_gen": "gemini",
+    "enablement_extract": "gemini",
+    "enablement_triage": "gemini",
+    "enablement_subtasks": "gemini",
+    "enablement_chat": "gemini",
 }
 
 
@@ -58,11 +65,26 @@ def get_task_routing() -> dict:
         return {"override_all": "", "routes": dict(_DEFAULT_ROUTES)}
 
 
+def _enablement_provider() -> str:
+    """Operator's Enablement provider toggle ('gemini'|'claude'|'')."""
+    try:
+        from src.data.settings_manager import get_section
+        return (get_section("enablement", {}) or {}).get("provider", "") or ""
+    except Exception:
+        return ""
+
+
 def resolve_provider_for_task(task_type: str) -> str:
     """Determine provider name ('gemini' or 'claude') for a task type.
 
-    Checks override_all first, then per-task route, then default map.
+    Enablement lanes ('enablement_*') honor the operator's Enablement provider
+    toggle first so it scopes to those lanes only; then override_all, then the
+    per-task route, then the default map.
     """
+    if task_type.startswith("enablement_"):
+        prov = _enablement_provider()
+        if prov in ("gemini", "claude"):
+            return prov
     routing = get_task_routing()
     override = routing["override_all"]
     if override in ("gemini", "claude"):
@@ -86,18 +108,26 @@ def build_client_for_task(task_type: str, use_bridge: bool = False) -> Any | Non
     logger.debug("Task '%s' → provider '%s'", task_type, provider)
 
     if provider == "claude":
-        client = _build_claude_client_from_registry()
-        if client is not None:
-            return client
-        # Fallback to Gemini if Claude not configured
-        logger.info("Claude not configured, falling back to Gemini for task '%s'", task_type)
-        return _build_gemini_client_internal(use_bridge)
+        # Enablement Claude is BAA-routed through AWS Bedrock (the org's PHI-approved
+        # path) — always via the CLI bridge, never the direct Anthropic API.
+        force_cli = task_type.startswith("enablement_")
+        client = _build_claude_client_from_registry(force_cli=force_cli)
+        if client is None:
+            logger.info("Claude not configured, falling back to Gemini for task '%s'", task_type)
+            client = _build_gemini_client_internal(use_bridge)
+    else:
+        client = _build_gemini_client_internal(use_bridge)
 
-    # Gemini path
-    return _build_gemini_client_internal(use_bridge)
+    # Enablement content is product docs / Guru cards, NOT ticket PHI. The aggressive
+    # name-redaction pass rewrites Title-Case product terms (e.g. "Identity Providers",
+    # "Okta") to [NAME] and wrecks card quality. Disable it for enablement lanes —
+    # base redaction (emails/phones/SSNs/cards/member-ids) always runs regardless.
+    if task_type.startswith("enablement_") and client is not None and hasattr(client, "pii_redaction"):
+        client.pii_redaction = False
+    return client
 
 
-def _build_claude_client_from_registry():
+def _build_claude_client_from_registry(force_cli: bool = False):
     """Build a Claude client.
 
     Prefers ClaudeClient (Anthropic Messages API) when ``anthropic_api_key``
@@ -105,13 +135,18 @@ def _build_claude_client_from_registry():
     which uses the local ``claude`` CLI subprocess and inherits whatever auth
     the user has logged into the CLI with (OAuth/keychain/Bedrock env).
 
+    ``force_cli=True`` skips the direct-API path entirely and always returns the
+    CLI client — the Bedrock-routed, BAA-safe path (Bedrock activates when
+    ``bedrock.enabled=true`` in settings + the ops-ai SSO profile). Enablement
+    Claude work uses this so PHI-adjacent generation never leaves the BAA.
+
     The CLI fallback is the path that makes ``override_all=claude`` work
     end-to-end on machines without an Anthropic API key.
     """
     from src.data.pat_store import load_setting
     api_key = load_setting("anthropic_api_key", "")
 
-    if api_key:
+    if api_key and not force_cli:
         try:
             from src.llm.model_registry import ModelRegistry
             registry = ModelRegistry.instance()

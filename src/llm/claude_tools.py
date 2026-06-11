@@ -240,6 +240,240 @@ TOOL_DEFINITIONS = [
             "required": ["tag"],
         },
     },
+    {
+        "name": "search_local_documents",
+        "description": (
+            "Search the enablement document library stored locally — source "
+            "documents pulled from Google Drive plus generated Guru card drafts. "
+            "Use this whenever the user asks to find, look up, or recall a "
+            "document, draft, or past content by name or topic ('find the SSO "
+            "doc', 'what did the returns policy draft say'). Returns matching "
+            "documents and drafts with snippets."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Keyword or phrase to match names and bodies."},
+                "limit": {"type": "integer", "description": "Max results (default 10)."},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "query_business_drive",
+        "description": (
+            "Query the connected business Google Drive for documents. Searches "
+            "the live Drive when read access is configured, otherwise the "
+            "locally-indexed mirror of that Drive. Use when the user asks what's "
+            "in the Drive or to find a Drive document. Returns file names, links, "
+            "and snippets."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "What to look for in the Drive."},
+                "limit": {"type": "integer", "description": "Max results (default 10)."},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "asana_discover",
+        "description": (
+            "Discover the user's Asana projects, custom fields, and enum-value GIDs "
+            "so a non-technical operator never has to find them by hand. Optionally "
+            "pass project_gid to narrow to one project's custom fields. Returns "
+            "projects [{gid, name}] and custom_fields with field gids + enum_options "
+            "[{gid, name}]. Use this BEFORE set_asana_board_config to resolve GIDs."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "project_gid": {"type": "string", "description": "Optional — narrow to one project's custom fields."},
+            },
+        },
+    },
+    {
+        "name": "set_asana_board_config",
+        "description": (
+            "Save an Asana board's enablement config using resolved GIDs. THIS IS THE "
+            "ONLY SETTING THE ASSISTANT MAY WRITE — it creates/updates one Asana source "
+            "in monitor_sources and touches nothing else. Call after asana_discover to "
+            "persist the project + the indicator field/value GIDs + priority/assignee "
+            "field GIDs."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "project_gid": {"type": "string"},
+                "project_name": {"type": "string"},
+                "indicator_field_gid": {"type": "string", "description": "Custom-field GID that decides task creation (e.g. Assigned Team)."},
+                "indicator_field_name": {"type": "string"},
+                "indicator_value_gid": {"type": "string", "description": "Enum-value GID that triggers (e.g. the 'Enablement' option)."},
+                "indicator_value_name": {"type": "string"},
+                "priority_field_gid": {"type": "string", "description": "Optional — field GID to map to task priority."},
+                "assignee_field_gid": {"type": "string", "description": "Optional — people-field GID to map to assignee."},
+            },
+            "required": ["project_gid", "project_name", "indicator_field_gid",
+                         "indicator_field_name", "indicator_value_gid", "indicator_value_name"],
+        },
+    },
+    {
+        "name": "revise_draft",
+        "description": (
+            "Revise an existing Guru card draft per an instruction (e.g. 'tighten the "
+            "intro', 'add a rollout-date section') and re-render it. Pass the draft_id "
+            "and the change to make."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "draft_id": {"type": "integer", "description": "The draft id to revise."},
+                "instruction": {"type": "string", "description": "The change to make."},
+            },
+            "required": ["draft_id", "instruction"],
+        },
+    },
+    {
+        "name": "push_guru_draft",
+        "description": (
+            "Publish a card draft to Guru — creates a new card, or updates the existing "
+            "card if the draft is linked to one. This is the 'push to Guru' action; only "
+            "call it when the operator asked to publish."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "draft_id": {"type": "integer", "description": "The draft id to publish."},
+                "collection_id": {"type": "string", "description": "Optional target collection for a new card."},
+            },
+            "required": ["draft_id"],
+        },
+    },
+    {
+        "name": "render_card_preview",
+        "description": "Return a draft's current title and Markdown content for preview.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"draft_id": {"type": "integer"}},
+            "required": ["draft_id"],
+        },
+    },
+    {
+        "name": "draft_subtasks",
+        "description": (
+            "Attach a checklist of subtasks to a task. Decompose the work yourself and "
+            "pass the steps as items."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string"},
+                "items": {"type": "array", "items": {"type": "string"}, "description": "Ordered checklist steps."},
+            },
+            "required": ["task_id", "items"],
+        },
+    },
+    {
+        "name": "add_subtask",
+        "description": "Add a single subtask to a task.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"task_id": {"type": "string"}, "text": {"type": "string"}},
+            "required": ["task_id", "text"],
+        },
+    },
+    {
+        "name": "toggle_subtask",
+        "description": "Check or uncheck a subtask.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"subtask_id": {"type": "string"}, "done": {"type": "boolean"}},
+            "required": ["subtask_id", "done"],
+        },
+    },
+    {
+        "name": "update_scratchpad",
+        "description": "Write freeform operator notes on a task.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"task_id": {"type": "string"}, "text": {"type": "string"}},
+            "required": ["task_id", "text"],
+        },
+    },
+    {
+        "name": "create_task",
+        "description": "Create an enablement task.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "source": {"type": "string", "description": "drive|guru|asana|manual (default manual)."},
+                "kind": {"type": "string", "description": "card_review|doc_due_date|product_update|request."},
+                "due_date": {"type": "string", "description": "ISO date (optional)."},
+                "priority": {"type": "string", "description": "low|normal|high."},
+                "summary": {"type": "string"},
+            },
+            "required": ["title"],
+        },
+    },
+    {
+        "name": "update_task",
+        "description": "Update an enablement task's fields (status, priority, due_date, assignee, etc.).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string"},
+                "status": {"type": "string", "description": "open|in_progress|done|dismissed."},
+                "priority": {"type": "string"},
+                "due_date": {"type": "string"},
+                "assignee": {"type": "string"},
+                "title": {"type": "string"},
+                "summary": {"type": "string"},
+            },
+            "required": ["task_id"],
+        },
+    },
+    {
+        "name": "list_tasks",
+        "description": "List enablement tasks, optionally filtered by status/source/kind/due date.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "status": {"type": "string"},
+                "source": {"type": "string"},
+                "kind": {"type": "string"},
+                "due_before": {"type": "string", "description": "ISO date."},
+                "limit": {"type": "integer"},
+            },
+        },
+    },
+    {
+        "name": "search_drive_docs",
+        "description": "Search the locally-indexed Drive documents by name/topic.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}},
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "get_drive_doc",
+        "description": "Fetch one indexed Drive document (with full text) by its id.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"doc_id": {"type": "string"}},
+            "required": ["doc_id"],
+        },
+    },
+    {
+        "name": "run_monitor_now",
+        "description": "Run a one-off poll of the configured Asana/Drive monitors now.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"source": {"type": "string", "description": "Optional: 'asana' or 'drive' to poll just one."}},
+        },
+    },
 ]
 
 
@@ -505,6 +739,117 @@ def _audit_tag_correlation(args: dict, db) -> dict:
     return audit_tag_correlation(conn, tag, top_k=int(args.get("top_k", 10)))
 
 
+def _search_local_documents(args: dict, db) -> dict:
+    from src.data import enablement_store as store
+    conn = db.get_connection() if hasattr(db, 'get_connection') else db.conn
+    query = args.get("query", "")
+    limit = int(args.get("limit", 10))
+    docs = store.search_documents(conn, query, limit=limit)
+    drafts = store.search_drafts(conn, query, limit=limit)
+    return {
+        "documents": docs, "drafts": drafts,
+        "doc_count": len(docs), "draft_count": len(drafts),
+    }
+
+
+def _query_business_drive(args: dict, db) -> dict:
+    from src.data.drive_query import query_business_drive
+    conn = db.get_connection() if hasattr(db, 'get_connection') else db.conn
+    return query_business_drive(conn, args.get("query", ""), limit=int(args.get("limit", 10)))
+
+
+def _asana_discover(args: dict, db) -> dict:
+    from src.data.asana_setup import discover
+    return discover(project_gid=args.get("project_gid"))
+
+
+def _set_asana_board_config(args: dict, db) -> dict:
+    from src.data.asana_setup import set_asana_board_config
+    conn = db.get_connection() if hasattr(db, 'get_connection') else db.conn
+    return set_asana_board_config(
+        conn,
+        project_gid=args["project_gid"], project_name=args["project_name"],
+        indicator_field_gid=args["indicator_field_gid"], indicator_field_name=args["indicator_field_name"],
+        indicator_value_gid=args["indicator_value_gid"], indicator_value_name=args["indicator_value_name"],
+        priority_field_gid=args.get("priority_field_gid"), assignee_field_gid=args.get("assignee_field_gid"),
+    )
+
+
+# ── Enablement Workbench action tools (delegate to the shared impls in
+#    src/data/chat_tools/enablement_tools so both chat paths stay in sync) ──
+
+def _ent_conn(db):
+    return db.get_connection() if hasattr(db, 'get_connection') else db.conn
+
+
+def _revise_draft(args: dict, db) -> dict:
+    from src.data.chat_tools.enablement_tools import _revise_draft_impl
+    return _revise_draft_impl(_ent_conn(db), args.get("draft_id"), args.get("instruction", ""))
+
+
+def _push_guru_draft(args: dict, db) -> dict:
+    from src.data.chat_tools.enablement_tools import _push_guru_draft_impl
+    return _push_guru_draft_impl(_ent_conn(db), args.get("draft_id"), args.get("collection_id"))
+
+
+def _render_card_preview(args: dict, db) -> dict:
+    from src.data.chat_tools.enablement_tools import _render_card_preview_impl
+    return _render_card_preview_impl(_ent_conn(db), args.get("draft_id"))
+
+
+def _draft_subtasks(args: dict, db) -> dict:
+    from src.data.chat_tools.enablement_tools import _draft_subtasks_impl
+    return _draft_subtasks_impl(_ent_conn(db), args.get("task_id"), args.get("items"))
+
+
+def _add_subtask(args: dict, db) -> dict:
+    from src.data.chat_tools.enablement_tools import _add_subtask_impl
+    return _add_subtask_impl(_ent_conn(db), args.get("task_id"), args.get("text", ""))
+
+
+def _toggle_subtask(args: dict, db) -> dict:
+    from src.data.chat_tools.enablement_tools import _toggle_subtask_impl
+    return _toggle_subtask_impl(_ent_conn(db), args.get("subtask_id"), args.get("done", True))
+
+
+def _update_scratchpad(args: dict, db) -> dict:
+    from src.data.chat_tools.enablement_tools import _update_scratchpad_impl
+    return _update_scratchpad_impl(_ent_conn(db), args.get("task_id"), args.get("text", ""))
+
+
+def _create_enablement_task(args: dict, db) -> dict:
+    from src.data.chat_tools.enablement_tools import _create_task_impl
+    return _create_task_impl(_ent_conn(db), **args)
+
+
+def _update_enablement_task(args: dict, db) -> dict:
+    from src.data.chat_tools.enablement_tools import _update_task_impl
+    fields = {k: v for k, v in args.items() if k != "task_id"}
+    return _update_task_impl(_ent_conn(db), args.get("task_id"), fields)
+
+
+def _list_enablement_tasks(args: dict, db) -> dict:
+    from src.data.chat_tools.enablement_tools import _list_tasks_impl
+    return _list_tasks_impl(_ent_conn(db), status=args.get("status"), source=args.get("source"),
+                            kind=args.get("kind"), due_before=args.get("due_before"),
+                            limit=args.get("limit", 50))
+
+
+def _search_drive_docs(args: dict, db) -> dict:
+    from src.data.chat_tools.enablement_tools import _search_drive_docs_impl
+    return _search_drive_docs_impl(_ent_conn(db), args.get("query", ""), args.get("limit", 10))
+
+
+def _get_drive_doc(args: dict, db) -> dict:
+    from src.data.chat_tools.enablement_tools import _get_drive_doc_impl
+    return _get_drive_doc_impl(_ent_conn(db), args.get("doc_id"))
+
+
+def _run_monitor_now(args: dict, db) -> dict:
+    from src.data.chat_tools.enablement_tools import _run_monitor_now_impl
+    return _run_monitor_now_impl(_ent_conn(db), args.get("source"))
+
+
 _DISPATCH = {
     "read_scan_summary": _read_scan_summary,
     "get_friction_gaps": _get_friction_gaps,
@@ -516,4 +861,21 @@ _DISPATCH = {
     "propose_guru_edit": _propose_guru_edit,
     "query_issues": _query_issues,
     "audit_tag_correlation": _audit_tag_correlation,
+    "search_local_documents": _search_local_documents,
+    "query_business_drive": _query_business_drive,
+    "asana_discover": _asana_discover,
+    "set_asana_board_config": _set_asana_board_config,
+    "revise_draft": _revise_draft,
+    "push_guru_draft": _push_guru_draft,
+    "render_card_preview": _render_card_preview,
+    "draft_subtasks": _draft_subtasks,
+    "add_subtask": _add_subtask,
+    "toggle_subtask": _toggle_subtask,
+    "update_scratchpad": _update_scratchpad,
+    "create_task": _create_enablement_task,
+    "update_task": _update_enablement_task,
+    "list_tasks": _list_enablement_tasks,
+    "search_drive_docs": _search_drive_docs,
+    "get_drive_doc": _get_drive_doc,
+    "run_monitor_now": _run_monitor_now,
 }

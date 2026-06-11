@@ -180,34 +180,36 @@ class TestEnableExperimentalFlag:
 # ═══════════════════════════════════════════════════════════════════
 
 class TestMainWindowRouting:
-    """_make_guru_page returns WIP by default, legacy when flag is True."""
+    """_make_guru_page: the Enablement Workbench is the default front door;
+    legacy GuruPage / WIP placeholder only when enablement.workbench_enabled=False."""
 
-    def test_default_returns_wip(self, qapp):
-        """No experimental flag → WIP placeholder is mounted."""
+    def _make(self, sections):
         from src.ui.main_window import MainWindow
-        from src.ui.pages.guru_wip_page import GuruWipPage
 
-        # The full MainWindow is heavy; we exercise just the helper.
-        # Bind it as an unbound function to a minimal object.
-        with patch(
-            "src.data.settings_manager.get_section",
-            return_value={"experimental_ui_enabled": False},
-        ):
+        def fake_get_section(name, default=None):
+            return sections.get(name, default if default is not None else {})
+
+        with patch("src.data.settings_manager.get_section", side_effect=fake_get_section):
             instance = type("Stub", (), {"db": MagicMock()})()
-            page = MainWindow._make_guru_page(instance)
+            return MainWindow._make_guru_page(instance)
+
+    def test_default_returns_enablement(self, qapp):
+        """No flags → the Enablement Workbench (the new default)."""
+        from src.ui.pages.enablement import EnablementPage
+        assert isinstance(self._make({}), EnablementPage)
+
+    def test_workbench_disabled_returns_wip(self, qapp):
+        """enablement.workbench_enabled=False + no guru flag → WIP placeholder."""
+        from src.ui.pages.guru_wip_page import GuruWipPage
+        page = self._make({"enablement": {"workbench_enabled": False},
+                           "guru": {"experimental_ui_enabled": False}})
         assert isinstance(page, GuruWipPage)
 
-    def test_flag_true_returns_legacy(self, qapp):
-        """experimental_ui_enabled=True → legacy GuruPage instance."""
-        from src.ui.main_window import MainWindow
+    def test_workbench_disabled_guru_flag_returns_legacy(self, qapp):
+        """workbench off + guru.experimental_ui_enabled=True → legacy GuruPage."""
         from src.ui.pages.guru_page import GuruPage
         from src.ui.pages.guru_wip_page import GuruWipPage
-
-        with patch(
-            "src.data.settings_manager.get_section",
-            return_value={"experimental_ui_enabled": True},
-        ):
-            instance = type("Stub", (), {"db": MagicMock()})()
-            page = MainWindow._make_guru_page(instance)
+        page = self._make({"enablement": {"workbench_enabled": False},
+                           "guru": {"experimental_ui_enabled": True}})
         assert isinstance(page, GuruPage)
         assert not isinstance(page, GuruWipPage)

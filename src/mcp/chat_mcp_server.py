@@ -287,6 +287,237 @@ TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "name": "search_local_documents",
+        "description": (
+            "Search the enablement document library stored locally — source "
+            "documents pulled from Google Drive plus generated Guru card drafts. "
+            "Use whenever the user asks to find, look up, or recall a document, "
+            "draft, or past content by name or topic. Returns matching documents "
+            "and drafts with snippets."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Keyword or phrase to match names and bodies."},
+                "limit": {"type": "integer", "description": "Max results (default 10)."},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "query_business_drive",
+        "description": (
+            "Query the connected business Google Drive for documents. Searches the "
+            "live Drive when read access is configured, otherwise the locally-"
+            "indexed mirror of that Drive. Use when the user asks what's in the "
+            "Drive or to find a Drive document. Returns file names, links, and snippets."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "What to look for in the Drive."},
+                "limit": {"type": "integer", "description": "Max results (default 10)."},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "asana_discover",
+        "description": (
+            "Discover the user's Asana projects, custom fields, and enum-value GIDs "
+            "so a non-technical operator never has to find them by hand. Optionally "
+            "pass project_gid to narrow to one project. Returns projects [{gid, name}] "
+            "and custom_fields with field gids + enum_options [{gid, name}]. Use BEFORE "
+            "set_asana_board_config to resolve GIDs."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project_gid": {"type": "string", "description": "Optional — narrow to one project's custom fields."},
+            },
+        },
+    },
+    {
+        "name": "set_asana_board_config",
+        "description": (
+            "Save an Asana board's enablement config using resolved GIDs. THE ONLY "
+            "SETTING THE ASSISTANT MAY WRITE — creates/updates one Asana source in "
+            "monitor_sources and touches nothing else. Call after asana_discover."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project_gid": {"type": "string"},
+                "project_name": {"type": "string"},
+                "indicator_field_gid": {"type": "string"},
+                "indicator_field_name": {"type": "string"},
+                "indicator_value_gid": {"type": "string"},
+                "indicator_value_name": {"type": "string"},
+                "priority_field_gid": {"type": "string"},
+                "assignee_field_gid": {"type": "string"},
+            },
+            "required": ["project_gid", "project_name", "indicator_field_gid",
+                         "indicator_field_name", "indicator_value_gid", "indicator_value_name"],
+        },
+    },
+    {
+        "name": "revise_draft",
+        "description": (
+            "Revise an existing Guru card draft per an instruction (e.g. 'tighten "
+            "the intro', 'add a rollout-date section') and re-render it. Pass the "
+            "draft_id and the change to make."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "draft_id": {"type": "integer", "description": "The draft id to revise."},
+                "instruction": {"type": "string", "description": "The change to make."},
+            },
+            "required": ["draft_id", "instruction"],
+        },
+    },
+    {
+        "name": "push_guru_draft",
+        "description": (
+            "Publish a card draft to Guru — creates a new card, or updates the "
+            "existing card if the draft is linked to one. This is the 'push to Guru' "
+            "action; only call it when the operator asked to publish."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "draft_id": {"type": "integer", "description": "The draft id to publish."},
+                "collection_id": {"type": "string", "description": "Optional target collection for a new card."},
+            },
+            "required": ["draft_id"],
+        },
+    },
+    {
+        "name": "render_card_preview",
+        "description": "Return a draft's current title and Markdown content for preview.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"draft_id": {"type": "integer"}},
+            "required": ["draft_id"],
+        },
+    },
+    {
+        "name": "draft_subtasks",
+        "description": (
+            "Attach a checklist of subtasks to a task. Decompose the work yourself "
+            "and pass the steps as items."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string"},
+                "items": {"type": "array", "items": {"type": "string"},
+                          "description": "Ordered checklist steps."},
+            },
+            "required": ["task_id", "items"],
+        },
+    },
+    {
+        "name": "add_subtask",
+        "description": "Add a single subtask to a task.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"task_id": {"type": "string"}, "text": {"type": "string"}},
+            "required": ["task_id", "text"],
+        },
+    },
+    {
+        "name": "toggle_subtask",
+        "description": "Check or uncheck a subtask.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"subtask_id": {"type": "string"}, "done": {"type": "boolean"}},
+            "required": ["subtask_id", "done"],
+        },
+    },
+    {
+        "name": "update_scratchpad",
+        "description": "Write freeform operator notes on a task.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"task_id": {"type": "string"}, "text": {"type": "string"}},
+            "required": ["task_id", "text"],
+        },
+    },
+    {
+        "name": "create_task",
+        "description": "Create an enablement task.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "source": {"type": "string", "description": "drive|guru|asana|manual (default manual)."},
+                "kind": {"type": "string", "description": "card_review|doc_due_date|product_update|request."},
+                "due_date": {"type": "string", "description": "ISO date (optional)."},
+                "priority": {"type": "string", "description": "low|normal|high."},
+                "summary": {"type": "string"},
+            },
+            "required": ["title"],
+        },
+    },
+    {
+        "name": "update_task",
+        "description": "Update an enablement task's fields (status, priority, due_date, assignee, etc.).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string"},
+                "status": {"type": "string", "description": "open|in_progress|done|dismissed."},
+                "priority": {"type": "string"},
+                "due_date": {"type": "string"},
+                "assignee": {"type": "string"},
+                "title": {"type": "string"},
+                "summary": {"type": "string"},
+            },
+            "required": ["task_id"],
+        },
+    },
+    {
+        "name": "list_tasks",
+        "description": "List enablement tasks, optionally filtered by status/source/kind/due date.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "status": {"type": "string"},
+                "source": {"type": "string"},
+                "kind": {"type": "string"},
+                "due_before": {"type": "string", "description": "ISO date."},
+                "limit": {"type": "integer"},
+            },
+        },
+    },
+    {
+        "name": "search_drive_docs",
+        "description": "Search the locally-indexed Drive documents by name/topic.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}},
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "get_drive_doc",
+        "description": "Fetch one indexed Drive document (with full text) by its id.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"doc_id": {"type": "string"}},
+            "required": ["doc_id"],
+        },
+    },
+    {
+        "name": "run_monitor_now",
+        "description": "Run a one-off poll of the configured Asana/Drive monitors now.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"source": {"type": "string", "description": "Optional: 'asana' or 'drive' to poll just one."}},
+        },
+    },
 ]
 
 
