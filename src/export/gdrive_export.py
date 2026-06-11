@@ -24,16 +24,29 @@ class GoogleDriveExporter:
       - A target folder ID (shared with the service account email)
     """
 
-    def __init__(self, credentials_path: str = "", folder_id: str = "") -> None:
+    def __init__(self, credentials_path: str = "", folder_id: str = "",
+                 auth_type: str = "service_account") -> None:
         self._credentials_path = credentials_path
         self._folder_id = folder_id
+        self._auth_type = auth_type
         self._service = None
+
+    @classmethod
+    def from_settings(cls, folder_id: str = "") -> "GoogleDriveExporter":
+        from src.data.settings_manager import get_section
+        drive = (get_section("enablement", {}) or {}).get("drive") or {}
+        return cls(drive.get("credentials_path", ""), folder_id,
+                   auth_type=drive.get("auth_type", "service_account"))
 
     def is_configured(self) -> bool:
         """Check if credentials and folder are set."""
+        if not self._folder_id:
+            return False
+        if self._auth_type == "oauth_user":
+            from src.data import google_oauth
+            return google_oauth.is_active()  # disable-on-launch
         return (
             bool(self._credentials_path)
-            and bool(self._folder_id)
             and Path(self._credentials_path).is_file()
         )
 
@@ -43,19 +56,25 @@ class GoogleDriveExporter:
             return self._service
 
         try:
-            from google.oauth2 import service_account
             from googleapiclient.discovery import build
-
-            SCOPES = ["https://www.googleapis.com/auth/drive.file"]
-            creds = service_account.Credentials.from_service_account_file(
-                self._credentials_path, scopes=SCOPES
-            )
-            self._service = build("drive", "v3", credentials=creds)
-            return self._service
         except ImportError:
             raise ImportError(
                 "Google Drive export requires: pip install google-api-python-client google-auth"
             )
+        try:
+            if self._auth_type == "oauth_user":
+                from src.data import google_oauth
+                creds = google_oauth.load_active_credentials()
+                if creds is None:
+                    raise RuntimeError("Google account not connected this session")
+            else:
+                from google.oauth2 import service_account
+                SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+                creds = service_account.Credentials.from_service_account_file(
+                    self._credentials_path, scopes=SCOPES
+                )
+            self._service = build("drive", "v3", credentials=creds)
+            return self._service
         except Exception as e:
             raise RuntimeError(f"Failed to build Drive service: {e}")
 

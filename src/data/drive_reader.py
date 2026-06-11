@@ -27,39 +27,59 @@ _GOOGLE_DOC = "application/vnd.google-apps.document"
 class DriveReader:
     """Read-only Drive client: list changed files + export text + search."""
 
-    def __init__(self, credentials_path: str = ""):
+    def __init__(self, credentials_path: str = "", auth_type: str = "service_account"):
         self._credentials_path = credentials_path
+        self._auth_type = auth_type
         self._service = None
 
     @classmethod
     def from_settings(cls) -> "DriveReader":
         from src.data.settings_manager import get_section
         drive = (get_section("enablement", {}) or {}).get("drive") or {}
-        return cls(drive.get("credentials_path", ""))
+        return cls(drive.get("credentials_path", ""),
+                   auth_type=drive.get("auth_type", "service_account"))
 
     def is_configured(self) -> bool:
         from src.data.settings_manager import get_section
         drive = (get_section("enablement", {}) or {}).get("drive") or {}
         if not drive.get("read_enabled"):
             return False
+        if self._auth_type == "oauth_user":
+            # Disable-on-launch: only "configured" once the user has
+            # explicitly reconnected this session, so the background monitor
+            # never resumes Google calls on its own at boot.
+            from src.data import google_oauth
+            return google_oauth.is_active()
         return bool(self._credentials_path) and Path(self._credentials_path).is_file()
 
     def _build_service(self):
         if self._service:
             return self._service
         try:
-            from google.oauth2 import service_account
             from googleapiclient.discovery import build
         except ImportError:
             raise ImportError(
                 "Drive read requires: pip install google-api-python-client google-auth")
-        creds = service_account.Credentials.from_service_account_file(
-            self._credentials_path, scopes=_READONLY_SCOPE)
+        if self._auth_type == "oauth_user":
+            from src.data import google_oauth
+            creds = google_oauth.load_active_credentials()
+            if creds is None:
+                raise RuntimeError(
+                    "Google account not connected this session — open Settings "
+                    "and click Reconnect to authorize Drive access.")
+        else:
+            from google.oauth2 import service_account
+            creds = service_account.Credentials.from_service_account_file(
+                self._credentials_path, scopes=_READONLY_SCOPE)
         self._service = build("drive", "v3", credentials=creds)
         return self._service
 
     def test_connection(self) -> tuple[bool, str]:
-        if not self._credentials_path or not Path(self._credentials_path).is_file():
+        if self._auth_type == "oauth_user":
+            from src.data import google_oauth
+            if not google_oauth.is_active():
+                return False, "Google account not connected this session"
+        elif not self._credentials_path or not Path(self._credentials_path).is_file():
             return False, "Service-account credentials path not set"
         try:
             self._build_service().files().list(pageSize=1, fields="files(id)").execute()

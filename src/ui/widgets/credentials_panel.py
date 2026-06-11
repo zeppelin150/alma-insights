@@ -53,8 +53,16 @@ class CredentialsPanel(QWidget):
         super().__init__(parent)
         self._sections = tuple(sections)
         self._claude_acks = {k: False for k, _ in _CLAUDE_ACKS}
+        self._oauth_worker = None
         self.setStyleSheet(f"CredentialsPanel {{ background: {ALMA_CREAM}; }}")
         self._build()
+        # The panel owns the OAuth worker so the flow works in BOTH Settings
+        # hosts without each host re-wiring it.
+        if "external" in self._sections:
+            self.google_oauth_requested.connect(lambda: self._start_oauth("connect"))
+            self.google_oauth_reconnect_requested.connect(
+                lambda: self._start_oauth("reconnect"))
+            self.google_oauth_disconnect_requested.connect(self._on_oauth_disconnect)
         self.refresh()
 
     # ── construction ────────────────────────────────────────────────
@@ -562,6 +570,52 @@ class CredentialsPanel(QWidget):
         drive.setdefault("auth_type", "service_account")
         cfg["drive"] = drive
         set_section("enablement", cfg)
+        self.settings_changed.emit({"drive_updated": True})
+
+    # ── Google OAuth flow (off-thread) ──────────────────────────────
+
+    def _start_oauth(self, mode: str):
+        if self._oauth_worker is not None and self._oauth_worker.isRunning():
+            return  # single-flight
+        if mode == "connect":
+            from src.data import google_oauth
+            if not google_oauth.have_client():
+                self._google_status.setText(
+                    "No OAuth client — add your own GCP client below first.")
+                return
+        from src.ui.widgets.google_oauth_worker import GoogleOAuthWorker
+        self._oauth_connect.setEnabled(False)
+        self._oauth_reconnect.setEnabled(False)
+        self._google_status.setText(
+            "Opening your browser…" if mode == "connect" else "Reconnecting…")
+        self._oauth_worker = GoogleOAuthWorker(mode=mode)
+        self._oauth_worker.finished.connect(self._on_oauth_finished)
+        self._oauth_worker.error.connect(self._on_oauth_error)
+        self._oauth_worker.start()
+
+    def _on_oauth_finished(self, record: dict):
+        self._oauth_connect.setEnabled(True)
+        self._oauth_reconnect.setEnabled(True)
+        if record:  # connect → store the new record (also flips _active via reconnect)
+            from src.data import google_oauth
+            if not google_oauth.store_credentials(record):
+                self._google_status.setText("Could not save the authorization.")
+                return
+            google_oauth.reconnect()  # activate this session
+        stored, active = self._google_state()
+        self._render_google_state(stored, active)
+        self.settings_changed.emit({"drive_updated": True})
+
+    def _on_oauth_error(self, msg: str):
+        self._oauth_connect.setEnabled(True)
+        self._oauth_reconnect.setEnabled(True)
+        self._google_status.setText(msg or "Authorization failed.")
+
+    def _on_oauth_disconnect(self):
+        from src.data import google_oauth
+        google_oauth.forget()
+        stored, active = self._google_state()
+        self._render_google_state(stored, active)
         self.settings_changed.emit({"drive_updated": True})
 
     def _on_browse_oauth_client(self):
