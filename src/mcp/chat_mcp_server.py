@@ -537,6 +537,20 @@ TOOL_SCHEMAS = [
 ]
 
 
+# Mode gating: the host process may strip tools that must stay
+# unreachable in the current app mode (e.g. semantic_search in
+# enablement mode keeps the torch/embedding stack unloadable).
+# Filtering before _MCP_ALLOWED_TOOLS derives removes both the
+# advertisement (tools/list) and the dispatch path in one place.
+_EXCLUDED_TOOLS = {
+    name.strip()
+    for name in os.environ.get("ALMA_MCP_EXCLUDE_TOOLS", "").split(",")
+    if name.strip()
+}
+if _EXCLUDED_TOOLS:
+    TOOL_SCHEMAS = [t for t in TOOL_SCHEMAS if t["name"] not in _EXCLUDED_TOOLS]
+
+
 def _get_db_connection():
     import sqlite3
     db_path = os.environ.get("ALMA_DB_PATH", "")

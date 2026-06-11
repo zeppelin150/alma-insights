@@ -180,8 +180,9 @@ class TestEnableExperimentalFlag:
 # ═══════════════════════════════════════════════════════════════════
 
 class TestMainWindowRouting:
-    """_make_guru_page: the Enablement Workbench is the default front door;
-    legacy GuruPage / WIP placeholder only when enablement.workbench_enabled=False."""
+    """_make_guru_page is the legacy product-mode router: GuruPage behind
+    guru.experimental_ui_enabled, WIP placeholder otherwise. The Enablement
+    Workbench moved to enablement mode (registry-routed via app_modes)."""
 
     def _make(self, sections):
         from src.ui.main_window import MainWindow
@@ -193,23 +194,32 @@ class TestMainWindowRouting:
             instance = type("Stub", (), {"db": MagicMock()})()
             return MainWindow._make_guru_page(instance)
 
-    def test_default_returns_enablement(self, qapp):
-        """No flags → the Enablement Workbench (the new default)."""
-        from src.ui.pages.enablement import EnablementPage
-        assert isinstance(self._make({}), EnablementPage)
-
-    def test_workbench_disabled_returns_wip(self, qapp):
-        """enablement.workbench_enabled=False + no guru flag → WIP placeholder."""
+    def test_default_returns_wip(self, qapp):
+        """No flags → WIP placeholder (product mode has no Guru entry)."""
         from src.ui.pages.guru_wip_page import GuruWipPage
-        page = self._make({"enablement": {"workbench_enabled": False},
-                           "guru": {"experimental_ui_enabled": False}})
-        assert isinstance(page, GuruWipPage)
+        assert isinstance(self._make({}), GuruWipPage)
 
-    def test_workbench_disabled_guru_flag_returns_legacy(self, qapp):
-        """workbench off + guru.experimental_ui_enabled=True → legacy GuruPage."""
+    def test_guru_flag_returns_legacy(self, qapp):
+        """guru.experimental_ui_enabled=True → legacy GuruPage."""
         from src.ui.pages.guru_page import GuruPage
         from src.ui.pages.guru_wip_page import GuruWipPage
-        page = self._make({"enablement": {"workbench_enabled": False},
-                           "guru": {"experimental_ui_enabled": True}})
+        page = self._make({"guru": {"experimental_ui_enabled": True}})
         assert isinstance(page, GuruPage)
         assert not isinstance(page, GuruWipPage)
+
+    def test_enablement_routed_to_enablement_mode(self):
+        """The Workbench is registry-routed to enablement mode only, and the
+        legacy product entry is gated behind the guru settings flag."""
+        from src.ui import app_modes
+        en_specs = [
+            s for s in app_modes.pages_for_mode(app_modes.MODE_ENABLEMENT)
+            if s.factory == "_create_enablement_page"
+        ]
+        assert en_specs, "enablement mode hosts the EnablementPage tabs"
+        prod_ids = {
+            s.page_id for s in app_modes.pages_for_mode(app_modes.MODE_PRODUCT)
+        }
+        assert not any(s.page_id in prod_ids for s in en_specs)
+        legacy = app_modes.spec_for("guru_legacy")
+        assert legacy is not None
+        assert legacy.settings_flag == ("guru", "experimental_ui_enabled")

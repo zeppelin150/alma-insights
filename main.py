@@ -45,6 +45,23 @@ def main():
         from src.data.memory_profiler import MemoryProfiler
         MemoryProfiler.start()
 
+    # ── App mode override (python main.py --mode enablement) ──
+    mode_override = None
+    if "--mode" in sys.argv:
+        i = sys.argv.index("--mode")
+        if i + 1 < len(sys.argv):
+            mode_override = sys.argv[i + 1]
+            del sys.argv[i:i + 2]
+        else:
+            sys.argv.remove("--mode")
+    for arg in list(sys.argv):
+        if arg.startswith("--mode="):
+            mode_override = arg.split("=", 1)[1]
+            sys.argv.remove(arg)
+    if mode_override:
+        from src.ui import app_modes
+        app_modes.set_cli_override(mode_override)
+
     # High DPI support
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough

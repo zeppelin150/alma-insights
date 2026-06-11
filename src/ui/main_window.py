@@ -17,19 +17,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QIcon, QFont
 
 from src.ui.theme import *
-from src.ui.pages.conversation_search import ConversationSearchPage
-from src.ui.pages.trc_analytics import TRCAnalyticsPage
-from src.ui.pages.trending_topics import TrendingTopicsPage
-from src.ui.pages.incidents_page import IncidentsPage
-from src.ui.pages.ai_reports import AIReportsPage
-from src.ui.pages.ab_compare import ABComparePage
-from src.ui.pages.smart_reporting import SmartReportingPage
-from src.ui.pages.settings_page import SettingsPage
-from src.ui.pages.source_monitor_page import SourceMonitorPage
-from src.ui.pages.guru_page import GuruPage
-from src.ui.pages.guru_wip_page import GuruWipPage
-from src.ui.pages.data_warehouse_page import DataWarehousePage
-from src.ui.pages.gemini_chats_page import GeminiChatsPage
+from src.ui import app_modes
 from src.ui.dialogs.help_dialog import HelpDialog
 from src.data.db_manager import DatabaseManager
 from src.data.settings_manager import get_section
@@ -44,9 +32,14 @@ class MainWindow(QMainWindow):
 
     Hosts the sidebar navigation, stacked content pages, status bar,
     and overlays (job overlay, drilldown panel, toast manager). Owns
-    the singleton `DatabaseManager` and central `JobQueue`. Pages are
-    registered by integer index (PAGE_* constants) and receive the
-    shared drilldown panel via `set_drilldown_panel()`.
+    the singleton `DatabaseManager` and central `JobQueue`.
+
+    Pages and background services are mode-gated: the registry in
+    `src.ui.app_modes` declares which pages exist per mode ("product" /
+    "enablement"); page widgets are constructed by the `_create_*`
+    factory methods on first mount of their mode. The legacy integer
+    PAGE_* constants are kept as aliases — `_set_active_page` accepts
+    both ints and string page ids.
     """
 
     PAGE_CONVERSATIONS = 0
@@ -74,11 +67,20 @@ class MainWindow(QMainWindow):
 
         # Track sidebar buttons
         self._sidebar_buttons = []
-        self._active_page = 0
+        self._active_page = None
         self._sidebar_collapsed = False   # Build 10.0: T10
         self._sidebar_text_widgets = []   # labels/sections hidden when collapsed
         self._page_anim = None            # Build 10.0: T16 — page fade ref
-        self._page_widgets = {}           # Stage 2: PAGE_* constant → widget for setCurrentWidget
+        self._page_widgets = {}           # page_id → widget for setCurrentWidget
+        self._factory_widgets = {}        # factory name → widget (dedups shared hosts)
+        self._mounted_modes = set()
+        self._product_wiring_done = False
+        self._source_warehouse = None
+        self._watchlist_engine = None
+        self._zendesk_monitor = None
+
+        self._mode = app_modes.resolve_startup_mode()
+        app_modes.set_current_mode(self._mode)
 
         self._build_ui()
 
@@ -91,21 +93,16 @@ class MainWindow(QMainWindow):
         # Toast notification manager (Build 10.0: T9/T17)
         self._toasts = ToastManager(self)
 
-        # Universal drill-down panel (overlay drawer)
+        # Universal drill-down panel (overlay drawer) — created before any
+        # page mounts so factories can attach it.
         self._drilldown = DrilldownPanel(self.content_stack)
-        self.conversations_page.set_drilldown_panel(self._drilldown)
-        self.dashboard_page.set_drilldown_panel(self._drilldown)
-        self.trending_page.set_drilldown_panel(self._drilldown)
-        self.incidents_page.set_drilldown_panel(self._drilldown)
-        self.reports_page.set_drilldown_panel(self._drilldown)
-        self.ab_compare_page.set_drilldown_panel(self._drilldown)
-        self.guru_page.set_drilldown_panel(self._drilldown)
-        self.gemini_chats_page.set_drilldown_panel(self._drilldown)
-        self.data_warehouse_page.set_drilldown_panel(self._drilldown)
 
-        self._setup_calendar_sync()
-        self._restore_settings()
-        self._load_data()
+        self._mount_mode_pages(self._mode)
+        self._populate_sidebar(self._mode)
+        self._start_services_for_mode(self._mode)
+        if self._mode == app_modes.MODE_PRODUCT:
+            self._after_product_pages_mounted()
+        self._set_active_page(app_modes.first_page_id(self._mode))
 
     def _build_ui(self):
         # Central widget
@@ -209,67 +206,13 @@ class MainWindow(QMainWindow):
         self._sidebar_text_widgets = []   # Section labels + footer (hidden on collapse)
         self._sidebar_dividers = []        # Dividers (stay visible, just shrink margins)
 
-        # ── SOURCES section ──
-        section0 = QLabel("SOURCES")
-        section0.setObjectName("SidebarSection")
-        layout.addWidget(section0)
-        self._sidebar_text_widgets.append(section0)
-
-        layout.addWidget(self._sidebar_btn("\U0001F4AC  Conversations", self.PAGE_CONVERSATIONS, "\U0001F4AC"))
-        layout.addWidget(self._sidebar_btn("\U0001F4E1  Source Monitor", self.PAGE_SOURCE_MONITOR, "\U0001F4E1"))
-        layout.addWidget(self._sidebar_btn("\U0001F9F0  Enablement", self.PAGE_GURU, "\U0001F9F0"))
-
-        # Divider
-        div0 = QFrame()
-        div0.setObjectName("SidebarDivider")
-        layout.addWidget(div0)
-        self._sidebar_dividers.append(div0)
-
-        # ── ANALYSIS section ──
-        section1 = QLabel("ANALYSIS")
-        section1.setObjectName("SidebarSection")
-        layout.addWidget(section1)
-        self._sidebar_text_widgets.append(section1)
-
-        layout.addWidget(self._sidebar_btn("\U0001F4CA  TRC Analytics", self.PAGE_DASHBOARD, "\U0001F4CA"))
-        layout.addWidget(self._sidebar_btn("\U0001F4C8  Trending Topics", self.PAGE_TRENDING, "\U0001F4C8"))
-        layout.addWidget(self._sidebar_btn("\U0001F6A8  Incidents", self.PAGE_INCIDENTS, "\U0001F6A8"))
-
-        # Divider
-        div1 = QFrame()
-        div1.setObjectName("SidebarDivider")
-        layout.addWidget(div1)
-        self._sidebar_dividers.append(div1)
-
-        # ── REPORTS section ──
-        section2 = QLabel("REPORTS")
-        section2.setObjectName("SidebarSection")
-        layout.addWidget(section2)
-        self._sidebar_text_widgets.append(section2)
-
-        layout.addWidget(self._sidebar_btn("\U0001F916  AI Reports", self.PAGE_REPORTS, "\U0001F916"))
-        # Build 11.0: A/B Compare moved into AI Reports as a tab
-        # (page still exists in stack for backward compat, sidebar button hidden)
-        self._ab_sidebar_btn = self._sidebar_btn("\U0001F504  A/B Compare", self.PAGE_AB_COMPARE, "\U0001F504")
-        self._ab_sidebar_btn.setVisible(False)
-        layout.addWidget(self._ab_sidebar_btn)
-        layout.addWidget(self._sidebar_btn("\u26A1  Smart Reporting", self.PAGE_SMART_REPORTING, "\u26A1"))
-        layout.addWidget(self._sidebar_btn("\U0001F4AC  Gemini Chats", self.PAGE_GEMINI_CHATS, "\U0001F4AC"))
-
-        # Divider
-        div2 = QFrame()
-        div2.setObjectName("SidebarDivider")
-        layout.addWidget(div2)
-        self._sidebar_dividers.append(div2)
-
-        # ── SYSTEM section ──
-        section3 = QLabel("SYSTEM")
-        section3.setObjectName("SidebarSection")
-        layout.addWidget(section3)
-        self._sidebar_text_widgets.append(section3)
-
-        layout.addWidget(self._sidebar_btn("\U0001F5C4\ufe0f  Data Warehouse", self.PAGE_DATA_WAREHOUSE, "\U0001F5C4\ufe0f"))
-        layout.addWidget(self._sidebar_btn("\u2699\ufe0f  Settings", self.PAGE_SETTINGS, "\u2699\ufe0f"))
+        # Nav entries live in a sub-layout so a mode switch can rebuild
+        # them without touching the collapse button / footer chrome.
+        # Populated per mode by `_populate_sidebar`.
+        self._sidebar_nav = QVBoxLayout()
+        self._sidebar_nav.setContentsMargins(0, 0, 0, 0)
+        self._sidebar_nav.setSpacing(0)
+        layout.addLayout(self._sidebar_nav)
 
         layout.addStretch()
 
@@ -287,60 +230,129 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._sidebar_footer)
         self._sidebar_text_widgets.append(self._sidebar_footer)
 
-        # Set initial active
-        self._set_active_page(self.PAGE_CONVERSATIONS)
-
         return self._sidebar
 
-    def _sidebar_btn(self, text, page_index, icon_char=None):
+    def _populate_sidebar(self, mode):
+        """(Re)build the sidebar nav entries for `mode` from the registry."""
+        nav = self._sidebar_nav
+        while nav.count():
+            item = nav.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.hide()
+                w.deleteLater()
+
+        self._sidebar_buttons = []
+        self._sidebar_dividers = []
+        self._sidebar_text_widgets = [self._sidebar_footer]
+
+        current_section = None
+        for spec in app_modes.pages_for_mode(mode):
+            if not self._spec_enabled(spec):
+                continue
+            if spec.section != current_section:
+                if current_section is not None:
+                    div = QFrame()
+                    div.setObjectName("SidebarDivider")
+                    nav.addWidget(div)
+                    self._sidebar_dividers.append(div)
+                section_label = QLabel(spec.section)
+                section_label.setObjectName("SidebarSection")
+                nav.addWidget(section_label)
+                self._sidebar_text_widgets.append(section_label)
+                current_section = spec.section
+            btn = self._sidebar_btn(
+                f"{spec.icon}  {spec.title}", spec.page_id, spec.icon
+            )
+            if spec.hidden:
+                btn.setVisible(False)
+            nav.addWidget(btn)
+
+        # Re-apply collapsed presentation to freshly built entries
+        if self._sidebar_collapsed:
+            for btn, _pid in self._sidebar_buttons:
+                btn.setText(btn.property("icon_char") or "")
+                btn.setProperty("collapsed", "true")
+                btn.style().unpolish(btn)
+                btn.style().polish(btn)
+            for w in self._sidebar_text_widgets:
+                w.setVisible(False)
+            for div in self._sidebar_dividers:
+                div.setProperty("collapsed", "true")
+                div.style().unpolish(div)
+                div.style().polish(div)
+
+        # Re-assert the active highlight after a rebuild
+        if self._active_page:
+            for btn, pid in self._sidebar_buttons:
+                btn.setProperty(
+                    "active", "true" if pid == self._active_page else "false"
+                )
+                btn.style().unpolish(btn)
+                btn.style().polish(btn)
+
+    def _sidebar_btn(self, text, page_id, icon_char=None):
         btn = QPushButton(text)
         btn.setObjectName("SidebarButton")
         btn.setCursor(Qt.PointingHandCursor)
-        btn.clicked.connect(lambda: self._set_active_page(page_index))
+        btn.clicked.connect(lambda: self._set_active_page(page_id))
         # Store icon and full text for collapse/expand (Build 10.0: T10)
         btn.setProperty("full_text", text)
         btn.setProperty("icon_char", icon_char or "")
-        self._sidebar_buttons.append((btn, page_index))
+        self._sidebar_buttons.append((btn, page_id))
         return btn
 
-    def _set_active_page(self, index):
-        self._active_page = index
-        widget = self._page_widgets.get(index)
-        if widget:
-            self.content_stack.setCurrentWidget(widget)
-        else:
-            self.content_stack.setCurrentIndex(index)
+    def _set_active_page(self, page):
+        """Show a page. Accepts a string page id or a legacy PAGE_* int."""
+        page_id = app_modes.normalize_page_id(page)
+        widget = self._page_widgets.get(page_id)
+        if widget is None:
+            return
+        spec = app_modes.spec_for(page_id)
+        same_widget = self.content_stack.currentWidget() is widget
+
+        self._active_page = page_id
+        self.content_stack.setCurrentWidget(widget)
+        if spec is not None and spec.tab_key:
+            try:
+                widget.select_tab(spec.tab_key)
+            except Exception:
+                pass
 
         # Re-raise job overlay after page switch (QStackedWidget repaints
         # the new page on top, which can obscure the overlay)
         if hasattr(self, '_job_overlay') and self._job_overlay.isVisible():
             self._job_overlay.raise_()
 
-        # Close drill-down panel on page navigation
-        if hasattr(self, '_drilldown') and self._drilldown.is_open():
+        # Close drill-down panel on page navigation — but not when switching
+        # tabs on the same host widget (keeps the enablement chat open).
+        if (not same_widget and hasattr(self, '_drilldown')
+                and self._drilldown.is_open()):
             self._drilldown.close_panel()
 
         # Update button states — force full stylesheet re-evaluation
         # PySide6 unpolish/polish can miss dynamic property changes, so we
         # also poke setStyleSheet("") to clear any stale inline cache.
-        for btn, page_idx in self._sidebar_buttons:
-            btn.setProperty("active", "true" if page_idx == index else "false")
+        for btn, pid in self._sidebar_buttons:
+            btn.setProperty("active", "true" if pid == page_id else "false")
             btn.setStyleSheet("")          # clear any inline overrides
             btn.style().unpolish(btn)
             btn.style().polish(btn)
             btn.update()
 
-        # ── Page transition fade-in (Build 10.0: T16) ──
-        page = self.content_stack.widget(index)
-        if page:
-            effect = QGraphicsOpacityEffect(page)
-            page.setGraphicsEffect(effect)
+        # ── Page transition fade-in (Build 10.0: T16) ── skipped when only
+        # switching tabs on the same host widget (no full-page change).
+        if not same_widget:
+            effect = QGraphicsOpacityEffect(widget)
+            widget.setGraphicsEffect(effect)
             self._page_anim = QPropertyAnimation(effect, b"opacity")
             self._page_anim.setDuration(200)
             self._page_anim.setStartValue(0.0)
             self._page_anim.setEndValue(1.0)
             self._page_anim.setEasingCurve(QEasingCurve.OutCubic)
-            self._page_anim.finished.connect(lambda p=page: p.setGraphicsEffect(None))
+            self._page_anim.finished.connect(
+                lambda p=widget: p.setGraphicsEffect(None)
+            )
             self._page_anim.start(QAbstractAnimation.KeepWhenStopped)
 
     # ── Sidebar Collapse / Expand (Build 10.0: T10) ──────────
@@ -434,61 +446,156 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(content)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-
         self.content_stack = QStackedWidget()
+        layout.addWidget(self.content_stack)
+        return content
 
-        # Page 0: Conversation Search
+    # ═══════════════════════════════════════════
+    #  MODE-GATED PAGE MOUNTING + SERVICES
+    # ═══════════════════════════════════════════
+
+    def _spec_enabled(self, spec) -> bool:
+        """A spec may be gated behind a truthy settings flag."""
+        if spec.settings_flag:
+            try:
+                section, key = spec.settings_flag
+                cfg = get_section(section, {}) or {}
+                return bool(cfg.get(key, False))
+            except Exception:
+                return False
+        return True
+
+    def _mount_mode_pages(self, mode):
+        """Construct and stack the pages of `mode` (once per mode).
+
+        Several specs may share one factory (the enablement tabs all host
+        on EnablementPage); `_factory_widgets` dedups so the widget is
+        built once and registered under every page id that targets it.
+        """
+        if mode in self._mounted_modes:
+            return
+        for spec in app_modes.pages_for_mode(mode):
+            if not self._spec_enabled(spec):
+                continue
+            widget = self._factory_widgets.get(spec.factory)
+            if widget is None:
+                widget = getattr(self, spec.factory)()
+                self._factory_widgets[spec.factory] = widget
+                self.content_stack.addWidget(widget)
+                if spec.wants_drilldown:
+                    try:
+                        widget.set_drilldown_panel(self._drilldown)
+                    except Exception:
+                        pass
+            self._page_widgets[spec.page_id] = widget
+        self._mounted_modes.add(mode)
+
+    def _start_services_for_mode(self, mode):
+        for svc in app_modes.services_for_mode(mode):
+            try:
+                getattr(self, svc.start)()
+            except Exception as exc:
+                import logging
+                logging.getLogger("alma.main").warning(
+                    "service %s start failed: %s", svc.service_id, exc
+                )
+
+    def _stop_services_for_mode(self, outgoing, incoming):
+        """Stop stoppable services exclusive to the outgoing mode."""
+        for svc in app_modes.services_for_mode(outgoing):
+            if incoming in svc.modes or not svc.stop:
+                continue
+            try:
+                getattr(self, svc.stop)()
+            except Exception as exc:
+                import logging
+                logging.getLogger("alma.main").warning(
+                    "service %s stop failed: %s", svc.service_id, exc
+                )
+
+    def switch_mode(self, mode):
+        """Runtime mode toggle: lazy-mounts the target mode's pages on
+        first use, swaps the sidebar, and starts/stops mode-exclusive
+        services. Already-built pages persist for the session."""
+        if mode not in app_modes.MODES or mode == self._mode:
+            return
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            outgoing = self._mode
+            self._stop_services_for_mode(outgoing, mode)
+            self._mode = mode
+            app_modes.set_current_mode(mode)
+            self._mount_mode_pages(mode)
+            self._populate_sidebar(mode)
+            self._start_services_for_mode(mode)
+            if mode == app_modes.MODE_PRODUCT:
+                self._after_product_pages_mounted()
+            try:
+                from src.data.settings_manager import update_section
+                update_section("app", {"last_mode": mode})
+            except Exception:
+                pass
+            self._set_active_page(app_modes.first_page_id(mode))
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    def _after_product_pages_mounted(self):
+        """One-time product wiring: cross-page sync, settings restore,
+        initial data load (incl. the launch auto-search)."""
+        if self._product_wiring_done:
+            return
+        self._product_wiring_done = True
+        self._setup_calendar_sync()
+        self._restore_settings()
+        self._load_data()
+
+    # ── Page factories ──────────────────────────────────────────────
+    # One per page; imports are deferred so a mode never loads the other
+    # mode's page modules.
+
+    def _create_conversations_page(self):
+        from src.ui.pages.conversation_search import ConversationSearchPage
         self.conversations_page = ConversationSearchPage(self.db)
         self.conversations_page.data_loaded.connect(self._on_data_loaded)
-        self.content_stack.addWidget(self.conversations_page)
-        self._page_widgets[self.PAGE_CONVERSATIONS] = self.conversations_page
+        return self.conversations_page
 
-        # Page 1: TRC Analytics
+    def _create_dashboard_page(self):
+        from src.ui.pages.trc_analytics import TRCAnalyticsPage
         self.dashboard_page = TRCAnalyticsPage(self.db)
-        self.content_stack.addWidget(self.dashboard_page)
-        self._page_widgets[self.PAGE_DASHBOARD] = self.dashboard_page
-
-        # Page 2: Trending Topics
-        self.trending_page = TrendingTopicsPage(self.db)
-        self.content_stack.addWidget(self.trending_page)
-        self._page_widgets[self.PAGE_TRENDING] = self.trending_page
-
-        # Page 3: Incidents
-        self.incidents_page = IncidentsPage(self.db)
-        self.incidents_page.scan_complete.connect(self._update_incident_badge)
-        self.content_stack.addWidget(self.incidents_page)
-        self._page_widgets[self.PAGE_INCIDENTS] = self.incidents_page
-
-        # NLP Scanner signals now wired through TRC Analytics (NLP Scanner absorbed)
+        # NLP Scanner signals wired through TRC Analytics (NLP Scanner absorbed)
         self.dashboard_page.deep_dive_requested.connect(self._on_nlp_deep_dive)
         self.dashboard_page.view_tickets_requested.connect(self._on_nlp_view_tickets)
         self.dashboard_page.scan_active_changed.connect(self._on_scan_active_changed)
+        return self.dashboard_page
 
-        # Page 4: AI Reports
+    def _create_trending_page(self):
+        from src.ui.pages.trending_topics import TrendingTopicsPage
+        self.trending_page = TrendingTopicsPage(self.db)
+        return self.trending_page
+
+    def _create_incidents_page(self):
+        from src.ui.pages.incidents_page import IncidentsPage
+        self.incidents_page = IncidentsPage(self.db)
+        self.incidents_page.scan_complete.connect(self._update_incident_badge)
+        return self.incidents_page
+
+    def _create_reports_page(self):
+        from src.ui.pages.ai_reports import AIReportsPage
         self.reports_page = AIReportsPage(self.db)
-        self.content_stack.addWidget(self.reports_page)
-        self._page_widgets[self.PAGE_REPORTS] = self.reports_page
+        return self.reports_page
 
-        # Page 5: A/B Compare
+    def _create_ab_compare_page(self):
+        from src.ui.pages.ab_compare import ABComparePage
         self.ab_compare_page = ABComparePage(self.db)
-        self.content_stack.addWidget(self.ab_compare_page)
-        self._page_widgets[self.PAGE_AB_COMPARE] = self.ab_compare_page
+        return self.ab_compare_page
 
-        # Page 6: Smart Reporting
+    def _create_smart_reporting_page(self):
+        from src.ui.pages.smart_reporting import SmartReportingPage
         self.smart_reporting_page = SmartReportingPage(self.db)
-        self.content_stack.addWidget(self.smart_reporting_page)
-        self._page_widgets[self.PAGE_SMART_REPORTING] = self.smart_reporting_page
+        return self.smart_reporting_page
 
-        # Schedule Manager (persistent DB-backed scheduling for Smart Reporting)
-        try:
-            from src.data.schedule_manager import ScheduleManager
-            self._schedule_manager = ScheduleManager(self.db, parent=self)
-            self.smart_reporting_page.set_schedule_manager(self._schedule_manager)
-            self._schedule_manager.start()
-        except Exception:
-            self._schedule_manager = None
-
-        # Page 7: Settings
+    def _create_settings_page(self):
+        from src.ui.pages.settings_page import SettingsPage
         self.settings_page = SettingsPage()
         self.settings_page.set_db_manager(self.db)
         self.settings_page.datasets_changed.connect(self._on_datasets_changed)
@@ -496,47 +603,77 @@ class MainWindow(QMainWindow):
         self.settings_page.debug_mode_changed.connect(self._on_debug_mode_toggled)
         self.settings_page.api_toggle.toggled.connect(self._on_api_toggled)
         self.settings_page.settings_changed.connect(self._on_settings_changed)
-        self.content_stack.addWidget(self.settings_page)
-        self._page_widgets[self.PAGE_SETTINGS] = self.settings_page
+        return self.settings_page
 
-        # Page 8: Source Monitor (Zendesk)
+    def _create_source_monitor_page(self):
+        from src.ui.pages.source_monitor_page import SourceMonitorPage
         self.source_monitor_page = SourceMonitorPage(self.db)
-        self.content_stack.addWidget(self.source_monitor_page)
-        self._page_widgets[self.PAGE_SOURCE_MONITOR] = self.source_monitor_page
+        return self.source_monitor_page
 
-        # Page 9: Guru Knowledge Base (Phase 4)
-        # As of 2026-05-07 the user-facing default is the WIP placeholder
-        # (`GuruWipPage`) — the legacy interactive `GuruPage` is preserved
-        # behind the `guru.experimental_ui_enabled` settings flag so we
-        # don't lose the build-out work while the redesign lands.
+    def _create_legacy_guru_page(self):
         self.guru_page = self._make_guru_page()
-        self.content_stack.addWidget(self.guru_page)
-        self._page_widgets[self.PAGE_GURU] = self.guru_page
+        return self.guru_page
 
-        # Page 10: Gemini Chats (Build 11.0)
+    def _create_enablement_page(self):
+        from src.ui.pages.enablement import EnablementPage
+        en_cfg = get_section("enablement", {}) or {}
+        page = EnablementPage(self.db, demo=en_cfg.get("demo_mode", True))
+        try:
+            # Sidebar entries drive tab selection in enablement mode
+            page.set_tab_bar_visible(False)
+        except Exception:
+            pass
+        self.guru_page = page
+        return page
+
+    def _create_gemini_chats_page(self):
+        from src.ui.pages.gemini_chats_page import GeminiChatsPage
         self.gemini_chats_page = GeminiChatsPage(self.db)
-        self.content_stack.addWidget(self.gemini_chats_page)
-        self._page_widgets[self.PAGE_GEMINI_CHATS] = self.gemini_chats_page
+        return self.gemini_chats_page
 
-        # Page 11: Data Warehouse (Session 4)
+    def _create_data_warehouse_page(self):
+        from src.ui.pages.data_warehouse_page import DataWarehousePage
         self.data_warehouse_page = DataWarehousePage(self.db)
-        self.content_stack.addWidget(self.data_warehouse_page)
-        self._page_widgets[self.PAGE_DATA_WAREHOUSE] = self.data_warehouse_page
+        return self.data_warehouse_page
 
-        # Source Warehouse + Watchlist Engine (Phase 3.5)
-        self._source_warehouse = None
-        self._watchlist_engine = None
-        self._setup_warehouse_and_watchlist()
+    # ── Mode-gated service start/stop wrappers ──────────────────────
 
-        # Guru Integration (Phase 4)
-        self._setup_guru()
+    def _start_schedule_manager(self):
+        """Schedule Manager (persistent DB-backed scheduling for Smart
+        Reporting). Product mode only."""
+        if getattr(self, "_schedule_manager", None) is None:
+            try:
+                from src.data.schedule_manager import ScheduleManager
+                self._schedule_manager = ScheduleManager(self.db, parent=self)
+                self.smart_reporting_page.set_schedule_manager(self._schedule_manager)
+            except Exception:
+                self._schedule_manager = None
+                return
+        if self._schedule_manager is not None and not self._schedule_manager.is_running():
+            self._schedule_manager.start()
 
-        # Zendesk Monitor — background polling + spike detection
-        self._zendesk_monitor = None
-        self._setup_zendesk_monitor()
+    def _stop_schedule_manager(self):
+        if getattr(self, "_schedule_manager", None) is not None:
+            try:
+                self._schedule_manager.stop()
+            except Exception:
+                pass
 
-        layout.addWidget(self.content_stack)
-        return content
+    def _stop_zendesk_monitor(self):
+        if self._zendesk_monitor is not None:
+            try:
+                self._zendesk_monitor.stop()
+            except Exception:
+                pass
+            self._zendesk_monitor = None
+
+    def _stop_enablement_monitor(self):
+        if getattr(self, "_enablement_monitor", None) is not None:
+            try:
+                self._enablement_monitor.stop()
+            except Exception:
+                pass
+            self._enablement_monitor = None
 
     # ═══════════════════════════════════════════
     #  RESTORE PERSISTED SETTINGS
@@ -607,6 +744,10 @@ class MainWindow(QMainWindow):
         These are source-agnostic — they work with any source monitor.
         Created once on app start; passed to monitors via constructor.
         """
+        if not hasattr(self, "source_monitor_page"):
+            return  # product pages not mounted (enablement mode)
+        if self._source_warehouse is not None:
+            return  # already initialized (mode switch round trip)
         try:
             from src.data.source_warehouse import SourceWarehouse
             from src.data.watchlist_engine import WatchlistEngine
@@ -633,26 +774,25 @@ class MainWindow(QMainWindow):
     # ═══════════════════════════════════════════
 
     def _make_guru_page(self):
-        """Construct either the WIP placeholder or the legacy interactive page.
+        """Legacy Guru page routing (product mode only).
 
-        Routing is gated by ``guru.experimental_ui_enabled`` in
-        settings.yaml. Default is False → WIP placeholder. Setting True
-        falls through to the legacy ``GuruPage`` (interactive, all 6
-        tabs work but UI polish is incomplete).
+        The Enablement Workbench now lives in enablement mode (see
+        `_create_enablement_page`); the product sidebar carries no Guru
+        entry unless ``guru.experimental_ui_enabled`` is set, in which
+        case the legacy interactive ``GuruPage`` mounts. The WIP
+        placeholder remains the safe fallback if that construction
+        fails.
         """
         try:
             from src.data.settings_manager import get_section
-            en_cfg = get_section("enablement", {}) or {}
-            # New Enablement Workbench (4-tab ETL) is the default front door.
-            if en_cfg.get("workbench_enabled", True):
-                from src.ui.pages.enablement import EnablementPage
-                return EnablementPage(self.db, demo=en_cfg.get("demo_mode", True))
-            guru_cfg = get_section("guru", {})
+            guru_cfg = get_section("guru", {}) or {}
             if guru_cfg.get("experimental_ui_enabled", False):
+                from src.ui.pages.guru_page import GuruPage
                 return GuruPage(self.db)
         except Exception:
             # If settings load fails, default to the safer WIP page.
             pass
+        from src.ui.pages.guru_wip_page import GuruWipPage
         return GuruWipPage(self.db)
 
     def _wire_enablement_monitor(self):
@@ -686,6 +826,8 @@ class MainWindow(QMainWindow):
         # The WIP placeholder defines the same setter API as GuruPage
         # but ignores everything. Skip the pipeline construction entirely
         # to avoid running unnecessary DB queries at startup.
+        if not hasattr(self, "guru_page"):
+            return  # no guru surface mounted in this mode
         if type(self.guru_page).__name__ == "EnablementPage":
             # Enablement Workbench publishes via guru_content_drafts; it needs only
             # the Guru client, not the friction/content/effectiveness pipelines.
@@ -708,7 +850,7 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
             return
-        if isinstance(self.guru_page, GuruWipPage):
+        if type(self.guru_page).__name__ == "GuruWipPage":
             return
         try:
             from src.data.guru_client import GuruClient
@@ -753,6 +895,8 @@ class MainWindow(QMainWindow):
 
     def _setup_zendesk_monitor(self):
         """Create and start the Zendesk monitor if credentials are configured."""
+        if not hasattr(self, "source_monitor_page"):
+            return  # product pages not mounted (enablement mode)
         # Wire connection_changed ONCE (idempotent via _zd_signal_wired flag)
         if not getattr(self, "_zd_signal_wired", False):
             self.source_monitor_page.connection_changed.connect(
@@ -1343,12 +1487,14 @@ class MainWindow(QMainWindow):
 
     def _update_incident_badge(self, count_2theta: int = 0):
         """Update sidebar badge for Incidents with 2θ flag count."""
-        for btn, page_idx in self._sidebar_buttons:
-            if page_idx == self.PAGE_INCIDENTS:
-                if count_2theta > 0:
-                    btn.setText(f"\U0001F6A8  Incidents ({count_2theta})")
-                else:
-                    btn.setText("\U0001F6A8  Incidents")
+        spec = app_modes.spec_for("incidents")
+        icon = spec.icon if spec else ""
+        for btn, pid in self._sidebar_buttons:
+            if pid == "incidents":
+                text = (f"{icon}  Incidents ({count_2theta})"
+                        if count_2theta > 0 else f"{icon}  Incidents")
+                btn.setText(text)
+                btn.setProperty("full_text", text)
                 break
 
     # ═══════════════════════════════════════════
@@ -1476,6 +1622,12 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         """Prompt to clear session data on close."""
+        if not hasattr(self, "settings_page"):
+            # Enablement-only session — the product settings page (and its
+            # staging-clear semantics) never mounted; keep everything.
+            self.db.close()
+            event.accept()
+            return
         # Only prompt if there's real (non-test) data loaded
         is_test = self.settings_page.is_test_data_enabled()
         count = self.db.get_ticket_count()

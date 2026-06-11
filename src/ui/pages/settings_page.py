@@ -1856,8 +1856,63 @@ class SettingsPage(QWidget):
     #  TAB 4: DISPLAY
     # ═══════════════════════════════════════════
 
+    def _on_default_mode_changed(self):
+        """Persist the startup-mode choice (product / enablement / last)."""
+        from src.data.settings_manager import update_section
+        try:
+            value = self._default_mode_combo.currentData() or "product"
+            update_section("app", {"default_mode": value})
+        except Exception:
+            pass
+
     def _build_display_tab(self, lay):
-        """Build Display tab: test data, display prefs, AI enhancements, behavior settings."""
+        """Build Display tab: app mode, test data, display prefs, AI enhancements, behavior settings."""
+
+        # ── App Mode ──
+        lay.addWidget(self._section_label("APP MODE"))
+        lay.addSpacing(8)
+
+        mode_card = self._card()
+        mode_layout = QVBoxLayout(mode_card)
+        mode_layout.setContentsMargins(20, 18, 20, 18)
+        mode_layout.setSpacing(10)
+
+        mode_row = QHBoxLayout()
+        mode_lbl_col = QVBoxLayout()
+        mode_lbl_col.setSpacing(2)
+        mode_title = QLabel("Default Mode at Startup")
+        mode_title.setStyleSheet(f"font-size: 14px; font-weight: 600; color: {ALMA_TEXT_DARK};")
+        mode_desc = QLabel(
+            "Which workspace the app opens in: Product (full analytics suite) "
+            "or Enablement (lightweight workbench). 'Last used' reopens "
+            "whichever mode was active when the app closed."
+        )
+        mode_desc.setStyleSheet(f"font-size: 12px; color: {ALMA_TEXT_LIGHT};")
+        mode_desc.setWordWrap(True)
+        mode_lbl_col.addWidget(mode_title)
+        mode_lbl_col.addWidget(mode_desc)
+        mode_row.addLayout(mode_lbl_col, 1)
+
+        self._default_mode_combo = QComboBox()
+        self._default_mode_combo.addItem("Product", "product")
+        self._default_mode_combo.addItem("Enablement", "enablement")
+        self._default_mode_combo.addItem("Last used", "last")
+        try:
+            from src.data.settings_manager import get_section
+            _current_mode = (get_section("app", {}) or {}).get("default_mode", "product")
+        except Exception:
+            _current_mode = "product"
+        _mode_idx = self._default_mode_combo.findData(_current_mode)
+        if _mode_idx >= 0:
+            self._default_mode_combo.setCurrentIndex(_mode_idx)
+        self._default_mode_combo.currentIndexChanged.connect(
+            self._on_default_mode_changed
+        )
+        mode_row.addWidget(self._default_mode_combo)
+        mode_layout.addLayout(mode_row)
+
+        lay.addWidget(mode_card)
+        lay.addSpacing(24)
 
         # ── Development ──
         lay.addWidget(self._section_label("DEVELOPMENT"))

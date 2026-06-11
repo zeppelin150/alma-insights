@@ -7,6 +7,7 @@ Graceful fallback when model is not installed.
 from __future__ import annotations
 
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,12 @@ def handle_semantic_search(conn, args: dict, session_filters: dict) -> dict:
     Returns:
         Dict with matches or graceful error.
     """
+    # Belt-and-braces with the MCP server's schema filter: never reach
+    # the torch import when the host excluded this tool for the mode.
+    excluded = os.environ.get("ALMA_MCP_EXCLUDE_TOOLS", "")
+    if "semantic_search" in {n.strip() for n in excluded.split(",")}:
+        return {"error": "semantic_search is disabled in this mode"}
+
     query = args.get("query", "")
     if not query:
         return {"error": "query is required"}

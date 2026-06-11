@@ -92,3 +92,18 @@ def test_settings_set_drive_folders_renders(qapp):
     s = SettingsPage()
     s.set_drive_folders([{"display_name": "Docs", "config": {"folder_id": "f1"}, "last_status": "ok"}])
     assert s._drive_list.count() >= 1
+
+
+def test_select_tab_and_tab_bar_visibility(qapp, empty_db):
+    """Sidebar-driven tab selection (enablement mode) + hideable tab bar."""
+    page = _page(empty_db)
+    page.select_tab("calendar")
+    assert page.tabs.currentWidget() is page._tab_widgets["calendar"]
+    page.select_tab("workbench")
+    assert page.tabs.currentWidget() is page.workbench
+    page.select_tab("bogus")  # unknown key is a no-op
+    assert page.tabs.currentWidget() is page.workbench
+    page.set_tab_bar_visible(False)
+    assert page.tabs.tabBar().isHidden()
+    page.set_tab_bar_visible(True)
+    assert not page.tabs.tabBar().isHidden()

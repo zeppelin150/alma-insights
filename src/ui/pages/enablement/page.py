@@ -102,10 +102,19 @@ class EnablementPage(QWidget):
         self.settings = SettingsPage()
         # Scroll-wrap the tall pages so content scrolls instead of compressing
         # (compression was overlapping rows on Settings). Workbench fills exactly.
-        self.tabs.addTab(self._scroll(self.calendar), "Calendar")
-        self.tabs.addTab(self._scroll(self.tasks), "Tasks")
+        cal_tab = self._scroll(self.calendar)
+        tasks_tab = self._scroll(self.tasks)
+        settings_tab = self._scroll(self.settings)
+        self.tabs.addTab(cal_tab, "Calendar")
+        self.tabs.addTab(tasks_tab, "Tasks")
         self.tabs.addTab(self.workbench, "Workbench")
-        self.tabs.addTab(self._scroll(self.settings), "Settings")
+        self.tabs.addTab(settings_tab, "Settings")
+        self._tab_widgets = {
+            "calendar": cal_tab,
+            "tasks": tasks_tab,
+            "workbench": self.workbench,
+            "settings": settings_tab,
+        }
         self.tabs.setCurrentWidget(self.workbench)
         outer.addWidget(self.tabs, 1)
 
@@ -405,19 +414,38 @@ class EnablementPage(QWidget):
         except Exception:
             return ""
 
+    def select_tab(self, key: str):
+        """Select a tab by key — the enablement-mode sidebar drives this."""
+        w = getattr(self, "_tab_widgets", {}).get(key)
+        if w is not None:
+            self.tabs.setCurrentWidget(w)
+
+    def set_tab_bar_visible(self, visible: bool):
+        """Hide the internal tab bar when the sidebar owns navigation."""
+        self.tabs.tabBar().setVisible(visible)
+
     def _build_mcp_config(self) -> list[dict]:
         import sys
         from pathlib import Path
         db_path = self._engine_db_path() or ""
         pointer = str(Path(db_path).parent / ".current_chat_session") if db_path else ""
+        env = [
+            {"name": "ALMA_DB_PATH", "value": db_path},
+            {"name": "ALMA_CHAT_SESSION_FILE", "value": pointer},
+        ]
+        try:
+            from src.ui import app_modes
+            if app_modes.current_mode() == app_modes.MODE_ENABLEMENT:
+                # Keeps the torch/Qwen3 stack unloadable in enablement mode
+                env.append({"name": "ALMA_MCP_EXCLUDE_TOOLS",
+                            "value": "semantic_search"})
+        except Exception:
+            pass
         return [{
             "name": "alma-chat-tools",
             "command": sys.executable,
             "args": ["-m", "src.mcp.chat_mcp_server"],
-            "env": [
-                {"name": "ALMA_DB_PATH", "value": db_path},
-                {"name": "ALMA_CHAT_SESSION_FILE", "value": pointer},
-            ],
+            "env": env,
         }]
 
     def _ensure_session(self):

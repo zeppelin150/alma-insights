@@ -21,38 +21,31 @@ class TestH0_DataWarehouseSidebarPosition:
     """H0: Data Warehouse button is in the SYSTEM section of the sidebar."""
 
     def test_dw_in_system_section(self):
-        """H0: Data Warehouse sidebar button appears after SYSTEM label, before Settings.
+        """H0: Data Warehouse sits in SYSTEM, ordered before Settings.
 
-        Read main_window.py source and check ordering: SYSTEM label should
-        precede Data Warehouse sidebar_btn which should precede Settings sidebar_btn.
+        The sidebar now renders from the app_modes registry in spec order,
+        so the ordering invariant is asserted on the registry itself.
         """
-        src = (Path(__file__).parent.parent / "src" / "ui" / "main_window.py").read_text(encoding="utf-8")
+        from src.ui import app_modes
 
-        # Find section markers and sidebar_btn call positions (not PAGE constants)
-        system_pos = src.find('"SYSTEM"')
-        # Find the _sidebar_btn call that creates the Data Warehouse button
-        dw_btn_pos = src.find('Data Warehouse", self.PAGE_DATA_WAREHOUSE')
-        # Find the _sidebar_btn call that creates the Settings button
-        settings_btn_pos = src.find('Settings", self.PAGE_SETTINGS')
+        specs = app_modes.pages_for_mode(app_modes.MODE_PRODUCT)
+        ids = [s.page_id for s in specs]
+        dw = next(s for s in specs if s.page_id == "data_warehouse")
+        settings = next(s for s in specs if s.page_id == "settings")
 
-        assert system_pos > 0, "SYSTEM section label exists"
-        assert dw_btn_pos > 0, "Data Warehouse sidebar button exists"
-
-        # H0: Data Warehouse sidebar_btn comes AFTER SYSTEM label
-        assert dw_btn_pos > system_pos, \
-            f"H0 REJECTED: Data Warehouse btn (pos {dw_btn_pos}) is BEFORE SYSTEM section (pos {system_pos})"
+        assert dw.section == "SYSTEM"
+        assert settings.section == "SYSTEM"
+        assert ids.index("data_warehouse") < ids.index("settings"), \
+            "H0 REJECTED: Data Warehouse must precede Settings in SYSTEM"
 
     def test_dw_not_in_sources_section(self):
-        """H0 predicts DW is NOT between SOURCES and ANALYSIS markers."""
-        src = (Path(__file__).parent.parent / "src" / "ui" / "main_window.py").read_text(encoding="utf-8")
+        """H0 predicts DW is NOT in the SOURCES section."""
+        from src.ui import app_modes
 
-        sources_pos = src.find('"SOURCES"')
-        analysis_pos = src.find('"ANALYSIS"')
-        dw_pos = src.find("Data Warehouse")
-
-        is_in_sources_section = sources_pos < dw_pos < analysis_pos
-        assert not is_in_sources_section, \
-            f"H0 REJECTED: Data Warehouse is in SOURCES section (between pos {sources_pos} and {analysis_pos})"
+        dw = app_modes.spec_for("data_warehouse")
+        assert dw is not None
+        assert dw.section != "SOURCES", \
+            "H0 REJECTED: Data Warehouse is in the SOURCES section"
 
 
 class TestH0_CollapseSidebarPerformance:
