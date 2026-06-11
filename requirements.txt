@@ -31,9 +31,11 @@ PyJWT[crypto]==2.10.1
 pytest==8.3.4
 pytest-timeout==2.3.1
 
-# Optional — Google Drive export
-# google-api-python-client==2.149.0
-# google-auth==2.36.0
+# Google Drive — service-account read/export + per-user OAuth (InstalledAppFlow).
+# google-auth-oauthlib provides the loopback PKCE flow for individual accounts.
+google-api-python-client==2.149.0
+google-auth==2.36.0
+google-auth-oauthlib==1.2.1
 
 # Optional — OCR Debug tool (AI assistant visual inspection)
 # mss==10.0.0

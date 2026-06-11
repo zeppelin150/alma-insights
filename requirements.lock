@@ -34,6 +34,13 @@ keyring==25.5.0
 # Critical for tests/test_github_app_auth.py; without the extra, CI fails
 # at 'from cryptography.hazmat.primitives import serialization'.
 PyJWT[crypto]==2.10.1
+# Google Drive — service-account + per-user OAuth (google-auth-oauthlib =
+# InstalledAppFlow/PKCE). Transitive closure (google-auth-httplib2, httplib2,
+# requests-oauthlib, oauthlib, googleapis-common-protos, …) is filled with
+# hashes by the M1 pip-compile run below.
+google-api-python-client==2.149.0
+google-auth==2.36.0
+google-auth-oauthlib==1.2.1
 
 # ── Transitive pins (regenerate on M1 to fill in hashes) ────────
 # The following are the expected transitive deps. pip-compile on the
