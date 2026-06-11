@@ -209,3 +209,116 @@ if __name__ == "__main__":  # pragma: no cover — manual smoke run
     print("Simulation summary:", summary)
     print("Docs in store:", len(store.list_documents(c)))
     print("Lookup 'SSO':", [d["name"] for d in store.search_documents(c, "SSO")])
+
+
+# ── demo analytics (Analytics page in demo mode) ─────────────────────
+
+_DEMO_ANALYTICS_CARDS = [
+    ("demo-card-sso", "Setting up SSO for Providers", "Provider Enablement", 9),
+    ("demo-card-payments", "Payments v2 Overview", "Product", 7),
+    ("demo-card-returns", "Returns & Refunds Policy", "CX", 5),
+    ("demo-card-claims", "Claims Resubmission Guide", "CX", 3),
+    ("demo-card-pricing", "Q3 Pricing Tiers", "Product", 2),
+]
+
+
+def seed_demo_analytics(conn) -> dict:
+    """Deterministic synthetic Guru analytics for demo mode.
+
+    30 days of view/copy events over five demo cards, a stats snapshot,
+    a verification queue with two due cards, and four open comments —
+    enough for every Analytics section to render.
+    """
+    import json
+    import random
+    from datetime import datetime, timedelta, timezone
+
+    from src.data.connection_factory import atomic
+
+    rng = random.Random(2026)
+    now = datetime.now(timezone.utc)
+    inserted = 0
+    with atomic(conn):
+        for day in range(30):
+            date = now - timedelta(days=29 - day)
+            for cid, _title, _coll, weight in _DEMO_ANALYTICS_CARDS:
+                views = rng.randint(0, weight)
+                for n in range(views):
+                    ts = (date + timedelta(minutes=7 * n)).isoformat()
+                    conn.execute(
+                        "INSERT OR IGNORE INTO guru_events "
+                        "(event_key, event_type, user_email, event_date, "
+                        " card_id, properties, fetched_at) VALUES (?,?,?,?,?,?,?)",
+                        (f"demo-{cid}-{day}-{n}", "card-viewed",
+                         "demo@alma.com", ts, cid, "{}", now.isoformat()),
+                    )
+                    inserted += 1
+                if rng.random() < 0.18:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO guru_events "
+                        "(event_key, event_type, user_email, event_date, "
+                        " card_id, properties, fetched_at) VALUES (?,?,?,?,?,?,?)",
+                        (f"demo-copy-{cid}-{day}", "card-copied",
+                         "demo@alma.com", date.isoformat(), cid, "{}",
+                         now.isoformat()),
+                    )
+                    inserted += 1
+
+        conn.execute(
+            "INSERT OR REPLACE INTO guru_team_stats(snapshot_at, stats_json) "
+            "VALUES (?,?)",
+            (now.isoformat(), json.dumps({"cards": 412, "trusted": 318,
+                                          "needsVerification": 61,
+                                          "stale": 33})),
+        )
+
+        verif = [
+            ("demo-card-sso", "NEEDS_VERIFICATION", 2),
+            ("demo-card-returns", "STALE", 6),
+            ("demo-card-claims", "TRUSTED", 21),
+        ]
+        for cid, state, due_days in verif:
+            title = next(t for c, t, _co, _w in _DEMO_ANALYTICS_CARDS if c == cid)
+            coll = next(co for c, _t, co, _w in _DEMO_ANALYTICS_CARDS if c == cid)
+            conn.execute(
+                "INSERT OR REPLACE INTO guru_card_verification "
+                "(card_id, title, collection_id, collection_name, "
+                " verification_state, verification_reason, "
+                " next_verification_date, verification_interval, "
+                " last_verified_at, last_modified, comment_count, fetched_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (cid, title, f"coll-{coll.lower().replace(' ', '-')}", coll,
+                 state, "", (now + timedelta(days=due_days)).isoformat(),
+                 "90 days", (now - timedelta(days=80)).isoformat(),
+                 (now - timedelta(days=95)).isoformat(), 1, now.isoformat()),
+            )
+
+        comments = [
+            ("demo-comment-1", "demo-card-sso", "jordan@alma.com",
+             "The Okta steps changed in the June release — step 3 screenshot is stale."),
+            ("demo-comment-2", "demo-card-payments", "sam@alma.com",
+             "Can we add the ERA auto-match thresholds here?"),
+            ("demo-comment-3", "demo-card-returns", "alex@alma.com",
+             "Policy says 30 days but the portal enforces 45 — which is right?"),
+            ("demo-comment-4", "demo-card-sso", "casey@alma.com",
+             "Worth a callout that pilot orgs keep legacy login until cutover."),
+        ]
+        for n, (cmid, cid, author, text) in enumerate(comments):
+            title = next(t for c, t, _co, _w in _DEMO_ANALYTICS_CARDS if c == cid)
+            conn.execute(
+                "INSERT OR REPLACE INTO guru_card_comments "
+                "(comment_id, card_id, card_title, author, text, created_at, "
+                " status, fetched_at) VALUES (?,?,?,?,?,?,?,?)",
+                (cmid, cid, title, author, text,
+                 (now - timedelta(days=3 + n)).isoformat(), "OPEN",
+                 now.isoformat()),
+            )
+
+        conn.execute(
+            "INSERT INTO guru_sync_state(key, value, updated_at) "
+            "VALUES('last_sync_at', ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, "
+            "updated_at=excluded.updated_at",
+            (now.isoformat(), now.isoformat()),
+        )
+    return {"events": inserted, "comments": len(comments)}

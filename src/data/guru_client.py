@@ -17,8 +17,11 @@ import base64
 import hashlib
 import json
 import logging
-import urllib.request
+import re
+import time
 import urllib.error
+import urllib.parse
+import urllib.request
 
 from src.data import pat_store
 
@@ -189,7 +192,149 @@ class GuruClient:
         email, token = GuruClient.load_credentials()
         return bool(email and token)
 
+    # ── Analytics / comments / verification (2026-06 redesign) ──
+
+    def get_team_id(self) -> str:
+        """The team id for analytics endpoints (whoami → teams fallback)."""
+        data = self._request("GET", "/whoami")
+        if isinstance(data, dict):
+            for container in (data, data.get("user") or {}):
+                team = container.get("team") if isinstance(container, dict) else None
+                if isinstance(team, dict) and team.get("id"):
+                    return team["id"]
+        teams = self._request("GET", "/teams")
+        if isinstance(teams, list) and teams and isinstance(teams[0], dict):
+            return teams[0].get("id", "")
+        return ""
+
+    def get_analytics(self, team_id: str, from_date: str | None = None,
+                      to_date: str | None = None, *,
+                      max_pages: int = 20) -> list[dict]:
+        """Usage events (card-viewed, card-comment-created, card-verified…).
+
+        ``GET /teams/{id}/analytics`` paginated via the Link header.
+        Events carry {type, user, eventDate, properties.cardId}.
+        """
+        params = []
+        if from_date:
+            params.append(f"fromDate={urllib.parse.quote(from_date)}")
+        if to_date:
+            params.append(f"toDate={urllib.parse.quote(to_date)}")
+        qs = ("?" + "&".join(params)) if params else ""
+        rows = self._paged_get(
+            f"/teams/{team_id}/analytics{qs}", max_pages=max_pages
+        )
+        return [r for r in rows if isinstance(r, dict)]
+
+    def get_team_stats(self, team_id: str) -> dict:
+        """Card totals per verification state (``GET /teams/{id}/stats``)."""
+        data = self._request("GET", f"/teams/{team_id}/stats")
+        return data if isinstance(data, dict) else {}
+
+    def list_unverified_cards(self, *, max_pages: int = 4) -> list[dict]:
+        """The verification-manager queue (``GET /cards/verificationmgr``).
+
+        Cards carry verificationState / nextVerificationDate /
+        verificationInterval / lastVerified / commentCount / collection.
+        """
+        rows = self._paged_get("/cards/verificationmgr", max_pages=max_pages)
+        out = []
+        for c in rows:
+            if not isinstance(c, dict) or not c.get("id"):
+                continue
+            coll = c.get("collection") or {}
+            out.append({
+                "id": c.get("id", ""),
+                "title": c.get("preferredPhrase", ""),
+                "verification_state": c.get("verificationState", ""),
+                "verification_reason": c.get("verificationReason", ""),
+                "next_verification_date": c.get("nextVerificationDate", ""),
+                "verification_interval": c.get("verificationInterval", ""),
+                "last_verified": c.get("lastVerified", ""),
+                "last_modified": c.get("lastModified", ""),
+                "comment_count": c.get("commentCount", 0),
+                "collection": coll.get("name", "") if isinstance(coll, dict) else "",
+                "collection_id": coll.get("id", "") if isinstance(coll, dict) else "",
+            })
+        return out
+
+    def verify_card(self, card_id: str) -> dict:
+        data = self._request("PUT", f"/cards/{card_id}/verify")
+        return data if isinstance(data, dict) else {}
+
+    def unverify_card(self, card_id: str) -> dict:
+        data = self._request("POST", f"/cards/{card_id}/unverify")
+        return data if isinstance(data, dict) else {}
+
+    def get_card_comments(self, card_id: str, *, status: str | None = None,
+                          max_pages: int = 4) -> list[dict]:
+        """Comments on a card (``GET /cards/{id}/comments``), Link-paged."""
+        qs = f"?status={urllib.parse.quote(status)}" if status else ""
+        rows = self._paged_get(f"/cards/{card_id}/comments{qs}",
+                               max_pages=max_pages)
+        out = []
+        for c in rows:
+            if not isinstance(c, dict) or not c.get("id"):
+                continue
+            owner = c.get("owner") or {}
+            author = ""
+            if isinstance(owner, dict):
+                author = owner.get("email") or " ".join(
+                    p for p in (owner.get("firstName"), owner.get("lastName")) if p
+                )
+            out.append({
+                "id": c.get("id", ""),
+                "content": c.get("content", ""),
+                "author": author,
+                "created_at": c.get("dateCreated", ""),
+                "status": c.get("status", "OPEN"),
+            })
+        return out
+
+    def create_card_comment(self, card_id: str, text: str) -> dict:
+        data = self._request("POST", f"/cards/{card_id}/comments",
+                             body={"content": text})
+        return data if isinstance(data, dict) else {}
+
+    def delete_card_comment(self, card_id: str, comment_id: str) -> dict:
+        data = self._request("DELETE", f"/cards/{card_id}/comments/{comment_id}")
+        return data if isinstance(data, dict) else {}
+
     # ── Internals ───────────────────────────────────────────────
+
+    _LINK_NEXT = re.compile(r'<([^>]+)>;\s*rel="next"')
+
+    def _paged_get(self, path: str, *, max_pages: int = 20) -> list:
+        """GET a paginated collection, following RFC5988 Link rel="next".
+
+        One simple retry on 429 per page; hard page cap so a runaway
+        cursor can never spin.
+        """
+        out: list = []
+        next_url: str | None = None
+        for page in range(max_pages):
+            try:
+                parsed, headers = self._request_raw(
+                    "GET", path if page == 0 else "", full_url=next_url
+                )
+            except GuruAPIError as exc:
+                if "429" in str(exc):
+                    time.sleep(2.0)
+                    parsed, headers = self._request_raw(
+                        "GET", path if page == 0 else "", full_url=next_url
+                    )
+                else:
+                    raise
+            if isinstance(parsed, list):
+                out.extend(parsed)
+            elif parsed:
+                out.append(parsed)
+            link = headers.get("link", "")
+            m = self._LINK_NEXT.search(link)
+            if not m:
+                break
+            next_url = m.group(1)
+        return out
 
     @staticmethod
     def _build_auth_header(email: str, token: str) -> str:
@@ -200,7 +345,17 @@ class GuruClient:
     def _request(self, method: str, path: str,
                  body: dict | None = None) -> dict | list:
         """Execute an API request and return parsed JSON."""
-        url = f"{self.BASE}{path}"
+        parsed, _headers = self._request_raw(method, path, body=body)
+        return parsed
+
+    def _request_raw(self, method: str, path: str, body: dict | None = None,
+                     full_url: str | None = None) -> tuple:
+        """Execute a request; return (parsed JSON, lower-cased headers).
+
+        ``full_url`` overrides BASE+path — Link-header pagination hands
+        back absolute next-page URLs.
+        """
+        url = full_url or f"{self.BASE}{path}"
         headers = {
             "Authorization": self._auth_header,
             "Content-Type": "application/json",
@@ -218,9 +373,10 @@ class GuruClient:
         try:
             with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT) as resp:
                 raw = resp.read().decode("utf-8")
+                resp_headers = {k.lower(): v for k, v in resp.headers.items()}
                 if not raw.strip():
-                    return {}
-                return json.loads(raw)
+                    return {}, resp_headers
+                return json.loads(raw), resp_headers
         except urllib.error.HTTPError as exc:
             if exc.code == 401:
                 raise GuruAuthError("Invalid Guru credentials") from exc

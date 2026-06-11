@@ -730,7 +730,7 @@ class EnablementPage(QWidget):
                     res = store.import_guru_card_to_draft(conn, client, ref)
                 else:
                     from src.data.drive_reader import DriveReader
-                    reader = DriveReader()
+                    reader = DriveReader.from_settings()
                     if not reader.is_configured():
                         res = {"ok": False, "error":
                                "Drive read is not configured (Settings → Drive)."}
