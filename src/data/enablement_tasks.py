@@ -36,9 +36,12 @@ def _uid() -> str:
 
 
 def dedup_key(source: str, source_ref: str | None, title: str) -> str:
-    """Stable key so re-polling the same source item doesn't spawn a duplicate."""
+    """Stable key so re-polling the same source item doesn't spawn a duplicate.
+
+    Non-cryptographic identity hash — collision resistance for dedup only.
+    """
     raw = f"{source}|{source_ref or ''}|{title}".encode("utf-8")
-    return hashlib.sha1(raw).hexdigest()
+    return hashlib.sha1(raw, usedforsecurity=False).hexdigest()
 
 
 # ── tasks ────────────────────────────────────────────────────────────
