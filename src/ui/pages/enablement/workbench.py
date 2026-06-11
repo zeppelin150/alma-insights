@@ -18,16 +18,16 @@ from PySide6.QtWidgets import (
 )
 
 from src.ui.theme import (
-    ALMA_BG_ELEVATED, ALMA_BG_INSET, ALMA_BORDER, ALMA_BORDER_LIGHT, ALMA_CREAM,
-    ALMA_GREEN_DARK, ALMA_GREEN_LIGHT, ALMA_INFO, ALMA_TEXT_DARK,
-    ALMA_TEXT_LIGHT, ALMA_TEXT_MID, ALMA_TEXT_ON_DARK, ALMA_WARNING,
+    ALMA_ACCENT_TEAL, ALMA_BG_ELEVATED, ALMA_BG_INSET, ALMA_BORDER,
+    ALMA_BORDER_LIGHT, ALMA_CREAM, ALMA_GREEN_DARK, ALMA_GREEN_LIGHT,
+    ALMA_INFO, ALMA_TEXT_DARK, ALMA_TEXT_LIGHT, ALMA_TEXT_MID,
+    ALMA_TEXT_ON_DARK, ALMA_WARNING,
 )
+from src.ui.pages.enablement._common import TINT as _TINT
+from src.ui.pages.enablement._common import badge as _badge
+from src.ui.pages.enablement._common import card_frame as _card_frame
 
-_TEAL = "#0D7D72"
-_TINT = {
-    "drive": ("#E4ECF5", ALMA_INFO), "guru": ("#DCEFEC", _TEAL),
-    "asana": ("#F8E6E1", "#C2543F"), "draft": ("#F6EBDD", ALMA_WARNING),
-}
+_TEAL = ALMA_ACCENT_TEAL
 
 _SAMPLE_DRAFTS = [
     {"id": 1, "title": "SSO Setup", "source": "drive"},
@@ -53,26 +53,6 @@ _SAMPLE_CARD = {
         "active until SSO is enabled org-wide."
     ),
 }
-
-
-def _badge(text: str, kind: str) -> QLabel:
-    bg, fg = _TINT.get(kind, ("#ECEAE5", ALMA_TEXT_LIGHT))
-    lbl = QLabel(text)
-    lbl.setStyleSheet(
-        f"background:{bg}; color:{fg}; border-radius:10px; padding:2px 10px; "
-        f"font-size:11px; font-weight:600;"
-    )
-    lbl.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
-    return lbl
-
-
-def _card_frame() -> QFrame:
-    f = QFrame()
-    f.setStyleSheet(
-        f"QFrame{{background:{ALMA_BG_ELEVATED}; border:1px solid {ALMA_BORDER_LIGHT}; "
-        f"border-radius:12px;}}"
-    )
-    return f
 
 
 class _DropZone(QFrame):

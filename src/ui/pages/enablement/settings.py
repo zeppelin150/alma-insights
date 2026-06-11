@@ -15,7 +15,7 @@ from src.ui.theme import (
     ALMA_TEXT_ON_DARK, ALMA_WARNING,
 )
 
-_TEAL = "#0D7D72"
+from src.ui.theme import ALMA_ACCENT_TEAL as _TEAL  # noqa: E402
 
 
 class SettingsPage(QWidget):

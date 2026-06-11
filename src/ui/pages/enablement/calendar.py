@@ -87,10 +87,12 @@ class CalendarPage(QWidget):
         self._month_label = QLabel(self._title_text())
         self._month_label.setStyleSheet(f"color:{ALMA_TEXT_DARK}; font-size:18px; font-weight:700; border:none;")
         row.addWidget(self._month_label)
-        for ch, delta in (("‹", -1), ("›", 1)):
-            b = QPushButton(ch)
+        from src.ui.design.icons import icon as design_icon
+        for name, delta in (("chevron-left", -1), ("chevron-right", 1)):
+            b = QPushButton("")
+            b.setIcon(design_icon(name, 14, ALMA_TEXT_MID))
             b.setCursor(Qt.PointingHandCursor)
-            b.setStyleSheet(f"QPushButton{{background:transparent; color:{ALMA_TEXT_MID}; border:none; font-size:18px; padding:0px 6px;}}")
+            b.setStyleSheet("QPushButton{background:transparent; border:none; padding:2px 6px;}")
             b.clicked.connect(lambda _=False, d=delta: self._change_month(d))
             row.addWidget(b)
         row.addSpacing(18)
