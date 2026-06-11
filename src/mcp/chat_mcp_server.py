@@ -534,6 +534,51 @@ TOOL_SCHEMAS = [
             "properties": {"source": {"type": "string", "description": "Optional: 'asana' or 'drive' to poll just one."}},
         },
     },
+    {
+        "name": "import_guru_card",
+        "description": (
+            "Import an existing Guru card (by id or app.getguru.com URL) as an "
+            "editable draft. The draft stays linked, so publishing UPDATES the "
+            "same card rather than creating a duplicate."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "card_ref": {"type": "string", "description": "Guru card id or card URL."},
+            },
+            "required": ["card_ref"],
+        },
+    },
+    {
+        "name": "get_guru_analytics",
+        "description": (
+            "Read the locally-synced Guru analytics: metric='top_cards' (most "
+            "viewed), 'verification' (queue KPIs), 'comments' (open card "
+            "comments), or 'due_cards' (cards needing an update)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "metric": {"type": "string", "description": "top_cards | verification | comments | due_cards"},
+                "days": {"type": "integer", "description": "Window in days (default 30)."},
+            },
+            "required": ["metric"],
+        },
+    },
+    {
+        "name": "create_task_from_comment",
+        "description": (
+            "Convert an open Guru card comment (see get_guru_analytics "
+            "metric='comments') into an enablement task. Idempotent."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "comment_id": {"type": "string", "description": "The Guru comment id."},
+            },
+            "required": ["comment_id"],
+        },
+    },
 ]
 
 

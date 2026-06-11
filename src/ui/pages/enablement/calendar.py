@@ -55,6 +55,7 @@ class CalendarPage(QWidget):
     """Month grid (navigable) + week view, colour-coded by source."""
 
     event_clicked = Signal(str)
+    event_activated = Signal(dict)   # full task payload (guru chips → targeted update)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -76,7 +77,9 @@ class CalendarPage(QWidget):
             due = t.get("due_date") or ""
             if len(due) >= 10:
                 kind = t.get("source") if t.get("source") in TINT else "normal"
-                ev.setdefault(due[:10], []).append(((t.get("title") or "")[:20], kind))
+                ev.setdefault(due[:10], []).append(
+                    ((t.get("title") or "")[:20], kind, dict(t))
+                )
         self._events = ev
         self._rebuild_grid()
 
@@ -231,13 +234,20 @@ class CalendarPage(QWidget):
             n.setStyleSheet(f"color:{ALMA_TEXT_LIGHT if not in_month else ALMA_TEXT_MID}; font-size:12px; font-weight:700; border:none;")
             v.addWidget(n)
         if in_month:
-            for label, kind in self._events.get(dt.isoformat(), []):
+            for entry in self._events.get(dt.isoformat(), []):
+                # sample data is (label, kind); real tasks carry a payload
+                label, kind = entry[0], entry[1]
+                payload = entry[2] if len(entry) > 2 else None
                 bg, fg = TINT.get(kind, ("#ECEAE5", ALMA_TEXT_LIGHT))
                 chip = _Chip(label)
                 chip.setFixedHeight(17)
                 chip.setCursor(Qt.PointingHandCursor)
                 chip.setStyleSheet(f"background:{bg}; color:{fg}; border-radius:5px; padding:1px 6px; font-size:10.5px; font-weight:600; border:none;")
                 chip.clicked.connect(lambda lab=label: self.event_clicked.emit(lab))
+                if payload is not None:
+                    chip.clicked.connect(
+                        lambda p=payload: self.event_activated.emit(p)
+                    )
                 v.addWidget(chip)
         v.addStretch(1)
         return f

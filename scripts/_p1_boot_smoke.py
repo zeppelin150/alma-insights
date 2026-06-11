@@ -40,7 +40,8 @@ if mode == "enablement":
     assert type(w.guru_page).__name__ == "EnablementPage"
     assert hasattr(w, "home_page")
     assert set(w._page_widgets) == {
-        "home", "en_calendar", "en_tasks", "en_workbench", "en_settings"
+        "home", "en_calendar", "en_tasks", "en_workbench",
+        "en_analytics", "en_settings"
     }, w._page_widgets.keys()
     assert w._active_page == "home"
     assert sidebar_ids[0] == "home"

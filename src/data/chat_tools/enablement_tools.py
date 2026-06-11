@@ -301,3 +301,53 @@ def handle_get_drive_doc(conn, args, filters):
 
 def handle_run_monitor_now(conn, args, filters):
     return _run_monitor_now_impl(conn, args.get("source"))
+
+
+# ── Guru analytics tools (P7 redesign) ───────────────────────────────
+
+def _import_guru_card_impl(conn, card_ref) -> dict:
+    from src.data import enablement_store as store
+    from src.data.guru_client import GuruClient
+    email, token = GuruClient.load_credentials()
+    if not (email and token):
+        return {"ok": False, "error": "guru_not_connected"}
+    return store.import_guru_card_to_draft(
+        conn, GuruClient(email, token), str(card_ref or "")
+    )
+
+
+def handle_import_guru_card(conn, args, session_filters) -> dict:
+    return _import_guru_card_impl(conn, args.get("card_ref", ""))
+
+
+def _get_guru_analytics_impl(conn, metric, days=30) -> dict:
+    from src.data import guru_analytics as ga
+    try:
+        d = int(days or 30)
+    except (TypeError, ValueError):
+        d = 30
+    metric = (metric or "top_cards").strip()
+    if metric == "top_cards":
+        return {"ok": True, "metric": metric, "rows": ga.top_cards(conn, days=d)}
+    if metric == "verification":
+        return {"ok": True, "metric": metric, "kpis": ga.verification_kpis(conn)}
+    if metric == "comments":
+        return {"ok": True, "metric": metric, "rows": ga.open_comments(conn)}
+    if metric == "due_cards":
+        return {"ok": True, "metric": metric,
+                "rows": ga.cards_due_for_update(conn, days=d)}
+    return {"ok": False, "error": f"unknown_metric: {metric}",
+            "valid": ["top_cards", "verification", "comments", "due_cards"]}
+
+
+def handle_get_guru_analytics(conn, args, session_filters) -> dict:
+    return _get_guru_analytics_impl(conn, args.get("metric"), args.get("days", 30))
+
+
+def _create_task_from_comment_impl(conn, comment_id) -> dict:
+    from src.data import guru_analytics as ga
+    return ga.create_task_from_comment(conn, str(comment_id or ""))
+
+
+def handle_create_task_from_comment(conn, args, session_filters) -> dict:
+    return _create_task_from_comment_impl(conn, args.get("comment_id", ""))

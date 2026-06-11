@@ -136,6 +136,18 @@ def _ensure_registered():
               phi_level=0, desc="Get one indexed Drive document by id")
     _register("run_monitor_now", handle_run_monitor_now,
               phi_level=0, desc="Run a one-off poll of the configured Asana/Drive monitors")
+    # ── Guru analytics tools (P7 redesign) ──
+    from src.data.chat_tools.enablement_tools import (
+        handle_create_task_from_comment,
+        handle_get_guru_analytics,
+        handle_import_guru_card,
+    )
+    _register("import_guru_card", handle_import_guru_card,
+              phi_level=0, desc="Import an existing Guru card as an editable draft (publish updates it)")
+    _register("get_guru_analytics", handle_get_guru_analytics,
+              phi_level=0, desc="Guru usage analytics: top_cards | verification | comments | due_cards")
+    _register("create_task_from_comment", handle_create_task_from_comment,
+              phi_level=0, desc="Convert an open Guru card comment into an enablement task")
 
     # ── Backward-compat aliases for old tool names ──
     # These map old names to new handlers so existing prompts keep working

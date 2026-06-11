@@ -51,7 +51,11 @@ RENN_SYSTEM_PROMPT = (
     "- Set up Asana: asana_discover (find projects + field/enum GIDs), then "
     "set_asana_board_config (save the board config). Never ask the user for GIDs — "
     "discover them yourself.\n"
-    "- run_monitor_now to pull fresh items from the configured sources.\n\n"
+    "- run_monitor_now to pull fresh items from the configured sources.\n"
+    "- Guru analytics: get_guru_analytics (metric=top_cards|verification|comments|"
+    "due_cards), import_guru_card (bring an existing card in as an editable draft — "
+    "publishing updates that same card), create_task_from_comment (turn an open card "
+    "comment into a task).\n\n"
     "Rules:\n"
     "- Only publish to Guru (push_guru_draft) when the operator explicitly asks to push or publish.\n"
     "- Ground every claim in tool results from THIS turn; never invent document names, "
@@ -88,6 +92,7 @@ class EnablementPage(QWidget):
     connection_changed = Signal()   # compat with GuruPage/GuruWipPage
     connection_status_ready = Signal(str, bool, str)  # (source_key, ok, detail) from the check worker
     import_finished = Signal(dict)  # off-thread import result → UI refresh
+    analytics_synced = Signal(dict)  # off-thread Guru analytics sync result
 
     def __init__(self, db=None, demo: bool = True, parent=None):
         super().__init__(parent)
@@ -123,17 +128,22 @@ class EnablementPage(QWidget):
         self.settings = SettingsPage()
         # Scroll-wrap the tall pages so content scrolls instead of compressing
         # (compression was overlapping rows on Settings). Workbench fills exactly.
+        from src.ui.pages.enablement.analytics import AnalyticsPage
+        self.analytics = AnalyticsPage()
         cal_tab = self._scroll(self.calendar)
         tasks_tab = self._scroll(self.tasks)
+        analytics_tab = self._scroll(self.analytics)
         settings_tab = self._scroll(self.settings)
         self.tabs.addTab(cal_tab, "Calendar")
         self.tabs.addTab(tasks_tab, "Tasks")
         self.tabs.addTab(self.workbench, "Workbench")
+        self.tabs.addTab(analytics_tab, "Analytics")
         self.tabs.addTab(settings_tab, "Settings")
         self._tab_widgets = {
             "calendar": cal_tab,
             "tasks": tasks_tab,
             "workbench": self.workbench,
+            "analytics": analytics_tab,
             "settings": settings_tab,
         }
         self.tabs.setCurrentWidget(self.workbench)
@@ -164,6 +174,13 @@ class EnablementPage(QWidget):
         self.import_finished.connect(self._on_import_finished)
         self.connection_status_ready.connect(
             lambda key, ok, detail: self.settings.set_connection_status(key, ok, detail))
+        # analytics
+        self.analytics.refresh_requested.connect(self._run_analytics_sync)
+        self.analytics.filters_changed.connect(self._refresh_analytics)
+        self.analytics.comment_task_requested.connect(self._on_comment_task)
+        self.analytics.targeted_update_requested.connect(self._on_targeted_update)
+        self.analytics_synced.connect(self._on_analytics_synced)
+        self.calendar.event_activated.connect(self._on_calendar_event_activated)
         self._refresh_style_guide_status()
 
         if not self.demo:
@@ -337,7 +354,20 @@ class EnablementPage(QWidget):
         rows = self._tasks_to_rows(task_list, conn)
         self._all_tasks = rows
         self.tasks.load_tasks(rows)
-        self.calendar.set_tasks(task_list)
+        cal_rows = list(task_list)
+        try:
+            from src.data import guru_analytics as ga
+            for c in ga.cards_due_for_update(conn):
+                cal_rows.append({
+                    "due_date": c.get("due_date", ""),
+                    "source": "guru",
+                    "title": f"Card due: {c.get('title', '')}",
+                    "kind": "guru_card_due",
+                    "card_id": c.get("card_id", ""),
+                })
+        except Exception:  # noqa: BLE001 — analytics tables may not exist yet
+            pass
+        self.calendar.set_tasks(cal_rows)
         drafts = store.list_drafts(conn, status="pending")
         self._drafts = {int(d["id"]): d for d in drafts}
         chips = [{"id": int(d["id"]),
@@ -353,6 +383,7 @@ class EnablementPage(QWidget):
             self.workbench.show_draft(self._card_from_draft(conn, self._drafts[active_id]))
         else:
             self.workbench.set_pending_drafts(chips)
+        self._refresh_analytics()
         self._set_status(f"{len(rows)} tasks · {len(drafts)} pending drafts.")
 
     def _on_scan_now(self):
@@ -788,6 +819,8 @@ class EnablementPage(QWidget):
                 note += f" (auto-draft skipped: {res['draft_error']})"
             self._set_status(note + ".")
         self._load_live(prefer_draft_id=res.get("draft_id"))
+        if res.get("draft_id"):
+            self.select_tab("workbench")
 
     def _demo_import(self, kind: str):
         """Scripted imports against the demo DB — same store code, canned data."""
@@ -824,6 +857,121 @@ class EnablementPage(QWidget):
                 self._set_status(f"Draft {did} updated from the editor.")
         except Exception as exc:  # noqa: BLE001
             self._set_status(f"Edit save failed: {exc}")
+
+    # ── Guru analytics (P7) ─────────────────────────────────────────
+
+    def _refresh_analytics(self):
+        """Re-render the Analytics tab from the local store (cheap reads)."""
+        try:
+            from src.data import guru_analytics as ga
+            conn = self._conn()
+            if self.demo:
+                n = conn.execute(
+                    "SELECT COUNT(*) FROM guru_events"
+                ).fetchone()[0]
+                if n == 0:
+                    from src.data.enablement_sim import seed_demo_analytics
+                    seed_demo_analytics(conn)
+            self.analytics.set_filters(ga.collections(conn), ga.domains(conn))
+            self.analytics.set_data(
+                ga.verification_kpis(conn),
+                ga.top_cards(
+                    conn, days=self.analytics.days(),
+                    collection_id=self.analytics.collection_id(),
+                    domain=self.analytics.domain(),
+                ),
+                ga.open_comments(conn),
+                ga.cards_due_for_update(conn, days=self.analytics.days()),
+            )
+        except Exception as exc:  # noqa: BLE001 — never break the page
+            logger.debug("analytics refresh skipped: %s", exc)
+
+    def _run_analytics_sync(self):
+        """Refresh button: live → pull from Guru off-thread; demo → re-seed."""
+        if self.demo:
+            from src.data.enablement_sim import seed_demo_analytics
+            seed_demo_analytics(self._conn())
+            self._refresh_analytics()
+            self._set_status("Analytics refreshed (demo).")
+            return
+        import threading
+        self._set_status("Syncing Guru analytics…")
+        db_path = self._engine_db_path()
+
+        def worker():
+            res = {"ok": False, "error": "unknown"}
+            conn = None
+            try:
+                from src.data.connection_factory import get_connection
+                from src.data.guru_client import GuruClient
+                email, token = GuruClient.load_credentials()
+                if not (email and token):
+                    res = {"ok": False,
+                           "error": "Connect Guru first (Settings → Guru)."}
+                else:
+                    from src.data import guru_analytics as ga
+                    conn = get_connection(db_path)
+                    res = ga.sync(conn, GuruClient(email, token))
+            except Exception as exc:  # noqa: BLE001
+                res = {"ok": False, "error": str(exc)}
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+            self.analytics_synced.emit(res)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_analytics_synced(self, res: dict):
+        if res.get("ok"):
+            self._set_status("Guru analytics synced.")
+        else:
+            sections = res.get("sections") or {}
+            errors = "; ".join(
+                f"{k}: {v.get('error')}" for k, v in sections.items()
+                if isinstance(v, dict) and v.get("error")
+            )
+            self._set_status(
+                f"Analytics sync issue: {res.get('error') or errors}"
+            )
+        self._load_live(prefer_draft_id=self.workbench.active_draft_id)
+
+    def _on_comment_task(self, comment_id: str):
+        try:
+            from src.data import guru_analytics as ga
+            res = ga.create_task_from_comment(self._conn(), comment_id)
+            if res.get("ok"):
+                self._set_status("Comment converted to an enablement task.")
+                self._load_live()
+            else:
+                self._set_status(f"Couldn't create task: {res.get('error')}")
+        except Exception as exc:  # noqa: BLE001
+            self._set_status(f"Couldn't create task: {exc}")
+
+    def _on_targeted_update(self, card_id: str):
+        """Analytics/calendar 'targeted update' → import the card as a draft
+        and land in the Workbench (the P4 import flow end-to-end)."""
+        if not card_id:
+            return
+        if self.demo:
+            from src.data import enablement_store as store
+            res = store.import_guru_card_to_draft(
+                self._conn(), _DemoGuruClient(), card_id
+            )
+            self._load_live(prefer_draft_id=res.get("draft_id"))
+            self.select_tab("workbench")
+            self._set_status("Card imported for a targeted update (demo).")
+            return
+        if self._guru_client is None:
+            self._set_status("Connect Guru first (Settings → Guru).")
+            return
+        self._run_import("guru", card_id)
+
+    def _on_calendar_event_activated(self, task: dict):
+        if task.get("kind") == "guru_card_due" and task.get("card_id"):
+            self._on_targeted_update(task["card_id"])
 
     # ── style guide ─────────────────────────────────────────────────
 

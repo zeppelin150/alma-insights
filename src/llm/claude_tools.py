@@ -335,6 +335,51 @@ TOOL_DEFINITIONS = [
         },
     },
     {
+        "name": "import_guru_card",
+        "description": (
+            "Import an existing Guru card (by id or app.getguru.com URL) as an editable "
+            "draft. The draft stays linked, so publishing UPDATES the same card rather "
+            "than creating a duplicate."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "card_ref": {"type": "string", "description": "Guru card id or card URL."},
+            },
+            "required": ["card_ref"],
+        },
+    },
+    {
+        "name": "get_guru_analytics",
+        "description": (
+            "Read the locally-synced Guru analytics: metric='top_cards' (most viewed), "
+            "'verification' (queue KPIs), 'comments' (open card comments), or "
+            "'due_cards' (cards needing an update)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "metric": {"type": "string", "description": "top_cards | verification | comments | due_cards"},
+                "days": {"type": "integer", "description": "Window in days (default 30)."},
+            },
+            "required": ["metric"],
+        },
+    },
+    {
+        "name": "create_task_from_comment",
+        "description": (
+            "Convert an open Guru card comment (see get_guru_analytics "
+            "metric='comments') into an enablement task. Idempotent."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "comment_id": {"type": "string", "description": "The Guru comment id."},
+            },
+            "required": ["comment_id"],
+        },
+    },
+    {
         "name": "revise_draft",
         "description": (
             "Revise an existing Guru card draft per an instruction (e.g. 'tighten the "
@@ -803,6 +848,21 @@ def _create_card_draft(args: dict, db) -> dict:
     return _create_card_draft_impl(_ent_conn(db), args.get("title", ""), args.get("content", ""))
 
 
+def _import_guru_card(args: dict, db) -> dict:
+    from src.data.chat_tools.enablement_tools import _import_guru_card_impl
+    return _import_guru_card_impl(_ent_conn(db), args.get("card_ref", ""))
+
+
+def _get_guru_analytics(args: dict, db) -> dict:
+    from src.data.chat_tools.enablement_tools import _get_guru_analytics_impl
+    return _get_guru_analytics_impl(_ent_conn(db), args.get("metric"), args.get("days", 30))
+
+
+def _create_task_from_comment(args: dict, db) -> dict:
+    from src.data.chat_tools.enablement_tools import _create_task_from_comment_impl
+    return _create_task_from_comment_impl(_ent_conn(db), args.get("comment_id", ""))
+
+
 def _revise_draft(args: dict, db) -> dict:
     from src.data.chat_tools.enablement_tools import _revise_draft_impl
     return _revise_draft_impl(_ent_conn(db), args.get("draft_id"), args.get("instruction", ""))
@@ -900,4 +960,7 @@ _DISPATCH = {
     "search_drive_docs": _search_drive_docs,
     "get_drive_doc": _get_drive_doc,
     "run_monitor_now": _run_monitor_now,
+    "import_guru_card": _import_guru_card,
+    "get_guru_analytics": _get_guru_analytics,
+    "create_task_from_comment": _create_task_from_comment,
 }
