@@ -356,3 +356,37 @@ def seed_demo_decks(conn) -> dict:
         ids.append(pptx_store.save_deck(conn, title=title, outline=outline,
                                         source_ref="topic:demo"))
     return {"decks": ids}
+
+
+# ── demo Zendesk content (E5) ────────────────────────────────────────
+
+def seed_demo_zendesk(conn) -> dict:
+    """Synthetic synced articles/macros + drafts for the Zendesk tab demo."""
+    import json as _json
+    from datetime import datetime, timezone
+    from src.data.connection_factory import atomic
+    from src.data import zendesk_store
+    now = datetime.now(timezone.utc).isoformat()
+    with atomic(conn):
+        for aid, title in ((101, "Setting up SSO"), (102, "Returns & Refunds"),
+                           (103, "Claims Resubmission")):
+            conn.execute(
+                "INSERT OR REPLACE INTO zendesk_articles (article_id, title, body, "
+                "locale, section_id, html_url, updated_at, fetched_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (aid, title, f"<p>{title} body.</p>", "en-us", 9, "", now, now))
+        for mid, name in ((201, "Password reset — provider portal"),
+                          (202, "Claim status — pending")):
+            conn.execute(
+                "INSERT OR REPLACE INTO zendesk_macros (macro_id, name, description, "
+                "actions_json, active, updated_at, fetched_at) VALUES (?,?,?,?,?,?,?)",
+                (mid, name, "", _json.dumps([{"field": "comment_value", "value": name}]),
+                 1, now, now))
+    # one of each as an AI draft
+    a = zendesk_store.save_article_draft(
+        conn, title="SSO Setup (refresh)", body="## Steps\n1. Open console\n",
+        article_id=101, source_ref="demo")
+    m = zendesk_store.save_macro_draft(
+        conn, name="Refund approved", actions=[{"field": "comment_value",
+        "value": "Your refund has been approved."}], source_ref="demo")
+    return {"articles": 3, "macros": 2, "article_draft": a, "macro_draft": m}

@@ -94,6 +94,7 @@ class EnablementPage(QWidget):
     import_finished = Signal(dict)  # off-thread import result → UI refresh
     analytics_synced = Signal(dict)  # off-thread Guru analytics sync result
     pptx_modeled = Signal(dict)      # off-thread deck-model result
+    zendesk_synced = Signal(dict)    # off-thread Zendesk sync result
 
     def __init__(self, db=None, demo: bool = True, parent=None):
         super().__init__(parent)
@@ -113,6 +114,7 @@ class EnablementPage(QWidget):
         self._build()
         self._setup_engine()
         self._load_pptx()
+        self._load_zendesk()
 
     # ── layout ────────────────────────────────────────────────────
     def _build(self):
@@ -132,18 +134,22 @@ class EnablementPage(QWidget):
         # (compression was overlapping rows on Settings). Workbench fills exactly.
         from src.ui.pages.enablement.analytics import AnalyticsPage
         from src.ui.pages.enablement.pptx_tab import PptxPage
+        from src.ui.pages.enablement.zendesk_tab import ZendeskPage
         self.analytics = AnalyticsPage()
         self.pptx = PptxPage()
+        self.zendesk = ZendeskPage()
         cal_tab = self._scroll(self.calendar)
         tasks_tab = self._scroll(self.tasks)
         analytics_tab = self._scroll(self.analytics)
         pptx_tab = self._scroll(self.pptx)
+        zendesk_tab = self._scroll(self.zendesk)
         settings_tab = self._scroll(self.settings)
         self.tabs.addTab(cal_tab, "Calendar")
         self.tabs.addTab(tasks_tab, "Tasks")
         self.tabs.addTab(self.workbench, "Workbench")
         self.tabs.addTab(analytics_tab, "Analytics")
         self.tabs.addTab(pptx_tab, "PowerPoint")
+        self.tabs.addTab(zendesk_tab, "Zendesk")
         self.tabs.addTab(settings_tab, "Settings")
         self._tab_widgets = {
             "calendar": cal_tab,
@@ -151,6 +157,7 @@ class EnablementPage(QWidget):
             "workbench": self.workbench,
             "analytics": analytics_tab,
             "powerpoint": pptx_tab,
+            "zendesk": zendesk_tab,
             "settings": settings_tab,
         }
         self.tabs.setCurrentWidget(self.workbench)
@@ -194,6 +201,15 @@ class EnablementPage(QWidget):
         self.pptx.outline_saved.connect(self._on_pptx_outline_saved)
         self.pptx.export_requested.connect(self._on_pptx_export)
         self.pptx_modeled.connect(self._on_pptx_modeled)
+        # Zendesk
+        self.zendesk.sync_requested.connect(self._on_zendesk_sync)
+        self.zendesk.article_selected.connect(self._on_zd_article_selected)
+        self.zendesk.article_saved.connect(self._on_zd_article_saved)
+        self.zendesk.article_push.connect(self._on_zd_article_push)
+        self.zendesk.macro_selected.connect(self._on_zd_macro_selected)
+        self.zendesk.macro_saved.connect(self._on_zd_macro_saved)
+        self.zendesk.macro_push.connect(self._on_zd_macro_push)
+        self.zendesk_synced.connect(self._on_zendesk_synced)
         self._refresh_style_guide_status()
 
         if not self.demo:
@@ -398,6 +414,7 @@ class EnablementPage(QWidget):
             self.workbench.set_pending_drafts(chips)
         self._refresh_analytics()
         self._load_pptx()
+        self._load_zendesk()
         self._set_status(f"{len(rows)} tasks · {len(drafts)} pending drafts.")
 
     def _on_scan_now(self):
@@ -1076,6 +1093,132 @@ class EnablementPage(QWidget):
             self._load_pptx()
         else:
             self.pptx.set_status(f"Export failed: {res.get('error')}")
+
+    # ── Zendesk (E5) ────────────────────────────────────────────────
+
+    def _load_zendesk(self):
+        try:
+            from src.data import zendesk_store
+            conn = self._conn()
+            if self.demo and not zendesk_store.list_articles(conn):
+                from src.data.enablement_sim import seed_demo_zendesk
+                seed_demo_zendesk(conn)
+            self.zendesk.set_articles(
+                len(zendesk_store.list_articles(conn)),
+                zendesk_store.list_article_drafts(conn))
+            self.zendesk.set_macros(
+                len(zendesk_store.list_macros(conn)),
+                zendesk_store.list_macro_drafts(conn))
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("zendesk load skipped: %s", exc)
+
+    def _zendesk_client(self):
+        if self.demo:
+            return None
+        try:
+            from src.data.zendesk_client import ZendeskClient
+            return ZendeskClient.from_settings()
+        except Exception:
+            return None
+
+    def _on_zendesk_sync(self):
+        if self.demo:
+            from src.data.enablement_sim import seed_demo_zendesk
+            seed_demo_zendesk(self._conn())
+            self._load_zendesk()
+            self.zendesk.set_status("Synced (demo).")
+            return
+        client = self._zendesk_client()
+        if client is None:
+            self.zendesk.set_status("Connect Zendesk first (Settings).")
+            return
+        self.zendesk.set_status("Syncing from Zendesk…")
+        import threading
+        db_path = self._engine_db_path()
+
+        def worker():
+            res = {"ok": False}
+            conn = None
+            try:
+                from src.data import zendesk_store
+                from src.data.connection_factory import get_connection
+                conn = get_connection(db_path)
+                a = zendesk_store.sync_articles(conn, client)
+                m = zendesk_store.sync_macros(conn, client)
+                res = {"ok": a.get("ok") and m.get("ok"),
+                       "articles": a.get("count", 0), "macros": m.get("count", 0),
+                       "error": a.get("error") or m.get("error")}
+            except Exception as exc:  # noqa: BLE001
+                res = {"ok": False, "error": str(exc)}
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+            self.zendesk_synced.emit(res)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_zendesk_synced(self, res: dict):
+        if res.get("ok"):
+            self.zendesk.set_status(
+                f"Synced {res.get('articles', 0)} articles, {res.get('macros', 0)} macros.")
+        else:
+            self.zendesk.set_status(f"Sync issue: {res.get('error')}")
+        self._load_zendesk()
+
+    def _on_zd_article_selected(self, draft_id: int):
+        from src.data import zendesk_store
+        d = zendesk_store.get_article_draft(self._conn(), draft_id)
+        if d:
+            self.zendesk.show_article_draft(d)
+
+    def _on_zd_article_saved(self, draft_id: int, title: str, body_md: str):
+        from src.data import zendesk_store
+        zendesk_store.update_article_draft(self._conn(), draft_id, title=title, body=body_md)
+        self.zendesk.set_status("Article draft saved.")
+        self._load_zendesk()
+
+    def _on_zd_article_push(self, draft_id: int):
+        from src.data import zendesk_store
+        res = zendesk_store.publish_article_draft(
+            self._conn(), draft_id, zendesk_client=self._zendesk_client())
+        if res.get("ok"):
+            self.zendesk.set_status(
+                f"Article pushed{' (demo)' if self.demo else ''}.")
+            self._load_zendesk()
+        else:
+            self.zendesk.set_status(f"Push failed: {res.get('error')}")
+
+    def _on_zd_macro_selected(self, draft_id: int):
+        from src.data import zendesk_store
+        d = zendesk_store.get_macro_draft(self._conn(), draft_id)
+        if d:
+            self.zendesk.show_macro_draft(d)
+
+    def _on_zd_macro_saved(self, draft_id: int, name: str, reply: str):
+        from src.data import zendesk_store
+        d = zendesk_store.get_macro_draft(self._conn(), draft_id)
+        if not d:
+            return
+        # keep any non-comment actions; replace the public reply
+        actions = [a for a in d.get("actions", [])
+                   if a.get("field") not in ("comment_value", "comment_value_html")]
+        actions.insert(0, {"field": "comment_value", "value": reply})
+        zendesk_store.update_macro_draft(self._conn(), draft_id, name=name, actions=actions)
+        self.zendesk.set_status("Macro draft saved.")
+        self._load_zendesk()
+
+    def _on_zd_macro_push(self, draft_id: int):
+        from src.data import zendesk_store
+        res = zendesk_store.publish_macro_draft(
+            self._conn(), draft_id, zendesk_client=self._zendesk_client())
+        if res.get("ok"):
+            self.zendesk.set_status(f"Macro pushed{' (demo)' if self.demo else ''}.")
+            self._load_zendesk()
+        else:
+            self.zendesk.set_status(f"Push failed: {res.get('error')}")
 
     # ── style guide ─────────────────────────────────────────────────
 

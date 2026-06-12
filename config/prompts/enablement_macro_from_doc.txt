@@ -1,0 +1,17 @@
+You are an enablement specialist at Alma Health. Create a Zendesk macro
+(a reusable agent reply / set of ticket actions) from the source below.
+
+SOURCE: {doc_name}
+
+--- SOURCE START ---
+{doc_text}
+--- SOURCE END ---
+
+The macro should:
+1. Have a short, descriptive name (e.g. "Password reset — provider portal").
+2. Set a public comment with a helpful, on-brand reply, plus any obvious
+   field actions (status, tags) the situation calls for.
+3. Stay faithful to the source — do not invent policy.
+
+Return ONLY valid JSON in exactly this shape (no prose, no code fences):
+{{"name": "<macro name>", "actions": [{{"field": "comment_value", "value": "<reply text>"}}, {{"field": "status", "value": "solved"}}]}}

@@ -72,8 +72,8 @@ class TestRegistryIntegrity:
             if s.page_id == "home":
                 continue
             assert s.factory == "_create_enablement_page"
-            assert s.tab_key in {"calendar", "tasks", "workbench",
-                                 "analytics", "powerpoint", "settings"}
+            assert s.tab_key in {"calendar", "tasks", "workbench", "analytics",
+                                 "powerpoint", "zendesk", "settings"}
 
     def test_first_page_ids_resolve(self):
         for mode in MODES:
@@ -91,7 +91,7 @@ class TestModeRouting:
     def test_enablement_pages(self):
         ids = {s.page_id for s in pages_for_mode(MODE_ENABLEMENT)}
         assert ids == {"home", "en_calendar", "en_tasks", "en_workbench",
-                       "en_analytics", "en_powerpoint", "en_settings"}
+                       "en_analytics", "en_powerpoint", "en_zendesk", "en_settings"}
 
     def test_home_shared_and_first(self):
         home = spec_for("home")

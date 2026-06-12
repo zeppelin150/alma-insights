@@ -298,6 +298,103 @@ class ZendeskClient(SourceClient):
                 raise ZendeskRateLimitError(retry) from exc
             raise
 
+    def _write(self, method: str, path: str, body: dict) -> dict:
+        """Authenticated POST/PUT with a JSON body (Help Center + macros)."""
+        url = f"{self._base}{path}"
+        auth_str = f"{self._email}/token:{self._api_key}"
+        auth_b64 = base64.b64encode(auth_str.encode()).decode()
+        data = json.dumps(body).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=data, method=method,
+            headers={
+                "Authorization": f"Basic {auth_b64}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": "AlmaInsights/1.0",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT) as resp:
+                raw = resp.read().decode("utf-8")
+                return json.loads(raw) if raw.strip() else {}
+        except urllib.error.HTTPError as exc:
+            if exc.code == 401:
+                raise ZendeskAuthError("Invalid Zendesk credentials") from exc
+            if exc.code == 429:
+                retry = int(exc.headers.get("Retry-After", "60"))
+                raise ZendeskRateLimitError(retry) from exc
+            raise
+
+    # ── Help Center articles ────────────────────────────────
+    # Base path under self._base (…/api/v2): /help_center/...
+
+    def get_articles(self, *, locale: str = "en-us", per_page: int = 100) -> list[dict]:
+        data = self._get(f"/help_center/{locale}/articles.json?per_page={per_page}")
+        return data.get("articles", []) if isinstance(data, dict) else []
+
+    def get_article(self, article_id, *, locale: str = "en-us") -> dict:
+        data = self._get(f"/help_center/{locale}/articles/{article_id}.json")
+        return data.get("article", {}) if isinstance(data, dict) else {}
+
+    def search_articles(self, query: str) -> list[dict]:
+        from urllib.parse import quote
+        data = self._get(f"/help_center/articles/search.json?query={quote(query)}")
+        return data.get("results", []) if isinstance(data, dict) else []
+
+    def create_article(self, section_id, title: str, body: str, *,
+                       locale: str = "en-us") -> dict:
+        data = self._write(
+            "POST", f"/help_center/{locale}/sections/{section_id}/articles.json",
+            {"article": {"title": title, "body": body, "locale": locale}})
+        return data.get("article", {}) if isinstance(data, dict) else {}
+
+    def update_article(self, article_id, *, title: str | None = None,
+                       body: str | None = None, locale: str = "en-us") -> dict:
+        translation = {}
+        if title is not None:
+            translation["title"] = title
+        if body is not None:
+            translation["body"] = body
+        data = self._write(
+            "PUT", f"/help_center/articles/{article_id}/translations/{locale}.json",
+            {"translation": translation})
+        return data.get("translation", {}) if isinstance(data, dict) else {}
+
+    # ── Macros ──────────────────────────────────────────────
+
+    def list_macros(self, *, per_page: int = 100) -> list[dict]:
+        data = self._get(f"/macros.json?per_page={per_page}")
+        return data.get("macros", []) if isinstance(data, dict) else []
+
+    def get_macro(self, macro_id) -> dict:
+        data = self._get(f"/macros/{macro_id}.json")
+        return data.get("macro", {}) if isinstance(data, dict) else {}
+
+    def create_macro(self, name: str, actions: list[dict], *,
+                     description: str | None = None) -> dict:
+        macro = {"title": name, "actions": actions}
+        if description:
+            macro["description"] = description
+        data = self._write("POST", "/macros.json", {"macro": macro})
+        return data.get("macro", {}) if isinstance(data, dict) else {}
+
+    def update_macro(self, macro_id, *, name: str | None = None,
+                     actions: list[dict] | None = None) -> dict:
+        macro = {}
+        if name is not None:
+            macro["title"] = name
+        if actions is not None:
+            macro["actions"] = actions
+        data = self._write("PUT", f"/macros/{macro_id}.json", {"macro": macro})
+        return data.get("macro", {}) if isinstance(data, dict) else {}
+
+    @staticmethod
+    def from_settings() -> "ZendeskClient | None":
+        sub, email, key, view = ZendeskClient.load_credentials()
+        if not (sub and email and key):
+            return None
+        return ZendeskClient(sub, email, key, view)
+
     # ── cursor persistence helpers ──────────────────────────
 
     @staticmethod
