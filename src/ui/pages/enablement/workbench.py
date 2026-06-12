@@ -13,8 +13,8 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QFileDialog, QFrame, QHBoxLayout, QLabel, QMenu, QPlainTextEdit,
-    QPushButton, QSizePolicy, QStackedWidget, QTextBrowser, QVBoxLayout,
-    QWidget,
+    QPushButton, QSizePolicy, QStackedWidget, QTextBrowser, QToolButton,
+    QVBoxLayout, QWidget,
 )
 
 from src.ui.theme import (
@@ -319,14 +319,13 @@ class WorkbenchPage(QWidget):
         return b
 
     def _build_tools_panel(self) -> QFrame:
-        """Publish & tools strip — upload a document, or push the active content out."""
+        """Compact action bar: a primary Upload button + a single Tools
+        hamburger that folds Import / Push to Guru / Save to Drive into one
+        menu (the old strip-of-buttons, decluttered). All signals preserved."""
         panel = _card_frame()
         h = QHBoxLayout(panel)
-        h.setContentsMargins(18, 12, 18, 12)
+        h.setContentsMargins(18, 10, 18, 10)
         h.setSpacing(10)
-        lab = QLabel("PUBLISH & TOOLS")
-        lab.setStyleSheet(f"color:{ALMA_TEXT_LIGHT}; font-size:11px; font-weight:700; letter-spacing:0.7px; border:none;")
-        h.addWidget(lab)
 
         # Upload (primary, opens the OS file picker)
         up = QPushButton("Upload document")
@@ -338,37 +337,48 @@ class WorkbenchPage(QWidget):
         up.clicked.connect(self._on_upload)
         h.addWidget(up)
 
-        # Import ▾  (Google Doc by URL / existing Guru card in native format)
-        imp = self._secondary_btn("Import")
-        imenu = QMenu(imp)
-        imenu.addAction(
-            "Google Doc / Drive URL…",
-            lambda: self.import_requested.emit("drive"),
+        # ── Tools hamburger ──
+        tools = QToolButton()
+        tools.setText("Tools")
+        tools.setPopupMode(QToolButton.InstantPopup)
+        tools.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        tools.setCursor(Qt.PointingHandCursor)
+        try:
+            from src.ui.design.icons import icon as design_icon
+            tools.setIcon(design_icon("sliders", 15, ALMA_GREEN_DARK))
+        except Exception:
+            pass
+        tools.setStyleSheet(
+            f"QToolButton{{background:{ALMA_BG_ELEVATED}; color:{ALMA_GREEN_DARK}; "
+            f"border:1px solid {ALMA_BORDER}; border-radius:8px; padding:7px 14px; "
+            f"font-size:12px; font-weight:600;}} QToolButton:hover{{border-color:{ALMA_GREEN_LIGHT};}} "
+            f"QToolButton::menu-indicator{{image:none;}}"
         )
-        imenu.addAction(
-            "Existing Guru card…",
-            lambda: self.import_requested.emit("guru"),
-        )
-        imp.setMenu(imenu)
-        h.addWidget(imp)
+        menu = QMenu(tools)
 
-        # Push to Guru ▾  (New card / Existing card → inline edit)
-        guru = self._secondary_btn("Push to Guru")
-        gmenu = QMenu(guru)
-        gmenu.addAction("New Guru card", lambda: self.publish_requested.emit("guru_new"))
-        self._existing_menu = gmenu.addMenu("Existing Guru card")
+        imp = menu.addMenu("Import")
+        imp.addAction("Google Doc / Drive URL…", lambda: self.import_requested.emit("drive"))
+        imp.addAction("Existing Guru card…", lambda: self.import_requested.emit("guru"))
+
+        guru = menu.addMenu("Push to Guru")
+        guru.addAction("New Guru card", lambda: self.publish_requested.emit("guru_new"))
+        self._existing_menu = guru.addMenu("Existing Guru card")
         self._existing_menu.aboutToShow.connect(self.existing_cards_requested.emit)
         self._render_existing_cards([{"id": None, "title": c} for c in self._DEMO_CARDS])
-        guru.setMenu(gmenu)
-        h.addWidget(guru)
 
-        # Save to Drive ▾  (New doc / Update existing doc)
-        drive = self._secondary_btn("Save to Drive")
-        dmenu = QMenu(drive)
-        dmenu.addAction("New Google Doc", lambda: self.publish_requested.emit("drive_new"))
-        dmenu.addAction("Update existing doc", lambda: self.publish_requested.emit("drive_update"))
-        drive.setMenu(dmenu)
-        h.addWidget(drive)
+        drive = menu.addMenu("Save to Drive")
+        drive.addAction("New Google Doc", lambda: self.publish_requested.emit("drive_new"))
+        drive.addAction("Update existing doc", lambda: self.publish_requested.emit("drive_update"))
+
+        menu.addSeparator()
+        menu.addAction("Load a file…", self._on_upload)
+        tools.setMenu(menu)
+        self._tools_menu = menu
+        # Retain submenu refs — PySide6's addMenu(str) hands back a QMenu
+        # whose C++ object is destroyed (with its actions) when the local
+        # wrapper is GC'd, even though it's logically a child of `menu`.
+        self._tools_submenus = (imp, guru, drive)
+        h.addWidget(tools)
 
         h.addStretch(1)
         dz = _DropZone()
