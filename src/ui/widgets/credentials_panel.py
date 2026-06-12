@@ -500,6 +500,13 @@ class CredentialsPanel(QWidget):
 
     def _on_save_claude(self):
         from src.data.pat_store import save_setting
+        # Authoritative HIPAA/BAA gate lives HERE, on the model state — not
+        # only on widget enabled-state — so a direct slot call or a
+        # force-enabled field can't persist the key without all three
+        # acknowledgments.
+        if not all(self._claude_acks.values()):
+            self._render_claude()
+            return
         key = self._claude_key.text().strip()
         if not key:
             return
@@ -613,9 +620,11 @@ class CredentialsPanel(QWidget):
 
     def _on_oauth_disconnect(self):
         from src.data import google_oauth
-        google_oauth.forget()
+        ok = google_oauth.forget()
         stored, active = self._google_state()
         self._render_google_state(stored, active)
+        if not ok and stored:
+            self._google_status.setText("Disconnect failed — the credential is still stored.")
         self.settings_changed.emit({"drive_updated": True})
 
     def _on_browse_oauth_client(self):

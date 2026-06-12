@@ -122,8 +122,9 @@ class GoogleDriveExporter:
 
         try:
             service = self._build_service()
+            esc = str(self._folder_id).replace("\\", "\\\\").replace("'", "\\'")
             results = service.files().list(
-                q=f"'{self._folder_id}' in parents",
+                q=f"'{esc}' in parents",
                 pageSize=1,
                 fields="files(id, name)",
             ).execute()

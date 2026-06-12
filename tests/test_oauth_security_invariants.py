@@ -33,11 +33,13 @@ def test_scopes_are_least_privilege():
     assert "https://www.googleapis.com/auth/drive" not in go.scopes()
 
 
-def test_flow_uses_ephemeral_port_and_no_fixed_redirect():
-    """Source-level guard: ephemeral loopback port, never a hardcoded one."""
+def test_flow_pins_ipv4_loopback_with_timeout():
+    """Source-level guard: IPv4-pinned host (closes the localhost→::1 race),
+    ephemeral port, bounded wait, never a hardcoded redirect port."""
     src = (_SRC / "data" / "google_oauth.py").read_text(encoding="utf-8")
-    assert "run_local_server(port=0" in src
-    # no fixed common OAuth redirect ports baked in
+    assert 'host="127.0.0.1"' in src      # not the default 'localhost' (::1-first)
+    assert "port=0" in src
+    assert "timeout_seconds=" in src       # no infinite hang
     assert "port=8080" not in src and "port=8000" not in src
 
 

@@ -34,6 +34,8 @@ _PATTERNS = {
     "anthropic_api_key":   re.compile(r"sk-ant-[A-Za-z0-9_-]{20,}"),
     "github_fine_grained": re.compile(r"gh[pousr]_[A-Za-z0-9]{36,}"),
     "google_api_key":      re.compile(r"AIza[0-9A-Za-z_\-]{35}"),
+    "google_oauth_secret": re.compile(r"GOCSPX-[A-Za-z0-9_\-]{20,}"),
+    "google_refresh_token": re.compile(r"1//0[A-Za-z0-9_\-]{20,}"),
     "generic_bearer":      re.compile(r"Bearer\s+[A-Za-z0-9_\-.]{40,}", re.IGNORECASE),
 }
 

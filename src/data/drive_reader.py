@@ -24,6 +24,15 @@ _READONLY_SCOPE = ["https://www.googleapis.com/auth/drive.readonly"]
 _GOOGLE_DOC = "application/vnd.google-apps.document"
 
 
+def _q(value: str) -> str:
+    """Quote + escape a value for a Drive `q` query string. The Drive query
+    grammar escapes ' and \\ with a backslash; without this an LLM- or
+    doc-supplied query (or a stray quote in a folder id) could break out of
+    the quotes and drop the trashed/parents filters."""
+    s = str(value).replace("\\", "\\\\").replace("'", "\\'")
+    return f"'{s}'"
+
+
 class DriveReader:
     """Read-only Drive client: list changed files + export text + search."""
 
@@ -93,12 +102,12 @@ class DriveReader:
                            recursive: bool = True, mime_types: list[str] | None = None) -> list[dict]:
         """Files in a folder changed since modified_after (incremental watermark)."""
         svc = self._build_service()
-        clauses = [f"'{folder_id}' in parents", "trashed = false",
+        clauses = [f"{_q(folder_id)} in parents", "trashed = false",
                    "mimeType != 'application/vnd.google-apps.folder'"]
         if modified_after:
-            clauses.append(f"modifiedTime > '{modified_after}'")
+            clauses.append(f"modifiedTime > {_q(modified_after)}")
         if mime_types:
-            clauses.append("(" + " or ".join(f"mimeType = '{m}'" for m in mime_types) + ")")
+            clauses.append("(" + " or ".join(f"mimeType = {_q(m)}" for m in mime_types) + ")")
         q = " and ".join(clauses)
         files: list[dict] = []
         page_token = None
@@ -140,7 +149,8 @@ class DriveReader:
     def search_files(self, query: str, limit: int = 20) -> list[dict]:
         """Satisfies drive_query.query_business_drive's live_client.search_files seam."""
         svc = self._build_service()
-        q = f"fullText contains '{query}' and trashed = false" if query else "trashed = false"
+        q = (f"fullText contains {_q(query)} and trashed = false"
+             if query else "trashed = false")
         resp = svc.files().list(
             q=q, pageSize=limit, fields="files(id, name, mimeType, webViewLink)").execute()
         return [{"name": f.get("name"), "id": f.get("id"),

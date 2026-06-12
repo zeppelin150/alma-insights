@@ -375,17 +375,35 @@ def _inject_google_oauth_client(app_dir):
     client_json = os.environ.get("ALMA_GOOGLE_OAUTH_CLIENT", "")
     out_path = app_dir / "src" / "data" / "_google_oauth_client.py"
 
-    if client_json == "":
+    if client_json.strip() == "":
         if "ALMA_GOOGLE_OAUTH_CLIENT" in os.environ:
             raise RuntimeError(
-                "ALMA_GOOGLE_OAUTH_CLIENT is set but empty. Refusing to build "
-                "with a half-configured OAuth client. Either set the JSON or "
-                "unset the variable entirely (bundle ships without a built-in "
-                "client; users supply their own GCP client in Settings)."
+                "ALMA_GOOGLE_OAUTH_CLIENT is set but empty/blank. Refusing to "
+                "build with a half-configured OAuth client. Either set valid "
+                "JSON or unset the variable entirely (bundle ships without a "
+                "built-in client; users supply their own GCP client in Settings)."
             )
         log("  [WARN] ALMA_GOOGLE_OAUTH_CLIENT not set — bundle ships without "
             "a built-in Google OAuth client (admin-supplied client only).")
         return
+
+    # Validate the value is a real Google desktop "installed" client BEFORE
+    # writing — a whitespace/garbage value would otherwise pass the empty
+    # guard, obfuscate to junk, and ship a bundle that "looks fine" but whose
+    # Connect button is silently dead (decode → None at runtime).
+    import json as _json
+    try:
+        parsed = _json.loads(client_json)
+        installed = parsed["installed"]
+        client_id = installed["client_id"]
+        assert installed.get("client_secret"), "missing client_secret"
+        assert client_id, "missing client_id"
+    except Exception as exc:
+        raise RuntimeError(
+            "ALMA_GOOGLE_OAUTH_CLIENT is not a valid Google desktop "
+            f"'installed' client JSON ({exc}). A 'web' client or malformed "
+            "value is rejected so we never ship a broken/confidential client."
+        )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -403,16 +421,11 @@ def _inject_google_oauth_client(app_dir):
     obf_mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(obf_mod)
 
-    # Fingerprint the client_id (non-secret) for a safe-to-log build line.
-    try:
-        import json as _json
-        client_id = (_json.loads(client_json).get("installed", {})
-                     .get("client_id", ""))
-    except Exception:
-        client_id = ""
+    # client_id already validated above; fingerprint it (non-secret) for a
+    # safe-to-log build line.
     key = obf_mod.generate_key()
     payload = obf_mod.obfuscate(client_json, key)
-    fp = obf_mod.fingerprint(client_id) if client_id else "<unknown client_id>"
+    fp = obf_mod.fingerprint(client_id)
 
     contents = (
         '"""\n'

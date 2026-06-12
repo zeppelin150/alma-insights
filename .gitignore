@@ -79,6 +79,14 @@ debug/
 *token*.json
 *secret*
 *.yaml.migrated
+# Google OAuth client configs under their natural names (gcloud/quickstart
+# defaults + plausible operator names) — keep a real client_secret out of git.
+*oauth*client*.json
+*client*secret*.json
+gcp-oauth*.json
+gcp_oauth*.json
+google_client*.json
+oauth_client*.json
 
 # Re-include the secrets-audit tool + its test (their filenames match
 # *secret* but they hold no secrets — they're the tool that FINDS them).
