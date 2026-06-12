@@ -205,6 +205,9 @@ class WorkbenchPage(QWidget):
         self._preview_btn = self._view_toggle_btn("Guru preview")
         self._preview_btn.clicked.connect(lambda: self._set_view("preview"))
         meta.addWidget(self._preview_btn)
+        self._rich_btn = self._view_toggle_btn("Rich text")
+        self._rich_btn.clicked.connect(lambda: self._set_view("rich"))
+        meta.addWidget(self._rich_btn)
         self._edit_btn = self._view_toggle_btn("Edit markdown")
         self._edit_btn.clicked.connect(lambda: self._set_view("edit"))
         meta.addWidget(self._edit_btn)
@@ -215,6 +218,8 @@ class WorkbenchPage(QWidget):
         self._body.setStyleSheet(
             f"QTextBrowser{{background:{ALMA_BG_ELEVATED}; border:none; color:{ALMA_TEXT_DARK}; font-size:13.5px;}}"
         )
+        from src.ui.pages.enablement.rich_editor import RichTextEditor
+        self._rich = RichTextEditor()
         self._editor = QPlainTextEdit()
         self._editor.setStyleSheet(
             f"QPlainTextEdit{{background:{ALMA_BG_INSET}; border:1px solid {ALMA_BORDER_LIGHT}; "
@@ -222,8 +227,9 @@ class WorkbenchPage(QWidget):
             f"font-family:Consolas,monospace; font-size:12.5px; padding:8px;}}"
         )
         self._body_stack = QStackedWidget()
-        self._body_stack.addWidget(self._body)
-        self._body_stack.addWidget(self._editor)
+        self._body_stack.addWidget(self._body)     # 0 preview
+        self._body_stack.addWidget(self._rich)     # 1 rich text (WYSIWYG)
+        self._body_stack.addWidget(self._editor)   # 2 markdown source
         v.addWidget(self._body_stack, 1)
 
         strip = QFrame()
@@ -262,19 +268,33 @@ class WorkbenchPage(QWidget):
             f"border-radius:7px; padding:4px 12px; font-size:11px; font-weight:600;}}"
         )
 
+    def _commit_active_editor(self):
+        """Read the editor we're leaving back into _current_md, emitting
+        content_edited if it changed. Markdown source wins verbatim; the
+        rich editor serializes to markdown via toMarkdown()."""
+        cur = self._body_stack.currentWidget()
+        new_md = None
+        if cur is self._editor:
+            new_md = self._editor.toPlainText()
+        elif cur is self._rich:
+            new_md = self._rich.to_markdown()
+        if new_md is not None and new_md != self._current_md:
+            self._current_md = new_md
+            self.content_edited.emit(self._active_draft_id, new_md)
+
     def _set_view(self, mode: str):
+        self._commit_active_editor()
         if mode == "edit":
             self._editor.setPlainText(self._current_md)
             self._body_stack.setCurrentWidget(self._editor)
+        elif mode == "rich":
+            self._rich.set_markdown(self._current_md)
+            self._body_stack.setCurrentWidget(self._rich)
         else:
-            if self._body_stack.currentWidget() is self._editor:
-                new_md = self._editor.toPlainText()
-                if new_md != self._current_md:
-                    self._current_md = new_md
-                    self.content_edited.emit(self._active_draft_id, new_md)
             self._render_body()
             self._body_stack.setCurrentWidget(self._body)
         self._style_view_btn(self._preview_btn, active=mode == "preview")
+        self._style_view_btn(self._rich_btn, active=mode == "rich")
         self._style_view_btn(self._edit_btn, active=mode == "edit")
 
     def _render_body(self):
@@ -385,10 +405,13 @@ class WorkbenchPage(QWidget):
         self._breadcrumb.setText(card.get("breadcrumb", ""))
         self._title.setText(card.get("title", ""))
         self._source.setText(card.get("source", ""))
+        # Switching draft: drop any in-progress edit of the OLD draft rather
+        # than committing it under the new draft id.
         self._current_md = card.get("markdown", "")
         self._render_body()
         self._body_stack.setCurrentWidget(self._body)
         self._style_view_btn(self._preview_btn, active=True)
+        self._style_view_btn(self._rich_btn, active=False)
         self._style_view_btn(self._edit_btn, active=False)
 
     def set_active_draft(self, draft_id):
