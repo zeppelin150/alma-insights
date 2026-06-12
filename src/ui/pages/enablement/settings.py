@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout,
-    QWidget,
+    QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea,
+    QTabWidget, QVBoxLayout, QWidget,
 )
 
 from src.ui.pages.enablement._common import card_frame, field, pill, section_label, toggle
@@ -29,21 +29,42 @@ class SettingsPage(QWidget):
         super().__init__(parent)
         self.setStyleSheet(f"background:{ALMA_CREAM};")
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(20, 14, 20, 18)
-        outer.setSpacing(12)
+        outer.setContentsMargins(20, 14, 20, 14)
+        outer.setSpacing(10)
         outer.addLayout(self._intro())
-        outer.addWidget(self._connections())
+
         # Shared credentials/LLM panel — Claude+Gemini keys, model, routing,
         # Guru email+PAT, Google service-account + per-user OAuth. Same widget
-        # the product Settings embeds (External section), so configuration
-        # carries over between both modes via one keyring/settings store.
+        # the product Settings embeds, so config carries over between modes via
+        # one keyring/settings store.
         from src.ui.widgets.credentials_panel import CredentialsPanel
         self.credentials = CredentialsPanel(sections=("llm", "external"))
-        outer.addWidget(self.credentials)
-        outer.addWidget(self._asana())
-        outer.addWidget(self._drive())
-        outer.addWidget(self._style_guide())
-        outer.addStretch(1)
+
+        # Sub-tabs give the (formerly one long scroll) settings some order.
+        self._tabs = QTabWidget()
+        self._tabs.setObjectName("AnalysisTab")
+        self._tabs.addTab(self._tab([self._connections()]), "Connections")
+        self._tabs.addTab(self._tab([self.credentials]), "Providers")
+        self._tabs.addTab(self._tab([self._asana(), self._drive()]), "Sources")
+        self._tabs.addTab(self._tab([self._style_guide()]), "Style Guide")
+        outer.addWidget(self._tabs, 1)
+
+    def _tab(self, cards: list) -> QScrollArea:
+        """Wrap one or more section cards in a top-aligned scroll area so a
+        tall sub-tab (Providers, Asana) scrolls instead of compressing."""
+        body = QWidget()
+        v = QVBoxLayout(body)
+        v.setContentsMargins(2, 8, 2, 8)
+        v.setSpacing(12)
+        for c in cards:
+            v.addWidget(c)
+        v.addStretch(1)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setStyleSheet("QScrollArea{background:transparent; border:none;}")
+        scroll.setWidget(body)
+        return scroll
 
     # ── helpers ───────────────────────────────────────────────────
     def _text(self, s, size=12.5, color=None, bold=False):
