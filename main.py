@@ -145,13 +145,18 @@ def main():
     window.show()
 
     # If the Gemini OAuth startup check failed (CLI missing, timed out, or
-    # reports unauthenticated) route the user straight to Settings → AI
-    # Provider so they can re-authenticate without hunting through the UI.
-    if "gemini_oauth" in failed_check_ids and hasattr(window, "PAGE_SETTINGS"):
+    # reports unauthenticated) surface a non-blocking notice pointing at
+    # Settings → AI Provider. The app always lands on Home — never
+    # auto-navigate away from it.
+    if "gemini_oauth" in failed_check_ids:
         try:
-            window._set_active_page(window.PAGE_SETTINGS)
-        except Exception as exc:  # noqa: BLE001 — routing is non-fatal
-            print(f"[startup] Could not route to Settings after OAuth failure: {exc}")
+            window._toasts.show_toast(
+                "Gemini sign-in needs attention — open Settings to re-authenticate.",
+                duration_ms=8000, toast_type="warning")
+            window.status_label.setText(
+                "Gemini sign-in needs attention — see Settings")
+        except Exception as exc:  # noqa: BLE001 — the notice is non-fatal
+            print(f"[startup] Could not surface OAuth notice: {exc}")
 
     # Wire guard to status bar if available
     if hasattr(window, 'qt_error_label'):
