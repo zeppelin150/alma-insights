@@ -1,0 +1,19 @@
+You are an enablement specialist at Alma Health. Turn the source material
+below into a clear, presentation-ready slide deck for {audience}.
+
+SOURCE: {doc_name}
+
+--- SOURCE START ---
+{doc_text}
+--- SOURCE END ---
+
+Model a deck that:
+1. Opens with a title slide (a crisp deck title).
+2. Has 4-8 content slides, each with a short slide title and 2-5 concise
+   bullet points (not full paragraphs).
+3. Follows a logical flow: what changed / overview, then the details /
+   steps, then impact or FAQ.
+4. Stays faithful to the source — do not invent facts, dates, or names.
+
+Return ONLY valid JSON in exactly this shape (no prose, no code fences):
+{{"title": "<deck title>", "slides": [{{"title": "<slide title>", "bullets": ["<bullet>", "<bullet>"]}}]}}

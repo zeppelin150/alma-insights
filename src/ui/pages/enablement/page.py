@@ -93,6 +93,7 @@ class EnablementPage(QWidget):
     connection_status_ready = Signal(str, bool, str)  # (source_key, ok, detail) from the check worker
     import_finished = Signal(dict)  # off-thread import result → UI refresh
     analytics_synced = Signal(dict)  # off-thread Guru analytics sync result
+    pptx_modeled = Signal(dict)      # off-thread deck-model result
 
     def __init__(self, db=None, demo: bool = True, parent=None):
         super().__init__(parent)
@@ -111,6 +112,7 @@ class EnablementPage(QWidget):
         self.setStyleSheet(f"background:{ALMA_CREAM};")
         self._build()
         self._setup_engine()
+        self._load_pptx()
 
     # ── layout ────────────────────────────────────────────────────
     def _build(self):
@@ -129,21 +131,26 @@ class EnablementPage(QWidget):
         # Scroll-wrap the tall pages so content scrolls instead of compressing
         # (compression was overlapping rows on Settings). Workbench fills exactly.
         from src.ui.pages.enablement.analytics import AnalyticsPage
+        from src.ui.pages.enablement.pptx_tab import PptxPage
         self.analytics = AnalyticsPage()
+        self.pptx = PptxPage()
         cal_tab = self._scroll(self.calendar)
         tasks_tab = self._scroll(self.tasks)
         analytics_tab = self._scroll(self.analytics)
+        pptx_tab = self._scroll(self.pptx)
         settings_tab = self._scroll(self.settings)
         self.tabs.addTab(cal_tab, "Calendar")
         self.tabs.addTab(tasks_tab, "Tasks")
         self.tabs.addTab(self.workbench, "Workbench")
         self.tabs.addTab(analytics_tab, "Analytics")
+        self.tabs.addTab(pptx_tab, "PowerPoint")
         self.tabs.addTab(settings_tab, "Settings")
         self._tab_widgets = {
             "calendar": cal_tab,
             "tasks": tasks_tab,
             "workbench": self.workbench,
             "analytics": analytics_tab,
+            "powerpoint": pptx_tab,
             "settings": settings_tab,
         }
         self.tabs.setCurrentWidget(self.workbench)
@@ -181,6 +188,12 @@ class EnablementPage(QWidget):
         self.analytics.targeted_update_requested.connect(self._on_targeted_update)
         self.analytics_synced.connect(self._on_analytics_synced)
         self.calendar.event_activated.connect(self._on_calendar_event_activated)
+        # PowerPoint
+        self.pptx.model_topic_requested.connect(self._on_pptx_model_topic)
+        self.pptx.deck_selected.connect(self._on_pptx_deck_selected)
+        self.pptx.outline_saved.connect(self._on_pptx_outline_saved)
+        self.pptx.export_requested.connect(self._on_pptx_export)
+        self.pptx_modeled.connect(self._on_pptx_modeled)
         self._refresh_style_guide_status()
 
         if not self.demo:
@@ -384,6 +397,7 @@ class EnablementPage(QWidget):
         else:
             self.workbench.set_pending_drafts(chips)
         self._refresh_analytics()
+        self._load_pptx()
         self._set_status(f"{len(rows)} tasks · {len(drafts)} pending drafts.")
 
     def _on_scan_now(self):
@@ -972,6 +986,96 @@ class EnablementPage(QWidget):
     def _on_calendar_event_activated(self, task: dict):
         if task.get("kind") == "guru_card_due" and task.get("card_id"):
             self._on_targeted_update(task["card_id"])
+
+    # ── PowerPoint (E4) ─────────────────────────────────────────────
+
+    def _load_pptx(self):
+        """Refresh the PowerPoint tab's deck list (demo seeds on first load)."""
+        try:
+            from src.data import pptx_store
+            conn = self._conn()
+            if self.demo and not pptx_store.list_decks(conn):
+                from src.data.enablement_sim import seed_demo_decks
+                seed_demo_decks(conn)
+            self.pptx.set_decks(pptx_store.list_decks(conn))
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("pptx load skipped: %s", exc)
+
+    def _on_pptx_deck_selected(self, deck_id: int):
+        from src.data import pptx_store
+        deck = pptx_store.get_deck(self._conn(), deck_id)
+        if deck:
+            self.pptx.show_deck(deck)
+
+    def _on_pptx_outline_saved(self, deck_id: int, title: str, outline: dict):
+        from src.data import pptx_store
+        res = pptx_store.update_deck_outline(self._conn(), deck_id,
+                                             title=title, outline=outline)
+        if res.get("ok"):
+            self.pptx.set_status(f"Saved — {res['slides']} slides.")
+            self._load_pptx()
+
+    def _on_pptx_model_topic(self, topic: str):
+        """Model a deck from a topic via the LLM (off-thread)."""
+        self.pptx.set_status("Modeling a deck…")
+        if self.demo:
+            self._ensure_demo_db()
+        import threading
+        db_path = self._engine_db_path()
+        demo = self.demo
+
+        def worker():
+            res = {"ok": False, "error": "unknown"}
+            conn = None
+            try:
+                from src.data import pptx_store
+                from src.data.connection_factory import get_connection
+                conn = get_connection(db_path)
+                if demo:
+                    from src.data.enablement_sim import _StubLLM
+                    llm = _StubLLM()
+                else:
+                    from src.gemini.client_factory import build_client_for_task
+                    llm = build_client_for_task("enablement_pptx_gen")
+                if llm is None:
+                    res = {"ok": False, "error": "no_llm_client"}
+                else:
+                    res = pptx_store.generate_deck_from_topic(conn, topic, llm)
+            except Exception as exc:  # noqa: BLE001
+                res = {"ok": False, "error": str(exc)}
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+            self.pptx_modeled.emit(res)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_pptx_modeled(self, res: dict):
+        if res.get("ok"):
+            self.pptx.set_status(f"Modeled “{res.get('title', '')}” ({res.get('slides', 0)} slides).")
+            self._load_pptx()
+            self._on_pptx_deck_selected(res["deck_id"])
+        else:
+            self.pptx.set_status(f"Modeling failed: {res.get('error')}")
+
+    def _on_pptx_export(self, deck_id: int):
+        from PySide6.QtWidgets import QFileDialog
+        from src.data import pptx_store
+        deck = pptx_store.get_deck(self._conn(), deck_id)
+        default = (deck.get("title", "deck") if deck else "deck").replace(" ", "_") + ".pptx"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export deck", default, "PowerPoint (*.pptx)")
+        if not path:
+            return
+        res = pptx_store.export_pptx(self._conn(), deck_id, path)
+        if res.get("ok"):
+            self.pptx.set_status(f"Exported {res['slides']} slides → {path}")
+            self._load_pptx()
+        else:
+            self.pptx.set_status(f"Export failed: {res.get('error')}")
 
     # ── style guide ─────────────────────────────────────────────────
 

@@ -322,3 +322,37 @@ def seed_demo_analytics(conn) -> dict:
             (now.isoformat(), now.isoformat()),
         )
     return {"events": inserted, "comments": len(comments)}
+
+
+# ── demo PowerPoint decks (E4) ───────────────────────────────────────
+
+def seed_demo_decks(conn) -> dict:
+    """A couple of synthetic deck drafts for the PowerPoint tab in demo mode."""
+    from src.data import pptx_store
+    decks = [
+        ("SSO Rollout — Provider Enablement", {
+            "title": "SSO Rollout — Provider Enablement",
+            "slides": [
+                {"title": "What's changing", "bullets": [
+                    "Providers self-serve SSO from the admin console",
+                    "Rollout June 24, 2026 for all provider orgs"]},
+                {"title": "Setup steps", "bullets": [
+                    "Admin Console > Security > SSO",
+                    "Choose IdP (Okta, Azure AD, Google)",
+                    "Upload metadata XML and test with a pilot org"]},
+                {"title": "FAQ", "bullets": [
+                    "Existing logins stay active until org-wide enable"]},
+            ]}),
+        ("Payments v2 Overview", {
+            "title": "Payments v2 Overview",
+            "slides": [
+                {"title": "Highlights", "bullets": [
+                    "Unified remittance ledger", "Auto-matching for ERA lines"]},
+                {"title": "Rollout", "bullets": ["June 30, 2026"]},
+            ]}),
+    ]
+    ids = []
+    for title, outline in decks:
+        ids.append(pptx_store.save_deck(conn, title=title, outline=outline,
+                                        source_ref="topic:demo"))
+    return {"decks": ids}

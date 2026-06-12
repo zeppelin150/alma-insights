@@ -68,6 +68,7 @@ PACKAGES = [
     "sentence-transformers==3.3.1",
     "hdbscan==0.8.40",
     "markdown==3.7",
+    "python-pptx==1.0.2",
     "keyring==25.5.0",
     "PyJWT[crypto]==2.10.1",
     "google-api-python-client==2.149.0",

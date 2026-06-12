@@ -45,6 +45,9 @@ _DEFAULT_ROUTES = {
     "enablement_triage": "gemini",
     "enablement_subtasks": "gemini",
     "enablement_chat": "gemini",
+    "enablement_pptx_gen": "gemini",
+    "enablement_article_gen": "gemini",
+    "enablement_macro_gen": "gemini",
 }
 
 
