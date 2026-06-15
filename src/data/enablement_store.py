@@ -465,8 +465,13 @@ def publish_draft(
         # it from the canonical markdown with the SAME converter the in-app
         # preview uses, so the published card matches the preview. (Previously
         # this sent raw markdown into Guru's HTML field — formatting was lost.)
+        from src.data.guru_blocks import expand_blocks
         from src.data.html_markdown import markdown_to_html
         html_body = draft.get("content_html") or markdown_to_html(draft["content"])
+        # Expand native-block directives (callout / collapsible / card-link)
+        # into Guru's markup — works on both the captured rich HTML and the
+        # markdown-derived HTML. Idempotent when there are no directives.
+        html_body = expand_blocks(html_body)
         try:
             if card_id:
                 guru_result = guru_client.update_card(card_id, html_body, draft["title"])

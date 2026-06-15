@@ -173,8 +173,10 @@ class GuruContentPipeline:
         # Guru's `content` field is HTML — convert the markdown body (or use a
         # captured rich HTML) so formatting survives publish (a bare markdown
         # body would render as literal text).
+        from src.data.guru_blocks import expand_blocks
         from src.data.html_markdown import markdown_to_html
-        html_body = draft.get("content_html") or markdown_to_html(draft["content"])
+        html_body = expand_blocks(
+            draft.get("content_html") or markdown_to_html(draft["content"]))
 
         if draft["draft_type"] == "rewrite" and draft["card_id"]:
             try:

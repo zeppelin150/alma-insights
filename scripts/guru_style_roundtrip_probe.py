@@ -25,15 +25,21 @@ import argparse
 import re
 import sys
 
-_STYLE_MATRIX = (
-    '<p style="text-align:center">'
-    '<span style="color:#cc0000;background-color:#fff2a8">'
-    'colored + highlighted + centered</span></p>'
-    '<p><span style="text-decoration:underline">underlined</span> and '
-    '<span style="font-family:monospace">monospace</span></p>'
-    '<table border="1" cellspacing="0" cellpadding="4">'
-    '<tr><td bgcolor="#0d7d72">cell A</td><td>cell B</td></tr></table>'
-)
+def _build_matrix() -> str:
+    from src.data.guru_blocks import callout_html, collapsible_html, card_link_html
+    return (
+        '<p style="text-align:center">'
+        '<span style="color:#cc0000;background-color:#fff2a8">'
+        'colored + highlighted + centered</span></p>'
+        '<p><span style="text-decoration:underline">underlined</span> and '
+        '<span style="font-family:monospace">monospace</span></p>'
+        '<table border="1" cellspacing="0" cellpadding="4">'
+        '<tr><td bgcolor="#0d7d72">cell A</td><td>cell B</td></tr></table>'
+        + callout_html("<p>callout body</p>", "warning")
+        + collapsible_html("Collapsible title", "<p>hidden body</p>")
+        + card_link_html("REPLACE_WITH_REAL_CARD_UUID", "card link text")
+    )
+
 
 _PROBES = {
     "color": r"color:\s*#?cc0000",
@@ -42,12 +48,26 @@ _PROBES = {
     "underline (text-decoration)": r"text-decoration:\s*underline",
     "font-family": r"font-family",
     "table bgcolor": r"bgcolor=.?#?0d7d72|background-color:\s*#?0d7d72",
+    "callout (native)": r'data-ghq-card-content-type="CALLOUT"|ghq-card-content__callout',
+    "collapsible (native)": r'data-ghq-card-content-type="COLLAPSIBLE"|ghq-card-content__collapsible',
+    "card-link (native green-G)": r'data-ghq-card-content-type="GURU_CARD"|ghq-card-content__guru-card',
 }
+
+
+def _dump_card(client, card_id: str) -> int:
+    """Print an existing card's stored content HTML — use this to reverse-
+    engineer Guru's native-block markup from a card you authored in Guru."""
+    card = client.get_card(card_id)
+    content = (card or {}).get("content", "")
+    print(f"── Stored content HTML for card {card_id} ({len(content)} chars) ──\n")
+    print(content)
+    return 0
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--collection", required=True, help="Guru collection id")
+    ap.add_argument("--collection", help="Guru collection id (for the create probe)")
+    ap.add_argument("--dump-card", help="GET an existing card and print its content HTML")
     ap.add_argument("--title", default="[probe] style round-trip — safe to delete")
     args = ap.parse_args()
 
@@ -57,8 +77,14 @@ def main() -> int:
         print("Guru is not configured (Settings → Connections). Aborting.")
         return 2
 
+    if args.dump_card:
+        return _dump_card(client, args.dump_card)
+    if not args.collection:
+        print("Pass --collection <id> to run the style probe, or --dump-card <id>.")
+        return 2
+
     print("Creating throwaway probe card…")
-    created = client.create_card(args.collection, args.title, _STYLE_MATRIX)
+    created = client.create_card(args.collection, args.title, _build_matrix())
     card_id = created.get("id") if isinstance(created, dict) else None
     if not card_id:
         print(f"Create failed: {created!r}")

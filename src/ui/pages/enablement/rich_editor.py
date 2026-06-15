@@ -32,8 +32,8 @@ from PySide6.QtGui import (
     QTextBlockFormat, QTextCharFormat, QTextCursor, QTextListFormat,
 )
 from PySide6.QtWidgets import (
-    QFrame, QHBoxLayout, QInputDialog, QPushButton, QTextEdit, QVBoxLayout,
-    QWidget,
+    QFrame, QHBoxLayout, QInputDialog, QMenu, QPushButton, QTextEdit,
+    QToolButton, QVBoxLayout, QWidget,
 )
 
 from src.ui.theme import (
@@ -104,6 +104,8 @@ class RichTextEditor(QWidget):
                 bar.addWidget(self._separator())
             for label, tip, handler, bold in group:
                 bar.addWidget(self._tool_btn(label, tip, handler, bold))
+        bar.addWidget(self._separator())
+        bar.addWidget(self._build_insert_menu())   # Guru-native blocks
         bar.addStretch(1)
         outer.addLayout(bar)
 
@@ -115,6 +117,53 @@ class RichTextEditor(QWidget):
         )
         self.editor.textChanged.connect(self.content_changed.emit)
         outer.addWidget(self.editor, 1)
+
+    def _build_insert_menu(self) -> QToolButton:
+        """Insert Guru-native blocks (callout / collapsible / card-link) as
+        markdown-directive markup that expands to Guru's `ghq-card-content__*`
+        HTML at preview + publish."""
+        btn = QToolButton()
+        btn.setText("Insert")
+        btn.setToolTip("Insert a Guru block")
+        btn.setPopupMode(QToolButton.InstantPopup)
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setFixedHeight(28)
+        btn.setStyleSheet(
+            f"QToolButton{{background:{ALMA_BG_INSET}; color:{ALMA_TEXT_MID}; "
+            f"border:1px solid {ALMA_BORDER}; border-radius:6px; padding:2px 9px; "
+            f"font-size:12px; font-weight:600;}} "
+            f"QToolButton:hover{{border-color:{_TEAL}; color:{_TEAL};}} "
+            f"QToolButton::menu-indicator{{image:none;}}"
+        )
+        menu = QMenu(btn)
+        callout = menu.addMenu("Callout")
+        for label, variant in (("Note", "note"), ("Success", "success"),
+                               ("Warning", "warning"), ("Danger", "danger")):
+            callout.addAction(label, lambda v=variant: self._insert_callout(v))
+        menu.addAction("Collapsible section", self._insert_collapsible)
+        menu.addAction("Guru card link…", self._insert_card_link)
+        btn.setMenu(menu)
+        self._insert_menu = menu
+        self._insert_submenus = (callout,)   # retain ref (addMenu GC footgun)
+        return btn
+
+    def _insert_callout(self, variant: str):
+        body = "Your message here."
+        self.editor.textCursor().insertHtml(
+            f"<blockquote>[!{variant.upper()}]<br>{_html.escape(body)}</blockquote>")
+
+    def _insert_collapsible(self):
+        self.editor.textCursor().insertHtml(
+            "<p>::: details Section title</p><p>Hidden body.</p><p>:::</p>")
+
+    def _insert_card_link(self):
+        cid, ok = QInputDialog.getText(self, "Guru card link", "Card id or slug:")
+        if not ok or not cid.strip():
+            return
+        label, ok = QInputDialog.getText(self, "Guru card link", "Link text:")
+        label = (label.strip() if ok else "") or cid.strip()
+        from src.data.guru_blocks import card_link_token
+        self.editor.textCursor().insertText(card_link_token(cid.strip(), label))
 
     def _separator(self) -> QFrame:
         line = QFrame()
