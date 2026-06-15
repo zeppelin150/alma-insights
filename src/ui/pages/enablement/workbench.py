@@ -458,7 +458,7 @@ class WorkbenchPage(QWidget):
     def _on_upload(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Upload a document", "",
-            "Documents (*.pdf *.docx *.doc *.md *.txt);;All files (*)")
+            "Documents (*.docx *.md *.markdown *.txt *.csv);;All files (*)")
         if path:
             self.load_file_requested.emit(path)
 

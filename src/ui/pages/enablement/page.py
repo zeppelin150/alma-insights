@@ -789,18 +789,31 @@ class EnablementPage(QWidget):
                 with open(path, "r", encoding="utf-8", errors="replace") as fh:
                     return fh.read()
             if ext == ".docx":
-                try:
-                    import docx  # python-docx, optional
-                    return "\n".join(p.text for p in docx.Document(path).paragraphs)
-                except Exception:
-                    pass
+                return EnablementPage._docx_text(path)
         except Exception:
             pass
         return (
             f"Imported file: {os.path.basename(path)}.\n\n"
             "(This format can't be read locally — connect Google Drive or paste "
-            "the text to extract the full content.)"
+            "the text to extract the full content. .docx / .md / .txt read here; "
+            ".pdf / .doc need Drive.)"
         )
+
+    @staticmethod
+    def _docx_text(path: str) -> str:
+        """Extract text from a .docx with the stdlib only (a .docx is a zip
+        of XML) — no python-docx dependency. Paragraph + line/tab breaks are
+        preserved; runs are concatenated."""
+        import html
+        import re
+        import zipfile
+        with zipfile.ZipFile(path) as z:
+            xml = z.read("word/document.xml").decode("utf-8", "replace")
+        xml = re.sub(r"<w:tab\b[^>]*/>", "\t", xml)
+        xml = re.sub(r"<w:br\b[^>]*/>", "\n", xml)
+        xml = re.sub(r"</w:p>", "\n", xml)
+        xml = re.sub(r"<[^>]+>", "", xml)          # strip remaining tags
+        return html.unescape(xml).strip()
 
     @staticmethod
     def _ingest_local_file(conn, path: str, demo: bool) -> dict:

@@ -55,6 +55,24 @@ class TestIngest:
         f.write_text("# Title\n\nbody text here")
         assert "body text here" in EnablementPage._read_local_text(str(f))
 
+    def test_read_docx(self, tmp_path):
+        import zipfile
+        from src.ui.pages.enablement import EnablementPage
+        p = tmp_path / "report.docx"
+        doc_xml = (
+            '<?xml version="1.0"?><w:document xmlns:w="ns"><w:body>'
+            '<w:p><w:r><w:t>Hello from</w:t></w:r>'
+            '<w:r><w:t xml:space="preserve"> a docx</w:t></w:r></w:p>'
+            '<w:p><w:r><w:t>Second &amp; final line</w:t></w:r></w:p>'
+            '</w:body></w:document>'
+        )
+        with zipfile.ZipFile(p, "w") as z:
+            z.writestr("word/document.xml", doc_xml)
+        text = EnablementPage._read_local_text(str(p))
+        assert "Hello from a docx" in text
+        assert "Second & final line" in text
+        assert "can't be read" not in text   # not the stub fallback
+
     def test_dropped_file_creates_draft_demo(self, qapp, empty_db, tmp_path):
         from src.data import enablement_store as store
         from src.ui.pages.enablement import EnablementPage
