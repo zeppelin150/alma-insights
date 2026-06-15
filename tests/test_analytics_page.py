@@ -68,6 +68,49 @@ def test_widget_signals(qapp, empty_db):
     assert got["filters"] >= 1
 
 
+class TestUplift:
+    def _a(self):
+        from src.ui.pages.enablement.analytics import AnalyticsPage
+        return AnalyticsPage()
+
+    _KPIS = {"states": {"TRUSTED": 8, "NEEDS_VERIFICATION": 3, "STALE": 1},
+             "queue_total": 4, "due_soon": 2, "open_comments": 1,
+             "last_sync_at": "2026-06-11T10:00:00"}
+
+    def test_donut_chart_paints(self, qapp):
+        from src.ui.pages.enablement.mini_charts import DonutChart
+        d = DonutChart()
+        d.set_segments([("Trusted", 8, "#3FA66A"), ("Stale", 1, "#D6603A")], "cards")
+        d.resize(160, 160)
+        d.grab()   # paintEvent runs without raising
+
+    def test_donut_segments_mapped(self, qapp):
+        a = self._a()
+        segs = a._donut_segments(self._KPIS)
+        labels = {s[0] for s in segs}
+        assert "Trusted" in labels and "Needs verification" in labels
+        # colours assigned, zero states dropped
+        assert all(s[1] > 0 for s in segs)
+
+    def test_set_data_renders_donut_and_legend(self, qapp):
+        a = self._a()
+        a.set_data(self._KPIS, [{"card_id": "c", "title": "C", "views": 4}], [], [])
+        assert a._legend.count() >= 3            # legend rows + stretch
+        assert a._donut._segments                # donut has segments
+
+    def test_expand_builds_overlay_with_content(self, qapp):
+        from PySide6.QtWidgets import QWidget
+        a = self._a()
+        a.set_overlay_host(QWidget())
+        a.set_data(self._KPIS,
+                   [{"card_id": "c", "title": "Top card", "views": 9}], [], [])
+        a._open_expand()
+        assert a._overlay is not None
+        assert a._overlay.content.count() >= 1   # expand content populated
+        a._overlay._collapse()
+        assert a._overlay.isHidden()
+
+
 def test_comment_to_task_flow_marks_badge(qapp, empty_db):
     page = _page(empty_db)
     page._refresh_analytics()

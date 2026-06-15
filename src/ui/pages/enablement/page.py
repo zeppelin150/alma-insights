@@ -1443,6 +1443,7 @@ class EnablementPage(QWidget):
             host = panel.parentWidget() if panel is not None else None
             self.workbench.set_overlay_host(host)
             self.pptx.set_overlay_host(host)
+            self.analytics.set_overlay_host(host)
         except Exception:
             pass
 

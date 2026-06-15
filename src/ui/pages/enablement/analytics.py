@@ -19,11 +19,21 @@ from src.ui.theme import (
     ALMA_TEXT_LIGHT, ALMA_TEXT_MID, ALMA_TEXT_ON_DARK, ALMA_WARNING,
 )
 from src.ui.pages.enablement._common import badge, card_frame, pill, section_label
+from src.ui.pages.enablement.mini_charts import DonutChart
 
 _REASON_BADGE = {
     "unverified": ("Unverified", "high"),
     "verification_due": ("Verification due", "in_progress"),
     "stale_high_traffic": ("High traffic, stale", "draft"),
+}
+
+# Verification-state → (legend label, donut colour).
+_STATE_STYLE = {
+    "TRUSTED": ("Trusted", "#3FA66A"),
+    "VERIFIED": ("Verified", "#3FA66A"),
+    "NEEDS_VERIFICATION": ("Needs verification", "#E0A82E"),
+    "UNVERIFIED": ("Unverified", "#E0A82E"),
+    "STALE": ("Stale", "#D6603A"),
 }
 
 
@@ -36,6 +46,9 @@ class AnalyticsPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setStyleSheet(f"background:{ALMA_CREAM};")
+        self._overlay_host = None
+        self._overlay = None
+        self._last = ({}, [], [], [])
         self._build()
 
     # ── layout ──────────────────────────────────────────────────────
@@ -73,6 +86,16 @@ class AnalyticsPage(QWidget):
             )
             head.addWidget(combo)
 
+        expand = QPushButton("⤢  Expand")
+        expand.setCursor(Qt.PointingHandCursor)
+        expand.setStyleSheet(
+            f"QPushButton{{background:{ALMA_BG_ELEVATED}; color:{ALMA_TEXT_MID}; "
+            f"border:1px solid {ALMA_BORDER}; border-radius:8px; padding:7px 13px; "
+            "font-size:12px; font-weight:600; }"
+        )
+        expand.clicked.connect(self._open_expand)
+        head.addWidget(expand)
+
         refresh = QPushButton("Refresh from Guru")
         refresh.setCursor(Qt.PointingHandCursor)
         refresh.setStyleSheet(
@@ -103,6 +126,22 @@ class AnalyticsPage(QWidget):
 
         right = QVBoxLayout()
         right.setSpacing(6)
+        right.addWidget(section_label("VERIFICATION"))
+        self._donut_card = card_frame()
+        dl = QHBoxLayout(self._donut_card)
+        dl.setContentsMargins(14, 10, 14, 10)
+        dl.setSpacing(12)
+        self._donut = DonutChart()
+        self._donut.setFixedWidth(140)
+        dl.addWidget(self._donut)
+        legend_w = QWidget()
+        legend_w.setStyleSheet("background:transparent;")
+        self._legend = QVBoxLayout(legend_w)
+        self._legend.setContentsMargins(0, 6, 0, 6)
+        self._legend.setSpacing(5)
+        dl.addWidget(legend_w, 1)
+        right.addWidget(self._donut_card)
+
         right.addWidget(section_label("NEEDS ATTENTION"))
         self._due_card = card_frame()
         self._due_layout = QVBoxLayout(self._due_card)
@@ -151,11 +190,102 @@ class AnalyticsPage(QWidget):
 
     def set_data(self, kpis: dict, top: list[dict], comments: list[dict],
                  due: list[dict]):
+        self._last = (kpis, top, comments, due)
         self._render_sync_pill(kpis.get("last_sync_at", ""))
         self._render_kpis(kpis)
-        self._render_top(top)
+        self._render_donut(kpis, self._donut, self._legend)
+        self._render_top(top, self._top_layout)
         self._render_due(due)
         self._render_comments(comments)
+
+    def set_overlay_host(self, widget):
+        self._overlay_host = widget
+
+    # ── verification donut ──────────────────────────────────────────
+    def _donut_segments(self, kpis: dict) -> list[tuple]:
+        segs = []
+        for key, count in (kpis.get("states", {}) or {}).items():
+            if not count:
+                continue
+            label, color = _STATE_STYLE.get(str(key).upper(),
+                                            (str(key).title(), "#9AA4B2"))
+            segs.append((label, int(count), color))
+        return segs
+
+    def _render_donut(self, kpis: dict, donut, legend):
+        segs = self._donut_segments(kpis)
+        donut.set_segments(segs, "cards")
+        self._clear(legend)
+        if not segs:
+            legend.addWidget(self._empty("No verification data yet."))
+            return
+        for label, count, color in segs:
+            row = QFrame()
+            row.setStyleSheet("background:transparent; border:none;")
+            h = QHBoxLayout(row)
+            h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(8)
+            dot = QLabel()
+            dot.setFixedSize(10, 10)
+            dot.setStyleSheet(f"background:{color}; border-radius:5px;")
+            h.addWidget(dot, 0, Qt.AlignVCenter)
+            name = QLabel(label)
+            name.setStyleSheet(
+                f"color:{ALMA_TEXT_MID}; font-size:11.5px; border:none;")
+            h.addWidget(name, 1)
+            val = QLabel(f"{count:,}")
+            val.setStyleSheet(
+                f"color:{ALMA_TEXT_DARK}; font-size:12px; font-weight:700; border:none;")
+            h.addWidget(val)
+            legend.addWidget(row)
+        legend.addStretch(1)
+
+    # ── expand / focus ──────────────────────────────────────────────
+    def _open_expand(self):
+        from src.ui.pages.enablement.focus_overlay import FocusOverlay
+        if self._overlay is None:
+            self._overlay = FocusOverlay(self._overlay_host or self.window(),
+                                         title="Guru Analytics")
+        self._build_expand_content(self._overlay.content)
+        self._overlay.present()
+
+    def _build_expand_content(self, layout):
+        # clear any prior expand content
+        while layout.count():
+            item = layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.hide()
+                w.deleteLater()
+            elif item.layout() is not None:
+                self._clear(item.layout())
+        kpis, top, _comments, _due = self._last
+        row = QHBoxLayout()
+        row.setSpacing(14)
+        # big donut + legend
+        dcard = card_frame()
+        dl = QHBoxLayout(dcard)
+        dl.setContentsMargins(18, 14, 18, 14)
+        dl.setSpacing(16)
+        big = DonutChart()
+        big.setMinimumSize(220, 220)
+        dl.addWidget(big)
+        lw = QWidget()
+        lw.setStyleSheet("background:transparent;")
+        leg = QVBoxLayout(lw)
+        leg.setSpacing(7)
+        dl.addWidget(lw, 1)
+        self._render_donut(kpis, big, leg)
+        row.addWidget(dcard, 2)
+        # top cards
+        tcard = card_frame()
+        tl = QVBoxLayout(tcard)
+        tl.setContentsMargins(18, 14, 18, 14)
+        tl.setSpacing(6)
+        tl.addWidget(section_label("TOP USED CARDS"))
+        self._render_top(top, tl, limit=20)
+        row.addWidget(tcard, 3)
+        layout.addLayout(row, 1)
 
     def _clear(self, layout):
         while layout.count():
@@ -199,14 +329,14 @@ class AnalyticsPage(QWidget):
             v.addWidget(cap)
             self._kpi_row.addWidget(cell)
 
-    def _render_top(self, top: list[dict]):
-        self._clear(self._top_layout)
+    def _render_top(self, top: list[dict], layout, limit: int = 12):
+        self._clear(layout)
         if not top:
-            self._top_layout.addWidget(self._empty(
+            layout.addWidget(self._empty(
                 "No usage events yet — refresh from Guru to pull analytics."))
             return
         max_views = max((c.get("views", 0) for c in top), default=1) or 1
-        for rank, card in enumerate(top[:12], start=1):
+        for rank, card in enumerate(top[:limit], start=1):
             row = QFrame()
             row.setStyleSheet("background:transparent; border:none;")
             h = QHBoxLayout(row)
@@ -247,8 +377,8 @@ class AnalyticsPage(QWidget):
                 f"color:{ALMA_TEXT_MID}; font-size:11.5px; border:none;"
             )
             h.addWidget(views)
-            self._top_layout.addWidget(row)
-        self._top_layout.addStretch(1)
+            layout.addWidget(row)
+        layout.addStretch(1)
 
     def _render_due(self, due: list[dict]):
         self._clear(self._due_layout)
