@@ -30,6 +30,11 @@ _DATE_HINT = re.compile(
 )
 # Lines that are already markdown structure — passed through untouched.
 _MD_LINE = re.compile(r"^\s*(?:#{1,6}\s|>\s|\d+[.)]\s|[-*+]\s|```|\|)")
+# Whether the text already carries resolved formatting (e.g. from the docx
+# reader or a .md file) — if so we trust it rather than re-structuring.
+_MD_SIGNAL = re.compile(
+    r"(?m)^\s*(?:#{1,6}\s|[-*+]\s|\d+[.)]\s|\|)"          # headings/lists/tables
+    r"|\*\*[^*]|__[^_]|\[[^\]]+\]\([^)]+\)")               # bold / links
 _UNICODE_BULLET = re.compile(r"^\s*[•·▪◦‣]\s+(.*)")
 _NUMBERED = re.compile(r"^\s*(\d+)[.)]\s+(.*)")
 
@@ -92,6 +97,13 @@ def card_from_document(name: str, text: str) -> tuple[str, str]:
             "the document can be extracted."
         )
 
+    # Already-structured input (resolved docx / a .md file): trust its
+    # formatting and pass it through verbatim — don't re-flatten/re-infer.
+    if _MD_SIGNAL.search(text):
+        return title, text
+
+    # Plain prose (.txt or an unformatted doc): lead summary + date callout +
+    # lightly-inferred structure.
     paras = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
     lead = paras[0] if paras else text[:400]
     callout = find_date_line(text)
