@@ -85,3 +85,25 @@ class TestIngest:
         assert res["chars"] > 0
         after = store.list_drafts(page._conn(), status="pending")
         assert len(after) == before + 1
+
+    def test_docx_upload_card_has_real_content_demo(self, qapp, empty_db, tmp_path):
+        """End-to-end: a .docx upload → the demo card shows the doc's real
+        content, not the canned stub template."""
+        import zipfile
+        from src.data import enablement_store as store
+        from src.ui.pages.enablement import EnablementPage
+        page = EnablementPage(empty_db, demo=True)
+        p = tmp_path / "COB_Reduction_Pilot_PRD.docx"
+        doc_xml = (
+            '<?xml version="1.0"?><w:document xmlns:w="ns"><w:body>'
+            '<w:p><w:r><w:t>Providers must verify secondary coverage before '
+            'submitting.</w:t></w:r></w:p>'
+            '<w:p><w:r><w:t>Rollout effective 2026-08-01 for the pilot.</w:t></w:r></w:p>'
+            '</w:body></w:document>'
+        )
+        with zipfile.ZipFile(p, "w") as z:
+            z.writestr("word/document.xml", doc_xml)
+        res = page._ingest_local_file(page._conn(), str(p), demo=True)
+        body = store.get_draft(page._conn(), res["draft_id"])["content"]
+        assert "secondary coverage" in body
+        assert "Update training material" not in body   # not the stub template

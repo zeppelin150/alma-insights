@@ -91,6 +91,24 @@ def test_draft_card_from_document(empty_db):
     assert S.search_drafts(conn, "Returns")                          # draft searchable
 
 
+def test_demo_card_reflects_document_content(empty_db):
+    """A demo card must reflect the REAL uploaded document, not a generic
+    canned template (the bug: uploaded doc → stub template ignoring content)."""
+    conn = empty_db.conn
+    text = (
+        "COB reduction pilot. Providers must verify secondary coverage before "
+        "submitting a claim.\n\nRollout: effective 2026-08-01 for the pilot cohort.\n\n"
+        "Tier B accounts move to usage-based billing."
+    )
+    doc_id = S.save_document(conn, source="upload",
+                             name="COB_Reduction_Pilot_PRD.docx", full_text=text)
+    draft = S.draft_card_from_document(conn, doc_id, SIM._StubLLM())
+    body = S.get_draft(conn, draft["id"])["content"]
+    assert "secondary coverage" in body          # the REAL content surfaces
+    assert "usage-based billing" in body
+    assert "Update training material" not in body  # not the old canned template
+
+
 def test_redraft_is_idempotent(empty_db):
     conn = empty_db.conn
     doc_id = S.save_document(conn, source="drive", doc_id="d9", name="X.gdoc", full_text="body")
