@@ -33,7 +33,7 @@ _TEAL = "#0D7D72"
 class ExpandOverlay(QFrame):
     """Distraction-free, near-fullscreen editor overlay over the content area."""
 
-    committed = Signal(int, str)   # (draft_id, markdown)
+    committed = Signal(int, str, object)   # (draft_id, markdown, clean_html|None)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -126,6 +126,14 @@ class ExpandOverlay(QFrame):
             return self._source.toPlainText()
         return self._rich.to_markdown()
 
+    def _current_html(self):
+        """Cleaned rich HTML when the rich tab is active (carries color /
+        highlight for Guru publish); None when editing markdown source, so
+        publish derives HTML from the markdown."""
+        if self._stack.currentWidget() is self._source:
+            return None
+        return self._rich.to_clean_html()
+
     def _set_mode(self, mode: str):
         # Commit across the pair before switching, mirroring the inline editor.
         if mode == "markdown":
@@ -151,7 +159,7 @@ class ExpandOverlay(QFrame):
         self.setFocus()
 
     def _collapse(self):
-        self.committed.emit(self._draft_id, self._current_markdown())
+        self.committed.emit(self._draft_id, self._current_markdown(), self._current_html())
         self.hide()
 
     # ── parent-resize tracking + Esc ────────────────────────────────

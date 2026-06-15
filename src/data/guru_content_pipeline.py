@@ -170,11 +170,17 @@ class GuruContentPipeline:
 
         now = datetime.now(timezone.utc).isoformat()
 
+        # Guru's `content` field is HTML — convert the markdown body (or use a
+        # captured rich HTML) so formatting survives publish (a bare markdown
+        # body would render as literal text).
+        from src.data.html_markdown import markdown_to_html
+        html_body = draft.get("content_html") or markdown_to_html(draft["content"])
+
         if draft["draft_type"] == "rewrite" and draft["card_id"]:
             try:
                 self.client.update_card(
                     draft["card_id"],
-                    draft["content"],
+                    html_body,
                     draft["title"],
                 )
             except Exception as exc:
@@ -188,7 +194,7 @@ class GuruContentPipeline:
                     self.client.create_card(
                         collection_id,
                         draft["title"],
-                        draft["content"],
+                        html_body,
                     )
                     created = True
                 except Exception as exc:

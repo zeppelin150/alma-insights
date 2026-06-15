@@ -111,6 +111,7 @@ class WorkbenchPage(QWidget):
         self._current_drafts = []
         self._chip_widgets = []
         self._current_md = ""
+        self._current_html = None    # cleaned rich HTML for Guru publish (or None)
         self._overlay_host = None    # content_stack, injected by the page
         self._overlay = None         # lazily-built ExpandOverlay
         self._build()
@@ -276,15 +277,20 @@ class WorkbenchPage(QWidget):
     def _commit_active_editor(self):
         """Read the editor we're leaving back into _current_md, emitting
         content_edited if it changed. Markdown source wins verbatim; the
-        rich editor serializes to markdown via toMarkdown()."""
+        rich editor serializes to markdown via toMarkdown() AND captures
+        cleaned HTML (carrying color/highlight) for the Guru publish path.
+        A markdown-only source edit clears the HTML (publish re-derives)."""
         cur = self._body_stack.currentWidget()
         new_md = None
+        new_html = None
         if cur is self._editor:
-            new_md = self._editor.toPlainText()
+            new_md = self._editor.toPlainText()      # markdown only → derive HTML
         elif cur is self._rich:
             new_md = self._rich.to_markdown()
+            new_html = self._rich.to_clean_html()
         if new_md is not None and new_md != self._current_md:
             self._current_md = new_md
+            self._current_html = new_html
             self.content_edited.emit(self._active_draft_id, new_md)
 
     def _set_view(self, mode: str):
@@ -326,17 +332,24 @@ class WorkbenchPage(QWidget):
         self._overlay.load(self._current_md, self._active_draft_id, self._title.text())
         self._overlay.present()
 
-    def _on_expand_committed(self, draft_id: int, md: str):
+    def _on_expand_committed(self, draft_id: int, md: str, html=None):
         if md == self._current_md:
             return
-        # Set _current_md FIRST so the inline editors and the _commit_active_editor
-        # dedup guard stay consistent and don't re-emit, then route the edit
-        # through the existing content_edited → update_draft_content path.
+        # Set _current_md/_current_html FIRST so the inline editors and the
+        # _commit_active_editor dedup guard stay consistent and don't re-emit,
+        # then route the edit through the existing content_edited path.
         self._current_md = md
+        self._current_html = html
         self._editor.setPlainText(md)
         self._rich.set_markdown(md)
         self._render_body()
         self.content_edited.emit(draft_id, md)
+
+    def current_html(self):
+        """Cleaned rich HTML for the active draft's last edit (or None if the
+        last edit was markdown-only). The page reads this on content_edited to
+        persist content_html alongside the markdown."""
+        return self._current_html
 
     # Demo placeholder Guru cards offered under "Push to Guru › Existing card".
     _DEMO_CARDS = ("Setting up SSO for Providers", "Returns & Refunds Policy", "Payments v2 Overview")
@@ -452,6 +465,9 @@ class WorkbenchPage(QWidget):
         # Switching draft: drop any in-progress edit of the OLD draft rather
         # than committing it under the new draft id.
         self._current_md = card.get("markdown", "")
+        # Seed HTML from the draft's stored content_html if present (e.g. an
+        # imported Guru card keeps its source HTML); else None → publish derives.
+        self._current_html = card.get("content_html")
         self._render_body()
         self._body_stack.setCurrentWidget(self._body)
         self._style_view_btn(self._preview_btn, active=True)

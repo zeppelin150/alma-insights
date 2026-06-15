@@ -10,6 +10,7 @@ subset Guru cards actually use). ``markdown_to_html`` uses the
 
 from __future__ import annotations
 
+import html as _html
 import re
 from html.parser import HTMLParser
 
@@ -40,6 +41,125 @@ def _gfm_task_items(html: str) -> str:
         return (f'<li class="task-list-item">'
                 f'<input type="checkbox" disabled{checked}> ')
     return _GFM_TASK.sub(_repl, html)
+
+
+# ── Qt HTML → portable clean HTML (for the Guru publish payload) ──────
+#
+# Guru's card `content` field is HTML, and its editor stores text color /
+# highlight / callouts as inline-style HTML — so publishing the rich
+# editor's HTML (rather than a markdown subset) preserves color + highlight
+# that markdown cannot represent. QTextEdit.toHtml() emits those styles
+# faithfully but wraps them in a <!DOCTYPE>/<html><head><style>…<body>
+# document full of Qt-specific `-qt-*` properties and default font/margin
+# noise. This cleaner strips that wrapper + noise and keeps only the
+# portable, meaningful inline styles + semantic tags.
+
+# Style props worth keeping (everything else, incl. -qt-* and font-family,
+# is dropped). These are exactly what Guru's own editor emits.
+_KEEP_STYLE_PROPS = {
+    "color", "background-color", "background", "text-align",
+    "text-decoration", "font-weight", "font-style", "vertical-align",
+}
+# Whole tags whose content/markup is Qt document chrome — dropped entirely.
+_DROP_TAGS = {"html", "head", "meta", "title", "body", "style", "script"}
+# Structural attributes to preserve on kept tags.
+_KEEP_ATTRS = {
+    "href", "src", "alt", "title", "colspan", "rowspan", "border",
+    "cellpadding", "cellspacing", "bgcolor", "width", "height",
+}
+_VOID_TAGS = {"br", "hr", "img"}
+
+
+class _QtHtmlCleaner(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.out: list[str] = []
+        self._drop_depth = 0   # inside <style>/<script> → suppress text
+
+    def handle_decl(self, decl):        # drop <!DOCTYPE …>
+        pass
+
+    def handle_comment(self, data):     # drop <!--StartFragment--> etc.
+        pass
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ("style", "script"):
+            self._drop_depth += 1
+            return
+        if tag in _DROP_TAGS or self._drop_depth:
+            return
+        self.out.append(self._render_start(tag, attrs, self_close=tag in _VOID_TAGS))
+
+    def handle_startendtag(self, tag, attrs):
+        if tag in _DROP_TAGS or self._drop_depth:
+            return
+        self.out.append(self._render_start(tag, attrs, self_close=True))
+
+    def handle_endtag(self, tag):
+        if tag in ("style", "script"):
+            if self._drop_depth:
+                self._drop_depth -= 1
+            return
+        if tag in _DROP_TAGS or self._drop_depth or tag in _VOID_TAGS:
+            return
+        self.out.append(f"</{tag}>")
+
+    def handle_data(self, data):
+        if self._drop_depth:
+            return
+        self.out.append(_html.escape(data, quote=False))
+
+    def _render_start(self, tag, attrs, *, self_close):
+        d = {k: (v or "") for k, v in attrs}
+        # Qt emits paragraph alignment as align="center" — promote it to a
+        # portable text-align style (Qt does not emit text-align itself).
+        align = d.pop("align", "").lower()
+        style = self._clean_style(d.pop("style", ""))
+        if align in ("center", "right", "left", "justify"):
+            style = (style + ";" if style else "") + f"text-align:{align}"
+        kept = []
+        for k, v in d.items():
+            if k in _KEEP_ATTRS:
+                kept.append(f'{k}="{_html.escape(v, quote=True)}"')
+        if style:
+            kept.append(f'style="{_html.escape(style, quote=True)}"')
+        attr_str = (" " + " ".join(kept)) if kept else ""
+        slash = "/" if self_close else ""
+        return f"<{tag}{attr_str}{slash}>"
+
+    @staticmethod
+    def _clean_style(style: str) -> str:
+        keep = []
+        for decl in style.split(";"):
+            if ":" not in decl:
+                continue
+            prop, val = decl.split(":", 1)
+            prop, val = prop.strip().lower(), val.strip()
+            if not prop or not val or prop.startswith("-qt-"):
+                continue
+            if prop in _KEEP_STYLE_PROPS:
+                keep.append(f"{prop}:{val}")
+        return ";".join(keep)
+
+
+_FRAGMENT_MARKERS = re.compile(r"<!--\s*(?:Start|End)Fragment\s*-->")
+_INTERTAG_WS = re.compile(r">\s*\n\s*<")   # collapse Qt's pretty-print newlines
+
+
+def qt_html_to_clean_html(qt_html: str) -> str:
+    """Convert QTextEdit.toHtml() output into portable, Guru-ready HTML:
+    strip the Qt document wrapper + `-qt-*`/font noise, keep semantic tags
+    and meaningful inline styles (color, background, text-align via the
+    align-attr promotion, text-decoration, font-weight)."""
+    if not (qt_html or "").strip():
+        return ""
+    html = _FRAGMENT_MARKERS.sub("", qt_html)
+    parser = _QtHtmlCleaner()
+    parser.feed(html)
+    parser.close()
+    out = "".join(parser.out)
+    out = _INTERTAG_WS.sub("><", out)   # remove inter-block newline whitespace
+    return out.strip()
 
 
 def html_to_markdown(html: str) -> str:

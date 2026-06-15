@@ -122,19 +122,25 @@ def save_card_draft(
     *,
     title: str,
     content: str,
+    content_html: str | None = None,
     source_ref: str | None = None,
     draft_type: str = "new_article",
     status: str = "pending",
 ) -> int:
-    """Persist a generated card draft into guru_content_drafts. Returns its id."""
+    """Persist a generated card draft into guru_content_drafts. Returns its id.
+
+    ``content`` is the canonical markdown body. ``content_html`` is the
+    optional rich-HTML representation used on the Guru publish path
+    (carries color/highlight); NULL → publish derives it from markdown.
+    """
     now = _now()
     with atomic(conn):
         cur = conn.execute(
             """INSERT INTO guru_content_drafts
-               (card_id, friction_type, draft_type, title, content,
+               (card_id, friction_type, draft_type, title, content, content_html,
                 source_tickets, status, created_at, source_ref)
-               VALUES ('', '', ?, ?, ?, '', ?, ?, ?)""",
-            (draft_type, title, content, status, now, source_ref),
+               VALUES ('', '', ?, ?, ?, ?, '', ?, ?, ?)""",
+            (draft_type, title, content, content_html, status, now, source_ref),
         )
     return cur.lastrowid
 
@@ -178,22 +184,29 @@ def update_draft_content(
     *,
     title: str | None = None,
     content: str,
+    content_html: str | None = None,
 ) -> dict:
     """Replace a draft's body (and optionally title) in one atomic UPDATE.
 
     Lets the chat ``revise_draft`` tool rewrite a draft directly on the dispatch
     path — one BEGIN/COMMIT, no nested transaction.
+
+    ``content_html`` is ALWAYS rewritten to keep it consistent with the new
+    markdown: the rich editor passes its cleaned HTML (preserving color /
+    highlight); every markdown-only writer (source editor, ``revise_draft``,
+    LLM generation) passes None, which clears any stale rich HTML so
+    ``publish_draft`` re-derives a fresh HTML body from the new markdown.
     """
     with atomic(conn):
         if title is not None:
             conn.execute(
-                "UPDATE guru_content_drafts SET title=?, content=? WHERE id=?",
-                (title, content, draft_id),
+                "UPDATE guru_content_drafts SET title=?, content=?, content_html=? WHERE id=?",
+                (title, content, content_html, draft_id),
             )
         else:
             conn.execute(
-                "UPDATE guru_content_drafts SET content=? WHERE id=?",
-                (content, draft_id),
+                "UPDATE guru_content_drafts SET content=?, content_html=? WHERE id=?",
+                (content, content_html, draft_id),
             )
     return {"id": draft_id, "title": title, "content": content}
 
@@ -249,11 +262,16 @@ def import_guru_card_to_draft(conn: sqlite3.Connection, guru_client, card_ref: s
     if not card or not card.get("id"):
         return {"ok": False, "error": f"card_not_found: {card_id}"}
 
-    markdown = html_to_markdown(card.get("content", ""))
+    source_html = card.get("content", "")
+    markdown = html_to_markdown(source_html)
     draft_id = save_card_draft(
         conn,
         title=card.get("title") or "Untitled card",
         content=markdown,
+        # Keep the ORIGINAL Guru HTML so a round-trip publish preserves the
+        # source fidelity instead of re-deriving from down-converted markdown.
+        # (An editor edit replaces it: rich → its cleaned HTML, markdown → None.)
+        content_html=source_html or None,
         source_ref=f"guru:{card['id']}",
         draft_type="card_update",
     )
@@ -442,12 +460,19 @@ def publish_draft(
     card_id = draft.get("card_id") or ""
     guru_result = None
     if guru_client is not None:
+        # Guru's `content` field is HTML. Send the draft's rich HTML when the
+        # rich editor captured it (preserves color/highlight); otherwise derive
+        # it from the canonical markdown with the SAME converter the in-app
+        # preview uses, so the published card matches the preview. (Previously
+        # this sent raw markdown into Guru's HTML field — formatting was lost.)
+        from src.data.html_markdown import markdown_to_html
+        html_body = draft.get("content_html") or markdown_to_html(draft["content"])
         try:
             if card_id:
-                guru_result = guru_client.update_card(card_id, draft["content"], draft["title"])
+                guru_result = guru_client.update_card(card_id, html_body, draft["title"])
             else:
                 guru_result = guru_client.create_card(
-                    collection_id or "", draft["title"], draft["content"]
+                    collection_id or "", draft["title"], html_body
                 )
                 if isinstance(guru_result, dict):
                     card_id = guru_result.get("id", card_id)

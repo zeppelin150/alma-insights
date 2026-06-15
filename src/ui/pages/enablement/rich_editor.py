@@ -63,9 +63,13 @@ class RichTextEditor(QWidget):
             [
                 ("B", "Bold", self._bold, True),
                 ("I", "Italic", self._italic, False),
-                ("U", "Underline (visual only — not saved to markdown)",
+                ("U", "Underline (rich — published to Guru, dropped in markdown source)",
                  self._underline, False),
                 ("S", "Strikethrough", self._strike, False),
+                ("Color", "Text color (rich — published to Guru as HTML)",
+                 self._text_color, False),
+                ("Highlight", "Highlight (rich — published to Guru as HTML)",
+                 self._highlight, False),
             ],
             [
                 ("H1", "Heading 1", lambda: self._heading(1), False),
@@ -175,6 +179,24 @@ class RichTextEditor(QWidget):
         fmt.setFontFamilies(["monospace"])
         self._merge_char(fmt)
 
+    def _text_color(self):
+        # Rich-only: color has no markdown token, but Guru stores text color
+        # as inline style HTML, so it survives via the cleaned-HTML payload.
+        from PySide6.QtWidgets import QColorDialog
+        col = QColorDialog.getColor(parent=self, title="Text color")
+        if col.isValid():
+            fmt = QTextCharFormat()
+            fmt.setForeground(col)
+            self._merge_char(fmt)
+
+    def _highlight(self):
+        from PySide6.QtWidgets import QColorDialog
+        col = QColorDialog.getColor(parent=self, title="Highlight color")
+        if col.isValid():
+            fmt = QTextCharFormat()
+            fmt.setBackground(col)
+            self._merge_char(fmt)
+
     def _heading(self, level: int):
         cursor = self.editor.textCursor()
         cursor.beginEditBlock()
@@ -280,3 +302,10 @@ class RichTextEditor(QWidget):
         from PySide6.QtGui import QTextDocument
         return self.editor.document().toMarkdown(
             QTextDocument.MarkdownFeature.MarkdownDialectGitHub).strip()
+
+    def to_clean_html(self) -> str:
+        """Portable HTML for the Guru publish payload — carries color /
+        highlight / underline that markdown cannot represent. Guru's
+        `content` field is HTML, so this is the high-fidelity submit form."""
+        from src.data.html_markdown import qt_html_to_clean_html
+        return qt_html_to_clean_html(self.editor.document().toHtml())

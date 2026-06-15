@@ -138,7 +138,7 @@ class TestExpandOverlay:
     def test_collapse_emits_committed_and_hides(self, qapp):
         ov = self._overlay()
         got = []
-        ov.committed.connect(lambda did, md: got.append((did, md)))
+        ov.committed.connect(lambda did, md, html: got.append((did, md)))
         ov.load("orig", 9, "T")
         ov._set_mode("markdown")
         ov._source.setPlainText("edited in focus mode")

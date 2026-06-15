@@ -304,6 +304,8 @@ class EnablementPage(QWidget):
             "title": draft.get("title") or "Untitled",
             "source": f"From: {name}",
             "markdown": draft.get("content") or "",
+            # carry any stored rich HTML so an unedited publish keeps fidelity
+            "content_html": draft.get("content_html"),
         }
 
     @staticmethod
@@ -878,13 +880,18 @@ class EnablementPage(QWidget):
             self._load_live(prefer_draft_id=draft.get("id"))
 
     def _on_content_edited(self, draft_id, md: str):
-        """Persist Edit-view changes to the draft (pushed drafts stay frozen)."""
+        """Persist Edit-view changes to the draft (pushed drafts stay frozen).
+
+        Also persists the rich editor's cleaned HTML (when the last edit was
+        in rich mode) so the Guru publish path can submit color/highlight;
+        a markdown-only edit passes None, clearing stale HTML."""
         from src.data import enablement_store as store
         try:
             did = int(draft_id)
             draft = store.get_draft(self._conn(), did)
             if draft and draft.get("status") != "pushed":
-                store.update_draft_content(self._conn(), did, content=md)
+                html = self.workbench.current_html()
+                store.update_draft_content(self._conn(), did, content=md, content_html=html)
                 self._set_status(f"Draft {did} updated from the editor.")
         except Exception as exc:  # noqa: BLE001
             self._set_status(f"Edit save failed: {exc}")
