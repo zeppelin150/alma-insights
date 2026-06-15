@@ -200,6 +200,7 @@ class EnablementPage(QWidget):
         self.pptx.deck_selected.connect(self._on_pptx_deck_selected)
         self.pptx.outline_saved.connect(self._on_pptx_outline_saved)
         self.pptx.export_requested.connect(self._on_pptx_export)
+        self.pptx.doc_dropped.connect(self._on_pptx_doc_dropped)
         self.pptx_modeled.connect(self._on_pptx_modeled)
         # Zendesk
         self.zendesk.sync_requested.connect(self._on_zendesk_sync)
@@ -1148,6 +1149,30 @@ class EnablementPage(QWidget):
         else:
             self.pptx.set_status(f"Export failed: {res.get('error')}")
 
+    def _on_pptx_doc_dropped(self, path: str):
+        """Drag-drop a document → model a deck from it deterministically
+        (no LLM): read the doc (resolving formatting) and turn its headings /
+        sections into slides."""
+        import os
+        if not path or not os.path.isfile(path):
+            self.pptx.set_status("Could not read that file.")
+            return
+        try:
+            from src.data import pptx_store
+            from src.data.doc_reader import read_document
+            name = os.path.basename(path)
+            md = read_document(path)
+            outline = pptx_store.outline_from_markdown(name, md)
+            deck_id = pptx_store.save_deck(
+                self._conn(), title=outline["title"], outline=outline,
+                source_ref=f"upload:{name}")
+            self.pptx.set_status(
+                f"Modeled “{outline['title']}” ({len(outline['slides'])} slides) from {name}.")
+            self._load_pptx()
+            self._on_pptx_deck_selected(deck_id)
+        except Exception as exc:  # noqa: BLE001
+            self.pptx.set_status(f"Couldn't model a deck: {exc}")
+
     # ── Zendesk (E5) ────────────────────────────────────────────────
 
     def _load_zendesk(self):
@@ -1417,6 +1442,7 @@ class EnablementPage(QWidget):
         try:
             host = panel.parentWidget() if panel is not None else None
             self.workbench.set_overlay_host(host)
+            self.pptx.set_overlay_host(host)
         except Exception:
             pass
 

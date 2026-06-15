@@ -77,6 +77,60 @@ class TestPage:
         assert got == [9]
 
 
+class TestUplift:
+    def _page(self):
+        from src.ui.pages.enablement.pptx_tab import PptxPage
+        return PptxPage()
+
+    def test_slides_preview_renders_cards(self, qapp):
+        p = self._page()
+        p.show_deck({"id": 1, "title": "D", "status": "pending", "outline": {
+            "title": "D", "slides": [{"title": "Intro", "bullets": ["x", "y"]},
+                                     {"title": "Next", "bullets": ["z"]}]}})
+        # slides view is default → slide cards populate the preview layout
+        assert p._slides_layout.count() >= 2
+        assert p._stack.currentWidget() is p._scroll
+
+    def test_view_toggle(self, qapp):
+        p = self._page()
+        p.show_deck({"id": 1, "title": "D", "status": "pending",
+                     "outline": {"title": "D", "slides": []}})
+        p._set_view("outline")
+        assert p._stack.currentWidget() is p._outline
+        p._set_view("slides")
+        assert p._stack.currentWidget() is p._scroll
+
+    def test_drag_drop_emits_doc_dropped(self, qapp, tmp_path):
+        from PySide6.QtCore import QEvent, QMimeData, QPointF, Qt, QUrl
+        from PySide6.QtGui import QDropEvent
+        p = self._page()
+        f = tmp_path / "deck-source.md"
+        f.write_text("# Overview\n\n- a")
+        got = []
+        p.doc_dropped.connect(got.append)
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(str(f))])
+        ev = QDropEvent(QPointF(10, 10), Qt.CopyAction, mime,
+                        Qt.LeftButton, Qt.NoModifier, QEvent.Drop)
+        p.dropEvent(ev)
+        import os
+        assert got and os.path.normpath(got[0]) == os.path.normpath(str(f))
+
+    def test_expand_builds_and_commits(self, qapp):
+        from PySide6.QtWidgets import QWidget
+        p = self._page()
+        p.set_overlay_host(QWidget())
+        p.show_deck({"id": 3, "title": "D", "status": "pending",
+                     "outline": {"title": "D", "slides": [{"title": "A", "bullets": []}]}})
+        p._open_expand()
+        assert p._overlay is not None
+        saved = []
+        p.outline_saved.connect(lambda did, t, o: saved.append((did, t, o)))
+        p._overlay._title.setText("Edited Deck")
+        p._overlay._collapse()
+        assert saved and saved[-1][0] == 3 and saved[-1][1] == "Edited Deck"
+
+
 class TestIntegration:
     def test_enablement_page_has_powerpoint_tab(self, qapp, empty_db):
         from src.ui.pages.enablement import EnablementPage
@@ -86,6 +140,32 @@ class TestIntegration:
         assert page.tabs.currentWidget() is page._tab_widgets["powerpoint"]
         # demo seeded decks on load
         assert page.pptx._list.count() >= 2
+
+    def test_outline_from_markdown_deterministic(self):
+        from src.data.pptx_store import outline_from_markdown
+        out = outline_from_markdown(
+            "COB_Pilot.docx",
+            "Intro paragraph.\n\n# Overview\n\n- point one\n- point two\n\n"
+            "# Steps\n\n1. do this\n2. then this")
+        titles = [s["title"] for s in out["slides"]]
+        assert "Overview" in titles and "Steps" in titles
+        ov = next(s for s in out["slides"] if s["title"] == "Overview")
+        assert "point one" in ov["bullets"] and "point two" in ov["bullets"]
+        assert out["title"] == "COB Pilot"
+
+    def test_doc_dropped_models_a_deck(self, qapp, empty_db, tmp_path):
+        from src.data import pptx_store
+        from src.ui.pages.enablement import EnablementPage
+        page = EnablementPage(empty_db, demo=True)
+        f = tmp_path / "Plan.md"
+        f.write_text("# Goals\n\n- ship it\n\n# Risks\n\n- scope creep")
+        before = len(pptx_store.list_decks(page._conn()))
+        page._on_pptx_doc_dropped(str(f))
+        decks = pptx_store.list_decks(page._conn())
+        assert len(decks) == before + 1
+        newest = pptx_store.get_deck(page._conn(), decks[0]["id"])
+        titles = [s["title"] for s in newest["outline"]["slides"]]
+        assert "Goals" in titles and "Risks" in titles
 
     def test_deck_select_and_export_end_to_end(self, qapp, empty_db, tmp_path, monkeypatch):
         from PySide6.QtWidgets import QFileDialog

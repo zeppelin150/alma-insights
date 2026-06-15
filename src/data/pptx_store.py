@@ -58,6 +58,37 @@ def parse_outline(text: str) -> dict:
     return _normalize_outline({"title": "Untitled deck", "slides": []})
 
 
+def outline_from_markdown(name: str, md: str) -> dict:
+    """Deterministically model a deck from a document's markdown — no LLM.
+    Each heading starts a slide; bullet/numbered list items and short
+    paragraphs become that slide's bullets. Faithful to the source."""
+    from src.data.doc_to_card import clean_name
+
+    title = clean_name(name)
+    slides: list[dict] = []
+    cur = {"title": title, "bullets": []}      # cover/intro slide
+    slides.append(cur)
+    for raw in (md or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        m = re.match(r"^(#{1,6})\s+(.*)$", line)
+        if m:
+            cur = {"title": re.sub(r"[*_`]", "", m.group(2)).strip() or "Slide",
+                   "bullets": []}
+            slides.append(cur)
+            continue
+        b = re.match(r"^(?:[-*+]|\d+[.)])\s+(.*)$", line)
+        text = b.group(1) if b else line
+        text = re.sub(r"[*_`]", "", text).strip()
+        # keep bullets concise and skip table/box noise
+        if text and not text.startswith(("|", "<")) and len(cur["bullets"]) < 8:
+            cur["bullets"].append(text[:160])
+    # drop an empty cover if the doc led with a heading
+    slides = [s for s in slides if s["bullets"] or s is slides[0]]
+    return _normalize_outline({"title": title, "slides": slides})
+
+
 # ── CRUD ─────────────────────────────────────────────────────────────
 
 def save_deck(conn: sqlite3.Connection, *, title: str, outline: dict,
