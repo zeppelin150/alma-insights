@@ -78,3 +78,26 @@ class TestMarkdownToHtml:
         assert "<h2>Steps</h2>" in html
         assert "<ol>" in html
         assert "<table>" in html
+
+    def test_strikethrough_renders(self):
+        # GFM ~~text~~ → <del> (the editor emits this; base markdown does not).
+        html = markdown_to_html("this is ~~struck~~ text")
+        assert "<del>struck</del>" in html
+
+    def test_task_list_renders_checkboxes(self):
+        html = markdown_to_html("- [ ] todo\n- [x] done\n")
+        assert html.count('type="checkbox"') == 2
+        assert "checked" in html                       # the done row
+        assert 'class="task-list-item"' in html
+
+    def test_no_pymdownx_dependency(self):
+        # The post-pass must stay within installed deps (pymdownx absent).
+        with pytest.raises(ImportError):
+            __import__("pymdownx")
+        # …and markdown_to_html must still work without it.
+        assert "<del>x</del>" in markdown_to_html("~~x~~")
+
+    def test_fenced_code_and_hr(self):
+        html = markdown_to_html("```python\nx = 1\n```\n\n---\n")
+        assert "<pre>" in html or "<code>" in html
+        assert "<hr" in html

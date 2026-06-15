@@ -111,6 +111,8 @@ class WorkbenchPage(QWidget):
         self._current_drafts = []
         self._chip_widgets = []
         self._current_md = ""
+        self._overlay_host = None    # content_stack, injected by the page
+        self._overlay = None         # lazily-built ExpandOverlay
         self._build()
         self.set_pending_drafts(_SAMPLE_DRAFTS)
         self.show_draft(_SAMPLE_CARD)
@@ -211,6 +213,9 @@ class WorkbenchPage(QWidget):
         self._edit_btn = self._view_toggle_btn("Edit markdown")
         self._edit_btn.clicked.connect(lambda: self._set_view("edit"))
         meta.addWidget(self._edit_btn)
+        self._expand_btn = self._view_toggle_btn("⤢  Expand")
+        self._expand_btn.clicked.connect(self._open_expand)
+        meta.addWidget(self._expand_btn)
         v.addLayout(meta)
 
         self._body = QTextBrowser()
@@ -303,6 +308,35 @@ class WorkbenchPage(QWidget):
             render_preview(self._body, self._current_md)
         except Exception:
             self._body.setMarkdown(self._current_md)
+
+    # ── expand / focus overlay ────────────────────────────────────
+    def set_overlay_host(self, widget):
+        """The page injects the content-area widget (content_stack) the
+        full-window overlay should parent to. Falls back to window()."""
+        self._overlay_host = widget
+
+    def _open_expand(self):
+        """Bring a large, near-fullscreen editor forward over the whole
+        content area, bound to the active draft's markdown."""
+        self._commit_active_editor()
+        if self._overlay is None:
+            from src.ui.pages.enablement.expand_overlay import ExpandOverlay
+            self._overlay = ExpandOverlay(self._overlay_host or self.window())
+            self._overlay.committed.connect(self._on_expand_committed)
+        self._overlay.load(self._current_md, self._active_draft_id, self._title.text())
+        self._overlay.present()
+
+    def _on_expand_committed(self, draft_id: int, md: str):
+        if md == self._current_md:
+            return
+        # Set _current_md FIRST so the inline editors and the _commit_active_editor
+        # dedup guard stay consistent and don't re-emit, then route the edit
+        # through the existing content_edited → update_draft_content path.
+        self._current_md = md
+        self._editor.setPlainText(md)
+        self._rich.set_markdown(md)
+        self._render_body()
+        self.content_edited.emit(draft_id, md)
 
     # Demo placeholder Guru cards offered under "Push to Guru › Existing card".
     _DEMO_CARDS = ("Setting up SSO for Providers", "Returns & Refunds Policy", "Payments v2 Overview")

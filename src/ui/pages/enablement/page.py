@@ -1358,6 +1358,13 @@ class EnablementPage(QWidget):
 
     def set_drilldown_panel(self, panel=None, *_a, **_k):
         self._drilldown = panel
+        # The expand overlay parents to the same content-area widget the
+        # drilldown drawer uses, so it covers almost the whole window.
+        try:
+            host = panel.parentWidget() if panel is not None else None
+            self.workbench.set_overlay_host(host)
+        except Exception:
+            pass
 
     def set_monitor(self, monitor):
         """Host wires the EnablementMonitor; its 'changed' signal refreshes the views."""

@@ -20,12 +20,20 @@ code {{ background-color: {tokens.ALMA_BG_INSET};
        font-family: Consolas, monospace; font-size: 12px; }}
 pre {{ background-color: {tokens.ALMA_BG_INSET}; padding: 8px;
       font-family: Consolas, monospace; font-size: 12px; }}
+pre code {{ background-color: transparent; }}
 blockquote {{ color: {tokens.ALMA_TEXT_MID}; margin-left: 0px;
              padding-left: 10px; border-left: 3px solid {tokens.ALMA_ACCENT_TEAL}; }}
 table {{ border: 1px solid {tokens.ALMA_BORDER}; }}
 th {{ background-color: {tokens.ALMA_BG_INSET}; font-weight: 700;
      padding: 4px 8px; border: 1px solid {tokens.ALMA_BORDER}; }}
 td {{ padding: 4px 8px; border: 1px solid {tokens.ALMA_BORDER_LIGHT}; }}
+del, s, strike {{ text-decoration: line-through; color: {tokens.ALMA_TEXT_MID}; }}
+hr {{ border: none; border-top: 1px solid {tokens.ALMA_BORDER}; }}
+ul, ol {{ margin: 6px 0 6px 0; padding-left: 22px; }}
+li.task-list-item {{ list-style: none; margin-left: -16px; }}
+h4, h5, h6 {{ font-size: 13px; font-weight: 700; color: {tokens.ALMA_TEXT_DARK};
+     margin-top: 10px; }}
+img {{ max-width: 100%; }}
 """
 
 

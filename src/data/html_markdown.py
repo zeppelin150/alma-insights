@@ -16,7 +16,30 @@ from html.parser import HTMLParser
 
 def markdown_to_html(md: str) -> str:
     import markdown as _md
-    return _md.markdown(md or "", extensions=["tables", "fenced_code"])
+    # The rich editor emits GitHub-dialect markdown (toMarkdown). The base
+    # `markdown` package (no pymdown-extensions installed) renders tables /
+    # fenced code / sane lists but NOT GFM strikethrough or task-list
+    # checkboxes — a small regex post-pass closes those two gaps within the
+    # installed deps so the preview matches what the WYSIWYG editor showed.
+    html = _md.markdown(
+        md or "", extensions=["tables", "fenced_code", "sane_lists"])
+    html = _GFM_STRIKE.sub(r"<del>\1</del>", html)
+    html = _gfm_task_items(html)
+    return html
+
+
+# ~~text~~ → <del>text</del>  (GFM strikethrough)
+_GFM_STRIKE = re.compile(r"~~(.+?)~~", re.DOTALL)
+# Leading "[ ]" / "[x]" inside a freshly-opened <li> → a real checkbox.
+_GFM_TASK = re.compile(r"<li>\s*\[( |x|X)\]\s*", re.IGNORECASE)
+
+
+def _gfm_task_items(html: str) -> str:
+    def _repl(m: "re.Match") -> str:
+        checked = " checked" if m.group(1).lower() == "x" else ""
+        return (f'<li class="task-list-item">'
+                f'<input type="checkbox" disabled{checked}> ')
+    return _GFM_TASK.sub(_repl, html)
 
 
 def html_to_markdown(html: str) -> str:
