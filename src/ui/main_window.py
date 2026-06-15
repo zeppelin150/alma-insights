@@ -571,6 +571,7 @@ class MainWindow(QMainWindow):
         self.home_page = HomePage(self.db, current_mode=self._mode)
         self.home_page.mode_selected.connect(self.switch_mode)
         self.home_page.quick_action.connect(self._on_home_quick_action)
+        self.home_page.activity_activated.connect(self._on_home_activity)
         return self.home_page
 
     def _on_home_quick_action(self, action: str):
@@ -591,6 +592,22 @@ class MainWindow(QMainWindow):
         if follow_up is not None:
             try:
                 follow_up()
+            except Exception:
+                pass
+
+    def _on_home_activity(self, kind: str):
+        """Route a clicked recent-activity row to its page (mode-aware)."""
+        if self._mode == app_modes.MODE_ENABLEMENT:
+            dest = {"Chat": "en_workbench", "Report": "en_analytics",
+                    "Task": "en_tasks"}.get(kind)
+        else:
+            dest = {"Chat": "gemini_chats", "Report": "reports"}.get(kind)
+        if not dest:
+            return
+        self._set_active_page(dest)
+        if kind == "Chat" and self._mode == app_modes.MODE_ENABLEMENT:
+            try:
+                self.guru_page._open_chat()
             except Exception:
                 pass
 

@@ -17,9 +17,10 @@ from PySide6.QtWidgets import (
 )
 
 from src.ui import app_modes
+from src.ui.design.icons import icon as _icon
 from src.ui.theme import (
-    ALMA_BG_ELEVATED, ALMA_BORDER, ALMA_CREAM, ALMA_TEXT_DARK,
-    ALMA_TEXT_MID,
+    ALMA_BG_ELEVATED, ALMA_BG_INSET, ALMA_BORDER, ALMA_CREAM, ALMA_TEXT_DARK,
+    ALMA_TEXT_LIGHT, ALMA_TEXT_MID,
 )
 from src.ui.pages.enablement._common import card_frame, pill
 
@@ -30,18 +31,39 @@ _KIND_TINT = {
     "Report": ("#F3E8FF", "#6D28D9"),
     "Task": ("#E5F3EC", _ACCENT),
 }
+_KIND_ICON = {"Chat": "chat", "Report": "doc", "Task": "tasks"}
+_MODE_ICON = {app_modes.MODE_PRODUCT: "pie", app_modes.MODE_ENABLEMENT: "pen"}
 
+# action key → (label, icon)
 _QUICK_ACTIONS = {
     app_modes.MODE_PRODUCT: [
-        ("search", "Run a search"),
-        ("reports", "Open AI Reports"),
+        ("search", "Run a search", "chat"),
+        ("reports", "Open AI Reports", "doc"),
     ],
     app_modes.MODE_ENABLEMENT: [
-        ("workbench", "Open Workbench"),
-        ("calendar", "Open Calendar"),
-        ("renn", "Chat with Renn"),
+        ("workbench", "Open Workbench", "pen"),
+        ("calendar", "Open Calendar", "calendar"),
+        ("renn", "Chat with Renn", "chat"),
     ],
 }
+
+
+class _ClickRow(QFrame):
+    """A recent-activity row that emits `clicked` (the whole row is a target)."""
+    clicked = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setObjectName("ActivityRow")
+        self.setStyleSheet(
+            "#ActivityRow{background:transparent; border:none; border-radius:7px;} "
+            f"#ActivityRow:hover{{background:{ALMA_BG_INSET};}}")
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
 
 _MODE_TILES = (
     (app_modes.MODE_PRODUCT, "Product",
@@ -56,6 +78,7 @@ _MODE_TILES = (
 class HomePage(QFrame):
     mode_selected = Signal(str)
     quick_action = Signal(str)
+    activity_activated = Signal(str)   # activity kind (Chat/Report/Task)
 
     def __init__(self, db, current_mode: str = app_modes.MODE_PRODUCT,
                  parent=None):
@@ -100,6 +123,12 @@ class HomePage(QFrame):
             self._tiles[mode] = tile
             tiles.addWidget(tile, 1)
         outer.addLayout(tiles)
+        outer.addSpacing(10)
+
+        # at-a-glance stat cards (mode-specific, guarded queries)
+        self._stats_row = QHBoxLayout()
+        self._stats_row.setSpacing(12)
+        outer.addLayout(self._stats_row)
         outer.addSpacing(8)
 
         outer.addWidget(self._heading("QUICK ACTIONS"))
@@ -127,12 +156,21 @@ class HomePage(QFrame):
 
     def _mode_tile(self, mode, title, desc):
         card = card_frame()
+        card.setObjectName("ModeTile")
+        card.setStyleSheet(
+            f"#ModeTile{{background:{ALMA_BG_ELEVATED}; border:1px solid {ALMA_BORDER}; "
+            f"border-radius:10px;}} #ModeTile:hover{{border-color:{_ACCENT};}}")
         card.setMinimumHeight(128)
         v = QVBoxLayout(card)
         v.setContentsMargins(20, 16, 20, 16)
         v.setSpacing(6)
 
         head = QHBoxLayout()
+        head.setSpacing(8)
+        glyph = QLabel()
+        glyph.setPixmap(_icon(_MODE_ICON.get(mode, "home"), 18, _ACCENT).pixmap(18, 18))
+        glyph.setStyleSheet("background:transparent; border:none;")
+        head.addWidget(glyph, 0, Qt.AlignVCenter)
         t = QLabel(title)
         t.setStyleSheet(
             f"font-size: 16px; font-weight: 700; color: {ALMA_TEXT_DARK}; "
@@ -185,14 +223,15 @@ class HomePage(QFrame):
                 w.hide()
                 w.deleteLater()
         self._qa_buttons = []
-        for action, label in _QUICK_ACTIONS.get(mode, []):
+        for action, label, icon_name in _QUICK_ACTIONS.get(mode, []):
             b = QPushButton(label)
             b.setCursor(Qt.PointingHandCursor)
+            b.setIcon(_icon(icon_name, 15, ALMA_TEXT_MID))
             b.setStyleSheet(
                 f"QPushButton {{ background: {ALMA_BG_ELEVATED}; "
                 f"color: {ALMA_TEXT_DARK}; border: 1px solid {ALMA_BORDER}; "
                 "border-radius: 7px; padding: 7px 14px; font-size: 12px; "
-                "font-weight: 600; }"
+                f"font-weight: 600; }} QPushButton:hover{{border-color:{_ACCENT};}}"
             )
             b.clicked.connect(
                 lambda _=False, a=action: self.quick_action.emit(a)
@@ -200,6 +239,61 @@ class HomePage(QFrame):
             self._qa_buttons.append(b)
             self._qa_row.addWidget(b)
         self._qa_row.addStretch()
+        self._render_stats()
+
+    # ── at-a-glance stats ───────────────────────────────────────────
+    def _render_stats(self):
+        while self._stats_row.count():
+            item = self._stats_row.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.hide()
+                w.deleteLater()
+        for label, value in self._stats():
+            card = card_frame()
+            v = QVBoxLayout(card)
+            v.setContentsMargins(16, 10, 16, 10)
+            v.setSpacing(2)
+            num = QLabel(f"{value:,}")
+            num.setStyleSheet(
+                f"color:{ALMA_TEXT_DARK}; font-size:22px; font-weight:700; "
+                "background:transparent; border:none;")
+            v.addWidget(num)
+            cap = QLabel(label.upper())
+            cap.setStyleSheet(
+                f"color:{ALMA_TEXT_LIGHT}; font-size:10px; font-weight:700; "
+                "letter-spacing:0.6px; background:transparent; border:none;")
+            v.addWidget(cap)
+            self._stats_row.addWidget(card)
+        self._stats_row.addStretch()
+
+    def _stats(self):
+        """Mode-specific at-a-glance counts (guarded — a missing table is 0)."""
+        conn = getattr(self.db, "conn", None)
+        if conn is None:
+            return []
+        if self._mode == app_modes.MODE_ENABLEMENT:
+            specs = [
+                ("Pending drafts",
+                 "SELECT COUNT(*) FROM guru_content_drafts WHERE status='pending'"),
+                ("Open tasks",
+                 "SELECT COUNT(*) FROM enablement_tasks "
+                 "WHERE status NOT IN ('done','dismissed')"),
+                ("Decks", "SELECT COUNT(*) FROM pptx_decks"),
+            ]
+        else:
+            specs = [
+                ("Tickets", "SELECT COUNT(*) FROM tickets"),
+                ("Reports", "SELECT COUNT(*) FROM analysis_reports"),
+                ("Chats", "SELECT COUNT(*) FROM chat_sessions"),
+            ]
+        out = []
+        for label, sql in specs:
+            try:
+                out.append((label, int(conn.execute(sql).fetchone()[0])))
+            except Exception:
+                out.append((label, 0))
+        return out
 
     def refresh(self):
         """Re-query recent activity and rebuild the list."""
@@ -230,12 +324,16 @@ class HomePage(QFrame):
             self._activity_layout.addWidget(self._activity_row(kind, title, ts))
 
     def _activity_row(self, kind, title, ts):
-        row = QFrame()
-        row.setStyleSheet("background: transparent; border: none;")
+        row = _ClickRow()
+        row.clicked.connect(lambda k=kind: self.activity_activated.emit(k))
         h = QHBoxLayout(row)
-        h.setContentsMargins(0, 2, 0, 2)
+        h.setContentsMargins(8, 4, 8, 4)
         h.setSpacing(10)
         bg, fg = _KIND_TINT.get(kind, ("#EEEEEE", ALMA_TEXT_MID))
+        glyph = QLabel()
+        glyph.setPixmap(_icon(_KIND_ICON.get(kind, "doc"), 14, fg).pixmap(14, 14))
+        glyph.setStyleSheet("background:transparent; border:none;")
+        h.addWidget(glyph, 0, Qt.AlignVCenter)
         h.addWidget(pill(kind, bg, fg))
         t = QLabel(title[:110])
         t.setStyleSheet(

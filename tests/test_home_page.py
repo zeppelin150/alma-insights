@@ -100,3 +100,33 @@ def test_unknown_mode_ignored(qapp, empty_db):
     page = _home(empty_db, mode="product")
     page.set_mode("bogus")
     assert page._mode == "product"
+
+
+class TestUplift:
+    def test_stat_cards_render(self, qapp, empty_db):
+        page = _home(empty_db, mode="enablement")
+        assert page._stats_row.count() >= 3      # 3 stat cards (+ stretch)
+        page.set_mode("product")
+        assert page._stats_row.count() >= 3
+
+    def test_quick_actions_have_icons(self, qapp, empty_db):
+        page = _home(empty_db, mode="enablement")
+        assert page._qa_buttons
+        assert all(not b.icon().isNull() for b in page._qa_buttons)
+
+    def test_activity_rows_are_clickable(self, qapp, empty_db):
+        conn = empty_db.conn
+        conn.execute(
+            "INSERT INTO enablement_tasks (task_id, source, title, status, updated_at) "
+            "VALUES ('t9', 'drive', 'Review card', 'open', '2026-06-11T11:00:00')")
+        conn.commit()
+        page = _home(empty_db)
+        from src.ui.pages.home_page import _ClickRow
+        rows = [page._activity_layout.itemAt(i).widget()
+                for i in range(page._activity_layout.count())]
+        rows = [r for r in rows if isinstance(r, _ClickRow)]
+        assert rows
+        got = []
+        page.activity_activated.connect(got.append)
+        rows[0].clicked.emit()
+        assert got and got[0] in ("Chat", "Report", "Task")
