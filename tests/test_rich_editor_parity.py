@@ -180,12 +180,22 @@ class TestExpandOverlay:
         ov = self._overlay()
         assert ov.isHidden()
 
-    def test_load_seeds_both_editors(self, qapp):
+    def test_load_defaults_to_guru_preview(self, qapp):
         ov = self._overlay()
         ov.load("# Hi\n\nbody text", 7, "Title")
-        assert "Hi" in ov._rich.to_markdown()
-        assert "body text" in ov._source.toPlainText()
+        # defaults to the faithful Guru preview (matches the inline card)
+        assert ov._stack.currentWidget() is ov._preview
+        assert ov._md == "# Hi\n\nbody text"
         assert ov._title.text() == "Title"
+        assert "body text" in ov._preview.toPlainText()
+
+    def test_switch_to_editors_seeds_them(self, qapp):
+        ov = self._overlay()
+        ov.load("# Hi\n\nbody text", 7, "Title")
+        ov._set_mode("rich")
+        assert "Hi" in ov._rich.to_markdown()
+        ov._set_mode("markdown")
+        assert "body text" in ov._source.toPlainText()
 
     def test_collapse_emits_committed_and_hides(self, qapp):
         ov = self._overlay()
@@ -237,7 +247,7 @@ class TestWorkbenchExpand:
         wb.show_draft({"title": "SSO", "markdown": "draft body"})
         wb._open_expand()
         assert wb._overlay is not None
-        assert "draft body" in wb._overlay._source.toPlainText()
+        assert "draft body" in wb._overlay._md
 
     def test_overlay_commit_persists_via_content_edited(self, qapp):
         from PySide6.QtWidgets import QWidget

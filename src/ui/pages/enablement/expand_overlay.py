@@ -17,7 +17,7 @@ from __future__ import annotations
 from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QStackedWidget,
-    QVBoxLayout,
+    QTextBrowser, QVBoxLayout,
 )
 
 from src.ui.pages.enablement.rich_editor import RichTextEditor
@@ -39,6 +39,8 @@ class ExpandOverlay(QFrame):
         super().__init__(parent)
         self._draft_id = 0
         self._read_only = False
+        self._md = ""          # authoritative markdown across mode switches
+        self._html = None      # cleaned rich HTML (when last edited in rich)
         self.setObjectName("ExpandOverlay")
         self.setStyleSheet(
             f"#ExpandOverlay{{background:{ALMA_CREAM}; border:none;}}")
@@ -66,6 +68,9 @@ class ExpandOverlay(QFrame):
         head.addWidget(self._ro_hint)
         head.addStretch(1)
 
+        self._preview_btn = self._toggle_btn("Guru preview")
+        self._preview_btn.clicked.connect(lambda: self._set_mode("preview"))
+        head.addWidget(self._preview_btn)
         self._rich_btn = self._toggle_btn("Rich text")
         self._rich_btn.clicked.connect(lambda: self._set_mode("rich"))
         head.addWidget(self._rich_btn)
@@ -83,6 +88,11 @@ class ExpandOverlay(QFrame):
         head.addWidget(collapse)
         outer.addLayout(head)
 
+        self._preview = QTextBrowser()
+        self._preview.setOpenExternalLinks(False)
+        self._preview.setStyleSheet(
+            f"QTextBrowser{{background:{ALMA_BG_ELEVATED}; border:1px solid {ALMA_BORDER}; "
+            f"border-radius:8px; color:{ALMA_TEXT_DARK}; font-size:14px; padding:12px 16px;}}")
         self._rich = RichTextEditor()
         self._source = QPlainTextEdit()
         self._source.setStyleSheet(
@@ -90,8 +100,9 @@ class ExpandOverlay(QFrame):
             f"border-radius:8px; color:{ALMA_TEXT_DARK}; "
             f"font-family:Consolas,monospace; font-size:13px; padding:10px;}}")
         self._stack = QStackedWidget()
-        self._stack.addWidget(self._rich)     # 0 rich
-        self._stack.addWidget(self._source)   # 1 markdown source
+        self._stack.addWidget(self._preview)   # 0 Guru preview (faithful render)
+        self._stack.addWidget(self._rich)      # 1 rich text
+        self._stack.addWidget(self._source)    # 2 markdown source
         outer.addWidget(self._stack, 1)
 
     def _toggle_btn(self, text: str) -> QPushButton:
@@ -112,36 +123,51 @@ class ExpandOverlay(QFrame):
     def load(self, md: str, draft_id: int, title: str, *, read_only: bool = False):
         self._draft_id = int(draft_id)
         self._read_only = bool(read_only)
+        self._md = md or ""
+        self._html = None
         self._title.setText(title or "Draft")
         self._ro_hint.setVisible(self._read_only)
-        self._rich.set_markdown(md or "")
-        self._source.setPlainText(md or "")
-        self._set_mode("rich")
+        # Default to the faithful Guru preview — same render as the inline card,
+        # so expanding doesn't change the formatting.
+        self._set_mode("preview")
+
+    def _capture(self):
+        """Pull the editing pane being left back into the authoritative md/html."""
+        cur = self._stack.currentWidget()
+        if cur is self._rich:
+            self._md = self._rich.to_markdown()
+            self._html = self._rich.to_clean_html()
+        elif cur is self._source:
+            self._md = self._source.toPlainText()
+            self._html = None      # markdown-only → publish re-derives HTML
 
     def _current_markdown(self) -> str:
-        """Authoritative markdown using the same precedence as the inline
-        editor: the markdown source wins verbatim when it's the active tab,
-        else serialize the rich editor."""
-        if self._stack.currentWidget() is self._source:
-            return self._source.toPlainText()
-        return self._rich.to_markdown()
+        self._capture()
+        return self._md
 
     def _current_html(self):
-        """Cleaned rich HTML when the rich tab is active (carries color /
-        highlight for Guru publish); None when editing markdown source, so
-        publish derives HTML from the markdown."""
-        if self._stack.currentWidget() is self._source:
-            return None
-        return self._rich.to_clean_html()
+        self._capture()
+        return self._html
+
+    def _render_preview(self):
+        try:
+            from src.ui.pages.enablement.guru_preview import render_preview
+            render_preview(self._preview, self._md)
+        except Exception:
+            self._preview.setMarkdown(self._md)
 
     def _set_mode(self, mode: str):
-        # Commit across the pair before switching, mirroring the inline editor.
+        self._capture()                 # commit the pane we're leaving
         if mode == "markdown":
-            self._source.setPlainText(self._rich.to_markdown())
+            self._source.setPlainText(self._md)
             self._stack.setCurrentWidget(self._source)
-        else:
-            self._rich.set_markdown(self._source.toPlainText())
+        elif mode == "rich":
+            self._rich.set_markdown(self._md)
             self._stack.setCurrentWidget(self._rich)
+        else:
+            self._render_preview()
+            self._stack.setCurrentWidget(self._preview)
+        self._style_toggle(self._preview_btn, active=mode == "preview")
         self._style_toggle(self._rich_btn, active=mode == "rich")
         self._style_toggle(self._md_btn, active=mode == "markdown")
 
