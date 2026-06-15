@@ -78,61 +78,21 @@ def _extract_dates(text: str) -> list[dict]:
     return [{"date": m, "context": "extracted"} for m in _DATE_RE.findall(text or "")]
 
 
-# Lines that read like a rollout / effective date → surfaced as a callout.
-_DATE_HINT = re.compile(
-    r"\b(?:rollout|effective|launch|go[- ]?live|deadline|due|live on|starts?|ships?)\b"
-    r"|\b\d{4}-\d{2}-\d{2}\b"
-    r"|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2}",
-    re.IGNORECASE,
-)
-
-
-def _stub_card_from_doc(name: str, doc: str) -> str:
-    """Build a Guru-card markdown from the REAL document text — deterministic,
-    faithful, no LLM. The demo has no provider, so rather than emit a generic
-    template we present the document's own content (summary + a date callout +
-    the details) so an uploaded doc actually shows up in the card."""
-    title = f"{name} — Enablement Guide"
-    doc = (doc or "").strip()
-    if not doc:
-        body = (
-            f"This card summarizes **{name}** for the enablement team.\n\n"
-            "## Summary\nKey changes captured from the source document.\n\n"
-            "## Steps\n1. Review the change.\n2. Update training material.\n"
-            "3. Publish and announce.\n\n"
-            "## FAQ\n**Does this change existing behavior?** See the source doc."
-        )
-        return f"TITLE: {title}\n---\n{body}"
-
-    paras = [p.strip() for p in re.split(r"\n\s*\n", doc) if p.strip()]
-    summary = paras[0] if paras else doc[:400]
-    callout = next((ln.strip() for ln in doc.splitlines()
-                    if _DATE_HINT.search(ln)), "")
-    parts = [f"This card captures **{name}** for the enablement team.", "",
-             "## Summary", summary]
-    if callout and callout not in summary:
-        parts += ["", "> [!NOTE]", f"> {callout}"]
-    # Details = remaining paragraphs, minus the one that became the callout.
-    rest = "\n\n".join(p for p in paras[1:] if p.strip() != callout).strip()
-    if rest:
-        parts += ["", "## Details", rest]
-    return f"TITLE: {title}\n---\n" + "\n".join(parts)
-
-
 class _StubLLM:
-    """Deterministic offline LLM so the sim runs with no provider/creds.
-
-    For card-from-document prompts it builds a card from the document's own
-    text (so an uploaded doc's content actually appears in the card); other
-    prompts fall back to a generic template."""
+    """Stand-in for an LLM client in the offline sim. Card-from-document is a
+    deterministic text transformation, so this just delegates to the real
+    Python converter (`doc_to_card.card_from_document`) — the demo isn't
+    faking an LLM, it's running the same code the live default uses."""
 
     def generate(self, prompt: str, *_, **__) -> str:
+        from src.data.doc_to_card import card_from_document
         m = re.search(r"SOURCE DOCUMENT:\s*(.+)", prompt)
-        name = (m.group(1).strip() if m else "Document").rsplit(".", 1)[0]
+        name = m.group(1).strip() if m else "Document"
         body_m = re.search(
             r"--- DOCUMENT START ---\s*(.*?)\s*--- DOCUMENT END ---",
             prompt, re.DOTALL)
-        return _stub_card_from_doc(name, body_m.group(1) if body_m else "")
+        title, content = card_from_document(name, body_m.group(1) if body_m else "")
+        return f"TITLE: {title}\n---\n{content}"
 
 
 def run_simulation(

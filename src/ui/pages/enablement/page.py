@@ -816,22 +816,18 @@ class EnablementPage(QWidget):
         return html.unescape(xml).strip()
 
     @staticmethod
-    def _ingest_local_file(conn, path: str, demo: bool) -> dict:
-        """Save a local file as an enablement document and draft a card from
-        it. Synchronous + connection-injected so it's unit-testable; the
-        off-thread worker in _on_load_file supplies its own connection."""
+    def _ingest_local_file(conn, path: str, demo: bool = False) -> dict:
+        """Save a local file as an enablement document and build a card from it
+        with a DETERMINISTIC Python conversion — no LLM (rendering a doc into a
+        card is a text transformation, not a reasoning task). The same in demo
+        and live; AI summarising stays an explicit "polish with AI" via Renn.
+        Synchronous + connection-injected so it's unit-testable."""
         import os
         from src.data import enablement_store as store
         name = os.path.basename(path)
         text = EnablementPage._read_local_text(path)
         doc_id = store.save_document(conn, source="upload", name=name, full_text=text)
-        if demo:
-            from src.data.enablement_sim import _StubLLM
-            llm = _StubLLM()
-        else:
-            from src.gemini.client_factory import build_client_for_task
-            llm = build_client_for_task("enablement_card_gen")
-        draft = store.draft_card_from_document(conn, doc_id, llm) if llm else {}
+        draft = store.draft_card_from_document(conn, doc_id)   # deterministic
         return {"ok": True, "kind": "upload", "name": name,
                 "chars": len(text), "draft_id": draft.get("id")}
 

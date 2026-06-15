@@ -382,33 +382,40 @@ def _parse_card(response: str, fallback_title: str) -> tuple[str, str]:
 def draft_card_from_document(
     conn: sqlite3.Connection,
     doc_id: str,
-    llm_client,
+    llm_client=None,
     *,
     collection: str = "Enablement",
 ) -> dict:
-    """Generate a Guru card draft from a stored document via the LLM client.
+    """Generate a Guru card draft from a stored document, and link it.
 
-    Writes the draft to guru_content_drafts (status='pending') and links it to
-    the document. Returns the draft dict. The llm_client only needs a
-    ``.generate(prompt)`` method (real or mock).
+    DEFAULT (``llm_client=None``) is a deterministic Python conversion
+    (``doc_to_card.card_from_document``) — no provider, no network, no
+    nondeterminism. Pass an ``llm_client`` (with ``.generate(prompt)``) only
+    when the caller wants AI summarisation/rewriting ("polish with AI"). The
+    draft is written to guru_content_drafts (status='pending').
     """
     doc = get_document(conn, doc_id)
     if not doc:
         raise ValueError(f"Document {doc_id} not found")
 
-    template = _CARD_PROMPT.read_text(encoding="utf-8") if _CARD_PROMPT.exists() else (
-        "Turn this document into a Guru card.\nSOURCE: {doc_name}\n{doc_text}\n"
-        "{style_guide}"
-        "Return:\nTITLE: <title>\n---\n<body>"
-    )
-    prompt = template.format(
-        doc_name=doc.get("name", "Untitled"),
-        doc_text=doc.get("full_text", ""),
-        collection=collection,
-        style_guide=style_guide_block(conn),
-    )
-    response = llm_client.generate(prompt)
-    title, content = _parse_card(response, fallback_title=doc.get("name", "Untitled"))
+    if llm_client is None:
+        from src.data.doc_to_card import card_from_document
+        title, content = card_from_document(
+            doc.get("name", "Untitled"), doc.get("full_text", ""))
+    else:
+        template = _CARD_PROMPT.read_text(encoding="utf-8") if _CARD_PROMPT.exists() else (
+            "Turn this document into a Guru card.\nSOURCE: {doc_name}\n{doc_text}\n"
+            "{style_guide}"
+            "Return:\nTITLE: <title>\n---\n<body>"
+        )
+        prompt = template.format(
+            doc_name=doc.get("name", "Untitled"),
+            doc_text=doc.get("full_text", ""),
+            collection=collection,
+            style_guide=style_guide_block(conn),
+        )
+        response = llm_client.generate(prompt)
+        title, content = _parse_card(response, fallback_title=doc.get("name", "Untitled"))
 
     # Idempotent: if this doc already has a draft, refresh it in place rather
     # than spawning a duplicate. A draft already pushed to Guru is left intact.

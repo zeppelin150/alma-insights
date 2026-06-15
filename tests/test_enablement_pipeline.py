@@ -109,6 +109,17 @@ def test_demo_card_reflects_document_content(empty_db):
     assert "Update training material" not in body  # not the old canned template
 
 
+def test_draft_card_from_document_is_deterministic_without_llm(empty_db):
+    """Default path: no LLM — a faithful Python conversion of the document."""
+    conn = empty_db.conn
+    doc_id = S.save_document(conn, source="upload", name="Pilot.docx",
+                             full_text="Verify secondary coverage.\n\nEffective 2026-08-01.")
+    draft = S.draft_card_from_document(conn, doc_id)   # no llm_client
+    body = S.get_draft(conn, draft["id"])["content"]
+    assert "secondary coverage" in body
+    assert "> [!NOTE]" in body and "2026-08-01" in body
+
+
 def test_redraft_is_idempotent(empty_db):
     conn = empty_db.conn
     doc_id = S.save_document(conn, source="drive", doc_id="d9", name="X.gdoc", full_text="body")
