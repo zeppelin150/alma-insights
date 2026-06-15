@@ -119,6 +119,58 @@ class TestToolbarBreadth:
             assert callable(getattr(ed, handler)), handler
 
 
+class TestToolbarChrome:
+    def test_undo_redo_present_and_disabled_initially(self, qapp):
+        ed = _editor()
+        assert hasattr(ed, "_undo_btn") and hasattr(ed, "_redo_btn")
+        assert not ed._undo_btn.isEnabled()
+        assert not ed._redo_btn.isEnabled()
+
+    def test_undo_enables_after_edit(self, qapp):
+        ed = _editor()
+        # insertPlainText is an undoable edit (setPlainText resets the stack)
+        ed.editor.insertPlainText("hello world")
+        qapp.processEvents()
+        assert ed._undo_btn.isEnabled()
+
+    def test_heading_dropdown_options(self, qapp):
+        ed = _editor()
+        assert hasattr(ed, "_heading_menu")
+        labels = [a.text() for a in ed._heading_menu.actions()]
+        assert labels == ["Normal", "Heading 1", "Heading 2", "Heading 3"]
+
+    def test_heading_label_tracks_cursor(self, qapp):
+        ed = _editor()
+        ed.editor.setPlainText("a heading")
+        _select_all(ed)
+        ed._heading(2)
+        ed._sync_states()
+        assert "Heading 2" in ed._heading_btn.text()
+
+    def test_active_state_sync_for_bold(self, qapp):
+        ed = _editor()
+        ed.editor.setPlainText("bold me")
+        _select_all(ed)
+        ed._bold()
+        ed._sync_states()
+        # the bold button is the first stateful entry (checker = _is_bold)
+        bold_btn = next(b for b, c in ed._stateful if c == ed._is_bold)
+        assert bold_btn.property("active") == "true"
+
+    def test_six_stateful_buttons(self, qapp):
+        ed = _editor()
+        assert len(ed._stateful) == 6   # B/I/U/S + bullet + numbered
+
+    def test_paragraph_resets_heading(self, qapp):
+        ed = _editor()
+        ed.editor.setPlainText("x")
+        _select_all(ed)
+        ed._heading(1)
+        _select_all(ed)
+        ed._paragraph()
+        assert ed.editor.textCursor().blockFormat().headingLevel() == 0
+
+
 class TestExpandOverlay:
     def _overlay(self, parent=None):
         from src.ui.pages.enablement.expand_overlay import ExpandOverlay

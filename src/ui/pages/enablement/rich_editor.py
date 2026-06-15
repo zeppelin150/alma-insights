@@ -27,21 +27,25 @@ from __future__ import annotations
 
 import html as _html
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import (
-    QTextBlockFormat, QTextCharFormat, QTextCursor, QTextListFormat,
+    QFont, QTextBlockFormat, QTextCharFormat, QTextCursor, QTextListFormat,
 )
 from PySide6.QtWidgets import (
-    QFrame, QHBoxLayout, QInputDialog, QMenu, QPushButton, QTextEdit,
-    QToolButton, QVBoxLayout, QWidget,
+    QFrame, QHBoxLayout, QInputDialog, QMenu, QTextEdit, QToolButton,
+    QVBoxLayout, QWidget,
 )
 
+from src.ui.design.icons import icon as _icon
 from src.ui.theme import (
     ALMA_BG_ELEVATED, ALMA_BG_INSET, ALMA_BORDER, ALMA_BORDER_LIGHT,
-    ALMA_GREEN_LIGHT, ALMA_TEXT_DARK, ALMA_TEXT_MID,
+    ALMA_TEXT_DARK, ALMA_TEXT_LIGHT, ALMA_TEXT_MID,
 )
 
 _TEAL = "#0D7D72"
+_HOVER_BG = "#ECEFEC"      # subtle neutral hover
+_ACTIVE_BG = "#DCEFEC"     # teal tint for the active/pressed format
+_PRESS_BG = "#CFE6E1"
 
 
 class RichTextEditor(QWidget):
@@ -49,93 +53,172 @@ class RichTextEditor(QWidget):
 
     content_changed = Signal()
 
+    _HEAD_LABELS = {0: "Normal", 1: "Heading 1", 2: "Heading 2", 3: "Heading 3"}
+
+    # flat icon-button QSS — borderless, neutral hover, teal-tint when the
+    # cursor's current format makes the control active.
+    _BTN_QSS = (
+        f"QToolButton{{background:transparent; border:none; border-radius:6px;}} "
+        f"QToolButton:hover{{background:{_HOVER_BG};}} "
+        f"QToolButton:pressed{{background:{_PRESS_BG};}} "
+        f"QToolButton[active=\"true\"]{{background:{_ACTIVE_BG};}} "
+        f"QToolButton::menu-indicator{{image:none;}}"
+    )
+    _MENU_QSS = (
+        f"QToolButton{{background:transparent; color:{ALMA_TEXT_MID}; border:none; "
+        f"border-radius:6px; padding:4px 8px; font-size:12px; font-weight:600;}} "
+        f"QToolButton:hover{{background:{_HOVER_BG};}} "
+        f"QToolButton::menu-indicator{{image:none;}}"
+    )
+
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._stateful = []       # [(button, checker)] for active-state sync
         self._build()
 
     def _build(self):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(6)
-
-        # Grouped toolbar: (label, tooltip, handler, bold-label?)
-        groups = [
-            [
-                ("B", "Bold", self._bold, True),
-                ("I", "Italic", self._italic, False),
-                ("U", "Underline (rich — published to Guru, dropped in markdown source)",
-                 self._underline, False),
-                ("S", "Strikethrough", self._strike, False),
-                ("Color", "Text color (rich — published to Guru as HTML)",
-                 self._text_color, False),
-                ("Highlight", "Highlight (rich — published to Guru as HTML)",
-                 self._highlight, False),
-            ],
-            [
-                ("H1", "Heading 1", lambda: self._heading(1), False),
-                ("H2", "Heading 2", lambda: self._heading(2), False),
-                ("H3", "Heading 3", lambda: self._heading(3), False),
-            ],
-            [
-                ("•", "Bullet list", lambda: self._list(QTextListFormat.ListDisc), False),
-                ("1.", "Numbered list", lambda: self._list(QTextListFormat.ListDecimal), False),
-                ("Todo", "Checklist", self._task_list, False),
-            ],
-            [
-                ("`", "Inline code", self._inline_code, False),
-                ("Code", "Code block", self._code_block, False),
-                ("Quote", "Blockquote", self._blockquote, False),
-                ("Table", "Insert table", self._table, False),
-                ("HR", "Divider", self._hr, False),
-            ],
-            [
-                ("Link", "Insert link", self._link, False),
-                ("Image", "Insert image", self._image, False),
-            ],
-            [
-                ("Clear", "Clear formatting", self._clear, False),
-            ],
-        ]
-
-        bar = QHBoxLayout()
-        bar.setSpacing(4)
-        for gi, group in enumerate(groups):
-            if gi:
-                bar.addWidget(self._separator())
-            for label, tip, handler, bold in group:
-                bar.addWidget(self._tool_btn(label, tip, handler, bold))
-        bar.addWidget(self._separator())
-        bar.addWidget(self._build_insert_menu())   # Guru-native blocks
-        bar.addStretch(1)
-        outer.addLayout(bar)
+        outer.setSpacing(8)
 
         self.editor = QTextEdit()
         self.editor.setAcceptRichText(True)
         self.editor.setStyleSheet(
             f"QTextEdit{{background:{ALMA_BG_ELEVATED}; border:1px solid {ALMA_BORDER_LIGHT}; "
-            f"border-radius:8px; color:{ALMA_TEXT_DARK}; font-size:13.5px; padding:10px;}}"
+            f"border-radius:8px; color:{ALMA_TEXT_DARK}; font-size:13.5px; padding:12px 14px;}}"
         )
         self.editor.textChanged.connect(self.content_changed.emit)
+
+        outer.addWidget(self._build_toolbar())
         outer.addWidget(self.editor, 1)
 
-    def _build_insert_menu(self) -> QToolButton:
-        """Insert Guru-native blocks (callout / collapsible / card-link) as
-        markdown-directive markup that expands to Guru's `ghq-card-content__*`
-        HTML at preview + publish."""
+        # Live active-state highlighting + undo/redo availability.
+        self.editor.currentCharFormatChanged.connect(self._sync_states)
+        self.editor.cursorPositionChanged.connect(self._sync_states)
+        self.editor.undoAvailable.connect(self._undo_btn.setEnabled)
+        self.editor.redoAvailable.connect(self._redo_btn.setEnabled)
+        self._undo_btn.setEnabled(False)
+        self._redo_btn.setEnabled(False)
+        self._sync_states()
+
+    def _build_toolbar(self) -> QFrame:
+        bar = QFrame()
+        bar.setObjectName("RteToolbar")
+        bar.setStyleSheet(
+            f"#RteToolbar{{background:{ALMA_BG_ELEVATED}; "
+            f"border:1px solid {ALMA_BORDER_LIGHT}; border-radius:9px;}}")
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(7, 5, 7, 5)
+        row.setSpacing(2)
+
+        self._undo_btn = self._icon_btn("undo", "Undo (Ctrl+Z)", self.editor.undo)
+        self._redo_btn = self._icon_btn("redo", "Redo (Ctrl+Y)", self.editor.redo)
+        row.addWidget(self._undo_btn)
+        row.addWidget(self._redo_btn)
+        row.addWidget(self._sep())
+
+        row.addWidget(self._build_heading_menu())
+        row.addWidget(self._sep())
+
+        # inline text formatting (active-state aware)
+        row.addWidget(self._icon_btn("bold", "Bold", self._bold, self._is_bold))
+        row.addWidget(self._icon_btn("italic", "Italic", self._italic, self._is_italic))
+        row.addWidget(self._icon_btn(
+            "underline",
+            "Underline (rich — published to Guru, dropped in markdown source)",
+            self._underline, self._is_underline))
+        row.addWidget(self._icon_btn("strikethrough", "Strikethrough",
+                                     self._strike, self._is_strike))
+        row.addWidget(self._sep())
+
+        row.addWidget(self._icon_btn("text-color",
+                                     "Text colour (published to Guru as HTML)",
+                                     self._text_color))
+        row.addWidget(self._icon_btn("highlighter",
+                                     "Highlight (published to Guru as HTML)",
+                                     self._highlight))
+        row.addWidget(self._sep())
+
+        row.addWidget(self._icon_btn("list", "Bullet list",
+                                     lambda: self._list(QTextListFormat.ListDisc),
+                                     self._is_bullet))
+        row.addWidget(self._icon_btn("list-ordered", "Numbered list",
+                                     lambda: self._list(QTextListFormat.ListDecimal),
+                                     self._is_numbered))
+        row.addWidget(self._icon_btn("list-check", "Checklist", self._task_list))
+        row.addWidget(self._sep())
+
+        row.addWidget(self._icon_btn("code", "Inline code", self._inline_code))
+        row.addWidget(self._icon_btn("quote", "Blockquote", self._blockquote))
+        row.addWidget(self._icon_btn("link", "Insert link", self._link))
+        row.addWidget(self._build_insert_menu())
+
+        row.addStretch(1)
+        row.addWidget(self._icon_btn("eraser", "Clear formatting", self._clear))
+        return bar
+
+    def _icon_btn(self, name, tip, handler, checker=None) -> QToolButton:
+        b = QToolButton()
+        b.setToolTip(tip)
+        b.setCursor(Qt.PointingHandCursor)
+        b.setFixedSize(30, 28)
+        b.setIconSize(QSize(17, 17))
+        b.setIcon(_icon(name, 17, ALMA_TEXT_MID))
+        b.setStyleSheet(self._BTN_QSS)
+        b.setProperty("active", "false")
+        if handler is not None:
+            b.clicked.connect(handler)
+        if checker is not None:
+            b._icon_on = _icon(name, 17, _TEAL)
+            b._icon_off = _icon(name, 17, ALMA_TEXT_MID)
+            self._stateful.append((b, checker))
+        return b
+
+    def _sep(self) -> QFrame:
+        line = QFrame()
+        line.setFrameShape(QFrame.VLine)
+        line.setFixedSize(1, 18)
+        line.setStyleSheet(f"background:{ALMA_BORDER}; border:none; margin:0 4px;")
+        return line
+
+    def _build_heading_menu(self) -> QToolButton:
         btn = QToolButton()
-        btn.setText("Insert")
-        btn.setToolTip("Insert a Guru block")
+        btn.setToolTip("Text style")
+        btn.setText("Normal  ▾")
         btn.setPopupMode(QToolButton.InstantPopup)
+        btn.setToolButtonStyle(Qt.ToolButtonTextOnly)
         btn.setCursor(Qt.PointingHandCursor)
         btn.setFixedHeight(28)
-        btn.setStyleSheet(
-            f"QToolButton{{background:{ALMA_BG_INSET}; color:{ALMA_TEXT_MID}; "
-            f"border:1px solid {ALMA_BORDER}; border-radius:6px; padding:2px 9px; "
-            f"font-size:12px; font-weight:600;}} "
-            f"QToolButton:hover{{border-color:{_TEAL}; color:{_TEAL};}} "
-            f"QToolButton::menu-indicator{{image:none;}}"
-        )
+        btn.setMinimumWidth(94)
+        btn.setStyleSheet(self._MENU_QSS)
         menu = QMenu(btn)
+        menu.addAction("Normal", self._paragraph)
+        menu.addAction("Heading 1", lambda: self._heading(1))
+        menu.addAction("Heading 2", lambda: self._heading(2))
+        menu.addAction("Heading 3", lambda: self._heading(3))
+        btn.setMenu(menu)
+        self._heading_btn = btn
+        self._heading_menu = menu
+        return btn
+
+    def _build_insert_menu(self) -> QToolButton:
+        """Block inserts (Guru "+" add-block menu): table / divider / code
+        block / image plus the Guru-native callout / collapsible / card-link
+        blocks (markdown directives that expand to ghq-card-content__* HTML)."""
+        btn = QToolButton()
+        btn.setToolTip("Insert a block")
+        btn.setIcon(_icon("plus", 17, ALMA_TEXT_MID))
+        btn.setIconSize(QSize(17, 17))
+        btn.setPopupMode(QToolButton.InstantPopup)
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setFixedSize(30, 28)
+        btn.setStyleSheet(self._BTN_QSS)
+        menu = QMenu(btn)
+        menu.addAction("Table", self._table)
+        menu.addAction("Divider", self._hr)
+        menu.addAction("Code block", self._code_block)
+        menu.addAction("Image…", self._image)
+        menu.addSeparator()
         callout = menu.addMenu("Callout")
         for label, variant in (("Note", "note"), ("Success", "success"),
                                ("Warning", "warning"), ("Danger", "danger")):
@@ -146,6 +229,56 @@ class RichTextEditor(QWidget):
         self._insert_menu = menu
         self._insert_submenus = (callout,)   # retain ref (addMenu GC footgun)
         return btn
+
+    # ── active-state sync ───────────────────────────────────────────
+    def _sync_states(self, *args):
+        for btn, checker in self._stateful:
+            try:
+                on = bool(checker())
+            except Exception:
+                on = False
+            btn.setProperty("active", "true" if on else "false")
+            btn.setIcon(btn._icon_on if on else btn._icon_off)
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
+        lvl = self.editor.textCursor().blockFormat().headingLevel()
+        self._heading_btn.setText(self._HEAD_LABELS.get(lvl, "Normal") + "  ▾")
+
+    def _is_bold(self):
+        return self.editor.fontWeight() >= QFont.Weight.Bold
+
+    def _is_italic(self):
+        return self.editor.fontItalic()
+
+    def _is_underline(self):
+        return self.editor.fontUnderline()
+
+    def _is_strike(self):
+        return self.editor.currentCharFormat().fontStrikeOut()
+
+    def _list_style(self):
+        cl = self.editor.textCursor().currentList()
+        return cl.format().style() if cl is not None else None
+
+    def _is_bullet(self):
+        return self._list_style() == QTextListFormat.ListDisc
+
+    def _is_numbered(self):
+        return self._list_style() == QTextListFormat.ListDecimal
+
+    def _paragraph(self):
+        """Reset the block to normal body text (the 'Normal' text style)."""
+        cursor = self.editor.textCursor()
+        cursor.beginEditBlock()
+        bf = QTextBlockFormat()
+        bf.setHeadingLevel(0)
+        cursor.mergeBlockFormat(bf)
+        cf = QTextCharFormat()
+        cf.setProperty(QTextCharFormat.FontSizeAdjustment, 0)
+        cf.setFontWeight(QFont.Normal)
+        cursor.select(QTextCursor.BlockUnderCursor)
+        cursor.mergeCharFormat(cf)
+        cursor.endEditBlock()
 
     def _insert_callout(self, variant: str):
         body = "Your message here."
@@ -164,28 +297,6 @@ class RichTextEditor(QWidget):
         label = (label.strip() if ok else "") or cid.strip()
         from src.data.guru_blocks import card_link_token
         self.editor.textCursor().insertText(card_link_token(cid.strip(), label))
-
-    def _separator(self) -> QFrame:
-        line = QFrame()
-        line.setFrameShape(QFrame.VLine)
-        line.setFixedHeight(20)
-        line.setStyleSheet(f"color:{ALMA_BORDER}; background:{ALMA_BORDER}; max-width:1px;")
-        return line
-
-    def _tool_btn(self, label, tip, handler, bold) -> QPushButton:
-        b = QPushButton(label)
-        b.setToolTip(tip)
-        b.setCursor(Qt.PointingHandCursor)
-        b.setFixedHeight(28)
-        weight = "700" if bold else "600"
-        b.setStyleSheet(
-            f"QPushButton{{background:{ALMA_BG_INSET}; color:{ALMA_TEXT_MID}; "
-            f"border:1px solid {ALMA_BORDER}; border-radius:6px; padding:2px 9px; "
-            f"font-size:12px; font-weight:{weight};}} "
-            f"QPushButton:hover{{border-color:{_TEAL}; color:{_TEAL};}}"
-        )
-        b.clicked.connect(handler)
-        return b
 
     # ── formatting actions ──────────────────────────────────────────
 

@@ -83,6 +83,63 @@ _GLYPHS = {
             '<line x1="12" y1="4" x2="12" y2="20"/>',
     "chevron-left": '<polyline points="15 18 9 12 15 6"/>',
     "chevron-right": '<polyline points="9 18 15 12 9 6"/>',
+    "chevron-down": '<polyline points="6 9 12 15 18 9"/>',
+    # ── rich-text editor toolbar glyphs ──
+    "bold": '<path d="M7 5h6a3.5 3.5 0 0 1 0 7H7z"/>'
+            '<path d="M7 12h7a3.5 3.5 0 0 1 0 7H7z"/>',
+    "italic": '<line x1="19" y1="4" x2="10" y2="4"/>'
+              '<line x1="14" y1="20" x2="5" y2="20"/>'
+              '<line x1="15" y1="4" x2="9" y2="20"/>',
+    "underline": '<path d="M6 4v6a6 6 0 0 0 12 0V4"/>'
+                 '<line x1="4" y1="21" x2="20" y2="21"/>',
+    "strikethrough": '<line x1="4" y1="12" x2="20" y2="12"/>'
+                     '<path d="M16.5 7.5A4 3 0 0 0 12 5h-1.5a3.5 3 0 0 0-2.5 5"/>'
+                     '<path d="M7.5 16.5A4 3 0 0 0 12 19h1.5a3.5 3 0 0 0 2.6-4.5"/>',
+    "undo": '<path d="M9 14 4 9l5-5"/>'
+            '<path d="M4 9h11a5 5 0 0 1 0 10h-3"/>',
+    "redo": '<path d="m15 14 5-5-5-5"/>'
+            '<path d="M20 9H9a5 5 0 0 0 0 10h3"/>',
+    "list": '<line x1="9" y1="6" x2="20" y2="6"/>'
+            '<line x1="9" y1="12" x2="20" y2="12"/>'
+            '<line x1="9" y1="18" x2="20" y2="18"/>'
+            '<circle cx="4.5" cy="6" r="1"/><circle cx="4.5" cy="12" r="1"/>'
+            '<circle cx="4.5" cy="18" r="1"/>',
+    "list-ordered": '<line x1="10" y1="6" x2="20" y2="6"/>'
+                    '<line x1="10" y1="12" x2="20" y2="12"/>'
+                    '<line x1="10" y1="18" x2="20" y2="18"/>'
+                    '<path d="M4 6h1v4"/><path d="M4 10h2"/>'
+                    '<path d="M6 18H4c0-1 2-2 2-3s-1-1.4-2-1"/>',
+    "list-check": '<path d="M3 6l1.4 1.4L6 5"/><path d="M3 13l1.4 1.4L6 12"/>'
+                  '<line x1="10" y1="6" x2="20" y2="6"/>'
+                  '<line x1="10" y1="13" x2="20" y2="13"/>'
+                  '<line x1="10" y1="19" x2="20" y2="19"/>',
+    "code": '<polyline points="16 18 22 12 16 6"/>'
+            '<polyline points="8 6 2 12 8 18"/>',
+    "quote": '<path d="M10 11H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h3a2 2 0 0 1 2 2v6c0 '
+             '2-1 3-3 4"/><path d="M21 11h-5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h3a2 2 0 '
+             '0 1 2 2v6c0 2-1 3-3 4"/>',
+    "table": '<rect x="3" y="4" width="18" height="16" rx="1"/>'
+             '<line x1="3" y1="10" x2="21" y2="10"/>'
+             '<line x1="3" y1="15" x2="21" y2="15"/>'
+             '<line x1="9" y1="4" x2="9" y2="20"/>'
+             '<line x1="15" y1="4" x2="15" y2="20"/>',
+    "minus": '<line x1="4" y1="12" x2="20" y2="12"/>',
+    "link": '<path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1.5 1.5"/>'
+            '<path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1.5-1.5"/>',
+    "image": '<rect x="3" y="3" width="18" height="18" rx="2"/>'
+             '<circle cx="8.5" cy="8.5" r="1.5"/>'
+             '<polyline points="21 15 16 10 5 21"/>',
+    "text-color": '<path d="M5 18 10 6l5 12"/>'
+                  '<line x1="7" y1="14" x2="13" y2="14"/>'
+                  '<line x1="4" y1="21" x2="16" y2="21"/>',
+    "highlighter": '<path d="m9 11-6 6v3h9l3-3"/>'
+                   '<path d="m22 12-4.6 4.6a2 2 0 0 1-2.8 0l-5.2-5.2a2 2 0 0 1 '
+                   '0-2.8L14 4"/>',
+    "eraser": '<path d="m7 21-4.3-4.3a1 1 0 0 1 0-1.4l10-10a1 1 0 0 1 1.4 0l5.6 '
+              '5.6a1 1 0 0 1 0 1.4L13 21"/><path d="M22 21H7"/>'
+              '<path d="m5 11 9 9"/>',
+    "plus": '<line x1="12" y1="5" x2="12" y2="19"/>'
+            '<line x1="5" y1="12" x2="19" y2="12"/>',
 }
 
 _TEMPLATE = (
