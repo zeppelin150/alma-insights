@@ -83,6 +83,12 @@ class _DropZone(QFrame):
             e.acceptProposedAction()
             self._hot()
 
+    def dragMoveEvent(self, e):
+        # Windows rejects the drop if the move isn't also accepted, even
+        # after dragEnter accepted — keep saying yes for file drags.
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+
     def dragLeaveEvent(self, e):
         self._idle()
 
@@ -107,6 +113,7 @@ class WorkbenchPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setStyleSheet(f"background:{ALMA_CREAM};")
+        self.setAcceptDrops(True)   # drop a doc anywhere on the workbench
         self._active_draft_id = 1
         self._current_drafts = []
         self._chip_widgets = []
@@ -350,6 +357,21 @@ class WorkbenchPage(QWidget):
         last edit was markdown-only). The page reads this on content_edited to
         persist content_html alongside the markdown."""
         return self._current_html
+
+    # ── drag & drop (drop a doc anywhere on the workbench card) ──────
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+
+    def dragMoveEvent(self, e):
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+
+    def dropEvent(self, e):
+        urls = e.mimeData().urls()
+        if urls:
+            e.acceptProposedAction()
+            self.load_file_requested.emit(urls[0].toLocalFile())
 
     # Demo placeholder Guru cards offered under "Push to Guru › Existing card".
     _DEMO_CARDS = ("Setting up SSO for Providers", "Returns & Refunds Policy", "Payments v2 Overview")

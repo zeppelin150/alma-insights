@@ -742,16 +742,85 @@ class EnablementPage(QWidget):
         self.chat.add_message("a", msg)
 
     def _on_load_file(self, path: str):
+        """A dropped / uploaded local file → ingest its text and draft a card
+        from it (off-thread; demo uses the stub LLM so it works with no
+        network). Results flow back through import_finished → the workbench
+        reloads and focuses the new draft."""
         import os
-        name = os.path.basename(path) if path else "a file"
-        self._set_status(f"Uploaded “{name}”.")
-        self.chat.set_chat([("a",
-            f"You uploaded “{name}”. Here's what you can do next:\n"
-            f"  •  Draft a Guru card from it\n"
-            f"  •  Make edits, then push to a new or existing Guru card\n"
-            f"  •  Save it to Google Drive\n"
-            f"Tell me what you'd like, or use the buttons below.")])
-        self._open_chat()
+        if not path or not os.path.isfile(path):
+            self._set_status("Could not read that file.")
+            return
+        self._set_status(f"Loading “{os.path.basename(path)}”…")
+        if self.demo:
+            self._ensure_demo_db()
+        import threading
+        db_path = self._engine_db_path()
+        demo = self.demo
+
+        def worker():
+            res = {"ok": False, "kind": "upload"}
+            conn = None
+            try:
+                from src.data.connection_factory import get_connection
+                conn = get_connection(db_path)
+                res = self._ingest_local_file(conn, path, demo)
+            except Exception as exc:  # noqa: BLE001
+                res = {"ok": False, "kind": "upload", "error": str(exc)}
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+            self.import_finished.emit(res)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    @staticmethod
+    def _read_local_text(path: str) -> str:
+        """Best-effort text extraction from a dropped local file. Reads
+        text-like files directly; tries python-docx for .docx if present;
+        otherwise returns a stub so a draft still forms (the user can paste
+        the real content or connect Drive)."""
+        import os
+        ext = os.path.splitext(path)[1].lower()
+        try:
+            if ext in (".txt", ".md", ".markdown", ".csv", ".json", ".rst", ""):
+                with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                    return fh.read()
+            if ext == ".docx":
+                try:
+                    import docx  # python-docx, optional
+                    return "\n".join(p.text for p in docx.Document(path).paragraphs)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return (
+            f"Imported file: {os.path.basename(path)}.\n\n"
+            "(This format can't be read locally — connect Google Drive or paste "
+            "the text to extract the full content.)"
+        )
+
+    @staticmethod
+    def _ingest_local_file(conn, path: str, demo: bool) -> dict:
+        """Save a local file as an enablement document and draft a card from
+        it. Synchronous + connection-injected so it's unit-testable; the
+        off-thread worker in _on_load_file supplies its own connection."""
+        import os
+        from src.data import enablement_store as store
+        name = os.path.basename(path)
+        text = EnablementPage._read_local_text(path)
+        doc_id = store.save_document(conn, source="upload", name=name, full_text=text)
+        if demo:
+            from src.data.enablement_sim import _StubLLM
+            llm = _StubLLM()
+        else:
+            from src.gemini.client_factory import build_client_for_task
+            llm = build_client_for_task("enablement_card_gen")
+        draft = store.draft_card_from_document(conn, doc_id, llm) if llm else {}
+        return {"ok": True, "kind": "upload", "name": name,
+                "chars": len(text), "draft_id": draft.get("id")}
 
     # ── workbench imports (Google Doc / existing Guru card) ────────
 
