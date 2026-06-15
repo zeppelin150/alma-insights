@@ -99,6 +99,55 @@ class TestFormatting:
         assert "| A | Flat |" in md
 
 
+class TestColorsAndBoxes:
+    def test_text_color_emits_span(self, tmp_path):
+        body = _p(_r("amber", '<w:rPr><w:color w:val="b45309"/></w:rPr>'))
+        md = docx_to_markdown(_docx(tmp_path, body))
+        assert '<span style="color:#b45309">amber</span>' in md
+
+    def test_near_black_color_skipped(self, tmp_path):
+        body = _p(_r("body", '<w:rPr><w:color w:val="1a1a1a"/></w:rPr>'))
+        md = docx_to_markdown(_docx(tmp_path, body))
+        assert "<span" not in md and "body" in md
+
+    def test_shaded_paragraph_becomes_box(self, tmp_path):
+        body = _p(_r("Heads up"), '<w:pPr><w:shd w:fill="dceae8"/></w:pPr>')
+        md = docx_to_markdown(_docx(tmp_path, body))
+        assert "background-color:#dceae8" in md
+        assert 'markdown="1"' in md and "Heads up" in md
+
+    def test_consecutive_shaded_merge_into_one_box(self, tmp_path):
+        body = (_p(_r("line one"), '<w:pPr><w:shd w:fill="fbf7ec"/></w:pPr>')
+                + _p(_r("line two"), '<w:pPr><w:shd w:fill="fbf7ec"/></w:pPr>'))
+        md = docx_to_markdown(_docx(tmp_path, body))
+        assert md.count("background-color:#fbf7ec") == 1
+        assert "line one" in md and "line two" in md
+
+    def test_single_row_table_not_degenerate(self, tmp_path):
+        body = "<w:tbl><w:tr><w:tc>" + _p(_r("Callout box text")) + "</w:tc></w:tr></w:tbl>"
+        md = docx_to_markdown(_docx(tmp_path, body))
+        assert "| --- |" not in md
+        assert "Callout box text" in md
+
+    def test_shaded_table_keeps_cell_colour(self, tmp_path):
+        shaded = '<w:tc><w:tcPr><w:shd w:fill="dceae8"/></w:tcPr>'
+        body = ("<w:tbl>"
+                f"<w:tr>{shaded}{_p(_r('Tier'))}</w:tc>{shaded}{_p(_r('Billing'))}</w:tc></w:tr>"
+                f"<w:tr><w:tc>{_p(_r('A'))}</w:tc><w:tc>{_p(_r('Flat'))}</w:tc></w:tr></w:tbl>")
+        md = docx_to_markdown(_docx(tmp_path, body))
+        assert "<table>" in md
+        assert 'style="background-color:#dceae8"' in md
+        assert "Tier" in md and "Flat" in md
+
+    def test_box_inner_markdown_renders(self):
+        from src.data.html_markdown import markdown_to_html
+        md = ('<div markdown="1" style="background-color:#dceae8;padding:12px">\n\n'
+              '**Note:** soon\n\n</div>')
+        html = markdown_to_html(md)
+        assert "background-color:#dceae8" in html
+        assert "<strong>Note:</strong>" in html
+
+
 class TestDispatch:
     def test_read_document_docx(self, tmp_path):
         body = _p(_r("hello"), '<w:pPr><w:pStyle w:val="Heading1"/></w:pPr>')

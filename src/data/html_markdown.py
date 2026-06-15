@@ -22,8 +22,13 @@ def markdown_to_html(md: str) -> str:
     # fenced code / sane lists but NOT GFM strikethrough or task-list
     # checkboxes — a small regex post-pass closes those two gaps within the
     # installed deps so the preview matches what the WYSIWYG editor showed.
+    # md_in_html lets the document reader's exact-colour callout boxes
+    # (<div markdown="1" style="background-color:…">) render their inner
+    # markdown; tables/fenced_code/sane_lists as before. All core extensions
+    # (no new dependency).
     html = _md.markdown(
-        md or "", extensions=["tables", "fenced_code", "sane_lists"])
+        md or "",
+        extensions=["tables", "fenced_code", "sane_lists", "md_in_html"])
     html = _GFM_STRIKE.sub(r"<del>\1</del>", html)
     html = _gfm_task_items(html)
     return html

@@ -55,6 +55,31 @@ def _findall(el, name: str):
     return [c for c in el if _local(c.tag) == name]
 
 
+_HEX6 = re.compile(r"[0-9a-f]{6}")
+
+
+def _custom_color(v) -> str | None:
+    """A run/cell colour worth keeping: a 6-hex value that isn't `auto` or
+    near-black body text (we don't span every default-coloured run)."""
+    v = (v or "").lower()
+    if not _HEX6.fullmatch(v):
+        return None
+    r, g, b = int(v[0:2], 16), int(v[2:4], 16), int(v[4:6], 16)
+    return v if max(r, g, b) >= 0x40 else None
+
+
+def _shade_fill(props) -> str | None:
+    """The background shading fill (a callout-box colour) on a paragraph's
+    pPr or a cell's tcPr — None for white/auto/no-fill."""
+    if props is None:
+        return None
+    shd = _find(props, "shd")
+    if shd is None:
+        return None
+    fill = (_attr(shd, "fill") or "").lower()
+    return fill if (_HEX6.fullmatch(fill) and fill != "ffffff") else None
+
+
 # ── public ───────────────────────────────────────────────────────────
 
 def read_document(path: str) -> str:
@@ -91,10 +116,10 @@ def docx_to_markdown(path: str) -> str:
             if tag == "p":
                 blocks.append(_paragraph(el, rels, numbering))
             elif tag == "tbl":
-                blocks.append({"li": False, "md": _table(el, rels)})
+                blocks.append(_table(el, rels))
         except Exception:
             continue   # loose: skip anything that won't parse
-    return _assemble(blocks)
+    return _assemble(_group_shaded(blocks))
 
 
 # ── docx internals ───────────────────────────────────────────────────
@@ -198,9 +223,15 @@ def _run_md(r) -> str:
     if not text:
         return ""
     rpr = _find(r, "rPr")
-    bold = rpr is not None and _on(_find(rpr, "b"))
-    ital = rpr is not None and _on(_find(rpr, "i"))
-    strike = rpr is not None and _on(_find(rpr, "strike"))
+    bold = ital = strike = False
+    color = None
+    if rpr is not None:
+        bold = _on(_find(rpr, "b"))
+        ital = _on(_find(rpr, "i"))
+        strike = _on(_find(rpr, "strike"))
+        c = _find(rpr, "color")
+        if c is not None:
+            color = _custom_color(_attr(c, "val"))
     if not text.strip():
         return text   # don't wrap pure whitespace
     lead = text[:len(text) - len(text.lstrip())]
@@ -214,6 +245,8 @@ def _run_md(r) -> str:
         word = f"**{word}**"
     elif ital:
         word = f"*{word}*"
+    if color:   # inline HTML span — markdown processes the emphasis inside it
+        word = f'<span style="color:#{color}">{word}</span>'
     return f"{lead}{word}{trail}"
 
 
@@ -237,33 +270,96 @@ def _paragraph(p, rels, numbering) -> dict:
     if is_list:
         indent = "  " * max(0, ilvl)
         marker = "1." if ordered else "-"
-        return {"li": True, "md": f"{indent}{marker} {text}" if text else ""}
+        return {"li": True, "md": f"{indent}{marker} {text}" if text else "",
+                "shade": None}
     if not text:
-        return {"li": False, "md": ""}
+        return {"li": False, "md": "", "shade": None}
     level = _heading_level(ppr)
-    if level:
-        return {"li": False, "md": f"{'#' * level} {text}"}
-    return {"li": False, "md": text}
+    md = f"{'#' * level} {text}" if level else text
+    return {"li": False, "md": md, "shade": _shade_fill(ppr)}
 
 
-def _table(tbl, rels) -> str:
-    rows = []
+_INLINE_HTML_SUBS = (
+    (re.compile(r"\*\*\*(.+?)\*\*\*"), r"<strong><em>\1</em></strong>"),
+    (re.compile(r"\*\*(.+?)\*\*"), r"<strong>\1</strong>"),
+    (re.compile(r"(?<![*\w])\*(?!\s)(.+?)(?<!\s)\*(?![*\w])"), r"<em>\1</em>"),
+    (re.compile(r"~~(.+?)~~"), r"<del>\1</del>"),
+    (re.compile(r"\[([^\]]+)\]\(([^)]+)\)"), r'<a href="\2">\1</a>'),
+)
+
+
+def _inline_html(s: str) -> str:
+    """Convert inline markdown (from _inline_md) to inline HTML, for use in
+    raw HTML table cells where markdown isn't re-processed. Colour spans are
+    already HTML and pass through."""
+    for pat, repl in _INLINE_HTML_SUBS:
+        s = pat.sub(repl, s)
+    return s
+
+
+def _table(tbl, rels) -> dict:
+    rows, fills = [], []
     for tr in _findall(tbl, "tr"):
-        cells = []
+        cells, cell_fills = [], []
         for tc in _findall(tr, "tc"):
+            cell_fills.append(_shade_fill(_find(tc, "tcPr")))
             cell = " ".join(_inline_md(p, rels).strip()
                             for p in _findall(tc, "p")).strip()
-            cells.append(cell.replace("|", "\\|") or " ")
+            cells.append(cell)
         if cells:
             rows.append(cells)
+            fills.append(cell_fills)
     if not rows:
-        return ""
+        return {"li": False, "md": "", "shade": None}
+    # A single-row table is a layout/callout box, not a data table — render its
+    # text (so it doesn't become a degenerate "| x |\n| --- |").
+    if len(rows) == 1:
+        fill = next((f for f in fills[0] if f), None)
+        return {"li": False, "md": "  ".join(c for c in rows[0] if c),
+                "shade": fill}
+    # Shaded cells (e.g. coloured header rows) can't be carried by a GFM table,
+    # so render those as a raw HTML table with inline cell colours.
+    if any(any(f) for f in fills):
+        out = ["<table>"]
+        for cells, cfs in zip(rows, fills):
+            out.append("<tr>")
+            for cell, fill in zip(cells, cfs):
+                style = f' style="background-color:#{fill}"' if fill else ""
+                out.append(f"<td{style}>{_inline_html(cell) or '&nbsp;'}</td>")
+            out.append("</tr>")
+        out.append("</table>")
+        return {"li": False, "md": "".join(out), "shade": None}
     ncol = max(len(r) for r in rows)
-    rows = [r + [" "] * (ncol - len(r)) for r in rows]
-    lines = ["| " + " | ".join(rows[0]) + " |",
+    grid = [[(c.replace("|", "\\|") or " ") for c in r] + [" "] * (ncol - len(r))
+            for r in rows]
+    lines = ["| " + " | ".join(grid[0]) + " |",
              "| " + " | ".join(["---"] * ncol) + " |"]
-    lines += ["| " + " | ".join(r) + " |" for r in rows[1:]]
-    return "\n".join(lines)
+    lines += ["| " + " | ".join(r) + " |" for r in grid[1:]]
+    return {"li": False, "md": "\n".join(lines), "shade": None}
+
+
+def _group_shaded(blocks: list[dict]) -> list[dict]:
+    """Wrap runs of consecutive same-fill blocks in one exact-colour callout
+    box (`<div markdown="1" style="background-color:…">`) so the document's
+    custom box colours survive — md_in_html renders the inner markdown."""
+    out: list[dict] = []
+    i = 0
+    while i < len(blocks):
+        shade = blocks[i].get("shade")
+        if shade and blocks[i].get("md") and not blocks[i].get("li"):
+            group = []
+            while (i < len(blocks) and blocks[i].get("shade") == shade
+                   and blocks[i].get("md") and not blocks[i].get("li")):
+                group.append(blocks[i]["md"])
+                i += 1
+            inner = "\n\n".join(group)
+            div = (f'<div markdown="1" style="background-color:#{shade};'
+                   f'padding:12px 16px;border-radius:6px;">\n\n{inner}\n\n</div>')
+            out.append({"li": False, "md": div, "shade": None})
+        else:
+            out.append(blocks[i])
+            i += 1
+    return out
 
 
 def _assemble(blocks: list[dict]) -> str:
