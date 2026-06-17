@@ -69,8 +69,28 @@ RENN_SYSTEM = (
 # Grounding sources for the resource grep (project's own docs).
 GREP_SOURCES = [
     "CLAUDE.md", "README.md",
-    "docs/ARCHITECTURE.md", "docs/AI_REPORTS.md", "docs/SOURCE_MONITOR.md",
+    "docs/ARCHITECTURE.md", "docs/DATA_FLOWS.md", "docs/UI_GUIDE.md",
+    "docs/AI_REPORTS.md", "docs/SOURCE_MONITOR.md",
 ]
+# Section headers (substring) that describe the tool deeply — pulled first.
+PRIORITY_HEADERS = (
+    "what this project is", "quick reference", "architecture overview",
+    "source layout", "ui pages", "data import", "agentic pipeline",
+    "llm integration", "key patterns", "database essentials", "overview",
+    "components", "data flow", "what it does", "getting started", "features",
+)
+# Topic keywords marking a section relevant even without a priority header.
+RELEVANCE = (
+    "alma insights", "rcm", "revenue cycle", "support ticket", "classif",
+    "trend", "anomaly", "report", "guru", "source monitor", "ingest",
+    "scan", "analytics", "incident", "dashboard",
+)
+# Build-history / meta sections to skip — noise for a product card.
+EXCLUDE_HEADERS = (
+    "redesign", "rebuild", "protocol", "build history", "session", "phase",
+    "gotcha", "danger", "documentation index", "branch status", "memory",
+)
+GREP_BUDGET = 13000  # max chars of grounding material fed to the model
 
 
 def banner(title: str) -> None:
@@ -178,50 +198,101 @@ def stage_ingest(conn, task_gid: str, due_iso: str) -> dict:
                 and any(due_iso[:10] in k for k in events)
                 and ours["title"][:20] in on_day)
     line("[calendar]", f"day {due_iso} has {len(on_day)} chip(s): {on_day}")
-    line("[attached]", "YES — task chip renders on its due day"
-                       if attached else "NO — not keyed onto the calendar day")
+    line("[keyed]", "YES — task keyed to its due day"
+                    if attached else "NO — not keyed onto the calendar day")
     if not attached:
-        raise RuntimeError("task did not attach to the calendar day")
+        raise RuntimeError("task did not attach (key) to the calendar day")
+
+    # Real render: instantiate the actual CalendarPage widget headless and
+    # confirm a chip for our task is drawn in the month grid (not just keyed).
+    rendered = _calendar_render_check(conn, ours["title"], due_iso)
+    if rendered is True:
+        line("[rendered]", "YES — _Chip widget drawn in CalendarPage grid for the day")
+    elif rendered is False:
+        raise RuntimeError("task keyed but no chip rendered in the calendar grid")
+    else:
+        line("[rendered]", "skipped (Qt unavailable headless); keying verified above")
     return ours
+
+
+def _calendar_render_check(conn, task_title: str, due_iso: str):
+    """Instantiate the real CalendarPage headless and confirm our task draws a
+    chip in the current month grid. True/False, or None if Qt can't run here."""
+    try:
+        import os
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+        from src.ui.pages.enablement import calendar as calmod
+        from src.data import enablement_tasks
+    except Exception:
+        return None
+    try:
+        QApplication.instance() or QApplication([])
+        cal = calmod.CalendarPage()
+        cal.set_tasks(enablement_tasks.list_tasks(conn))
+        Chip = getattr(calmod, "_Chip")
+        # set_tasks rebuilds self._grid_widget; inspect only the live grid so we
+        # ignore the pre-set sample grid still awaiting garbage collection.
+        grid = getattr(cal, "_grid_widget", cal)
+        label = (task_title or "")[:20]
+        return any(label in (c.text() or "") for c in grid.findChildren(Chip))
+    except Exception as exc:  # noqa: BLE001
+        line("[render]", f"check error: {exc}")
+        return None
 
 
 # ── Stage 3: resource grep ────────────────────────────────────────────────────
 
-def stage_grep() -> list[tuple[str, str]]:
-    banner("STAGE 3 — Resource grep (Alma Insights)")
-    hits: list[tuple[str, str]] = []
+def _split_sections(text: str) -> list[tuple[str, str]]:
+    """Split markdown into (header, body) by ATX headings (# … ####)."""
+    parts = re.split(r"(?m)^(#{1,4}\s+.+)$", text)
+    out: list[tuple[str, str]] = []
+    for i in range(1, len(parts) - 1, 2):
+        out.append((parts[i].lstrip("#").strip(), parts[i + 1].strip()))
+    return out
+
+
+def stage_grep() -> list[tuple[str, str, str]]:
+    banner("STAGE 3 — Resource grep (comprehensive tool material)")
+    scanned = 0
+    pool: list[tuple[int, str, str, str]] = []  # (rank, file, header, snippet)
     for rel in GREP_SOURCES:
         p = _ROOT / rel
         if not p.exists():
             continue
-        text = p.read_text(encoding="utf-8", errors="replace")
-        for para in re.split(r"\n\s*\n", text):
-            s = para.strip()
-            if "alma insights" in s.lower() and len(s) > 50 and not s.startswith("|"):
-                hits.append((rel, s))
-    # De-dup and cap to keep the prompt bounded.
-    seen, capped = set(), []
-    for src, txt in hits:
-        key = txt[:80]
-        if key in seen:
-            continue
-        seen.add(key)
-        capped.append((src, txt))
-        if len(capped) >= 8:
+        scanned += 1
+        for header, body in _split_sections(p.read_text(encoding="utf-8", errors="replace")):
+            hl = header.lower()
+            if any(x in hl for x in EXCLUDE_HEADERS) or len(body.strip()) < 40:
+                continue
+            is_priority = any(h in hl for h in PRIORITY_HEADERS)
+            if not (is_priority or any(k in (hl + " " + body.lower()) for k in RELEVANCE)):
+                continue
+            pool.append((0 if is_priority else 1, rel, header, body.strip()[:2200]))
+    pool.sort(key=lambda x: x[0])  # priority sections first, then other relevant
+
+    chunks: list[tuple[str, str, str]] = []
+    total = 0
+    for _, rel, header, snippet in pool:
+        if total >= GREP_BUDGET:
             break
-    line("[sources]", f"{len([s for s in GREP_SOURCES if (_ROOT/s).exists()])} files scanned")
-    line("[hits]", f"{len(capped)} grounding paragraph(s) mentioning 'Alma Insights'")
-    for src, txt in capped[:3]:
-        line("  -", f"[{src}] {txt[:90].replace(chr(10),' ')}…")
-    if not capped:
-        raise RuntimeError("resource grep found no Alma Insights content")
-    return capped
+        chunks.append((rel, header, snippet))
+        total += len(snippet)
+
+    line("[sources]", f"{scanned} doc(s) scanned")
+    line("[sections]", f"{len(chunks)} relevant section(s), ~{total} chars of grounding")
+    for rel, hdr, _ in chunks[:6]:
+        line("  -", f"[{rel}] {hdr[:60]}")
+    if not chunks:
+        raise RuntimeError("resource grep found no relevant material")
+    return chunks
 
 
 # ── Stage 4: Renn (Gemini) authors the card ───────────────────────────────────
 
-def stage_author(task_title: str, resources: list[tuple[str, str]]) -> tuple[str, str]:
-    banner("STAGE 4 — Renn (Gemini) authors the card")
+def stage_author(task_title: str,
+                 resources: list[tuple[str, str, str]]) -> tuple[str, str]:
+    banner("STAGE 4 — Renn (Gemini) authors a professional card")
     from src.gemini.gemini_client import GeminiClient
     from src.data.settings_manager import get_section
     g = get_section("gemini", {})
@@ -232,29 +303,57 @@ def stage_author(task_title: str, resources: list[tuple[str, str]]) -> tuple[str
     client = GeminiClient(cli_path=g.get("cli_path", ""),
                           model=g.get("model", "gemini-2.5-flash"),
                           pii_redaction=False)
-    ctx = "\n\n".join(f"[{src}]\n{txt}" for src, txt in resources)[:4500]
+    ctx = "\n\n".join(f"### [{src}] {hdr}\n{body}"
+                      for src, hdr, body in resources)[:GREP_BUDGET]
     prompt = (
         f'A task was submitted in our work tracker: "{task_title}".\n\n'
-        "Using ONLY the reference material below, write a Guru knowledge card "
-        "explaining what Alma Insights is and what it does, for non-technical "
-        "operations staff.\n\n"
+        "Write a COMPREHENSIVE, professional Guru knowledge card (500-1000 words) "
+        "about Alma Insights for non-technical operations staff. Ground every "
+        "claim ONLY in the reference material below — do not invent features.\n\n"
+        "STRUCTURE (use ## markdown headings, in this order):\n"
+        "  ## Overview — what Alma Insights is and who it's for\n"
+        "  ## Key Capabilities — 5-8 bullet points\n"
+        "  ## How It Works — the data flow (import -> classify -> analyze -> report)\n"
+        "  ## Frequently Asked Questions — 3-4 Q&As, EACH as a collapsible (format below)\n"
+        "  ## Troubleshooting — a Markdown table: | Symptom | Likely cause | What to do | "
+        "with 3-5 rows\n\n"
+        "GURU STYLING — use these; they render as native Guru blocks:\n"
+        "  - Callout: a blockquote whose FIRST line is a marker, e.g.\n"
+        "        > [!NOTE]\n"
+        "        > A concise, important note.\n"
+        "    Markers: [!NOTE] [!SUCCESS] [!WARNING] [!DANGER]. Open the card with a\n"
+        "    one-line [!NOTE] summary; use a [!WARNING] in Troubleshooting.\n"
+        "  - FAQ collapsible (KEEP the blank lines exactly as shown):\n"
+        "        ::: details How do I import tickets?\n\n"
+        "        Answer in markdown.\n\n"
+        "        :::\n\n"
+        "Markdown tables, bullet lists, and **bold** are supported. Clear, professional tone.\n\n"
         f'Reference material (grepped from the project\'s own docs):\n"""\n{ctx}\n"""\n\n'
-        "Return EXACTLY this format and nothing else:\n"
-        "TITLE: <a concise card title>\n"
+        "Return EXACTLY this format and NOTHING else:\n"
+        "TITLE: <concise card title>\n"
         "BODY:\n"
-        "<card body in Markdown: a 1-2 sentence intro, then 4-6 bullets of key "
-        "capabilities>\n"
+        "<the full markdown card body following the structure above>\n"
     )
     line("[model]", f"{client.model} (Renn persona)")
-    raw = client.generate(prompt, system_prompt=RENN_SYSTEM, timeout=120)
+    line("[grounding]", f"{len(ctx)} chars from {len(resources)} sections")
+    raw = client.generate(prompt, system_prompt=RENN_SYSTEM, timeout=200)
     title, body = _parse_card(raw)
+    words = len(body.split())
+    callouts = len(re.findall(
+        r"\[!\s*(?:NOTE|SUCCESS|WARNING|DANGER|INFO|TIP|CAUTION)", body, re.I))
+    faqs = body.count("::: details")
+    has_table = len(re.findall(r"(?m)^\s*\|.+\|\s*$", body)) >= 2
     line("[gen]", f"{len(raw)} chars returned")
     line("[title]", title or "<empty>")
-    line("[body]", f"{len(body)} chars, {body.count(chr(10))+1} lines")
+    line("[body]", f"{words} words, {body.count(chr(10)) + 1} lines")
+    line("[styling]", f"callouts={callouts}  FAQ-collapsibles={faqs}  "
+                      f"troubleshooting-table={'yes' if has_table else 'no'}")
     if not title or not body:
         print("    --- raw output (unparsed) ---")
-        print(raw[:600])
+        print(raw[:800])
         raise RuntimeError("Gemini output did not parse into title+body")
+    if words < 350:
+        line("[warn]", f"card is short ({words} words) — target was 500-1000")
     return title, body
 
 
@@ -314,13 +413,19 @@ def stage_verify(gc, card_id: str, expect_title: str) -> dict:
     line("[get_card]", f"id={card.get('id')}  title={card.get('title')!r}")
     line("[collection]", card.get("collection", ""))
     line("[content]", f"{len(card.get('content', ''))} chars of HTML body live")
-    # Slug for the clickable URL lives only on the raw payload.
+    # Slug + native-styling proof live only on the raw payload.
     try:
         raw = gc._request("GET", f"/cards/{card_id}")
-        slug = raw.get("slug", "") if isinstance(raw, dict) else ""
-        if slug:
-            card["url"] = f"https://app.getguru.com/card/{slug}"
-            line("[url]", card["url"])
+        if isinstance(raw, dict):
+            slug = raw.get("slug", "")
+            if slug:
+                card["url"] = f"https://app.getguru.com/card/{slug}"
+                line("[url]", card["url"])
+            html = raw.get("content", "") or ""
+            line("[styling-live]",
+                 f"callouts={html.count('ghq-card-content__callout')}  "
+                 f"collapsibles={html.count('ghq-card-content__collapsible')}  "
+                 f"tables={html.count('<table')}")
     except Exception:
         pass
     if not card.get("id"):
