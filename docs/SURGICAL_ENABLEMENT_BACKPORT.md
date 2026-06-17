@@ -1,5 +1,34 @@
 # Surgical Enablement Backport Plan
 
+## START HERE — preflight, then run
+
+**You are the work-machine Claude (Sonnet/Bedrock).** Run this 30-second preflight before anything else, then set the source variable used throughout this plan:
+
+```bash
+cd /path/to/work/alma-insights                       # the WORK copy (pre-split, pre-enablement)
+git fetch origin                                     # brings down origin/enablement-content-tabs + this plan
+git merge-base HEAD origin/enablement-content-tabs   # a commit hash = shared history (good); an error = see below
+git rev-parse --abbrev-ref HEAD                      # MUST be your work mainline, NOT enablement-content-tabs
+git branch -a | grep enablement-content-tabs         # is the branch local, or only origin/...?
+```
+
+Set the source ref used everywhere below (after a fresh fetch the branch is usually remote-only):
+
+```bash
+SRC=origin/enablement-content-tabs    # use a bare 'enablement-content-tabs' ONLY if 'git branch' shows it locally
+```
+
+Decision gate:
+- `git merge-base` prints a hash **and** `HEAD` is the work mainline → proceed to §2.
+- `git merge-base` **errors** (disconnected clone) → the `git show $SRC:path` copies still work, but you have **no** automatic clean-vs-diverged detection: treat **every** "MODIFY" file in §4 as a hand-merge (3-way), never an overwrite.
+- `HEAD` is `enablement-content-tabs` → **STOP**, you are on the source branch; switch to the work mainline first.
+
+**Two rules that keep this run cheap and safe:**
+1. **Copy, don't reconstruct.** Every file comes from `git show $SRC:path > path`. Never hand-type a file from this document's prose.
+2. **Don't read back the NEW files you copy; keep prompt caching ON.** The ~11k lines of NEW files flow shell→disk and must not enter your context — reading them back is the main way this run's token cost balloons. Only pull into context the files you must MODIFY (3-way merge) or actively debug.
+
+---
+
 **Audience:** A Claude (Sonnet, via AWS Bedrock) running on the **work machine**, executing against the work copy of Alma Insights.
 **Source of truth:** The Mac branch `enablement-content-tabs` (and its ancestors `credentials-oauth`, `app-redesign`). Latest commits on that branch include `23721b4` (E2E upgrade), `1dd1ffe` (live E2E), `e9db9da` (live integration validator).
 **Author's verification basis:** This plan was authored against a checkout where `enablement-content-tabs` and `main` both exist. `git merge-base main enablement-content-tabs` = `63f58b30d90eb50372e5e40fa300170e2fd40d45`. All file paths below were confirmed to exist on the `enablement-content-tabs` branch via `git ls-tree`. All "MODIFY" divergence notes were confirmed via `git diff main enablement-content-tabs -- <path>`.
