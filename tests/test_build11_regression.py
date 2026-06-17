@@ -16,12 +16,18 @@ from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _MIGRATION_SQL = (_PROJECT_ROOT / "migrations" / "005_persistence_layer.sql").read_text(encoding="utf-8")
+# Migration 016 adds the enrichment columns (insurance_payer, client_id, …) that
+# ticket_index_writer.upsert_ticket_index now writes. The base 005 schema predates
+# them, so apply 016 too — otherwise the upsert INSERT fails with
+# "table ticket_index has no column named insurance_payer".
+_ENRICH_SQL = (_PROJECT_ROOT / "migrations" / "016_warehouse_enrichment.sql").read_text(encoding="utf-8")
 
 
 @pytest.fixture
 def db_conn():
     db = sqlite3.connect(":memory:")
     db.executescript(_MIGRATION_SQL)
+    db.executescript(_ENRICH_SQL)
     yield db
     db.close()
 

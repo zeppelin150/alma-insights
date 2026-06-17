@@ -6,8 +6,20 @@ query_business_drive    — chat can query the business Drive (local mirror unti
 
 import json
 
+import pytest
+
 from src.data import enablement_store as S
 from src.llm.claude_tools import TOOL_DEFINITIONS, execute_tool
+
+
+@pytest.fixture(autouse=True)
+def _isolate_pat_store(monkeypatch):
+    """Keep these unit tests off the real OS keyring. asana_discover (and other
+    tools) fall back to pat_store for credentials; with a real asana_api_key
+    saved, discover() would hit LIVE Asana instead of returning MOCK_DISCOVERY,
+    making the asana-tool assertions non-deterministic. Force the mock path."""
+    from src.data import pat_store
+    monkeypatch.setattr(pat_store, "load_setting", lambda key, default="": default)
 
 
 def test_tools_registered():
