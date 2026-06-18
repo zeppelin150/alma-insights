@@ -312,6 +312,9 @@ def import_drive_doc(conn: sqlite3.Connection, drive_reader, drive_ref: str) -> 
 # ── style guide (first-class input to card generation/revision) ──────
 
 _STYLE_GUIDE_KEY = "style_guide_doc_id"
+# Searchable identifier prepended to every style-guide document name so Renn can
+# isolate style guides via search_local_documents / list_style_guides.
+_STYLE_GUIDE_TAG = "[STYLE-GUIDE]"
 
 
 def get_style_guide(conn: sqlite3.Connection) -> str:
@@ -328,17 +331,69 @@ def get_style_guide(conn: sqlite3.Connection) -> str:
 
 
 def set_style_guide(conn: sqlite3.Connection, text: str, *,
-                    name: str = "Card style guide") -> str:
-    """Store/replace the style guide as an enablement document + pointer."""
+                    name: str = "Card style guide",
+                    doc_id: str | None = None) -> str:
+    """Store/replace a style guide as an enablement document + set it active.
+
+    The stored name is prefixed with the ``[STYLE-GUIDE]`` identifier so Renn can
+    find style guides by searching the local DB. Pass an explicit ``doc_id`` (e.g.
+    a slug of an uploaded filename) to keep distinct guides as separate, searchable
+    documents; omit it to update the single default guide (paste/demo flows).
+    """
+    from src.data.settings_manager import get_section, set_section
+    name = name or "Card style guide"
+    if _STYLE_GUIDE_TAG not in name:
+        name = f"{_STYLE_GUIDE_TAG} {name}"
+    cfg = dict(get_section("enablement", {}) or {})
+    did = str(doc_id or cfg.get(_STYLE_GUIDE_KEY) or "style-guide")
+    did = save_document(
+        conn, source="manual", name=name, doc_id=did, full_text=text or ""
+    )
+    cfg[_STYLE_GUIDE_KEY] = did   # active pointer (get_style_guide/style_guide_block)
+    set_section("enablement", cfg)
+    return did
+
+
+def list_style_guides(conn: sqlite3.Connection) -> list[dict]:
+    """Every stored style guide (tagged docs), newest first, active one flagged."""
+    from src.data.settings_manager import get_section
+    active = (get_section("enablement", {}) or {}).get(_STYLE_GUIDE_KEY, "")
+    rows = conn.execute(
+        "SELECT doc_id, name, LENGTH(full_text) AS chars, "
+        "       COALESCE(modified_time, indexed_at) AS ts "
+        "FROM enablement_documents WHERE name LIKE ? "
+        "ORDER BY ts DESC",
+        (_STYLE_GUIDE_TAG + "%",),
+    ).fetchall()
+    return [{"doc_id": r["doc_id"], "name": r["name"], "chars": r["chars"],
+             "active": r["doc_id"] == active} for r in rows]
+
+
+def set_active_style_guide(conn: sqlite3.Connection, doc_id: str) -> bool:
+    """Make an existing style-guide document the active one (used for injection)."""
+    if not get_document(conn, str(doc_id)):
+        return False
     from src.data.settings_manager import get_section, set_section
     cfg = dict(get_section("enablement", {}) or {})
-    doc_id = str(cfg.get(_STYLE_GUIDE_KEY) or "style-guide")
-    doc_id = save_document(
-        conn, source="manual", name=name, doc_id=doc_id, full_text=text or ""
-    )
-    cfg[_STYLE_GUIDE_KEY] = doc_id
+    cfg[_STYLE_GUIDE_KEY] = str(doc_id)
     set_section("enablement", cfg)
-    return doc_id
+    return True
+
+
+def delete_style_guide(conn: sqlite3.Connection, doc_id: str) -> bool:
+    """Delete a stored style guide; if it was active, promote the newest remaining."""
+    from src.data.settings_manager import get_section, set_section
+    with atomic(conn):
+        cur = conn.execute(
+            "DELETE FROM enablement_documents WHERE doc_id = ?", (str(doc_id),))
+    cfg = dict(get_section("enablement", {}) or {})
+    if cfg.get(_STYLE_GUIDE_KEY) == str(doc_id):
+        cfg.pop(_STYLE_GUIDE_KEY, None)
+        remaining = list_style_guides(conn)
+        if remaining:
+            cfg[_STYLE_GUIDE_KEY] = remaining[0]["doc_id"]
+        set_section("enablement", cfg)
+    return cur.rowcount > 0
 
 
 def clear_style_guide() -> None:
@@ -450,6 +505,7 @@ def publish_draft(
     *,
     guru_client=None,
     collection_id: str | None = None,
+    folder_id: str | None = None,
     approved_by: str = "user",
 ) -> dict:
     """Publish an approved draft to Guru and mark it pushed.
@@ -482,12 +538,19 @@ def publish_draft(
         try:
             if card_id:
                 guru_result = guru_client.update_card(card_id, html_body, draft["title"])
-            else:
+            elif folder_id:
                 guru_result = guru_client.create_card(
-                    collection_id or "", draft["title"], html_body
-                )
-                if isinstance(guru_result, dict):
-                    card_id = guru_result.get("id", card_id)
+                    collection_id or "", draft["title"], html_body,
+                    folder_ids=[folder_id])
+            else:
+                # Unchanged 3-arg call — keeps backward-compat with callers/mocks
+                # whose create_card predates the folder_ids parameter.
+                guru_result = guru_client.create_card(
+                    collection_id or "", draft["title"], html_body)
+            # Capture the new card's id on EITHER create path (folder or root) so a
+            # later edit UPDATES the same card instead of creating a duplicate.
+            if not card_id and isinstance(guru_result, dict):
+                card_id = guru_result.get("id", card_id)
         except Exception as exc:  # noqa: BLE001 — surface as a failed publish
             return {"ok": False, "error": f"guru_push_failed: {exc}", "draft_id": draft_id}
 

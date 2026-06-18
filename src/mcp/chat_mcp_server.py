@@ -398,15 +398,40 @@ TOOL_SCHEMAS = [
         "description": (
             "Publish a card draft to Guru — creates a new card, or updates the "
             "existing card if the draft is linked to one. This is the 'push to Guru' "
-            "action; only call it when the operator asked to publish."
+            "action; only call it when the operator asked to publish. To publish into "
+            "a specific sub-folder, first call list_guru_collections + list_guru_folders, "
+            "then pass the chosen collection_id and folder_id."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "draft_id": {"type": "integer", "description": "The draft id to publish."},
                 "collection_id": {"type": "string", "description": "Optional target collection for a new card."},
+                "folder_id": {"type": "string", "description": "Optional target folder (sub-folder) id within the collection."},
             },
             "required": ["draft_id"],
+        },
+    },
+    {
+        "name": "list_guru_collections",
+        "description": (
+            "List the Guru collections (top-level knowledge areas) so you can pick where "
+            "to publish a card. Returns each collection's id and name."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "list_guru_folders",
+        "description": (
+            "List a Guru collection's folders (sub-folders) so you can publish a card "
+            "into the right one. Pass the collection id OR its name."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "collection": {"type": "string", "description": "Collection id or name."},
+            },
+            "required": ["collection"],
         },
     },
     {
@@ -459,6 +484,46 @@ TOOL_SCHEMAS = [
             "type": "object",
             "properties": {"task_id": {"type": "string"}, "text": {"type": "string"}},
             "required": ["task_id", "text"],
+        },
+    },
+    {
+        "name": "create_asana_subtask",
+        "description": (
+            "Add a subtask to a task AND create it back in Asana under the parent "
+            "Asana task. Saves locally; syncs to Asana only for Asana-sourced tasks."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string"}, "text": {"type": "string"},
+            },
+            "required": ["task_id", "text"],
+        },
+    },
+    {
+        "name": "post_asana_comment",
+        "description": "Post a comment back to the linked Asana task (Asana-sourced tasks only).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string"}, "text": {"type": "string"},
+            },
+            "required": ["task_id", "text"],
+        },
+    },
+    {
+        "name": "update_asana_due_date",
+        "description": (
+            "Update a task's due date locally AND push it to the linked Asana task. "
+            "due_on is an ISO date (YYYY-MM-DD) or null to clear."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string"},
+                "due_on": {"type": "string", "description": "ISO date YYYY-MM-DD or null."},
+            },
+            "required": ["task_id"],
         },
     },
     {
@@ -520,6 +585,25 @@ TOOL_SCHEMAS = [
     {
         "name": "get_drive_doc",
         "description": "Fetch one indexed Drive document (with full text) by its id.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"doc_id": {"type": "string"}},
+            "required": ["doc_id"],
+        },
+    },
+    {
+        "name": "list_style_guides",
+        "description": "List the operator's stored style guides (the active one is flagged).",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "get_style_guide",
+        "description": "Read the active style guide's full text to follow it when writing a card.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "set_active_style_guide",
+        "description": "Switch which stored style guide is active (injected into card gen/revise).",
         "inputSchema": {
             "type": "object",
             "properties": {"doc_id": {"type": "string"}},

@@ -67,6 +67,10 @@ def _poll_board(conn, client, board: dict) -> list[str]:
     project_gid = cfg.get("project_gid")
     source_id = board.get("source_id")
     if not project_gid:
+        # Mapped-projects-only: tasks are created ONLY from boards that an
+        # operator explicitly mapped (a monitor_sources row with a project_gid).
+        # An unmapped/misconfigured board is skipped, never scanned.
+        logger.info("Asana board %s has no project_gid mapped; skipping", source_id)
         return []
     watermark = _board_cursor(conn, source_id)
     tasks = client.list_tasks(project_gid, modified_since=watermark) or []
@@ -78,6 +82,11 @@ def _poll_board(conn, client, board: dict) -> list[str]:
         modified = task.get("modified_at") or ""
         if modified and (not newest or modified > newest):
             newest = modified
+        # Two-way read-back: if we already track this task, pull Asana-side
+        # changes (due / completion / assignee / subtasks) into the local task
+        # and stop — never re-create what we already have.
+        if _reconcile_existing_task(conn, client, task):
+            continue
         if task.get("completed"):
             continue
         if not _matches_indicators(task, indicators):
@@ -85,8 +94,73 @@ def _poll_board(conn, client, board: dict) -> list[str]:
         tid = _create_task_from_asana(conn, board, task, mappings)
         if tid:
             created.append(tid)
+            try:
+                _pull_subtasks(conn, client, tid, task.get("gid"))
+            except Exception as exc:  # noqa: BLE001 — best-effort initial subtask pull
+                logger.debug("initial subtask pull failed for %s: %s", task.get("gid"), exc)
     _mark_board(conn, source_id, status="ok", cursor=newest)
     return created
+
+
+def _reconcile_existing_task(conn, client, task: dict) -> bool:
+    """Pull Asana-side changes into the local task we already track for this gid.
+
+    Updates due date / completion / assignee and mirrors subtasks. Returns True
+    when a local task was found (so the caller won't try to re-create it)."""
+    from src.data import enablement_tasks as etasks
+    gid = task.get("gid")
+    if not gid:
+        return False
+    row = conn.execute(
+        "SELECT task_id FROM enablement_tasks WHERE source='asana' AND source_ref=?",
+        (gid,),
+    ).fetchone()
+    if not row:
+        return False
+    tid = row[0]
+    fields: dict = {}
+    if "due_on" in task:
+        fields["due_date"] = task.get("due_on")        # date, or None to clear
+    if task.get("completed"):
+        fields["status"] = "done"
+    asg = (task.get("assignee") or {}).get("name")
+    if asg:
+        fields["assignee"] = asg
+    if fields:
+        etasks.update_task(conn, tid, **fields)
+    try:
+        _pull_subtasks(conn, client, tid, gid)
+    except Exception as exc:  # noqa: BLE001 — subtask read-back is best-effort
+        logger.debug("subtask read-back failed for %s: %s", gid, exc)
+    return True
+
+
+def _pull_subtasks(conn, client, task_id, task_gid) -> None:
+    """Mirror Asana subtasks locally: add ones we don't have yet and sync the
+    done-state of ones we do, matched by asana_subtask_gid (so our own
+    write-backs are recognised and never duplicated)."""
+    from src.data import enablement_tasks as etasks
+    from src.data.connection_factory import atomic
+    subs = client.list_subtasks(task_gid) or []
+    existing = {r[0]: r[1] for r in conn.execute(
+        "SELECT asana_subtask_gid, subtask_id FROM enablement_subtasks "
+        "WHERE task_id=? AND asana_subtask_gid IS NOT NULL AND asana_subtask_gid != ''",
+        (task_id,),
+    ).fetchall()}
+    for s in subs:
+        gid = s.get("gid")
+        if not gid:
+            continue
+        if gid in existing:
+            etasks.toggle_subtask(conn, existing[gid], s["completed"])
+        else:
+            sid = etasks.add_subtask(conn, task_id, s["name"],
+                                     created_by="asana", done=s["completed"])
+            with atomic(conn):
+                conn.execute(
+                    "UPDATE enablement_subtasks SET asana_subtask_gid=? WHERE subtask_id=?",
+                    (gid, sid),
+                )
 
 
 def _matches_indicators(task: dict, indicators: list[dict]) -> bool:

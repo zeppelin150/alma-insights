@@ -90,21 +90,24 @@ def _revise_draft_impl(conn, draft_id, instruction) -> dict:
     return {"ok": True, "draft_id": did, "title": title}
 
 
-def _push_guru_draft_impl(conn, draft_id, collection_id=None) -> dict:
+def _push_guru_draft_impl(conn, draft_id, collection_id=None, folder_id=None) -> dict:
     from src.data import enablement_store as store
     try:
         did = int(draft_id)
     except (TypeError, ValueError):
         return {"ok": False, "error": "draft_id_required"}
+    guru_cfg = {}
+    try:
+        from src.data.settings_manager import get_section
+        guru_cfg = (get_section("enablement", {}) or {}).get("guru") or {}
+    except Exception:
+        guru_cfg = {}
     if not collection_id:
         # Renn rarely knows the Guru collection — fall back to the operator's
         # configured publish target so chat-initiated pushes land correctly.
-        try:
-            from src.data.settings_manager import get_section
-            collection_id = ((get_section("enablement", {}) or {}).get("guru")
-                             or {}).get("publish_collection_id") or None
-        except Exception:
-            collection_id = None
+        collection_id = guru_cfg.get("publish_collection_id") or None
+    if not folder_id:
+        folder_id = guru_cfg.get("publish_folder_id") or None
     client = None
     try:
         from src.data.guru_client import GuruClient
@@ -113,7 +116,56 @@ def _push_guru_draft_impl(conn, draft_id, collection_id=None) -> dict:
             client = GuruClient(email, token)
     except Exception:  # noqa: BLE001 — no creds → local mark-pushed
         client = None
-    return store.publish_draft(conn, did, guru_client=client, collection_id=collection_id)
+    return store.publish_draft(conn, did, guru_client=client,
+                               collection_id=collection_id, folder_id=folder_id)
+
+
+def _list_guru_collections_impl(conn) -> dict:
+    """List Guru collections so Renn can pick a publish target."""
+    from src.data.guru_client import GuruClient
+    email, token = GuruClient.load_credentials()
+    if not (email and token):
+        return {"ok": False, "error": "guru_not_connected"}
+    try:
+        cols = GuruClient(email, token).list_collections()
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "count": len(cols),
+            "collections": [{"id": c["id"], "name": c["name"]} for c in cols]}
+
+
+def _list_guru_folders_impl(conn, collection=None) -> dict:
+    """List a Guru collection's folders (sub-folders) so Renn can target one.
+
+    ``collection`` may be a collection id or a collection NAME (resolved here so
+    Renn can pass whatever the user said).
+    """
+    import re
+    from src.data.guru_client import GuruClient
+    email, token = GuruClient.load_credentials()
+    if not (email and token):
+        return {"ok": False, "error": "guru_not_connected"}
+    client = GuruClient(email, token)
+    cid = collection or None
+    if collection and not re.match(r"^[0-9a-f]{8}-[0-9a-f]{4}-", str(collection), re.I):
+        try:
+            cols = client.list_collections()
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
+        match = next((c for c in cols
+                      if (c.get("name") or "").lower() == str(collection).lower()), None)
+        if not match:
+            return {"ok": False, "error": f"collection_not_found: {collection}",
+                    "available": [c["name"] for c in cols]}
+        cid = match["id"]
+    try:
+        folders = client.list_folders(cid)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "collection_id": cid, "count": len(folders),
+            "folders": [{"id": f["id"], "title": f["title"],
+                         "home": f["home"], "items": f["item_count"]}
+                        for f in folders]}
 
 
 def _create_card_draft_impl(conn, title, content) -> dict:
@@ -173,6 +225,30 @@ def _update_scratchpad_impl(conn, task_id, text) -> dict:
     return {"ok": tasks.set_scratchpad(conn, str(task_id), str(text or ""))}
 
 
+def _create_asana_subtask_impl(conn, task_id, text) -> dict:
+    """Add a subtask AND create it back in Asana under the parent task."""
+    from src.data import asana_writeback as awb
+    if not task_id:
+        return {"ok": False, "error": "task_id_required"}
+    return awb.create_subtask_in_asana(conn, str(task_id), text)
+
+
+def _post_asana_comment_impl(conn, task_id, text) -> dict:
+    """Post a comment back to the linked Asana task."""
+    from src.data import asana_writeback as awb
+    if not task_id:
+        return {"ok": False, "error": "task_id_required"}
+    return awb.post_comment_to_asana(conn, str(task_id), text)
+
+
+def _update_asana_due_date_impl(conn, task_id, due_on) -> dict:
+    """Update the due date locally and push it to the linked Asana task."""
+    from src.data import asana_writeback as awb
+    if not task_id:
+        return {"ok": False, "error": "task_id_required"}
+    return awb.update_due_in_asana(conn, str(task_id), due_on)
+
+
 def _create_task_impl(conn, **kw) -> dict:
     from src.data import enablement_tasks as tasks
     title = kw.get("title")
@@ -224,6 +300,31 @@ def _get_drive_doc_impl(conn, doc_id) -> dict:
     return {"ok": True, "document": d}
 
 
+def _list_style_guides_impl(conn) -> dict:
+    """List the operator's stored style guides (tagged docs), active flagged."""
+    from src.data import enablement_store as store
+    guides = store.list_style_guides(conn)
+    return {"ok": True, "count": len(guides), "style_guides": guides}
+
+
+def _get_style_guide_impl(conn) -> dict:
+    """Return the ACTIVE style-guide text so a card can be written to follow it."""
+    from src.data import enablement_store as store
+    text = store.get_style_guide(conn)
+    return {"ok": True, "has_style_guide": bool(text.strip()),
+            "chars": len(text), "style_guide": text}
+
+
+def _set_active_style_guide_impl(conn, doc_id) -> dict:
+    """Switch the active style guide (the one injected into card-gen/revise)."""
+    from src.data import enablement_store as store
+    if not doc_id:
+        return {"ok": False, "error": "doc_id_required"}
+    if store.set_active_style_guide(conn, str(doc_id)):
+        return {"ok": True, "active_doc_id": str(doc_id)}
+    return {"ok": False, "error": "style_guide_not_found"}
+
+
 def _run_monitor_now_impl(conn, source=None) -> dict:
     """Run a one-off poll of the configured monitors (module-level poll_once so
     it works from the separate MCP-server process). Degrades gracefully until the
@@ -249,7 +350,16 @@ def handle_revise_draft(conn, args, filters):
 
 
 def handle_push_guru_draft(conn, args, filters):
-    return _push_guru_draft_impl(conn, args.get("draft_id"), args.get("collection_id"))
+    return _push_guru_draft_impl(conn, args.get("draft_id"),
+                                 args.get("collection_id"), args.get("folder_id"))
+
+
+def handle_list_guru_collections(conn, args, filters):
+    return _list_guru_collections_impl(conn)
+
+
+def handle_list_guru_folders(conn, args, filters):
+    return _list_guru_folders_impl(conn, args.get("collection"))
 
 
 def handle_create_card_draft(conn, args, filters):
@@ -276,6 +386,18 @@ def handle_update_scratchpad(conn, args, filters):
     return _update_scratchpad_impl(conn, args.get("task_id"), args.get("text", ""))
 
 
+def handle_create_asana_subtask(conn, args, filters):
+    return _create_asana_subtask_impl(conn, args.get("task_id"), args.get("text", ""))
+
+
+def handle_post_asana_comment(conn, args, filters):
+    return _post_asana_comment_impl(conn, args.get("task_id"), args.get("text", ""))
+
+
+def handle_update_asana_due_date(conn, args, filters):
+    return _update_asana_due_date_impl(conn, args.get("task_id"), args.get("due_on"))
+
+
 def handle_create_task(conn, args, filters):
     return _create_task_impl(conn, **args)
 
@@ -297,6 +419,18 @@ def handle_search_drive_docs(conn, args, filters):
 
 def handle_get_drive_doc(conn, args, filters):
     return _get_drive_doc_impl(conn, args.get("doc_id"))
+
+
+def handle_list_style_guides(conn, args, filters):
+    return _list_style_guides_impl(conn)
+
+
+def handle_get_style_guide(conn, args, filters):
+    return _get_style_guide_impl(conn)
+
+
+def handle_set_active_style_guide(conn, args, filters):
+    return _set_active_style_guide_impl(conn, args.get("doc_id"))
 
 
 def handle_run_monitor_now(conn, args, filters):

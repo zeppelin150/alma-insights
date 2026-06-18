@@ -49,11 +49,17 @@ def test_chat_context_includes_active_draft(qapp, empty_db):
 def test_dispatch_sends_to_engine(qapp, empty_db):
     page = _page(empty_db)
     page._engine = MagicMock(is_busy=False)
-    # Claude path → no ACP bridge boot (keeps the test subprocess-free).
+    # Claude path → wire a native-MCP Claude client so Renn actually HAS tools.
+    # (UAT fix: this used to be set_client(None) = zero tools on Bedrock.)
+    # Building the client is subprocess-free; the CLI boots lazily on generate().
     with patch("src.gemini.client_factory.resolve_provider_for_task", return_value="claude"):
         page._on_chat("hello renn")
     page._engine.send.assert_called_once_with("hello renn")
-    page._engine.set_client.assert_called_with(None)  # build-per-message for Claude
+    client = page._engine.set_client.call_args[0][0]
+    assert client is not None                       # not the old no-tools None
+    assert page._claude_client is client
+    assert any(s.get("name") == "alma-chat-tools"
+               for s in (getattr(client, "_mcp_config", None) or []))
 
 
 def test_engine_response_refreshes_views(qapp, empty_db):

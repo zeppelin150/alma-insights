@@ -400,15 +400,41 @@ TOOL_DEFINITIONS = [
         "description": (
             "Publish a card draft to Guru — creates a new card, or updates the existing "
             "card if the draft is linked to one. This is the 'push to Guru' action; only "
-            "call it when the operator asked to publish."
+            "call it when the operator asked to publish. To publish into a specific "
+            "sub-folder, first call list_guru_collections + list_guru_folders, then pass "
+            "the chosen collection_id and folder_id."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "draft_id": {"type": "integer", "description": "The draft id to publish."},
                 "collection_id": {"type": "string", "description": "Optional target collection for a new card."},
+                "folder_id": {"type": "string", "description": "Optional target folder (sub-folder) id within the collection."},
             },
             "required": ["draft_id"],
+        },
+    },
+    {
+        "name": "list_guru_collections",
+        "description": (
+            "List the Guru collections (top-level knowledge areas) so you can pick where "
+            "to publish a card. Returns each collection's id and name."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "list_guru_folders",
+        "description": (
+            "List a Guru collection's folders (sub-folders) so you can publish a card into "
+            "the right one. Pass the collection id OR its name; returns each folder's id, "
+            "title, and whether it is the collection's home (root) folder."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "collection": {"type": "string", "description": "Collection id or name to list folders for."},
+            },
+            "required": ["collection"],
         },
     },
     {
@@ -460,6 +486,52 @@ TOOL_DEFINITIONS = [
             "type": "object",
             "properties": {"task_id": {"type": "string"}, "text": {"type": "string"}},
             "required": ["task_id", "text"],
+        },
+    },
+    {
+        "name": "create_asana_subtask",
+        "description": (
+            "Add a subtask to a task AND create it back in Asana under the parent Asana "
+            "task. Use when the operator wants the subtask to appear in Asana too. Saves "
+            "locally and reports whether it synced (it won't for non-Asana tasks)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "The enablement task id."},
+                "text": {"type": "string", "description": "The subtask text."},
+            },
+            "required": ["task_id", "text"],
+        },
+    },
+    {
+        "name": "post_asana_comment",
+        "description": (
+            "Post a comment back to the linked Asana task (a story). Only works for tasks "
+            "that came from Asana."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "The enablement task id."},
+                "text": {"type": "string", "description": "The comment text."},
+            },
+            "required": ["task_id", "text"],
+        },
+    },
+    {
+        "name": "update_asana_due_date",
+        "description": (
+            "Update a task's due date locally AND push it to the linked Asana task. "
+            "due_on is an ISO date (YYYY-MM-DD) or null to clear."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "The enablement task id."},
+                "due_on": {"type": "string", "description": "ISO date YYYY-MM-DD, or null to clear."},
+            },
+            "required": ["task_id"],
         },
     },
     {
@@ -524,6 +596,34 @@ TOOL_DEFINITIONS = [
         "input_schema": {
             "type": "object",
             "properties": {"doc_id": {"type": "string"}},
+            "required": ["doc_id"],
+        },
+    },
+    {
+        "name": "list_style_guides",
+        "description": (
+            "List the operator's stored style guides (the active one is flagged). Use to "
+            "find a style guide before generating or revising a card."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "get_style_guide",
+        "description": (
+            "Read the ACTIVE style guide's full text so you can write or revise a card to "
+            "follow its tone, structure and formatting."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "set_active_style_guide",
+        "description": (
+            "Switch which stored style guide is active (the one injected into card "
+            "generation and revision). Pass the doc_id from list_style_guides."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"doc_id": {"type": "string", "description": "Style-guide doc id to activate."}},
             "required": ["doc_id"],
         },
     },
@@ -870,7 +970,18 @@ def _revise_draft(args: dict, db) -> dict:
 
 def _push_guru_draft(args: dict, db) -> dict:
     from src.data.chat_tools.enablement_tools import _push_guru_draft_impl
-    return _push_guru_draft_impl(_ent_conn(db), args.get("draft_id"), args.get("collection_id"))
+    return _push_guru_draft_impl(_ent_conn(db), args.get("draft_id"),
+                                 args.get("collection_id"), args.get("folder_id"))
+
+
+def _list_guru_collections(args: dict, db) -> dict:
+    from src.data.chat_tools.enablement_tools import _list_guru_collections_impl
+    return _list_guru_collections_impl(_ent_conn(db))
+
+
+def _list_guru_folders(args: dict, db) -> dict:
+    from src.data.chat_tools.enablement_tools import _list_guru_folders_impl
+    return _list_guru_folders_impl(_ent_conn(db), args.get("collection"))
 
 
 def _render_card_preview(args: dict, db) -> dict:
@@ -896,6 +1007,21 @@ def _toggle_subtask(args: dict, db) -> dict:
 def _update_scratchpad(args: dict, db) -> dict:
     from src.data.chat_tools.enablement_tools import _update_scratchpad_impl
     return _update_scratchpad_impl(_ent_conn(db), args.get("task_id"), args.get("text", ""))
+
+
+def _create_asana_subtask(args: dict, db) -> dict:
+    from src.data.chat_tools.enablement_tools import _create_asana_subtask_impl
+    return _create_asana_subtask_impl(_ent_conn(db), args.get("task_id"), args.get("text", ""))
+
+
+def _post_asana_comment(args: dict, db) -> dict:
+    from src.data.chat_tools.enablement_tools import _post_asana_comment_impl
+    return _post_asana_comment_impl(_ent_conn(db), args.get("task_id"), args.get("text", ""))
+
+
+def _update_asana_due_date(args: dict, db) -> dict:
+    from src.data.chat_tools.enablement_tools import _update_asana_due_date_impl
+    return _update_asana_due_date_impl(_ent_conn(db), args.get("task_id"), args.get("due_on"))
 
 
 def _create_enablement_task(args: dict, db) -> dict:
@@ -926,6 +1052,21 @@ def _get_drive_doc(args: dict, db) -> dict:
     return _get_drive_doc_impl(_ent_conn(db), args.get("doc_id"))
 
 
+def _list_style_guides(args: dict, db) -> dict:
+    from src.data.chat_tools.enablement_tools import _list_style_guides_impl
+    return _list_style_guides_impl(_ent_conn(db))
+
+
+def _get_style_guide(args: dict, db) -> dict:
+    from src.data.chat_tools.enablement_tools import _get_style_guide_impl
+    return _get_style_guide_impl(_ent_conn(db))
+
+
+def _set_active_style_guide(args: dict, db) -> dict:
+    from src.data.chat_tools.enablement_tools import _set_active_style_guide_impl
+    return _set_active_style_guide_impl(_ent_conn(db), args.get("doc_id"))
+
+
 def _run_monitor_now(args: dict, db) -> dict:
     from src.data.chat_tools.enablement_tools import _run_monitor_now_impl
     return _run_monitor_now_impl(_ent_conn(db), args.get("source"))
@@ -949,16 +1090,24 @@ _DISPATCH = {
     "create_card_draft": _create_card_draft,
     "revise_draft": _revise_draft,
     "push_guru_draft": _push_guru_draft,
+    "list_guru_collections": _list_guru_collections,
+    "list_guru_folders": _list_guru_folders,
     "render_card_preview": _render_card_preview,
     "draft_subtasks": _draft_subtasks,
     "add_subtask": _add_subtask,
     "toggle_subtask": _toggle_subtask,
     "update_scratchpad": _update_scratchpad,
+    "create_asana_subtask": _create_asana_subtask,
+    "post_asana_comment": _post_asana_comment,
+    "update_asana_due_date": _update_asana_due_date,
     "create_task": _create_enablement_task,
     "update_task": _update_enablement_task,
     "list_tasks": _list_enablement_tasks,
     "search_drive_docs": _search_drive_docs,
     "get_drive_doc": _get_drive_doc,
+    "list_style_guides": _list_style_guides,
+    "get_style_guide": _get_style_guide,
+    "set_active_style_guide": _set_active_style_guide,
     "run_monitor_now": _run_monitor_now,
     "import_guru_card": _import_guru_card,
     "get_guru_analytics": _get_guru_analytics,

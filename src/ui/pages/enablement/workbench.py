@@ -102,13 +102,17 @@ class _DropZone(QFrame):
 class WorkbenchPage(QWidget):
     """Card render canvas + pending-draft picker + Publish & Tools strip."""
 
-    draft_selected = Signal(int)        # pending-draft picked
+    draft_selected = Signal(int)        # workspace chip picked → switch active draft
+    workspace_closed = Signal(int)      # workspace chip's × → close that workspace
+    find_task_requested = Signal()      # "+ Find a task" → host opens the task search
     publish_requested = Signal(str)     # destination key → push the active content
     load_file_requested = Signal(str)   # dropped file path → load content
     open_chat_requested = Signal()      # request the Assistant chat in the drilldown
     existing_cards_requested = Signal() # "Existing Guru card" submenu opened → host fetches real cards
     import_requested = Signal(str)      # "drive" | "guru" → host runs the import
     content_edited = Signal(int, str)   # (draft_id, markdown) from the Edit view
+
+    MAX_WORKSPACES = 4   # work up to 4 cards at once, toggling between chips
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -117,13 +121,26 @@ class WorkbenchPage(QWidget):
         self._active_draft_id = 1
         self._current_drafts = []
         self._chip_widgets = []
+        self._ws_state = {}          # draft_id → {md, html, view, cursor} per workspace
         self._current_md = ""
         self._current_html = None    # cleaned rich HTML for Guru publish (or None)
         self._overlay_host = None    # content_stack, injected by the page
         self._overlay = None         # lazily-built ExpandOverlay
         self._build()
+        self._install_workspace_shortcuts()
         self.set_pending_drafts(_SAMPLE_DRAFTS)
         self.show_draft(_SAMPLE_CARD)
+
+    def _install_workspace_shortcuts(self):
+        """Ctrl+1..4 jump to the Nth open workspace chip."""
+        from PySide6.QtGui import QKeySequence, QShortcut
+        for i in range(1, self.MAX_WORKSPACES + 1):
+            sc = QShortcut(QKeySequence(f"Ctrl+{i}"), self)
+            sc.activated.connect(lambda idx=i - 1: self._switch_to_index(idx))
+
+    def _switch_to_index(self, idx: int):
+        if 0 <= idx < len(self._current_drafts):
+            self.draft_selected.emit(self._current_drafts[idx]["id"])
 
     # ── layout ────────────────────────────────────────────────────
     def _build(self):
@@ -137,16 +154,26 @@ class WorkbenchPage(QWidget):
     def _build_pending_strip(self) -> QHBoxLayout:
         row = QHBoxLayout()
         row.setSpacing(10)
-        lbl = QLabel("PENDING DRAFTS")
+        lbl = QLabel("WORKSPACES")
         lbl.setStyleSheet(f"color:{ALMA_TEXT_LIGHT}; font-size:11px; font-weight:700; letter-spacing:0.7px;")
         row.addWidget(lbl)
-        count = QLabel("3")
+        count = QLabel("0")
         count.setFixedSize(18, 18)
         count.setAlignment(Qt.AlignCenter)
-        count.setStyleSheet("background:#C41E1E; color:white; border-radius:9px; font-size:10px; font-weight:700;")
+        count.setStyleSheet(f"background:{ALMA_GREEN_DARK}; color:white; border-radius:9px; font-size:10px; font-weight:700;")
         row.addWidget(count)
+        self._count_badge = count
         self._pending_row = row
         row.addStretch(1)
+        find_btn = QPushButton("+ Find a task")
+        find_btn.setCursor(Qt.PointingHandCursor)
+        find_btn.setStyleSheet(
+            f"QPushButton{{background:{ALMA_BG_ELEVATED}; color:{ALMA_GREEN_DARK}; "
+            f"border:1px solid {ALMA_BORDER}; border-radius:8px; padding:6px 13px; "
+            f"font-size:12px; font-weight:600;}}"
+        )
+        find_btn.clicked.connect(self.find_task_requested.emit)
+        row.addWidget(find_btn)
         chat_btn = QPushButton("Open Assistant ›")
         chat_btn.setCursor(Qt.PointingHandCursor)
         chat_btn.setStyleSheet(
@@ -157,22 +184,41 @@ class WorkbenchPage(QWidget):
         row.addWidget(chat_btn)
         return row
 
-    def _draft_chip(self, draft: dict, active: bool) -> QPushButton:
-        _, dot = _TINT.get(draft.get("source", "drive"), ("#E4ECF5", ALMA_INFO))
-        btn = QPushButton(f"•  {draft['title']}")
-        btn.setCursor(Qt.PointingHandCursor)
+    def _workspace_chip(self, draft: dict, active: bool) -> QFrame:
+        """A workspace chip: click the title to switch to it, × to close it."""
+        frame = QFrame()
         border = ALMA_GREEN_LIGHT if active else ALMA_BORDER
-        textc = ALMA_GREEN_DARK if active else ALMA_TEXT_MID
-        btn.setStyleSheet(
-            f"QPushButton{{background:{ALMA_BG_ELEVATED}; color:{textc}; text-align:left; "
-            f"border:{'2px' if active else '1px'} solid {border}; border-radius:8px; "
-            f"padding:6px 14px; font-size:12px; font-weight:600;}}"
+        frame.setStyleSheet(
+            f"QFrame{{background:{ALMA_BG_ELEVATED}; border:{'2px' if active else '1px'} "
+            f"solid {border}; border-radius:8px;}}"
         )
-        btn.clicked.connect(lambda: self.draft_selected.emit(draft["id"]))
-        return btn
+        h = QHBoxLayout(frame)
+        h.setContentsMargins(12, 3, 6, 3)
+        h.setSpacing(6)
+        textc = ALMA_GREEN_DARK if active else ALMA_TEXT_MID
+        title = QPushButton(f"•  {draft['title']}")
+        title.setCursor(Qt.PointingHandCursor)
+        title.setStyleSheet(
+            f"QPushButton{{background:transparent; color:{textc}; border:none; "
+            f"text-align:left; font-size:12px; font-weight:600;}}"
+        )
+        title.clicked.connect(lambda: self.draft_selected.emit(draft["id"]))
+        h.addWidget(title)
+        close = QPushButton("×")
+        close.setCursor(Qt.PointingHandCursor)
+        close.setFixedSize(16, 16)
+        close.setStyleSheet(
+            f"QPushButton{{background:transparent; color:{ALMA_TEXT_LIGHT}; border:none; "
+            f"font-size:15px; font-weight:700;}}QPushButton:hover{{color:{ALMA_GREEN_DARK};}}"
+        )
+        close.clicked.connect(lambda: self.workspace_closed.emit(draft["id"]))
+        h.addWidget(close)
+        return frame
 
     def set_pending_drafts(self, drafts: list[dict], active_id=None):
-        self._current_drafts = list(drafts)
+        """Set the open workspace chips (capped at MAX_WORKSPACES)."""
+        drafts = list(drafts)[: self.MAX_WORKSPACES]
+        self._current_drafts = drafts
         ids = [d["id"] for d in drafts]
         if active_id is not None:
             self._active_draft_id = active_id
@@ -184,9 +230,85 @@ class WorkbenchPage(QWidget):
             chip.deleteLater()
         self._chip_widgets = []
         for idx, d in enumerate(drafts):
-            chip = self._draft_chip(d, active=d["id"] == self._active_draft_id)
+            chip = self._workspace_chip(d, active=d["id"] == self._active_draft_id)
             self._pending_row.insertWidget(2 + idx, chip)   # after label+count, before stretch
             self._chip_widgets.append(chip)
+        # drop cached state for workspaces that are no longer open
+        if getattr(self, "_ws_state", None):
+            self._ws_state = {k: v for k, v in self._ws_state.items() if k in ids}
+        try:
+            self._count_badge.setText(str(len(drafts)))
+        except Exception:
+            pass
+
+    def open_workspace(self, draft: dict):
+        """Open a draft as a workspace: activate it if already open, else add a
+        chip (dropping the oldest when already at MAX_WORKSPACES)."""
+        cur = list(self._current_drafts)
+        ids = [d["id"] for d in cur]
+        if draft["id"] in ids:
+            self.switch_workspace(draft["id"])      # restore its cached state
+            return
+        old = self._active_draft_id
+        if old is not None and old != draft["id"] and old in ids:
+            self._snapshot_workspace(old)           # preserve the outgoing edits
+        if len(cur) >= self.MAX_WORKSPACES:
+            self._ws_state.pop(cur[0]["id"], None)
+            cur = cur[1:]
+        cur.append(draft)
+        self.set_pending_drafts(cur, active_id=draft["id"])
+
+    # ── per-workspace edit state (preserved across chip switches) ────
+    def _current_view_mode(self) -> str:
+        cur = self._body_stack.currentWidget()
+        if cur is self._editor:
+            return "edit"
+        if cur is self._rich:
+            return "rich"
+        return "preview"
+
+    def _snapshot_workspace(self, draft_id):
+        """Capture the active workspace's live state (incl. unsaved edits + cursor)."""
+        view = self._current_view_mode()
+        md, html, cursor = self._current_md, self._current_html, 0
+        try:
+            if view == "edit":
+                md = self._editor.toPlainText()
+                cursor = self._editor.textCursor().position()
+            elif view == "rich":
+                md = self._rich.to_markdown()
+                html = self._rich.to_clean_html()
+        except Exception:
+            pass
+        self._ws_state[draft_id] = {"md": md, "html": html, "view": view, "cursor": cursor}
+
+    def _restore_workspace(self, draft_id) -> bool:
+        st = self._ws_state.get(draft_id)
+        if not st:
+            return False
+        self._current_md = st["md"]
+        self._current_html = st.get("html")
+        self._render_body()
+        self._set_view(st.get("view", "preview"))
+        if st.get("view") == "edit":
+            try:
+                cur = self._editor.textCursor()
+                cur.setPosition(min(int(st.get("cursor", 0)), len(self._editor.toPlainText())))
+                self._editor.setTextCursor(cur)
+            except Exception:
+                pass
+        return True
+
+    def switch_workspace(self, draft_id, card=None):
+        """Switch to a workspace: snapshot the outgoing one's edit state, restore
+        this one's (view + unsaved markdown + cursor) if seen before, else show the
+        card. This is how chip clicks + Ctrl+N keep 4 cards in flight at once."""
+        old = self._active_draft_id
+        if old is not None and old != draft_id:
+            self._snapshot_workspace(old)
+        self.set_active_draft(draft_id)
+        if not self._restore_workspace(draft_id) and card is not None:
+            self.show_draft(card)
 
     def _build_card_panel(self) -> QFrame:
         card = _card_frame()

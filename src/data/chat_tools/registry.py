@@ -87,16 +87,24 @@ def _ensure_registered():
         handle_create_card_draft,
         handle_revise_draft,
         handle_push_guru_draft,
+        handle_list_guru_collections,
+        handle_list_guru_folders,
         handle_render_card_preview,
         handle_draft_subtasks,
         handle_add_subtask,
         handle_toggle_subtask,
         handle_update_scratchpad,
+        handle_create_asana_subtask,
+        handle_post_asana_comment,
+        handle_update_asana_due_date,
         handle_create_task,
         handle_update_task,
         handle_list_tasks,
         handle_search_drive_docs,
         handle_get_drive_doc,
+        handle_list_style_guides,
+        handle_get_style_guide,
+        handle_set_active_style_guide,
         handle_run_monitor_now,
     )
     _register("search_local_documents", handle_search_local_documents,
@@ -113,7 +121,11 @@ def _ensure_registered():
     _register("revise_draft", handle_revise_draft,
               phi_level=0, desc="Revise a Guru card draft with an instruction and re-render it")
     _register("push_guru_draft", handle_push_guru_draft,
-              phi_level=0, desc="Publish a card draft to Guru (creates a new card or updates an existing one)")
+              phi_level=0, desc="Publish a card draft to Guru (creates a new card or updates an existing one); optional collection_id + folder_id target a sub-folder")
+    _register("list_guru_collections", handle_list_guru_collections,
+              phi_level=0, desc="List Guru collections to choose a publish target")
+    _register("list_guru_folders", handle_list_guru_folders,
+              phi_level=0, desc="List a Guru collection's folders (sub-folders) by collection id or name")
     _register("render_card_preview", handle_render_card_preview,
               phi_level=0, desc="Return a draft's current title + content for preview")
     _register("draft_subtasks", handle_draft_subtasks,
@@ -124,6 +136,13 @@ def _ensure_registered():
               phi_level=0, desc="Check or uncheck a subtask")
     _register("update_scratchpad", handle_update_scratchpad,
               phi_level=0, desc="Write freeform notes on a task")
+    # ── Asana write-back (two-way sync) ──
+    _register("create_asana_subtask", handle_create_asana_subtask,
+              phi_level=0, desc="Add a subtask AND create it back in Asana under the parent task")
+    _register("post_asana_comment", handle_post_asana_comment,
+              phi_level=0, desc="Post a comment back to the linked Asana task")
+    _register("update_asana_due_date", handle_update_asana_due_date,
+              phi_level=0, desc="Update a task's due date locally and push it to the linked Asana task")
     _register("create_task", handle_create_task,
               phi_level=0, desc="Create an enablement task")
     _register("update_task", handle_update_task,
@@ -132,6 +151,12 @@ def _ensure_registered():
               phi_level=0, desc="List enablement tasks with optional filters")
     _register("search_drive_docs", handle_search_drive_docs,
               phi_level=0, desc="Search indexed Drive documents")
+    _register("list_style_guides", handle_list_style_guides,
+              phi_level=0, desc="List the operator's stored style guides (the active one is flagged)")
+    _register("get_style_guide", handle_get_style_guide,
+              phi_level=0, desc="Read the active style guide's text so a card can be written to follow it")
+    _register("set_active_style_guide", handle_set_active_style_guide,
+              phi_level=0, desc="Switch which stored style guide is active (injected into card generation/revision)")
     _register("get_drive_doc", handle_get_drive_doc,
               phi_level=0, desc="Get one indexed Drive document by id")
     _register("run_monitor_now", handle_run_monitor_now,

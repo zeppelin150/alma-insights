@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
 from src.ui.pages.enablement._common import card_frame, field, pill, section_label, toggle
 from src.ui.theme import (
     ALMA_BG_ELEVATED, ALMA_BG_INSET, ALMA_BORDER, ALMA_CREAM, ALMA_GREEN_DARK,
-    ALMA_INFO, ALMA_SUCCESS, ALMA_TEXT_DARK, ALMA_TEXT_LIGHT, ALMA_TEXT_MID,
+    ALMA_GREEN_LIGHT, ALMA_INFO, ALMA_SUCCESS, ALMA_TEXT_DARK, ALMA_TEXT_LIGHT, ALMA_TEXT_MID,
     ALMA_TEXT_ON_DARK, ALMA_WARNING,
 )
 
@@ -23,7 +23,9 @@ class SettingsPage(QWidget):
 
     asana_setup_requested = Signal()       # "Set up with Renn" clicked
     drive_folder_added = Signal(str, str)  # (folder_id, display_name) from "+ Add folder"
-    style_guide_action = Signal(str)       # "paste" | "drive" | "clear"
+    style_guide_action = Signal(str)       # "paste" | "upload" | "drive" | "clear"
+    style_guide_activate = Signal(str)     # doc_id → make this stored guide active
+    style_guide_delete = Signal(str)       # doc_id → delete this stored guide
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -181,13 +183,19 @@ class SettingsPage(QWidget):
         self._style_guide_status = self._text("Not set", color=ALMA_TEXT_LIGHT)
         row.addWidget(self._style_guide_status)
         row.addStretch(1)
-        from_drive = QPushButton("From Drive…")
-        from_drive.setCursor(Qt.PointingHandCursor)
-        from_drive.setStyleSheet(
+        _btn_css = (
             f"QPushButton{{background:{ALMA_BG_ELEVATED}; color:{ALMA_TEXT_DARK}; "
             f"border:1px solid {ALMA_BORDER}; border-radius:7px; padding:5px 12px; "
             f"font-size:11px; font-weight:600;}}"
         )
+        upload = QPushButton("Upload…")
+        upload.setCursor(Qt.PointingHandCursor)
+        upload.setStyleSheet(_btn_css)
+        upload.clicked.connect(lambda: self.style_guide_action.emit("upload"))
+        row.addWidget(upload)
+        from_drive = QPushButton("From Drive…")
+        from_drive.setCursor(Qt.PointingHandCursor)
+        from_drive.setStyleSheet(_btn_css)
         from_drive.clicked.connect(lambda: self.style_guide_action.emit("drive"))
         row.addWidget(from_drive)
         clear = QPushButton("Clear")
@@ -200,11 +208,74 @@ class SettingsPage(QWidget):
         row.addWidget(clear)
         v.addLayout(row)
         hint = self._text(
-            "Card generation and Renn's revisions follow this guide when set.",
+            "Card generation and Renn's revisions follow the active guide. Upload "
+            "several — the active one is used; switch or remove them below.",
             color=ALMA_TEXT_LIGHT,
         )
         v.addWidget(hint)
+        self._sg_library = QVBoxLayout()
+        self._sg_library.setSpacing(4)
+        v.addLayout(self._sg_library)
         return card
+
+    def set_style_guides(self, guides: list):
+        """Render the stored style-guide library (active flagged; switch / delete)."""
+        lib = getattr(self, "_sg_library", None)
+        if lib is None:
+            return
+        while lib.count():
+            item = lib.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        for g in guides or []:
+            lib.addWidget(self._sg_row(g))
+
+    def _sg_row(self, g: dict) -> QWidget:
+        doc_id = g.get("doc_id", "")
+        name = (g.get("name", "") or "Untitled").replace("[STYLE-GUIDE]", "").strip()
+        active = bool(g.get("active"))
+        frame = QFrame()
+        frame.setStyleSheet(
+            f"QFrame{{background:{ALMA_BG_ELEVATED}; border:1px solid "
+            f"{ALMA_GREEN_LIGHT if active else ALMA_BORDER}; border-radius:7px;}}"
+        )
+        h = QHBoxLayout(frame)
+        h.setContentsMargins(10, 5, 8, 5)
+        h.setSpacing(8)
+        lbl = QLabel(name)
+        lbl.setStyleSheet(
+            f"color:{ALMA_TEXT_DARK}; font-size:12px; font-weight:600; border:none;")
+        h.addWidget(lbl)
+        chars = g.get("chars")
+        if chars is not None:
+            c = QLabel(f"{int(chars):,} chars")
+            c.setStyleSheet(f"color:{ALMA_TEXT_LIGHT}; font-size:10.5px; border:none;")
+            h.addWidget(c)
+        h.addStretch(1)
+        if active:
+            badge_lbl = QLabel("Active")
+            badge_lbl.setStyleSheet(
+                f"background:{ALMA_GREEN_LIGHT}; color:{ALMA_GREEN_DARK}; border:none; "
+                f"border-radius:6px; padding:2px 9px; font-size:10.5px; font-weight:700;")
+            h.addWidget(badge_lbl)
+        else:
+            act = QPushButton("Make active")
+            act.setCursor(Qt.PointingHandCursor)
+            act.setStyleSheet(
+                f"QPushButton{{background:transparent; color:{ALMA_GREEN_DARK}; "
+                f"border:1px solid {ALMA_BORDER}; border-radius:6px; padding:3px 9px; "
+                f"font-size:10.5px; font-weight:600;}}")
+            act.clicked.connect(lambda _=False, d=doc_id: self.style_guide_activate.emit(d))
+            h.addWidget(act)
+        rm = QPushButton("Delete")
+        rm.setCursor(Qt.PointingHandCursor)
+        rm.setStyleSheet(
+            f"QPushButton{{background:transparent; color:{ALMA_TEXT_LIGHT}; border:none; "
+            f"font-size:10.5px; font-weight:600;}}")
+        rm.clicked.connect(lambda _=False, d=doc_id: self.style_guide_delete.emit(d))
+        h.addWidget(rm)
+        return frame
 
     def set_style_guide_status(self, text: str):
         try:

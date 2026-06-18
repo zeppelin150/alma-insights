@@ -46,8 +46,16 @@ RENN_SYSTEM_PROMPT = (
     "- Work a card draft: render_card_preview (read the current draft), revise_draft "
     "(apply an edit and re-render), push_guru_draft (publish to Guru). Use the active "
     "draft id from the [ENABLEMENT SCOPE] context unless the user names another draft.\n"
+    "- Choose where to publish: list_guru_collections, then list_guru_folders (pass a "
+    "collection id or name) to find the sub-folder; pass collection_id + folder_id to "
+    "push_guru_draft to publish a card straight into that folder.\n"
+    "- Style guides: list_style_guides (find them), get_style_guide (read the active "
+    "one to follow it), set_active_style_guide (switch which one card generation uses).\n"
     "- Manage work: list_tasks, create_task, update_task, draft_subtasks, add_subtask, "
     "toggle_subtask, update_scratchpad.\n"
+    "- Two-way Asana: create_asana_subtask (adds a subtask AND creates it in Asana), "
+    "post_asana_comment (comment on the linked Asana task), update_asana_due_date "
+    "(set the due date locally and in Asana). These act only on Asana-sourced tasks.\n"
     "- Set up Asana: asana_discover (find projects + field/enum GIDs), then "
     "set_asana_board_config (save the board config). Never ask the user for GIDs — "
     "discover them yourself.\n"
@@ -93,6 +101,7 @@ class EnablementPage(QWidget):
     connection_status_ready = Signal(str, bool, str)  # (source_key, ok, detail) from the check worker
     import_finished = Signal(dict)  # off-thread import result → UI refresh
     analytics_synced = Signal(dict)  # off-thread Guru analytics sync result
+    task_action_done = Signal(dict)  # off-thread Asana write-back result
     pptx_modeled = Signal(dict)      # off-thread deck-model result
     zendesk_synced = Signal(dict)    # off-thread Zendesk sync result
 
@@ -107,6 +116,7 @@ class EnablementPage(QWidget):
         self._drilldown = None
         self._all_tasks = []
         self._warm_bridge = None
+        self._claude_client = None
         self._engine = None
         self._chat_session_id = None
         self._existing_cards_loaded = False
@@ -175,6 +185,8 @@ class EnablementPage(QWidget):
             lambda: self._send_quick("Draft a subtask checklist to ship the current card and attach it to the task."))
         # workbench actions
         self.workbench.draft_selected.connect(self._on_draft_selected)
+        self.workbench.find_task_requested.connect(self._open_task_search)
+        self.workbench.workspace_closed.connect(self._on_workspace_closed)
         self.workbench.publish_requested.connect(self._on_publish)
         self.workbench.load_file_requested.connect(self._on_load_file)
         self.workbench.open_chat_requested.connect(self._open_chat)
@@ -185,6 +197,8 @@ class EnablementPage(QWidget):
         self.workbench.content_edited.connect(self._on_content_edited)
         self.settings.drive_folder_added.connect(self._add_drive_folder)
         self.settings.style_guide_action.connect(self._on_style_guide_action)
+        self.settings.style_guide_activate.connect(self._on_style_guide_activate)
+        self.settings.style_guide_delete.connect(self._on_style_guide_delete)
         self.import_finished.connect(self._on_import_finished)
         self.connection_status_ready.connect(
             lambda key, ok, detail: self.settings.set_connection_status(key, ok, detail))
@@ -194,6 +208,7 @@ class EnablementPage(QWidget):
         self.analytics.comment_task_requested.connect(self._on_comment_task)
         self.analytics.targeted_update_requested.connect(self._on_targeted_update)
         self.analytics_synced.connect(self._on_analytics_synced)
+        self.task_action_done.connect(self._on_task_action_done)
         self.calendar.event_activated.connect(self._on_calendar_event_activated)
         # PowerPoint
         self.pptx.model_topic_requested.connect(self._on_pptx_model_topic)
@@ -325,10 +340,12 @@ class EnablementPage(QWidget):
         for t in task_list:
             subs = tasks.list_subtasks(conn, t["task_id"])
             rows.append({
+                "task_id": t["task_id"],
                 "status": t["status"] if t["status"] in ("open", "in_progress", "done") else "open",
                 "title": t["title"],
                 "source": t["source"] if t["source"] in ("drive", "guru", "asana") else "drive",
                 "due": self._fmt_due(t.get("due_date")),
+                "due_iso": (t.get("due_date") or "")[:10],
                 "priority": t.get("priority") or "normal",
                 "assignee": t.get("assignee") or "—",
                 "subs": f"{t.get('subtask_done', 0)} / {t.get('subtask_total', 0)}",
@@ -432,8 +449,42 @@ class EnablementPage(QWidget):
     def _on_draft_selected(self, draft_id):
         d = self._drafts.get(int(draft_id))
         if d:
-            self.workbench.set_active_draft(int(draft_id))
-            self.workbench.show_draft(self._card_from_draft(self._conn(), d))
+            # switch_workspace preserves each workspace's unsaved edits + view + cursor
+            self.workbench.switch_workspace(
+                int(draft_id), self._card_from_draft(self._conn(), d))
+
+    def _open_task_search(self):
+        """'+ Find a task' → search drafts and open the chosen one as a workspace."""
+        from src.ui.pages.enablement.task_search import TaskSearchDialog
+        conn = self._conn()
+        dlg = TaskSearchDialog(conn, self)
+        if dlg.exec() and dlg.selected_draft_id is not None:
+            self._open_draft_workspace(int(dlg.selected_draft_id))
+
+    def _open_draft_workspace(self, draft_id: int):
+        """Load a draft (even if not currently in the pending set) into a workspace."""
+        from src.data import enablement_store as store
+        conn = self._conn()
+        d = self._drafts.get(draft_id) or store.get_draft(conn, draft_id)
+        if not d:
+            self._set_status("That draft could not be opened.")
+            return
+        self._drafts[draft_id] = d
+        chip = {"id": draft_id,
+                "title": (d.get("title") or "Untitled").split(" — ")[0],
+                "source": "drive"}
+        self.workbench.open_workspace(chip)
+        self.workbench.show_draft(self._card_from_draft(conn, d))
+        self.tabs.setCurrentWidget(self.workbench)
+
+    def _on_workspace_closed(self, draft_id):
+        """Close a workspace chip; activate the next open one (if any)."""
+        cur = [d for d in self.workbench._current_drafts if d["id"] != int(draft_id)]
+        new_active = cur[0]["id"] if cur else None
+        self.workbench.set_pending_drafts(cur, active_id=new_active)
+        if new_active is not None and new_active in self._drafts:
+            self.workbench.show_draft(
+                self._card_from_draft(self._conn(), self._drafts[new_active]))
 
     def _on_chat(self, text: str):
         # ChatPanel already appended the user's bubble; just dispatch to the engine.
@@ -556,21 +607,27 @@ class EnablementPage(QWidget):
             logger.debug("enablement session create failed: %s", exc)
 
     def _prepare_provider(self):
-        """Boot the Gemini ACP warm bridge, or drop it for the Claude path."""
+        """Wire Renn's tools for the active provider.
+
+        BOTH providers need the chat-tool MCP server wired the SAME way, or Renn
+        has no tools: the Gemini warm bridge gets ``set_mcp_config`` (ACP native
+        tools); the Claude/Bedrock CLI client ALSO needs ``set_mcp_config`` so
+        ``claude -p`` runs the tool loop natively (Claude refuses text-injected
+        tool results). Previously the Claude branch did ``set_client(None)`` and
+        the per-message client was never given the MCP config — so Renn on the
+        Claude route had ZERO tools (the UAT failure).
+        """
         try:
             from src.gemini.client_factory import resolve_provider_for_task
             prov = resolve_provider_for_task("enablement_chat")
         except Exception:
             prov = "gemini"
         if prov == "gemini":
+            self._teardown_claude_client()
             self._ensure_warm_bridge()
         else:
-            if self._warm_bridge is not None:
-                self._on_bridge_recycle()
-            try:
-                self._engine.set_client(None)   # Claude builds a client per message
-            except Exception:
-                pass
+            self._teardown_warm_bridge()
+            self._ensure_claude_client()
 
     def _ensure_warm_bridge(self):
         if self._warm_bridge is not None or self._engine is None:
@@ -585,13 +642,55 @@ class EnablementPage(QWidget):
             logger.warning("Enablement warm bridge boot failed: %s", exc)
             self._warm_bridge = None
 
-    def _on_bridge_recycle(self):
+    def _ensure_claude_client(self):
+        """Build a native-MCP-wired Claude CLI client (the Bedrock/Claude route).
+
+        Mirrors _ensure_warm_bridge: the chat_mcp tool server is wired via
+        ``set_mcp_config`` so ``claude -p`` exposes the enablement tools to Claude
+        natively and runs the tool loop itself. Kept warm + reused; falls back to
+        a per-message client (no tools) only if the build fails.
+        """
+        if self._engine is None:
+            return
+        if self._claude_client is not None:
+            self._engine.set_client(self._claude_client)
+            return
+        try:
+            from src.gemini.client_factory import build_client_for_task
+            client = build_client_for_task("enablement_chat")
+            if client is not None and hasattr(client, "set_mcp_config"):
+                client.set_mcp_config(self._build_mcp_config())
+            self._claude_client = client
+            self._engine.set_client(client)
+        except Exception as exc:  # noqa: BLE001 — degrade to a per-message client
+            logger.warning("Enablement Claude client wiring failed: %s", exc)
+            self._claude_client = None
+            try:
+                self._engine.set_client(None)
+            except Exception:
+                pass
+
+    def _teardown_warm_bridge(self):
         if self._warm_bridge is not None:
             try:
                 self._warm_bridge.shutdown()
             except Exception:
                 pass
             self._warm_bridge = None
+
+    def _teardown_claude_client(self):
+        if self._claude_client is not None:
+            try:
+                self._claude_client.shutdown()
+            except Exception:
+                pass
+            self._claude_client = None
+
+    def _on_bridge_recycle(self):
+        # Degraded-quality recycle (or provider switch): drop whichever warm
+        # client we hold so the next send rebuilds + re-wires the MCP tools.
+        self._teardown_warm_bridge()
+        self._teardown_claude_client()
 
     def _on_engine_response(self, text: str):
         self.chat.add_message("a", text)
@@ -1318,6 +1417,28 @@ class EnablementPage(QWidget):
                 else:
                     store.clear_style_guide()
                     self._set_status("Style guide cleared.")
+        elif action == "upload":
+            from PySide6.QtWidgets import QFileDialog
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Upload style guide", "",
+                "Documents (*.md *.markdown *.txt *.docx *.html *.htm)")
+            if path:
+                try:
+                    text = self._read_local_text(path)
+                except Exception as exc:  # noqa: BLE001
+                    self._set_status(f"Could not read that file: {exc}")
+                    return
+                if text.strip():
+                    import os
+                    import re
+                    stem = os.path.splitext(os.path.basename(path))[0]
+                    slug = re.sub(r"[^a-z0-9]+", "-", stem.lower()).strip("-") or "guide"
+                    store.set_style_guide(conn, text, name=stem,
+                                          doc_id=f"style-guide-{slug}")
+                    self._set_status(
+                        f"Style guide “{stem}” uploaded — card generation now follows it.")
+                else:
+                    self._set_status("That file was empty — style guide unchanged.")
         elif action == "drive":
             if self.demo:
                 store.set_style_guide(
@@ -1344,13 +1465,30 @@ class EnablementPage(QWidget):
     def _refresh_style_guide_status(self):
         try:
             from src.data import enablement_store as store
-            text = store.get_style_guide(self._conn())
+            conn = self._conn()
+            text = store.get_style_guide(conn)
             if text.strip():
                 self.settings.set_style_guide_status(f"Set — {len(text):,} chars")
             else:
                 self.settings.set_style_guide_status("Not set")
+            try:
+                self.settings.set_style_guides(store.list_style_guides(conn))
+            except Exception:
+                pass
         except Exception:
             pass
+
+    def _on_style_guide_activate(self, doc_id):
+        from src.data import enablement_store as store
+        if store.set_active_style_guide(self._conn(), str(doc_id)):
+            self._set_status("Active style guide switched.")
+        self._refresh_style_guide_status()
+
+    def _on_style_guide_delete(self, doc_id):
+        from src.data import enablement_store as store
+        store.delete_style_guide(self._conn(), str(doc_id))
+        self._set_status("Style guide removed.")
+        self._refresh_style_guide_status()
 
     def _on_asana_setup(self):
         """Setup mode: Renn discovers Asana GIDs and writes the (scoped) board config."""
@@ -1419,8 +1557,63 @@ class EnablementPage(QWidget):
             return
         panel = TaskDetailPanel(task)
         panel.open_in_workbench.connect(lambda: self.tabs.setCurrentWidget(self.workbench))
+        tid = task.get("task_id")
+        if tid:
+            panel.subtask_added.connect(
+                lambda text, tid=tid: self._run_task_writeback("create_subtask_in_asana", tid, text))
+            panel.comment_posted.connect(
+                lambda text, tid=tid: self._run_task_writeback("post_comment_to_asana", tid, text))
+            panel.due_changed.connect(
+                lambda due, tid=tid: self._run_task_writeback("update_due_in_asana", tid, due or None))
+        self._open_task_title = task.get("title")
         self._drilldown.show_widget("Task", task.get("source", "").capitalize(), panel)
         self._set_status(f"Opened “{task.get('title', 'task')}”.")
+
+    def _run_task_writeback(self, fn_name: str, task_id: str, *args):
+        """Run an Asana write-back off-thread (the API call can block), then refresh."""
+        import threading
+        self._set_status("Syncing with Asana…")
+        db_path = self._engine_db_path()
+
+        def worker():
+            res = {"ok": False, "error": "unknown"}
+            conn = None
+            try:
+                from src.data.connection_factory import get_connection
+                from src.data import asana_writeback as awb
+                conn = get_connection(db_path)
+                res = getattr(awb, fn_name)(conn, task_id, *args)
+            except Exception as exc:  # noqa: BLE001
+                res = {"ok": False, "error": str(exc)}
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+            self.task_action_done.emit(res or {})
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_task_action_done(self, res: dict):
+        if res.get("ok"):
+            if res.get("synced") is True:
+                self._set_status("Done — synced to Asana.")
+            elif res.get("synced") is False:
+                note = res.get("note")
+                self._set_status(f"Saved locally{(' — ' + note) if note else ''}.")
+            else:
+                self._set_status("Done.")
+        else:
+            self._set_status(f"Asana action failed: {res.get('error', 'unknown')}")
+        # Refresh the task views, then re-open the same task's detail with fresh data.
+        try:
+            self._load_live()
+            title = getattr(self, "_open_task_title", None)
+            if title:
+                self._show_task_detail(self._find_task(title))
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("task refresh after action failed: %s", exc)
 
     # ── GuruPage-compat setters (so main_window wiring is drop-in) ──
     def set_guru_client(self, client=None, *_a, **_k):

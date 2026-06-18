@@ -58,6 +58,50 @@ class AsanaClient:
             payload = json.loads(resp.read().decode("utf-8"))
         return payload.get("data")
 
+    def _send(self, method: str, path: str, body: dict):
+        """POST/PUT helper. Asana wraps request bodies in {"data": {...}}."""
+        url = f"{_BASE}{path}"
+        data = json.dumps({"data": body}).encode("utf-8")
+        req = urllib.request.Request(url, data=data, method=method, headers={
+            "Authorization": f"Bearer {self.api_key}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        })
+        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+        return payload.get("data")
+
+    # ── writes (Renn write-back; gated by the caller) ─────────────
+    def create_subtask(self, parent_gid: str, name: str, *,
+                       assignee_gid: str | None = None,
+                       due_on: str | None = None) -> dict:
+        """Create a real subtask under an Asana task.
+
+        ``POST /tasks/{parent_gid}/subtasks`` with {name, assignee?, due_on?}.
+        Returns the created subtask (carries its ``gid``).
+        """
+        body: dict = {"name": name}
+        if assignee_gid:
+            body["assignee"] = assignee_gid
+        if due_on:
+            body["due_on"] = due_on
+        return self._send("POST", f"/tasks/{parent_gid}/subtasks", body) or {}
+
+    def add_comment(self, task_gid: str, text: str) -> dict:
+        """Post a comment (story) on an Asana task.
+
+        ``POST /tasks/{task_gid}/stories`` with {text}. Returns the story.
+        """
+        return self._send("POST", f"/tasks/{task_gid}/stories", {"text": text}) or {}
+
+    def update_due_date(self, task_gid: str, due_on: str | None) -> dict:
+        """Set/clear an Asana task's due date.
+
+        ``PUT /tasks/{task_gid}`` with {due_on}. Pass an ISO date (YYYY-MM-DD)
+        or None to clear. Returns the updated task.
+        """
+        return self._send("PUT", f"/tasks/{task_gid}", {"due_on": due_on or None}) or {}
+
     # ── reads ─────────────────────────────────────────────────────
     def test_connection(self) -> tuple[bool, str]:
         """Return (ok, name-or-error). Use to validate a pasted key."""
@@ -114,6 +158,18 @@ class AsanaClient:
         if modified_since:
             params["modified_since"] = modified_since
         return self._get("/tasks", params) or []
+
+    def get_task(self, task_gid: str, *,
+                 opt_fields: str = "name,due_on,completed,assignee.name,modified_at") -> dict:
+        """Fetch a single task's current state (for read-back reconciliation)."""
+        return self._get(f"/tasks/{task_gid}", {"opt_fields": opt_fields}) or {}
+
+    def list_subtasks(self, task_gid: str, *, limit: int = 100) -> list[dict]:
+        """List an Asana task's subtasks (gid + name + completed) for read-back."""
+        data = self._get(f"/tasks/{task_gid}/subtasks",
+                         {"opt_fields": "name,completed", "limit": limit}) or []
+        return [{"gid": s["gid"], "name": s.get("name", ""),
+                 "completed": bool(s.get("completed"))} for s in data]
 
     def list_workspace_users(self, workspace_gid: str) -> list[dict]:
         """Workspace members (gid → name/email) for resolving people fields."""

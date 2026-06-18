@@ -131,6 +131,52 @@ class GuruClient:
         results = data if isinstance(data, list) else []
         return self._normalize_cards(results)
 
+    def list_folders(self, collection_id: str | None = None) -> list[dict]:
+        """List Guru folders — the sub-folder model that replaced Boards (2022).
+
+        ``GET /folders`` (optionally ``?collection={id}``). The folder whose
+        ``home`` flag is set is the collection's root. Returns dicts with keys:
+        id, title, slug, home, item_count, collection_id, collection_name.
+        """
+        path = "/folders"
+        if collection_id:
+            path += f"?collection={urllib.parse.quote(collection_id)}"
+        data = self._request("GET", path)
+        out = []
+        for f in (data if isinstance(data, list) else []):
+            if not isinstance(f, dict):
+                continue
+            coll = f.get("collection") or {}
+            out.append({
+                "id": f.get("id", ""),
+                "title": f.get("title", ""),
+                "slug": f.get("slug", ""),
+                "home": bool(f.get("home")),
+                "item_count": f.get("numberOfFacts", 0),
+                "collection_id": coll.get("id", "") if isinstance(coll, dict) else "",
+                "collection_name": coll.get("name", "") if isinstance(coll, dict) else "",
+            })
+        return out
+
+    def get_folder_items(self, folder_id: str) -> list[dict]:
+        """List a folder's items — cards AND nested sub-folders.
+
+        ``GET /folders/{id}/items``. Returns dicts with keys: id, item_id,
+        type ('card'|'folder'), title.
+        """
+        data = self._request("GET", f"/folders/{folder_id}/items")
+        out = []
+        for it in (data if isinstance(data, list) else []):
+            if not isinstance(it, dict):
+                continue
+            out.append({
+                "id": it.get("id", ""),
+                "item_id": it.get("itemId", ""),
+                "type": it.get("type", ""),
+                "title": it.get("preferredPhrase") or it.get("title", ""),
+            })
+        return out
+
     def update_card(self, card_id: str, content: str,
                     title: str | None = None) -> dict:
         """Update card content.
@@ -154,11 +200,17 @@ class GuruClient:
         return data if isinstance(data, dict) else {}
 
     def create_card(self, collection_id: str, title: str,
-                    content: str) -> dict:
-        """Create a new card in a Guru collection.
+                    content: str, folder_ids: list[str] | None = None) -> dict:
+        """Create a new card in a Guru collection, optionally inside folders.
 
         **HUMAN-GATED ONLY** — never called without explicit user
         approval in the UI.
+
+        When ``folder_ids`` is given the card is created via
+        ``POST /cards/extended`` with a ``folderIds`` array, landing it directly
+        in the chosen sub-folder(s) (Guru's current model: Collection → Folder →
+        Card). With no folders it uses the plain ``POST /cards`` collection-root
+        create, unchanged for existing callers.
         """
         payload = {
             "preferredPhrase": title,
@@ -166,8 +218,15 @@ class GuruClient:
             "collection": {"id": collection_id},
             "shareStatus": "TEAM",
         }
-        data = self._request("POST", "/cards", body=payload)
-        logger.info("Created Guru card '%s' in collection %s", title, collection_id)
+        folder_ids = [f for f in (folder_ids or []) if f]
+        if folder_ids:
+            payload["folderIds"] = folder_ids
+            data = self._request("POST", "/cards/extended", body=payload)
+            logger.info("Created Guru card '%s' in collection %s folders %s",
+                        title, collection_id, folder_ids)
+        else:
+            data = self._request("POST", "/cards", body=payload)
+            logger.info("Created Guru card '%s' in collection %s", title, collection_id)
         return data if isinstance(data, dict) else {}
 
     # ── Credential Persistence ──────────────────────────────────

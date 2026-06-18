@@ -46,6 +46,7 @@ class StubGuru:
         ]
         self.analytics_calls = []
         self.fail_stats = False
+        self.fail_comments_for = set()
 
     def get_team_id(self):
         return "team-1"
@@ -63,6 +64,10 @@ class StubGuru:
         return [dict(c) for c in self.unverified]
 
     def get_card_comments(self, card_id, status=None, **kw):
+        if card_id in self.fail_comments_for:
+            raise RuntimeError(
+                "Guru API error 400: Comment operations can not be "
+                "applied to a deleted card")
         return [dict(c) for c in self.comments.get(card_id, [])]
 
 
@@ -112,6 +117,31 @@ class TestSync:
         assert "error" in summary["sections"]["stats"]
         assert summary["sections"]["events"]["inserted"] == 4
         assert ga._get_state(conn, "events_watermark")  # still advanced
+
+    def test_comment_card_failure_isolated(self, empty_db):
+        # A card deleted in Guru since its event fired 400s on
+        # get_card_comments. That must not abort the comments section,
+        # zero the cards that did sync, or flip the whole sync to ok=False.
+        conn = empty_db.conn
+        stub = StubGuru()
+        # c-del is the most-active card (3 events) so the loop hits it
+        # first; c-sso's comments must still sync after it raises.
+        stub.events += [
+            {"type": "card-viewed", "user": "a@x.com", "eventDate": _iso(0.4),
+             "properties": {"cardId": "c-del"}},
+            {"type": "card-viewed", "user": "b@x.com", "eventDate": _iso(0.3),
+             "properties": {"cardId": "c-del"}},
+            {"type": "card-viewed", "user": "c@x.com", "eventDate": _iso(0.2),
+             "properties": {"cardId": "c-del"}},
+        ]
+        stub.fail_comments_for = {"c-del"}
+        summary = ga.sync(conn, stub)
+        assert summary["ok"], summary
+        sec = summary["sections"]["comments"]
+        assert "error" not in sec, sec
+        assert sec["skipped"] == 1
+        assert sec["synced"] == 2
+        assert {c["comment_id"] for c in ga.open_comments(conn)} == {"cm1", "cm2"}
 
     def test_comment_resolution_detection(self, empty_db):
         conn = empty_db.conn

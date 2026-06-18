@@ -220,48 +220,57 @@ def sync(conn: sqlite3.Connection, client, *, days_back: int = 30,
             (cutoff, COMMENT_CARD_CAP),
         ).fetchall()]
         synced = 0
+        skipped = 0
         now = _now()
         for card_id in active:
-            comments = client.get_card_comments(card_id, status="OPEN") or []
-            title_row = conn.execute(
-                "SELECT COALESCE("
-                "  (SELECT title FROM guru_card_verification WHERE card_id=?),"
-                "  (SELECT title FROM guru_articles WHERE card_id=?), '')",
-                (card_id, card_id),
-            ).fetchone()
-            card_title = title_row[0] if title_row else ""
-            fetched_ids = [c.get("id", "") for c in comments if c.get("id")]
-            with atomic(conn):
-                for c in comments:
-                    if not c.get("id"):
-                        continue
+            # Per-card isolation: a single card can 400 (e.g. it was deleted
+            # in Guru since its event fired — "Comment operations can not be
+            # applied to a deleted card"). Skip it; never abort the section
+            # or zero the cards that did sync.
+            try:
+                comments = client.get_card_comments(card_id, status="OPEN") or []
+                title_row = conn.execute(
+                    "SELECT COALESCE("
+                    "  (SELECT title FROM guru_card_verification WHERE card_id=?),"
+                    "  (SELECT title FROM guru_articles WHERE card_id=?), '')",
+                    (card_id, card_id),
+                ).fetchone()
+                card_title = title_row[0] if title_row else ""
+                fetched_ids = [c.get("id", "") for c in comments if c.get("id")]
+                with atomic(conn):
+                    for c in comments:
+                        if not c.get("id"):
+                            continue
+                        conn.execute(
+                            "INSERT INTO guru_card_comments "
+                            "(comment_id, card_id, card_title, author, text, "
+                            " created_at, status, fetched_at) "
+                            "VALUES (?,?,?,?,?,?,?,?) "
+                            "ON CONFLICT(comment_id) DO UPDATE SET "
+                            "  text=excluded.text, status=excluded.status, "
+                            "  card_title=excluded.card_title, "
+                            "  fetched_at=excluded.fetched_at",
+                            (c["id"], card_id, card_title, c.get("author", ""),
+                             c.get("content", ""), c.get("created_at", ""),
+                             c.get("status", "OPEN"), now),
+                        )
+                        synced += 1
+                    # Anything we previously held as OPEN for this card but the
+                    # API no longer returns as OPEN got resolved in Guru.
+                    placeholders = ",".join("?" * len(fetched_ids)) or "''"
                     conn.execute(
-                        "INSERT INTO guru_card_comments "
-                        "(comment_id, card_id, card_title, author, text, "
-                        " created_at, status, fetched_at) "
-                        "VALUES (?,?,?,?,?,?,?,?) "
-                        "ON CONFLICT(comment_id) DO UPDATE SET "
-                        "  text=excluded.text, status=excluded.status, "
-                        "  card_title=excluded.card_title, "
-                        "  fetched_at=excluded.fetched_at",
-                        (c["id"], card_id, card_title, c.get("author", ""),
-                         c.get("content", ""), c.get("created_at", ""),
-                         c.get("status", "OPEN"), now),
+                        f"UPDATE guru_card_comments SET status='RESOLVED' "
+                        f"WHERE card_id=? AND status='OPEN' "
+                        f"AND comment_id NOT IN ({placeholders})",
+                        [card_id, *fetched_ids],
                     )
-                    synced += 1
-                # Anything we previously held as OPEN for this card but the
-                # API no longer returns as OPEN got resolved in Guru.
-                placeholders = ",".join("?" * len(fetched_ids)) or "''"
-                conn.execute(
-                    f"UPDATE guru_card_comments SET status='RESOLVED' "
-                    f"WHERE card_id=? AND status='OPEN' "
-                    f"AND comment_id NOT IN ({placeholders})",
-                    [card_id, *fetched_ids],
-                )
+            except Exception:  # noqa: BLE001 — one bad card never aborts the section
+                skipped += 1
+                continue
         summary["sections"]["comments"] = {
-            "cards_checked": len(active), "synced": synced,
+            "cards_checked": len(active), "synced": synced, "skipped": skipped,
         }
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 — section-level failure (e.g. the active query)
         summary["ok"] = False
         summary["sections"]["comments"] = {"error": str(exc)}
 
