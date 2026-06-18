@@ -37,6 +37,7 @@ class ClaudeCliClient:
         self.pii_redaction = pii_redaction
         self._bridge = None  # lazily initialized in _ensure_bridge
         self._call_counter = 0
+        self._mcp_config: list[dict] = []
 
     # ─── Public API (matches ClaudeClient + GeminiClient) ─────
 
@@ -107,6 +108,18 @@ class ClaudeCliClient:
         for delta in deltas:
             yield delta
 
+    def set_mcp_config(self, server_config: list[dict]) -> None:
+        """Wire native MCP tools onto the CLI (carried across bridge rebuilds).
+
+        Claude refuses text-injected tool results, so the chat's Claude path must
+        expose tools natively via MCP. The page passes the chat_mcp_server config;
+        this stores it and applies it to the live bridge (and to any future bridge
+        created by _ensure_bridge). Pass [] to disable.
+        """
+        self._mcp_config = server_config or []
+        if self._bridge is not None:
+            self._bridge.set_mcp_config(self._mcp_config)
+
     def shutdown(self) -> None:
         """Tear down the underlying bridge if alive. Idempotent."""
         if self._bridge is not None:
@@ -123,6 +136,8 @@ class ClaudeCliClient:
             from src.agents.claude_cli_bridge import ClaudeCliBridge
             self._bridge = ClaudeCliBridge(model=self.model)
             self._bridge.ensure_running()
+            if self._mcp_config:
+                self._bridge.set_mcp_config(self._mcp_config)
         return self._bridge
 
     def _prepare_prompt(self, prompt: str, system_prompt: str) -> str:

@@ -81,6 +81,8 @@ class ClaudeCliBridge:
         self._active_proc_lock = threading.Lock()
 
         self._mcp_servers: list[dict] = []
+        self._mcp_config_path: str | None = None
+        self._mcp_allowed: str = ""
 
         # Compatibility surface mirroring ACPBridge — death callbacks
         # in scan_orchestrator read these by name.
@@ -143,9 +145,48 @@ class ClaudeCliBridge:
         return None
 
     def set_mcp_config(self, server_config: list[dict]) -> None:
-        """Store MCP server config. Not yet wired into the CLI invocation —
-        Claude CLI uses a different MCP config schema than Gemini's ACP."""
-        self._mcp_servers = server_config
+        """Materialize a Claude-CLI mcp-config.json from the ACP-style server list
+        and compute the allowed-tools pattern. An empty list disables MCP (the CLI
+        then runs with no tools — used by the Gemini / text-loop path).
+
+        Claude rejects text-injected TOOL_RESULTs as prompt injection, so the
+        Claude chat path MUST expose tools natively via MCP. This wires the same
+        chat_mcp_server the model already speaks.
+
+          ACP-style entry: {"name", "command", "args", "env": [{"name","value"}]}
+          CLI mcp-config:  {"mcpServers": {name: {"type":"stdio","command","args","env":{}}}}
+        """
+        import json
+        import re
+        import tempfile
+
+        self._mcp_servers = server_config or []
+        self._mcp_config_path = None
+        self._mcp_allowed = ""
+        if not self._mcp_servers:
+            return
+
+        servers: dict = {}
+        allowed: list[str] = []
+        for s in self._mcp_servers:
+            name = s["name"]
+            env = {e["name"]: e["value"] for e in s.get("env", []) if e.get("name")}
+            servers[name] = {
+                "type": "stdio",
+                "command": s["command"],
+                "args": s.get("args", []),
+                "env": env,
+            }
+            # Claude normalizes non-alphanumerics to '_' in the mcp__ tool prefix
+            allowed.append(f"mcp__{re.sub(r'[^A-Za-z0-9_]', '_', name)}__*")
+
+        fd, path = tempfile.mkstemp(prefix="alma_mcp_", suffix=".json")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump({"mcpServers": servers}, f)
+        self._mcp_config_path = path
+        self._mcp_allowed = ",".join(allowed)
+        logger.info("ClaudeCliBridge: MCP wired (%d server(s); allow=%s)",
+                    len(servers), self._mcp_allowed)
 
     def new_session(self, mcp_env: dict | None = None) -> str:
         """Compatibility shim. CLI -p mode has no persistent session;
@@ -209,8 +250,13 @@ class ClaudeCliBridge:
 
     def _build_cmd(self) -> list[str]:
         """Construct the ``claude -p`` invocation. Stdin carries the prompt
-        (--input-format text), avoiding the Windows arg-length limit."""
-        return [
+        (--input-format text), avoiding the Windows arg-length limit.
+
+        When an MCP config is wired (set_mcp_config with a non-empty list), the
+        chat tools are exposed natively and pre-allowed so the model calls them
+        through the genuine tool-use channel — Claude refuses text-injected tool
+        results, so native MCP is the only reliable tool path for the CLI."""
+        cmd = [
             self._cli_path,
             "-p",
             "--input-format", "text",
@@ -221,6 +267,19 @@ class ClaudeCliBridge:
             "--tools", "",  # disable built-in tools (Bash/Edit/Read/etc)
             "--no-session-persistence",
         ]
+        if self._mcp_config_path:
+            cmd += [
+                "--strict-mcp-config",            # ignore user/global MCP config
+                "--mcp-config", self._mcp_config_path,
+                "--allowedTools", self._mcp_allowed,  # only our MCP tools
+                # bypassPermissions actually EXECUTES the pre-allowed MCP tools
+                # unattended. 'dontAsk' / 'default' / 'acceptEdits' all DENY MCP
+                # tool calls in -p mode (the model then fabricates tool results —
+                # the original UAT failure). Verified live: only bypassPermissions
+                # runs the allow-listed mcp__alma_chat_tools__* tools.
+                "--permission-mode", "bypassPermissions",
+            ]
+        return cmd
 
     # ─── Call interfaces ────────────────────────────────────────
 
