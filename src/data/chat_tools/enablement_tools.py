@@ -675,15 +675,20 @@ def _research_topic_impl(conn, topic, *, limit=5, collections=None) -> dict:
     except Exception as exc:  # noqa: BLE001
         out["doc_error"] = str(exc)[:120]
 
+    # PHI boundary: the enablement lane must NEVER pull raw ticket conversations
+    # (patient text). Ticket signals here are DE-IDENTIFIED counts by classification
+    # category only — no ticket text, no ids — matched on the taxonomy labels.
     try:
-        # FTS conversation search (no torch — keeps enablement mode lightweight;
-        # semantic_search would load the embedding model, which enablement avoids).
-        from src.data.chat_tools.fast_path import handle_legacy_search_conversations
-        sig = handle_legacy_search_conversations(conn, {"query": topic, "limit": limit}, {})
-        rows = sig.get("results") if isinstance(sig, dict) else None
-        out["ticket_signals"] = rows or []
-    except Exception as exc:  # noqa: BLE001
-        out["ticket_error"] = str(exc)[:120]
+        like = f"%{(topic or '').strip()}%"
+        rows = conn.execute(
+            "SELECT trc_code AS topic, COUNT(*) AS tickets FROM ticket_index "
+            "WHERE trc_code LIKE ? OR sub_pattern LIKE ? OR friction_type LIKE ? "
+            "GROUP BY trc_code ORDER BY tickets DESC LIMIT ?",
+            (like, like, like, limit)).fetchall()
+        out["ticket_signals"] = [{"category": r[0], "tickets": r[1]} for r in rows if r[0]]
+        out["ticket_signals_note"] = "De-identified counts by TRC category — no ticket text (PHI excluded)."
+    except Exception:  # noqa: BLE001 — aggregate unavailable; never fall back to raw text
+        out["ticket_signals"] = []
 
     out["note"] = ("Reference points gathered. Use these as authoritative input — "
                    "pass relevant card_ids/doc_ids as reference_refs when updating a card.")
@@ -716,3 +721,91 @@ def _open_guru_card_impl(conn, card_ref) -> dict:
 def handle_open_guru_card(conn, args, session_filters) -> dict:
     return _open_guru_card_impl(
         conn, args.get("card_ref") or args.get("card_id") or args.get("url"))
+
+
+# ── Content catalog (summary index for scalable, torch-free retrieval) ──
+
+def _doc_items(conn, limit) -> list[dict]:
+    from src.data import enablement_store as store
+    out = []
+    for d in store.list_documents(conn, limit=limit):
+        full = store.get_document(conn, d["doc_id"]) or {}
+        out.append({"item_id": f"doc:{d['doc_id']}", "item_type": "doc",
+                    "title": d.get("name", ""), "source": d.get("source", "upload"),
+                    "url": d.get("web_url", "") or "",
+                    "text": full.get("full_text", "") or d.get("text_excerpt", "")})
+    return out
+
+
+def _guru_items(conn, query, collections, limit) -> list[dict]:
+    from src.data.guru_client import GuruClient
+    email, token = GuruClient.load_credentials()
+    if not (email and token):
+        return []
+    try:
+        cards = GuruClient(email, token).search_cards(query or "")
+    except Exception:  # noqa: BLE001
+        return []
+    allowed = {c.lower() for c in (collections or [])}
+    out = []
+    for c in cards[:limit]:
+        coll = (c.get("collection", "") or "").lower()
+        coll_id = (c.get("collection_id", "") or "").lower()
+        if allowed and coll not in allowed and coll_id not in allowed:
+            continue
+        out.append({"item_id": f"card:{c.get('id')}", "item_type": "card",
+                    "title": c.get("title", ""), "source": "guru",
+                    "url": _card_url(c.get("id")), "text": _strip_html(c.get("content", ""))})
+    return out
+
+
+def _index_content_impl(conn, *, scope="docs", query=None, collections=None, limit=200) -> dict:
+    """Build/refresh the summary catalog over PHI-free content (docs + Guru cards)."""
+    from src.data.content_catalog import index_items, write_catalog_md
+    from src.gemini.client_factory import build_client_for_task
+    scope = (scope or "docs").lower()
+    items: list[dict] = []
+    if scope in ("docs", "all"):
+        items += _doc_items(conn, limit)
+    if scope in ("guru", "all"):
+        items += _guru_items(conn, query, collections, limit)
+    if not items:
+        return {"ok": True, "indexed": 0, "skipped": 0,
+                "note": "No PHI-free content found to index for that scope."}
+    llm = build_client_for_task("enablement_card_gen")
+    res = index_items(conn, items, llm_client=llm)
+    try:
+        from pathlib import Path
+        from src.data.connection_factory import DEFAULT_DB_PATH
+        res["catalog_md"] = write_catalog_md(
+            conn, str(Path(DEFAULT_DB_PATH).parent / "content_catalog.md"))
+    except Exception:  # noqa: BLE001 — md export is best-effort
+        pass
+    res["ok"] = True
+    res["note"] = (f"Indexed {res['indexed']} item(s), {res['skipped']} unchanged. "
+                   "Search with search_content.")
+    return res
+
+
+def handle_index_content(conn, args, session_filters) -> dict:
+    return _index_content_impl(conn, scope=args.get("scope", "docs"),
+                               query=args.get("query"), collections=args.get("collections"),
+                               limit=int(args.get("limit", 200)))
+
+
+def _search_content_impl(conn, query, *, limit=5) -> dict:
+    """Deterministic hybrid search over the catalog summaries (torch-free)."""
+    from src.data.content_catalog import all_entries, search_catalog
+    if not all_entries(conn):
+        return {"ok": True, "query": query, "count": 0, "results": [],
+                "note": "Catalog is empty — run index_content first to build the summary index."}
+    ranked = search_catalog(conn, query or "", limit=int(limit or 5))
+    return {"ok": True, "query": query, "count": len(ranked),
+            "results": [{"item_id": r.entry.item_id, "type": r.entry.item_type,
+                         "title": r.entry.title, "url": r.entry.url,
+                         "summary": r.entry.summary, "score": r.score,
+                         "matched_terms": r.matched_terms} for r in ranked]}
+
+
+def handle_search_content(conn, args, session_filters) -> dict:
+    return _search_content_impl(conn, args.get("query", ""), limit=args.get("limit", 5))

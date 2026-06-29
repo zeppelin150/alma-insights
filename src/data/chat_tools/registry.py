@@ -170,6 +170,8 @@ def _ensure_registered():
         handle_search_guru_cards,
         handle_research_topic,
         handle_open_guru_card,
+        handle_index_content,
+        handle_search_content,
     )
     _register("import_guru_card", handle_import_guru_card,
               phi_level=0, desc="Import an existing Guru card as an editable draft (publish updates it)")
@@ -185,6 +187,10 @@ def _ensure_registered():
               phi_level=1, desc="Gather reference points on a topic from every source: Guru cards + local docs + ticket signals")
     _register("open_guru_card", handle_open_guru_card,
               phi_level=0, desc="Open a Guru card in the operator's default web browser by id or URL")
+    _register("index_content", handle_index_content,
+              phi_level=0, desc="Build/refresh the summary catalog over PHI-free content (docs + Guru cards) for fast scalable search")
+    _register("search_content", handle_search_content,
+              phi_level=0, desc="Deterministic hybrid search over the content catalog summaries (torch-free; disambiguates look-alike titles by content)")
 
     # ── Backward-compat aliases for old tool names ──
     # These map old names to new handlers so existing prompts keep working

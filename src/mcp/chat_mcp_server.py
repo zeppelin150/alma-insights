@@ -413,6 +413,42 @@ TOOL_SCHEMAS = [
         },
     },
     {
+        "name": "index_content",
+        "description": (
+            "Build or refresh the SUMMARY CATALOG over PHI-free content (uploaded/Drive "
+            "docs and Guru cards). Each item gets a short content summary so look-alike "
+            "titles are distinguishable and search stays fast at scale. Run this when "
+            "content is added or changed. scope: 'docs' (default), 'guru', or 'all'."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "scope": {"type": "string", "description": "docs | guru | all (default docs)."},
+                "query": {"type": "string", "description": "For scope=guru: which cards to pull."},
+                "collections": {"type": "array", "items": {"type": "string"},
+                                "description": "Optional: limit Guru indexing to these collections."},
+                "limit": {"type": "integer", "description": "Max items to index (default 200)."},
+            },
+        },
+    },
+    {
+        "name": "search_content",
+        "description": (
+            "Search the content catalog by topic and return ranked candidates (id, title, "
+            "summary, url, score). This is the scalable, deterministic way to FIND the right "
+            "doc or card — it disambiguates similarly-titled items by their content summary. "
+            "Run index_content first if the catalog is empty."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Topic to search the catalog for."},
+                "limit": {"type": "integer", "description": "Max candidates to return (default 5)."},
+            },
+            "required": ["query"],
+        },
+    },
+    {
         "name": "open_guru_card",
         "description": (
             "Open a Guru card in the operator's default web browser. Pass the card id "
