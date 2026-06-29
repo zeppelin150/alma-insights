@@ -413,6 +413,22 @@ TOOL_SCHEMAS = [
         },
     },
     {
+        "name": "open_guru_card",
+        "description": (
+            "Open a Guru card in the operator's default web browser. Pass the card id "
+            "or its app.getguru.com URL (e.g. from search_guru_cards results). Use this "
+            "when the user asks to open / view / see a card in their browser."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "card_ref": {"type": "string",
+                             "description": "Guru card id or app.getguru.com/card/<id> URL."},
+            },
+            "required": ["card_ref"],
+        },
+    },
+    {
         "name": "research_topic",
         "description": (
             "Research a topic across EVERY source Renn can reach — live Guru cards, "

@@ -79,3 +79,18 @@ def test_research_topic_tokenized_doc_recall(empty_db, monkeypatch):
     out = et.handle_research_topic(empty_db.conn, {"topic": "Aetna copay telehealth"}, {})
     assert any(d["doc_id"] == "d1" for d in out["documents"])
     assert out["guru_cards"][0].get("url", "").endswith("/card/c1")
+
+
+def test_open_guru_card_opens_browser(empty_db, monkeypatch):
+    import webbrowser
+    captured = {}
+    monkeypatch.setattr(webbrowser, "open", lambda u: captured.update(url=u) or True)
+    out = et.handle_open_guru_card(empty_db.conn,
+                                   {"card_ref": "https://app.getguru.com/card/abc123"}, {})
+    assert out["ok"] and out["opened"]
+    assert captured["url"] == "https://app.getguru.com/card/abc123"
+
+
+def test_open_guru_card_requires_ref(empty_db):
+    out = et.handle_open_guru_card(empty_db.conn, {}, {})
+    assert not out["ok"] and out["error"] == "card_ref_required"

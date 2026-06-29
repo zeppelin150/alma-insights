@@ -169,6 +169,7 @@ def _ensure_registered():
         handle_update_card_from_doc,
         handle_search_guru_cards,
         handle_research_topic,
+        handle_open_guru_card,
     )
     _register("import_guru_card", handle_import_guru_card,
               phi_level=0, desc="Import an existing Guru card as an editable draft (publish updates it)")
@@ -182,6 +183,8 @@ def _ensure_registered():
               phi_level=0, desc="Search LIVE Guru for existing cards by topic/title (returns id, title, snippet)")
     _register("research_topic", handle_research_topic,
               phi_level=1, desc="Gather reference points on a topic from every source: Guru cards + local docs + ticket signals")
+    _register("open_guru_card", handle_open_guru_card,
+              phi_level=0, desc="Open a Guru card in the operator's default web browser by id or URL")
 
     # ── Backward-compat aliases for old tool names ──
     # These map old names to new handlers so existing prompts keep working

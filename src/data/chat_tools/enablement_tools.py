@@ -694,3 +694,25 @@ def handle_research_topic(conn, args, session_filters) -> dict:
     return _research_topic_impl(conn, args.get("topic", ""),
                                 limit=args.get("limit", 5),
                                 collections=args.get("collections"))
+
+
+def _open_guru_card_impl(conn, card_ref) -> dict:
+    """Open a Guru card in the operator's default browser (Guru URLs only)."""
+    import webbrowser
+    from src.data.enablement_store import parse_guru_card_ref
+    card_id = parse_guru_card_ref(str(card_ref or ""))
+    if not card_id:
+        return {"ok": False, "error": "card_ref_required"}
+    url = _card_url(card_id)
+    try:
+        opened = bool(webbrowser.open(url))
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)[:160], "url": url}
+    return {"ok": True, "url": url, "opened": opened,
+            "note": ("Opened the card in your default browser." if opened
+                     else f"Could not launch a browser — open it manually: {url}")}
+
+
+def handle_open_guru_card(conn, args, session_filters) -> dict:
+    return _open_guru_card_impl(
+        conn, args.get("card_ref") or args.get("card_id") or args.get("url"))
