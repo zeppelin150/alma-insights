@@ -24,9 +24,9 @@ class AgentPage(QWidget):
     """A self-contained Agent chat surface. ``engine`` is the chat runtime
     (a real ``ChatEngine`` in production, a fake in tests)."""
 
-    def __init__(self, engine, parent=None):
+    def __init__(self, engine, send_fn=None, parent=None):
         super().__init__(parent)
-        self.bridge = ChatBridge(engine, self)
+        self.bridge = ChatBridge(engine, send_fn=send_fn, parent=self)
         self.view = QWebEngineView(self)
         self._channel = QWebChannel(self)
         self._channel.registerObject("almaBridge", self.bridge)

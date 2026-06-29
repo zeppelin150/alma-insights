@@ -617,6 +617,31 @@ class MainWindow(QMainWindow):
         self.conversations_page.data_loaded.connect(self._on_data_loaded)
         return self.conversations_page
 
+    def _create_agent_page(self):
+        """The standalone Agent chat — an embedded web UI (QWebEngineView) bridged
+        to a live ChatEngine over QWebChannel. Degrades to a placeholder if
+        QtWebEngine is absent (shipped build before the installer adds it)."""
+        try:
+            from src.data.settings_manager import get_section
+            from src.services.agent_chat import AgentChatController
+            from src.ui.web.agent_page import AgentPage
+            en_cfg = get_section("enablement", {}) or {}
+            self._agent_controller = AgentChatController(
+                self.db, demo=en_cfg.get("demo_mode", True))
+            if self._agent_controller.engine is None:
+                raise RuntimeError("chat engine unavailable")
+            self.agent_page = AgentPage(self._agent_controller.engine,
+                                        send_fn=self._agent_controller.send)
+            return self.agent_page
+        except Exception as exc:  # noqa: BLE001 — graceful placeholder, never break the mode
+            import logging
+            logging.getLogger("alma.main").warning("Agent page unavailable: %s", exc)
+            ph = QLabel("The Agent chat needs QtWebEngine, which isn't installed "
+                        "in this build yet.")
+            ph.setWordWrap(True)
+            ph.setAlignment(Qt.AlignCenter)
+            return ph
+
     def _create_dashboard_page(self):
         from src.ui.pages.trc_analytics import TRCAnalyticsPage
         self.dashboard_page = TRCAnalyticsPage(self.db)

@@ -69,7 +69,7 @@ class TestRegistryIntegrity:
 
     def test_enablement_tab_keys(self):
         for s in pages_for_mode(MODE_ENABLEMENT):
-            if s.page_id == "home":
+            if s.page_id in ("home", "en_agent"):   # standalone pages, not host-page tabs
                 continue
             assert s.factory == "_create_enablement_page"
             assert s.tab_key in {"calendar", "tasks", "workbench", "analytics",
@@ -90,19 +90,20 @@ class TestModeRouting:
 
     def test_enablement_pages(self):
         ids = {s.page_id for s in pages_for_mode(MODE_ENABLEMENT)}
-        assert ids == {"home", "en_calendar", "en_tasks", "en_workbench",
+        assert ids == {"home", "en_agent", "en_calendar", "en_tasks", "en_workbench",
                        "en_analytics", "en_powerpoint", "en_zendesk", "en_settings"}
 
     def test_enablement_sidebar_sections(self):
-        """Enablement nav is grouped PLAN / CREATE / INSIGHTS / SYSTEM."""
+        """Enablement nav is grouped ASSISTANT / PLAN / CREATE / INSIGHTS / SYSTEM."""
         sections = []
         for s in pages_for_mode(MODE_ENABLEMENT):
             if s.section not in sections:
                 sections.append(s.section)
-        assert sections == ["", "PLAN", "CREATE", "INSIGHTS", "SYSTEM"]
+        assert sections == ["", "ASSISTANT", "PLAN", "CREATE", "INSIGHTS", "SYSTEM"]
         by_section = {}
         for s in pages_for_mode(MODE_ENABLEMENT):
             by_section.setdefault(s.section, []).append(s.page_id)
+        assert by_section["ASSISTANT"] == ["en_agent"]
         assert by_section["PLAN"] == ["en_calendar", "en_tasks"]
         assert by_section["CREATE"] == ["en_workbench", "en_powerpoint", "en_zendesk"]
         assert by_section["INSIGHTS"] == ["en_analytics"]

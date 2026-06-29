@@ -27,9 +27,12 @@ class ChatBridge(QObject):
     statusUpdate = Signal(str)
     telemetry = Signal(str)       # JSON: {role, model_used, tokens_in, tokens_out, latency_ms, tool_names}
 
-    def __init__(self, engine, parent=None):
+    def __init__(self, engine, send_fn=None, parent=None):
         super().__init__(parent)
         self._engine = engine
+        # ``send_fn`` lets a controller intercept sends (e.g. to lazily wire the
+        # provider/MCP on first message); defaults to the engine's own send.
+        self._send_fn = send_fn if send_fn is not None else engine.send
         # Re-emit the engine's signals as the bridge's (signal-to-signal).
         engine.response_ready.connect(self.responseReady)
         engine.error_occurred.connect(self.errorOccurred)
@@ -43,7 +46,7 @@ class ChatBridge(QObject):
     @Slot(str)
     def send(self, text):
         """Send a user message into the chat runtime."""
-        self._engine.send(text or "")
+        self._send_fn(text or "")
 
     @Slot(result=str)
     def ping(self):

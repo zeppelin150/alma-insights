@@ -75,7 +75,9 @@ PAGES: tuple[PageSpec, ...] = (
     PageSpec("settings", "Settings", "sliders", "SYSTEM",
              _PRODUCT, "_create_settings_page"),
     # ── Enablement (one host page, sidebar entries select tabs) ──
-    # Sections group the sidebar: PLAN / CREATE / INSIGHTS / SYSTEM.
+    # Sections group the sidebar: ASSISTANT / PLAN / CREATE / INSIGHTS / SYSTEM.
+    PageSpec("en_agent", "Agent", "chat", "ASSISTANT",
+             _ENABLEMENT, "_create_agent_page"),
     PageSpec("en_calendar", "Calendar", "calendar", "PLAN",
              _ENABLEMENT, "_create_enablement_page", tab_key="calendar",
              wants_drilldown=True),
