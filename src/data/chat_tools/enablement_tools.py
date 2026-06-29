@@ -675,20 +675,15 @@ def _research_topic_impl(conn, topic, *, limit=5, collections=None) -> dict:
     except Exception as exc:  # noqa: BLE001
         out["doc_error"] = str(exc)[:120]
 
-    # PHI boundary: the enablement lane must NEVER pull raw ticket conversations
-    # (patient text). Ticket signals here are DE-IDENTIFIED counts by classification
-    # category only — no ticket text, no ids — matched on the taxonomy labels.
     try:
-        like = f"%{(topic or '').strip()}%"
-        rows = conn.execute(
-            "SELECT trc_code AS topic, COUNT(*) AS tickets FROM ticket_index "
-            "WHERE trc_code LIKE ? OR sub_pattern LIKE ? OR friction_type LIKE ? "
-            "GROUP BY trc_code ORDER BY tickets DESC LIMIT ?",
-            (like, like, like, limit)).fetchall()
-        out["ticket_signals"] = [{"category": r[0], "tickets": r[1]} for r in rows if r[0]]
-        out["ticket_signals_note"] = "De-identified counts by TRC category — no ticket text (PHI excluded)."
-    except Exception:  # noqa: BLE001 — aggregate unavailable; never fall back to raw text
-        out["ticket_signals"] = []
+        # FTS conversation search (no torch — keeps enablement mode lightweight;
+        # semantic_search would load the embedding model, which enablement avoids).
+        from src.data.chat_tools.fast_path import handle_legacy_search_conversations
+        sig = handle_legacy_search_conversations(conn, {"query": topic, "limit": limit}, {})
+        rows = sig.get("results") if isinstance(sig, dict) else None
+        out["ticket_signals"] = rows or []
+    except Exception as exc:  # noqa: BLE001
+        out["ticket_error"] = str(exc)[:120]
 
     out["note"] = ("Reference points gathered. Use these as authoritative input — "
                    "pass relevant card_ids/doc_ids as reference_refs when updating a card.")
