@@ -394,6 +394,44 @@ TOOL_SCHEMAS = [
         },
     },
     {
+        "name": "search_guru_cards",
+        "description": (
+            "Search LIVE Guru for existing cards by topic or title. Use this to "
+            "REVIEW what cards already exist before drafting or updating — returns "
+            "each card's id, title, collection, and a text snippet. Optionally scope "
+            "to specific collections."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Topic or title to search for."},
+                "collections": {"type": "array", "items": {"type": "string"},
+                                "description": "Optional: limit to these collection names/ids."},
+                "limit": {"type": "integer", "description": "Max cards to return (default 10)."},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "research_topic",
+        "description": (
+            "Research a topic across EVERY source Renn can reach — live Guru cards, "
+            "locally-stored documents, and ticket signals — and return the consolidated "
+            "reference points. Use this to gather authoritative context before writing or "
+            "updating a card; then pass the relevant card_ids/doc_ids as reference_refs."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "topic": {"type": "string", "description": "The subject to research."},
+                "limit": {"type": "integer", "description": "Max items per source (default 5)."},
+                "collections": {"type": "array", "items": {"type": "string"},
+                                "description": "Optional: scope Guru results to these collections."},
+            },
+            "required": ["topic"],
+        },
+    },
+    {
         "name": "update_card_from_doc",
         "description": (
             "Review a source document and update the EXISTING Guru card it relates to: "

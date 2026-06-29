@@ -579,3 +579,83 @@ def handle_update_card_from_doc(conn, args, session_filters) -> dict:
         search=args.get("search"),
         collections=args.get("collections"),
     )
+
+
+# ── Search + research (live Guru search + cross-source reference gathering) ──
+
+def _strip_html(html: str) -> str:
+    import re
+    text = re.sub(r"<[^>]+>", " ", html or "")
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _search_guru_cards_impl(conn, query, *, collections=None, limit=10) -> dict:
+    """Live Guru card search (POST /search/cardmgr). Returns id/title/snippet."""
+    from src.data.guru_client import GuruClient
+    email, token = GuruClient.load_credentials()
+    if not (email and token):
+        return {"ok": False, "error": "guru_not_connected"}
+    try:
+        cards = GuruClient(email, token).search_cards(query or "")
+    except Exception as exc:  # noqa: BLE001 — surface as a failed search
+        return {"ok": False, "error": str(exc)[:160]}
+    allowed = {c.lower() for c in (collections or [])}
+    out = []
+    for c in cards:
+        coll = (c.get("collection", "") or "").lower()
+        coll_id = (c.get("collection_id", "") or "").lower()
+        if allowed and coll not in allowed and coll_id not in allowed:
+            continue
+        out.append({"card_id": c.get("id"), "title": c.get("title"),
+                    "collection": c.get("collection"),
+                    "snippet": _strip_html(c.get("content", ""))[:200]})
+        if len(out) >= int(limit or 10):
+            break
+    return {"ok": True, "query": query, "count": len(out), "cards": out}
+
+
+def handle_search_guru_cards(conn, args, session_filters) -> dict:
+    return _search_guru_cards_impl(conn, args.get("query", ""),
+                                   collections=args.get("collections"),
+                                   limit=args.get("limit", 10))
+
+
+def _research_topic_impl(conn, topic, *, limit=5, collections=None) -> dict:
+    """Gather reference points on a topic from every source Renn can reach:
+    live Guru cards, locally-stored docs, and ticket signals. Each source is
+    best-effort — a failure in one never blocks the others.
+    """
+    out = {"ok": True, "topic": topic, "guru_cards": [], "documents": [], "ticket_signals": []}
+
+    g = _search_guru_cards_impl(conn, topic, collections=collections, limit=limit)
+    if g.get("ok"):
+        out["guru_cards"] = [{"card_id": c["card_id"], "title": c["title"]} for c in g["cards"]]
+    else:
+        out["guru_error"] = g.get("error")
+
+    try:
+        from src.data import enablement_store as store
+        docs = store.search_documents(conn, topic, limit=limit)
+        out["documents"] = [{"doc_id": d.get("doc_id"), "name": d.get("name")} for d in docs]
+    except Exception as exc:  # noqa: BLE001
+        out["doc_error"] = str(exc)[:120]
+
+    try:
+        # FTS conversation search (no torch — keeps enablement mode lightweight;
+        # semantic_search would load the embedding model, which enablement avoids).
+        from src.data.chat_tools.fast_path import handle_legacy_search_conversations
+        sig = handle_legacy_search_conversations(conn, {"query": topic, "limit": limit}, {})
+        rows = sig.get("results") if isinstance(sig, dict) else None
+        out["ticket_signals"] = rows or []
+    except Exception as exc:  # noqa: BLE001
+        out["ticket_error"] = str(exc)[:120]
+
+    out["note"] = ("Reference points gathered. Use these as authoritative input — "
+                   "pass relevant card_ids/doc_ids as reference_refs when updating a card.")
+    return out
+
+
+def handle_research_topic(conn, args, session_filters) -> dict:
+    return _research_topic_impl(conn, args.get("topic", ""),
+                                limit=args.get("limit", 5),
+                                collections=args.get("collections"))
