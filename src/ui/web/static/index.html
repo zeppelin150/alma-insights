@@ -17,6 +17,7 @@
   .user { margin-left:auto; background:var(--user); color:#fff; border-bottom-right-radius:4px; }
   .assistant { background:var(--panel); border:1px solid var(--line); border-bottom-left-radius:4px; }
   .error { background:#F7E2E2; color:#8A1C1C; }
+  .thinking { font-style:italic; color:var(--mid); }
   #status { min-height:18px; padding:0 18px; font-size:12px; color:var(--mid); }
   #composer { display:flex; gap:8px; padding:12px 16px; border-top:1px solid var(--line); background:var(--panel); }
   #input { flex:1; padding:10px 12px; border:1px solid var(--line); border-radius:9px; font-size:14px; }
@@ -61,23 +62,40 @@
     bridge = channel.objects.almaBridge;
     window.almaBridge = bridge;            // expose under its registered name
 
+    function showThinking(text){
+      clearThinking();
+      var d = document.createElement('div');
+      d.className = 'msg assistant thinking'; d.id = 'thinking';
+      d.textContent = text || 'Renn is thinking…';
+      $('messages').appendChild(d);
+      $('messages').scrollTop = $('messages').scrollHeight;
+    }
+    function clearThinking(){ var t = $('thinking'); if (t) t.remove(); }
+
     bridge.responseReady.connect(function(t){
+      clearThinking();
       append('assistant', t);
       document.title = 'RT:' + t;          // round-trip hook for headless verification
     });
-    bridge.errorOccurred.connect(function(e){ append('error', e); });
+    bridge.errorOccurred.connect(function(e){ clearThinking(); append('error', e); });
     bridge.busyChanged.connect(function(b){
-      $('status').textContent = b ? 'thinking…' : '';
       $('send').disabled = b;
+      if (b) showThinking('Renn is thinking…'); else clearThinking();
     });
-    bridge.statusUpdate.connect(function(s){ if (s) $('status').textContent = s; });
+    bridge.statusUpdate.connect(function(s){
+      if (!s) return;
+      if ($('thinking')) $('thinking').textContent = s;   // live status in the bubble
+      else $('status').textContent = s;
+    });
     bridge.telemetry.connect(function(j){
       try {
         var m = JSON.parse(j);
-        if (m.tokens_in !== undefined)
-          $('meter').textContent = (m.model_used || 'model') + ' · ' +
-            (m.tokens_in||0) + ' in / ' + (m.tokens_out||0) + ' out tokens' +
-            (m.latency_ms ? ' · ' + m.latency_ms + 'ms' : '');
+        if (m.tokens_in === undefined) return;
+        var tools = (m.tool_names && m.tool_names.length)
+          ? ' · used ' + (Array.isArray(m.tool_names) ? m.tool_names.join(', ') : m.tool_names) : '';
+        $('meter').textContent = (m.model_used || 'model') + ' · ' +
+          (m.tokens_in||0) + ' in / ' + (m.tokens_out||0) + ' out tokens' +
+          (m.latency_ms ? ' · ' + m.latency_ms + 'ms' : '') + tools;
       } catch(e){}
     });
 

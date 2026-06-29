@@ -148,7 +148,19 @@ def main():
     # reports unauthenticated) surface a non-blocking notice pointing at
     # Settings → AI Provider. The app always lands on Home — never
     # auto-navigate away from it.
-    if "gemini_oauth" in failed_check_ids:
+    # Only relevant when Gemini is actually the active provider. In enablement
+    # mode on Claude, Gemini is never used — warning about its sign-in is noise.
+    _show_gemini_notice = "gemini_oauth" in failed_check_ids
+    if _show_gemini_notice:
+        try:
+            from src.data.settings_manager import get_section
+            from src.ui import app_modes
+            if (app_modes.current_mode() == app_modes.MODE_ENABLEMENT
+                    and str((get_section("enablement", {}) or {}).get("provider", "")).lower() == "claude"):
+                _show_gemini_notice = False
+        except Exception:  # noqa: BLE001 — default to showing the notice
+            pass
+    if _show_gemini_notice:
         try:
             window._toasts.show_toast(
                 "Gemini sign-in needs attention — open Settings to re-authenticate.",
