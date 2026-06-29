@@ -51,6 +51,46 @@ app-wide `max_tokens` doubling, broken tracked tests).
 
 ---
 
+## Building — Agent: a standalone, polished chat experience *(decided 2026-06-29)*
+
+A dedicated, Claude-app-grade chat surface to drive the enablement workflows,
+built **inside Alma Insights** (not a second app) so the local-first / no-server
+posture holds.
+
+**Architecture (Option B — embedded web UI):** a React chat rendered in a
+`QWebEngineView`, loaded from a static `qrc`/`file` bundle (**no web server, no
+`localhost:8080`**), bridged to Python via **`QWebChannel`** (in-process, not
+network). The backend is unchanged — `ChatEngine`, the `claude`/`aws` CLIs, the
+MCP servers, and redaction stay exactly as today; the web layer is a pure
+renderer talking to a `ChatBridge` QObject. The bridge is the only boundary, so
+the migration stays clean.
+
+**Features:**
+- Smooth streaming chat (markdown, code blocks), a live **tool-call timeline**, **token-use** display.
+- **Past-chat review** browser over the existing `chat_sessions`.
+- **Dictation** via the OS's on-device STT (macOS Speech / Windows WinRT) — audio never leaves the machine (HIPAA-safe, no BAA); free fallback is the OS dictation overlay typing into the field.
+- **Job-builder MCP** — a tool that turns a task into a first-class **job** (phases / agents / tokens / tools / status, persisted locally), tracked + inspectable in the **native sidebar pop-out** (replicating the background-tasks panel).
+- **In-thread tool-edit review + sign-off** — when the AI edits a tool/card, the user sees the diff and approves inline, reusing `diff_view.py` + the human-gate.
+
+**Cross-platform (load-bearing):** designed + heavily tested for **Windows (dev)
+and macOS / M1 (target)** in lockstep — QtWebEngine availability, Chromium bundle
+size, Mac code-signing/notarization, OS-speech API differences.
+
+**Installer:** the Express installer (bundled Node.js, deps, migrations) gains a
+React build step + the QtWebEngine dependency + the static UI bundle, for both
+platforms.
+
+> Status: **M1 spike built + verified** — `src/ui/web/` (`chat_bridge.py`,
+> `agent_page.py`, vendored `qwebchannel.js`, minimal `index.html`); the full
+> JS → QWebChannel → Python → JS round-trip works in a real `QWebEngineView`
+> **with no web server** (Windows, PySide6 6.10.2). Architecture de-risked. Next:
+> wire `AgentPage` into the app + the React build, then M2–M7 (tool-call
+> timeline / token use → past-chat browser → Job-builder MCP + sidebar →
+> in-thread sign-off → voice → installer/cross-platform). Full plan +
+> bridge contract + 7 open decisions: `~/.claude/plans/agent-chat-build.md`.
+
+---
+
 ## Left
 
 ### Phase 2 — policy / product-update signal *(the biggest missing input; the RCM wedge)*
