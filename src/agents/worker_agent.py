@@ -34,7 +34,15 @@ logger = logging.getLogger("alma.worker")
 
 # ── Context token thresholds ──
 CONTEXT_TOKEN_LIMIT = 800_000       # trigger reset above this
-CONTEXT_TOKENS_PER_CHAR = 0.25      # rough estimate: 4 chars per token
+CONTEXT_TOKENS_PER_CHAR = 0.25      # rough estimate: 4 chars per token (fallback)
+
+# Per-model chars→token rates. Models absent here use the 0.25 fallback,
+# so the default (and every existing Gemini worker) is unchanged. Keyed by
+# the bridge's model id / model_string substring.
+_TOKENS_PER_CHAR_BY_MODEL: dict[str, float] = {
+    "gemini": 0.25,   # ~4 chars/token (unchanged default)
+    "claude": 0.27,   # Claude tokenizer runs slightly denser on English
+}
 
 # ── Safety limits ──
 MAX_TOOL_CALLS_PER_BATCH = 150      # each ticket is now a tool call (5.2)
@@ -105,6 +113,24 @@ class WorkerAgent:
 
         # Load prompt template
         self._prompt_template = self._load_prompt_template()
+
+    def _tokens_per_char(self) -> float:
+        """Model-aware chars→token rate for the context-size estimate.
+
+        Reads the bridge's configured model (when available) and maps it to a
+        rate via ``_TOKENS_PER_CHAR_BY_MODEL`` by substring. Falls back to the
+        flat ``CONTEXT_TOKENS_PER_CHAR`` (0.25) for any unknown model or when
+        the bridge does not expose a model — so existing Gemini workers keep
+        the exact same estimate.
+        """
+        model = getattr(self.bridge, "_model", None) or getattr(self.bridge, "model", None)
+        if not model:
+            return CONTEXT_TOKENS_PER_CHAR
+        model_lc = str(model).lower()
+        for key, rate in _TOKENS_PER_CHAR_BY_MODEL.items():
+            if key in model_lc:
+                return rate
+        return CONTEXT_TOKENS_PER_CHAR
 
     def classify_batch(self, batch_payload: dict) -> dict:
         """
@@ -208,9 +234,10 @@ class WorkerAgent:
         # Build prompt
         prompt = self._build_prompt(batch_payload)
 
-        # Track chars sent for context estimate
+        # Track chars sent for context estimate (model-aware rate)
+        tokens_per_char = self._tokens_per_char()
         self.context_tokens_estimate += int(
-            len(prompt) * CONTEXT_TOKENS_PER_CHAR
+            len(prompt) * tokens_per_char
         )
 
         # Classify with retry
@@ -268,9 +295,9 @@ class WorkerAgent:
             batch_parse_rate = classified / total
             self.parse_rate = self.parse_rate * 0.7 + batch_parse_rate * 0.3
 
-        # Update context token estimate from response
+        # Update context token estimate from response (model-aware rate)
         self.context_tokens_estimate += int(
-            classified * 350 * CONTEXT_TOKENS_PER_CHAR
+            classified * 350 * self._tokens_per_char()
         )
 
         # Proactive context reset to prevent degradation (5.2)

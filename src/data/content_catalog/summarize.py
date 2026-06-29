@@ -26,8 +26,20 @@ def summarize_item(llm_client, title: str, text: str, *, max_chars: int = 4000) 
     if not res["ok"]:
         return _fallback(body)
     d = res["data"]
-    topics = [str(t).lower().strip() for t in d.get("topics", []) if str(t).strip()][:8]
-    summary = str(d.get("summary", "")).strip() or _fallback(body)["summary"]
+    # Small models (Haiku) sometimes return `topics` as a comma-joined string or
+    # omit/null it. Coerce to a list before iterating, else a string would be
+    # walked character-by-character (garbage topics) and a scalar (int) would
+    # raise TypeError and abort the whole index run.
+    raw_topics = d.get("topics")
+    if isinstance(raw_topics, str):
+        raw_topics = raw_topics.split(",")
+    elif not isinstance(raw_topics, list):
+        raw_topics = []
+    topics = [str(t).lower().strip() for t in raw_topics if str(t).strip()][:8]
+    # `summary` may be null/non-string; str(None) is the truthy literal "None"
+    # which would defeat the fallback, so reject anything but a real string.
+    raw_summary = d.get("summary")
+    summary = (raw_summary.strip() if isinstance(raw_summary, str) else "") or _fallback(body)["summary"]
     return {"summary": summary, "topics": topics}
 
 

@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import html as _html
 
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QSize, Qt, Signal
 from PySide6.QtGui import (
     QFont, QTextBlockFormat, QTextCharFormat, QTextCursor, QTextListFormat,
 )
@@ -52,6 +52,21 @@ class RichTextEditor(QWidget):
     """WYSIWYG editor that round-trips to markdown."""
 
     content_changed = Signal()
+    # (instruction, selection_text) — selection_text is "" for whole-doc edits.
+    # The host wires this to the enablement ChatEngine's "revise active draft"
+    # path (run off-thread); this widget only emits, never calls the LLM.
+    ai_edit_requested = Signal(str, str)
+
+    # The inline "/" menu + the highlight-to-edit context submenu share this
+    # one source of truth: (menu label, natural-language instruction).
+    _AI_ACTIONS = (
+        ("Rewrite", "Rewrite this more concisely while keeping the meaning."),
+        ("Make AI-readable",
+         "Rewrite this to be AI-readable: short sentences, clear headings, "
+         "and explicit steps."),
+        ("Add steps", "Turn this into a numbered list of clear steps."),
+        ("Match style guide", "Rewrite this to match the configured style guide."),
+    )
 
     _HEAD_LABELS = {0: "Normal", 1: "Heading 1", 2: "Heading 2", 3: "Heading 3"}
 
@@ -88,6 +103,10 @@ class RichTextEditor(QWidget):
             f"border-radius:8px; color:{ALMA_TEXT_DARK}; font-size:13.5px; padding:12px 14px;}}"
         )
         self.editor.textChanged.connect(self.content_changed.emit)
+        # Inline "/" menu + highlight-to-edit context submenu both route to
+        # ai_edit_requested. The editor's key path is watched via an event
+        # filter; its context menu is extended in contextMenuEvent.
+        self.editor.installEventFilter(self)
 
         outer.addWidget(self._build_toolbar())
         outer.addWidget(self.editor, 1)
@@ -452,6 +471,86 @@ class RichTextEditor(QWidget):
         block.setHeadingLevel(0)
         block.setMarker(QTextBlockFormat.MarkerType.NoMarker)
         cursor.mergeBlockFormat(block)
+
+    # ── inline AI edit ("/" menu + highlight-to-edit) ───────────────
+
+    def _selection_text(self) -> str:
+        """Selected text, falling back to the current block when nothing is
+        selected. The "/" menu uses this; the context submenu passes the live
+        selection directly (and is disabled when there is none)."""
+        cursor = self.editor.textCursor()
+        if cursor.hasSelection():
+            return cursor.selectedText()
+        return cursor.block().text()
+
+    def _emit_ai_edit(self, instruction: str, selection: str):
+        self.ai_edit_requested.emit(instruction, selection)
+
+    def _fill_ai_menu(self, menu: QMenu, selection: str):
+        """Add the four shared AI actions to ``menu``, each emitting
+        ai_edit_requested with ``selection`` when chosen."""
+        for label, instruction in self._AI_ACTIONS:
+            menu.addAction(
+                label,
+                lambda _=False, i=instruction: self._emit_ai_edit(i, selection),
+            )
+
+    def _at_line_start(self, cursor: QTextCursor) -> bool:
+        """True when the cursor sits at the first position of its block."""
+        return cursor.positionInBlock() == 0
+
+    def eventFilter(self, obj, event):
+        # Watch the editor's key path for a "/" typed at a line start and pop
+        # the inline AI menu there instead of inserting the slash; and its
+        # context-menu request to add the "Ask Renn to…" submenu.
+        if obj is self.editor:
+            if self._is_slash_keypress(event):
+                self._open_slash_menu()
+                return True
+            if event.type() == QEvent.ContextMenu:
+                self._open_context_menu(event.globalPos())
+                return True
+        return super().eventFilter(obj, event)
+
+    def _is_slash_keypress(self, event) -> bool:
+        if event.type() != QEvent.KeyPress or event.text() != "/":
+            return False
+        return self._at_line_start(self.editor.textCursor())
+
+    def _build_slash_menu(self) -> QMenu:
+        """The inline AI menu (four actions) over the current selection / block.
+        The triggering "/" is never inserted (the keypress is swallowed), so no
+        text cleanup is needed."""
+        menu = QMenu(self.editor)
+        self._fill_ai_menu(menu, self._selection_text())
+        return menu
+
+    def _open_slash_menu(self):
+        """Pop the inline AI menu anchored at the text cursor."""
+        rect = self.editor.cursorRect()
+        anchor = self.editor.viewport().mapToGlobal(rect.bottomLeft())
+        self._build_slash_menu().exec(anchor)
+
+    def _build_context_menu(self) -> QMenu:
+        """The editor's standard context menu plus an 'Ask Renn to…' submenu
+        carrying the four AI actions over the live selection (disabled when
+        there is no selection)."""
+        menu = self.editor.createStandardContextMenu()
+        menu.addSeparator()
+        ask = QMenu("Ask Renn to…", menu)
+        menu.addMenu(ask)
+        cursor = self.editor.textCursor()
+        if cursor.hasSelection():
+            self._fill_ai_menu(ask, cursor.selectedText())
+        else:
+            ask.setEnabled(False)
+        # Retain the submenu wrapper on the parent so it is not GC'd before the
+        # menu is shown (the addMenu(str) footgun, cf. _build_insert_menu).
+        menu._ask_renn = ask
+        return menu
+
+    def _open_context_menu(self, global_pos):
+        self._build_context_menu().exec(global_pos)
 
     # ── markdown round-trip ─────────────────────────────────────────
 

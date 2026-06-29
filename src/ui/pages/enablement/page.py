@@ -104,6 +104,7 @@ class EnablementPage(QWidget):
     task_action_done = Signal(dict)  # off-thread Asana write-back result
     pptx_modeled = Signal(dict)      # off-thread deck-model result
     zendesk_synced = Signal(dict)    # off-thread Zendesk sync result
+    ai_edit_done = Signal(dict)      # off-thread inline AI-edit (revise) result
 
     def __init__(self, db=None, demo: bool = True, parent=None):
         super().__init__(parent)
@@ -143,17 +144,21 @@ class EnablementPage(QWidget):
         # Scroll-wrap the tall pages so content scrolls instead of compressing
         # (compression was overlapping rows on Settings). Workbench fills exactly.
         from src.ui.pages.enablement.analytics import AnalyticsPage
+        from src.ui.pages.enablement.attention_queue_tab import AttentionQueueTab
         from src.ui.pages.enablement.pptx_tab import PptxPage
         from src.ui.pages.enablement.zendesk_tab import ZendeskPage
+        self.attention = AttentionQueueTab()
         self.analytics = AnalyticsPage()
         self.pptx = PptxPage()
         self.zendesk = ZendeskPage()
+        home_tab = self._scroll(self.attention)
         cal_tab = self._scroll(self.calendar)
         tasks_tab = self._scroll(self.tasks)
         analytics_tab = self._scroll(self.analytics)
         pptx_tab = self._scroll(self.pptx)
         zendesk_tab = self._scroll(self.zendesk)
         settings_tab = self._scroll(self.settings)
+        self.tabs.addTab(home_tab, "Home")
         self.tabs.addTab(cal_tab, "Calendar")
         self.tabs.addTab(tasks_tab, "Tasks")
         self.tabs.addTab(self.workbench, "Workbench")
@@ -162,6 +167,7 @@ class EnablementPage(QWidget):
         self.tabs.addTab(zendesk_tab, "Zendesk")
         self.tabs.addTab(settings_tab, "Settings")
         self._tab_widgets = {
+            "home": home_tab,
             "calendar": cal_tab,
             "tasks": tasks_tab,
             "workbench": self.workbench,
@@ -170,7 +176,8 @@ class EnablementPage(QWidget):
             "zendesk": zendesk_tab,
             "settings": settings_tab,
         }
-        self.tabs.setCurrentWidget(self.workbench)
+        # Land on the attention queue; Workbench stays reachable via its tab.
+        self.tabs.setCurrentWidget(home_tab)
         outer.addWidget(self.tabs, 1)
 
         # Assistant chat is hosted in the shared drilldown (chat_panel.ChatPanel)
@@ -195,6 +202,10 @@ class EnablementPage(QWidget):
         self.workbench.existing_cards_requested.connect(self._fetch_existing_cards)
         self.workbench.import_requested.connect(self._on_import_requested)
         self.workbench.content_edited.connect(self._on_content_edited)
+        # Inline "/"-menu + highlight-to-edit → revise the active draft off-thread,
+        # then reload the canvas live (result delivered on the main thread).
+        self.workbench.ai_edit_requested.connect(self._on_ai_edit)
+        self.ai_edit_done.connect(self._on_ai_edit_done)
         self.settings.drive_folder_added.connect(self._add_drive_folder)
         self.settings.style_guide_action.connect(self._on_style_guide_action)
         self.settings.style_guide_activate.connect(self._on_style_guide_activate)
@@ -202,6 +213,10 @@ class EnablementPage(QWidget):
         self.import_finished.connect(self._on_import_finished)
         self.connection_status_ready.connect(
             lambda key, ok, detail: self.settings.set_connection_status(key, ok, detail))
+        # attention queue (Home) — off-thread health load + open/dismiss wiring
+        self.attention.connect_signals()
+        self.attention.open_update_requested.connect(self._on_attention_open)
+        self.attention.reload()
         # analytics
         self.analytics.refresh_requested.connect(self._run_analytics_sync)
         self.analytics.filters_changed.connect(self._refresh_analytics)
@@ -698,6 +713,10 @@ class EnablementPage(QWidget):
         # active draft in focus if it's still pending.
         try:
             self._load_live(prefer_draft_id=self.workbench.active_draft_id)
+            # A revise_draft / update_card_from_doc turn replaced the active draft's
+            # content server-side; reload its canvas in place so the conversational
+            # edit shows up without a manual refresh.
+            self._reload_active_draft_canvas()
         except Exception as exc:  # noqa: BLE001
             self._set_status(f"Refresh error: {exc}")
 
@@ -1043,6 +1062,83 @@ class EnablementPage(QWidget):
         except Exception as exc:  # noqa: BLE001
             self._set_status(f"Edit save failed: {exc}")
 
+    # ── inline AI edit ("/"-menu + highlight-to-edit → revise active draft) ──
+
+    @staticmethod
+    def _scoped_instruction(instruction: str, selection: str) -> str:
+        """Fold the highlighted text into the instruction so the revise targets
+        just that passage; whole-doc actions (empty selection) pass through."""
+        sel = (selection or "").strip()
+        if not sel:
+            return instruction
+        return (f"{instruction}\n\nApply this to the following selected passage "
+                f"only, returning the full revised card:\n\"\"\"\n{sel}\n\"\"\"")
+
+    def _on_ai_edit(self, instruction: str, selection: str):
+        """Run the rich editor's inline AI edit against the active draft.
+
+        Reuses the chat-tool revise impl (LLM via build_client_for_task) off the
+        UI thread; the result returns on the main thread (ai_edit_done) to reload
+        the canvas. Guards when there is no active draft."""
+        draft_id = self.workbench.active_draft_id
+        if not draft_id:
+            self._set_status("Open a draft before asking for an AI edit.")
+            return
+        if not (instruction or "").strip():
+            return
+        import threading
+        self._set_status("Renn is revising the draft…")
+        if self.demo:
+            self._ensure_demo_db()
+        db_path = self._engine_db_path()
+        prompt = self._scoped_instruction(instruction, selection)
+        did = int(draft_id)
+
+        def worker():
+            from src.data.chat_tools.enablement_tools import _revise_draft_impl
+            from src.data.connection_factory import get_connection
+            res = {"ok": False, "draft_id": did}
+            conn = None
+            try:
+                conn = get_connection(db_path)
+                res = _revise_draft_impl(conn, did, prompt)
+            except Exception as exc:  # noqa: BLE001
+                res = {"ok": False, "draft_id": did, "error": str(exc)}
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+            self.ai_edit_done.emit(res or {})
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_ai_edit_done(self, res: dict):
+        """AI-edit finished off-thread → reload the canvas in place (main thread)."""
+        if not res.get("ok"):
+            self._set_status(f"AI edit failed: {res.get('error', 'unknown')}")
+            return
+        self._set_status(f"Draft {res.get('draft_id')} revised — reloaded the card.")
+        self._reload_active_draft_canvas()
+
+    def _reload_active_draft_canvas(self):
+        """Re-render the active draft's canvas from freshly-stored content so a
+        revise (inline AI edit OR a chat turn) shows up without a manual refresh."""
+        from src.data import enablement_store as store
+        draft_id = self.workbench.active_draft_id
+        if not draft_id:
+            return
+        try:
+            conn = self._conn()
+            draft = store.get_draft(conn, int(draft_id))
+            if not draft:
+                return
+            self._drafts[int(draft_id)] = draft
+            self.workbench.reload_active_canvas(self._card_from_draft(conn, draft))
+        except Exception as exc:  # noqa: BLE001
+            self._set_status(f"Canvas reload error: {exc}")
+
     # ── Guru analytics (P7) ─────────────────────────────────────────
 
     def _refresh_analytics(self):
@@ -1157,6 +1253,21 @@ class EnablementPage(QWidget):
     def _on_calendar_event_activated(self, task: dict):
         if task.get("kind") == "guru_card_due" and task.get("card_id"):
             self._on_targeted_update(task["card_id"])
+
+    def _on_attention_open(self, card_id: str):
+        """Home → 'Open targeted update': land in the Workbench and route the
+        card. A staged-draft pseudo id ('draft:<n>') opens that draft directly;
+        a real card id flows through the targeted-update import."""
+        self.tabs.setCurrentWidget(self.workbench)
+        if not card_id:
+            return
+        if card_id.startswith("draft:"):
+            try:
+                self._open_draft_workspace(int(card_id.split(":", 1)[1]))
+            except (TypeError, ValueError):
+                pass
+            return
+        self._on_targeted_update(card_id)
 
     # ── PowerPoint (E4) ─────────────────────────────────────────────
 

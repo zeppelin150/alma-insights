@@ -23,6 +23,29 @@ from PySide6.QtCore import QObject, Signal
 logger = logging.getLogger("alma.model_registry")
 
 
+@dataclass(frozen=True)
+class CapabilityProfile:
+    """Per-model capability hints used to un-hardcode tuning constants.
+
+    Purely descriptive — callers read these to size requests (e.g. max
+    output tokens) and to gate features (parallel tool use, thinking
+    effort) without branching on model id strings. The default profile
+    (``DEFAULT_PROFILE``) reproduces today's behavior exactly, so any
+    unknown / unprofiled model is safe.
+    """
+    max_output_tokens: int = 4096       # default reproduces legacy hardcode
+    supports_parallel_tools: bool = False
+    supports_thinking_effort: bool = False
+    context_window: int = 200_000
+    tier: int = 0                       # lower = cheaper / weaker
+    single_tool_per_turn_for_writes: bool = False
+
+
+# Conservative default — matches the legacy 4096 hardcode so unknown
+# models and the fallback path behave identically to before this change.
+DEFAULT_PROFILE = CapabilityProfile()
+
+
 @dataclass
 class ModelConfig:
     """Immutable description of a single LLM model."""
@@ -119,6 +142,72 @@ BUILTIN_MODELS: list[ModelConfig] = [
 _FALLBACK_MODEL_ID = "gemini-2.5-flash"
 
 
+# ── Per-model capability profiles ─────────────────────────────────
+# Keyed by ModelConfig.id. Any model without an entry falls back to
+# DEFAULT_PROFILE (max_output_tokens=4096) so nothing regresses.
+_BUILTIN_PROFILES: dict[str, CapabilityProfile] = {
+    "gemini-2.5-flash": CapabilityProfile(
+        max_output_tokens=8192,
+        supports_parallel_tools=True,
+        supports_thinking_effort=False,
+        context_window=1_000_000,
+        tier=1,
+    ),
+    "gemini-2.5-pro": CapabilityProfile(
+        max_output_tokens=8192,
+        supports_parallel_tools=True,
+        supports_thinking_effort=True,
+        context_window=1_000_000,
+        tier=3,
+    ),
+    "gemini-3-flash-preview": CapabilityProfile(
+        max_output_tokens=8192,
+        supports_parallel_tools=True,
+        supports_thinking_effort=True,
+        context_window=1_000_000,
+        tier=2,
+    ),
+    "gemini-3.1-pro-preview": CapabilityProfile(
+        max_output_tokens=8192,
+        supports_parallel_tools=True,
+        supports_thinking_effort=True,
+        context_window=1_000_000,
+        tier=3,
+    ),
+    "gemini-2.5-flash-lite": CapabilityProfile(
+        max_output_tokens=8192,
+        supports_parallel_tools=True,
+        supports_thinking_effort=False,
+        context_window=1_000_000,
+        tier=0,
+    ),
+    "claude-sonnet-4-6": CapabilityProfile(
+        max_output_tokens=8192,
+        supports_parallel_tools=True,
+        supports_thinking_effort=True,
+        context_window=200_000,
+        tier=3,
+        single_tool_per_turn_for_writes=True,
+    ),
+    "claude-opus-4-6": CapabilityProfile(
+        max_output_tokens=8192,
+        supports_parallel_tools=True,
+        supports_thinking_effort=True,
+        context_window=200_000,
+        tier=4,
+        single_tool_per_turn_for_writes=True,
+    ),
+    "claude-haiku-4-5": CapabilityProfile(
+        max_output_tokens=8192,
+        supports_parallel_tools=True,
+        supports_thinking_effort=False,
+        context_window=200_000,
+        tier=1,
+        single_tool_per_turn_for_writes=True,
+    ),
+}
+
+
 class ModelRegistry(QObject):
     """Singleton registry of LLM models.
 
@@ -162,6 +251,21 @@ class ModelRegistry(QObject):
     def get(self, model_id: str) -> ModelConfig | None:
         """Lookup a model by id.  Returns None if unknown."""
         return self._models.get(model_id)
+
+    def profile(self, model_id: str | None = None) -> CapabilityProfile:
+        """Return the CapabilityProfile for ``model_id``.
+
+        Falls back to the active model when ``model_id`` is None, and to
+        DEFAULT_PROFILE (max_output_tokens=4096) for any unknown / unprofiled
+        id — so callers always get a safe, behavior-preserving default.
+        """
+        if model_id is None:
+            model_id = self._active_id
+        return _BUILTIN_PROFILES.get(model_id, DEFAULT_PROFILE)
+
+    def active_profile(self) -> CapabilityProfile:
+        """Convenience: CapabilityProfile for the currently active model."""
+        return self.profile(self._active_id)
 
     def available(self) -> list[ModelConfig]:
         """Return only enabled models (for dropdown population)."""

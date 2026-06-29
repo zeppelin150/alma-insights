@@ -55,24 +55,37 @@ def test_orchestrator_records_provenance(empty_db):
 
 # ── effectiveness ──
 
-def test_card_effectiveness_surfaces_measured(empty_db):
+def test_card_effectiveness_surfaces_proxy(empty_db):
+    # Decoupled: impact is a Guru-native proxy (per-card view + open-comment
+    # deltas), NOT the old ticket-volume read of the forbidden guru_effectiveness
+    # warehouse table. ``measured`` stays an empty back-compat key.
     conn = empty_db.conn
-    conn.execute("PRAGMA foreign_keys=OFF")  # test-only: seed an effectiveness row without its parent
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS guru_effectiveness (id INTEGER PRIMARY KEY, card_id TEXT, "
-        "friction_type TEXT, measurement_date TEXT, source TEXT, pre_volume INT, post_volume INT, "
-        "pre_window_days INT, post_window_days INT, delta_pct REAL, is_significant INT, created_at TEXT)")
-    conn.execute("INSERT INTO guru_effectiveness (card_id, friction_type, measurement_date, "
-                 "pre_volume, post_volume, post_window_days, delta_pct, is_significant) "
-                 "VALUES ('c1','billing','2026-06-20',40,28,14,-30.0,1)")
-    conn.commit()
+    from src.data.content_update import effectiveness_proxy
+
+    class _FakeSignals:
+        """Minimal GuruSignals stand-in: fixed per-card views + open comments."""
+
+        def __init__(self, views, comments):
+            self._views, self._comments = views, comments
+
+        def card_view_counts(self, from_date=None, to_date=None):
+            return self._views
+
+        def open_comment_count(self, card_id):
+            return self._comments.get(card_id, 0)
+
     provenance.record_proposal(conn, 5, "c1", summary="s",
                                changes=[{"type": "update", "section": "P", "reason": "r"}])
     provenance.finalize_publish(conn, 5, approved_by="chris", card_id="c1")
 
+    # baseline at publish, then a followup after a window
+    effectiveness_proxy.snapshot_baseline(conn, _FakeSignals({"c1": 10}, {"c1": 5}), "c1", 5)
+    effectiveness_proxy.measure_proxy(conn, _FakeSignals({"c1": 18}, {"c1": 2}), "c1")
+
     eff = card_effectiveness(conn, "c1")
-    assert eff["ok"] and eff["measured"] and eff["measured"][0]["delta_pct"] == -30.0
-    assert "delta -30.0%" in eff["note"]
+    assert eff["ok"] and eff["measured"] == []  # ticket-volume measure is gone (decoupled)
+    assert eff["proxy"]["views_delta"] == 8 and eff["proxy"]["comments_resolved"] == 3
+    assert "Guru-native impact: views +8" in eff["note"] and "3 comment(s) resolved" in eff["note"]
     assert eff["updates"][0]["status"] == "published"
 
 

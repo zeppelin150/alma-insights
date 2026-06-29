@@ -111,6 +111,10 @@ class WorkbenchPage(QWidget):
     existing_cards_requested = Signal() # "Existing Guru card" submenu opened → host fetches real cards
     import_requested = Signal(str)      # "drive" | "guru" → host runs the import
     content_edited = Signal(int, str)   # (draft_id, markdown) from the Edit view
+    # Passthrough of the rich editor's inline "/"-menu + highlight-to-edit ask
+    # (instruction, selection_text). The host runs the revise off-thread and
+    # reloads this canvas; the workbench itself stays provider/LLM-free.
+    ai_edit_requested = Signal(str, str)
 
     MAX_WORKSPACES = 4   # work up to 4 cards at once, toggling between chips
 
@@ -124,6 +128,7 @@ class WorkbenchPage(QWidget):
         self._ws_state = {}          # draft_id → {md, html, view, cursor} per workspace
         self._current_md = ""
         self._current_html = None    # cleaned rich HTML for Guru publish (or None)
+        self._linked_card_md = ""    # current linked-card md, for the Review-changes diff
         self._overlay_host = None    # content_stack, injected by the page
         self._overlay = None         # lazily-built ExpandOverlay
         self._build()
@@ -310,6 +315,14 @@ class WorkbenchPage(QWidget):
         if not self._restore_workspace(draft_id) and card is not None:
             self.show_draft(card)
 
+    def reload_active_canvas(self, card: dict):
+        """Re-render the active draft's canvas in place from freshly-stored
+        content (an AI revise / chat edit replaced it server-side). Drops the
+        stale cached edit state for this workspace so show_draft's content wins,
+        and keeps the active id unchanged."""
+        self._ws_state.pop(self._active_draft_id, None)
+        self.show_draft(card)
+
     def _build_card_panel(self) -> QFrame:
         card = _card_frame()
         v = QVBoxLayout(card)
@@ -343,6 +356,9 @@ class WorkbenchPage(QWidget):
         self._edit_btn = self._view_toggle_btn("Edit markdown")
         self._edit_btn.clicked.connect(lambda: self._set_view("edit"))
         meta.addWidget(self._edit_btn)
+        self._diff_btn = self._view_toggle_btn("Review changes")
+        self._diff_btn.clicked.connect(lambda: self._set_view("diff"))
+        meta.addWidget(self._diff_btn)
         self._expand_btn = self._view_toggle_btn("⤢  Expand")
         self._expand_btn.clicked.connect(self._open_expand)
         meta.addWidget(self._expand_btn)
@@ -355,16 +371,22 @@ class WorkbenchPage(QWidget):
         )
         from src.ui.pages.enablement.rich_editor import RichTextEditor
         self._rich = RichTextEditor()
+        # Re-emit the editor's inline AI-edit ask up to the host (page.py) so it
+        # can route the revise + reload without reaching into the rich editor.
+        self._rich.ai_edit_requested.connect(self.ai_edit_requested)
         self._editor = QPlainTextEdit()
         self._editor.setStyleSheet(
             f"QPlainTextEdit{{background:{ALMA_BG_INSET}; border:1px solid {ALMA_BORDER_LIGHT}; "
             f"border-radius:8px; color:{ALMA_TEXT_DARK}; "
             f"font-family:Consolas,monospace; font-size:12.5px; padding:8px;}}"
         )
+        from src.ui.pages.enablement.diff_view import DiffView
+        self._diff = DiffView()
         self._body_stack = QStackedWidget()
         self._body_stack.addWidget(self._body)     # 0 preview
         self._body_stack.addWidget(self._rich)     # 1 rich text (WYSIWYG)
         self._body_stack.addWidget(self._editor)   # 2 markdown source
+        self._body_stack.addWidget(self._diff)     # 3 review-changes diff
         v.addWidget(self._body_stack, 1)
 
         strip = QFrame()
@@ -430,12 +452,16 @@ class WorkbenchPage(QWidget):
         elif mode == "rich":
             self._rich.set_markdown(self._current_md)
             self._body_stack.setCurrentWidget(self._rich)
+        elif mode == "diff":
+            self._diff.set_diff(self._linked_card_md, self._current_md)
+            self._body_stack.setCurrentWidget(self._diff)
         else:
             self._render_body()
             self._body_stack.setCurrentWidget(self._body)
         self._style_view_btn(self._preview_btn, active=mode == "preview")
         self._style_view_btn(self._rich_btn, active=mode == "rich")
         self._style_view_btn(self._edit_btn, active=mode == "edit")
+        self._style_view_btn(self._diff_btn, active=mode == "diff")
 
     def _render_body(self):
         try:
@@ -612,11 +638,23 @@ class WorkbenchPage(QWidget):
         # Seed HTML from the draft's stored content_html if present (e.g. an
         # imported Guru card keeps its source HTML); else None → publish derives.
         self._current_html = card.get("content_html")
+        # New draft: the diff baseline (the linked card md) belongs to this draft
+        # and is fed separately by the host; clear the stale one until then.
+        self._linked_card_md = card.get("linked_card_md", "")
         self._render_body()
         self._body_stack.setCurrentWidget(self._body)
         self._style_view_btn(self._preview_btn, active=True)
         self._style_view_btn(self._rich_btn, active=False)
         self._style_view_btn(self._edit_btn, active=False)
+        self._style_view_btn(self._diff_btn, active=False)
+
+    def set_linked_card_md(self, md: str):
+        """Host feeds the current linked-card markdown — the diff baseline the
+        Review-changes view compares the active draft's proposed content against.
+        If the diff view is showing, re-render it against the new baseline."""
+        self._linked_card_md = md or ""
+        if self._body_stack.currentWidget() is self._diff:
+            self._diff.set_diff(self._linked_card_md, self._current_md)
 
     def set_active_draft(self, draft_id):
         self.set_pending_drafts(self._current_drafts, active_id=draft_id)

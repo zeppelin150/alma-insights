@@ -403,6 +403,7 @@ TOOL_SCHEMAS = [
         ),
         "inputSchema": {
             "type": "object",
+            "additionalProperties": False,
             "properties": {
                 "query": {"type": "string", "description": "Topic or title to search for."},
                 "collections": {"type": "array", "items": {"type": "string"},
@@ -422,6 +423,7 @@ TOOL_SCHEMAS = [
         ),
         "inputSchema": {
             "type": "object",
+            "additionalProperties": False,
             "properties": {
                 "scope": {"type": "string", "description": "docs | guru | all (default docs)."},
                 "query": {"type": "string", "description": "For scope=guru: which cards to pull."},
@@ -429,6 +431,7 @@ TOOL_SCHEMAS = [
                                 "description": "Optional: limit Guru indexing to these collections."},
                 "limit": {"type": "integer", "description": "Max items to index (default 200)."},
             },
+            "required": [],
         },
     },
     {
@@ -441,6 +444,7 @@ TOOL_SCHEMAS = [
         ),
         "inputSchema": {
             "type": "object",
+            "additionalProperties": False,
             "properties": {
                 "query": {"type": "string", "description": "Topic to search the catalog for."},
                 "limit": {"type": "integer", "description": "Max candidates to return (default 5)."},
@@ -457,10 +461,13 @@ TOOL_SCHEMAS = [
         ),
         "inputSchema": {
             "type": "object",
+            "additionalProperties": False,
             "properties": {
                 "card_ref": {"type": "string", "description": "Guru card id or app.getguru.com URL."},
+                "card_id": {"type": "string", "description": "Alias for card_ref (a raw card id)."},
+                "url": {"type": "string", "description": "Alias for card_ref (an app.getguru.com URL)."},
             },
-            "required": ["card_ref"],
+            "required": [],
         },
     },
     {
@@ -473,10 +480,72 @@ TOOL_SCHEMAS = [
         ),
         "inputSchema": {
             "type": "object",
+            "additionalProperties": False,
             "properties": {
                 "card_ref": {"type": "string", "description": "Guru card id or app.getguru.com URL."},
+                "card_id": {"type": "string", "description": "Alias for card_ref (a raw card id)."},
+                "url": {"type": "string", "description": "Alias for card_ref (an app.getguru.com URL)."},
             },
-            "required": ["card_ref"],
+            "required": [],
+        },
+    },
+    {
+        "name": "find_cards_to_update",
+        "description": (
+            "Call this when the user asks 'what should I work on next', 'which cards "
+            "need attention', or wants the prioritized Guru-card work queue. Returns "
+            "the ranked attention queue (lowest health first) — each card with id, "
+            "title, score, bucket, and a short 'why' reason. Optionally filter to one "
+            "bucket. Reasons over INTENT — prefer this over raw analytics for "
+            "'what to update' questions."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "limit": {"type": "integer", "description": "Max cards to return (default 10)."},
+                "bucket": {
+                    "type": "string",
+                    "enum": ["source_changed", "verification_overdue", "gap_dup", "healthy"],
+                    "description": "Optional: restrict to one attention bucket.",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "find_stale_cards",
+        "description": (
+            "Call this when the user asks which cards are stale, out of date, or "
+            "overdue for verification. Returns cards in the verification_overdue "
+            "bucket (falling back to the least-fresh cards when none are overdue), "
+            "ranked staleest-first, each with id, title, score, bucket, and a "
+            "'why' reason."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "limit": {"type": "integer", "description": "Max cards to return (default 10)."},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "find_content_gaps",
+        "description": (
+            "Call this when the user asks about content gaps or duplicate cards. "
+            "Returns cards flagged as a coverage gap or a near-duplicate (the gap_dup "
+            "bucket), ranked, each noting the gap or the duplicated card ids in its "
+            "'why' reason."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "limit": {"type": "integer", "description": "Max cards to return (default 10)."},
+            },
+            "required": [],
         },
     },
     {
@@ -488,11 +557,14 @@ TOOL_SCHEMAS = [
         ),
         "inputSchema": {
             "type": "object",
+            "additionalProperties": False,
             "properties": {
                 "card_ref": {"type": "string",
                              "description": "Guru card id or app.getguru.com/card/<id> URL."},
+                "card_id": {"type": "string", "description": "Alias for card_ref (a raw card id)."},
+                "url": {"type": "string", "description": "Alias for card_ref (an app.getguru.com URL)."},
             },
-            "required": ["card_ref"],
+            "required": [],
         },
     },
     {
@@ -505,6 +577,7 @@ TOOL_SCHEMAS = [
         ),
         "inputSchema": {
             "type": "object",
+            "additionalProperties": False,
             "properties": {
                 "topic": {"type": "string", "description": "The subject to research."},
                 "limit": {"type": "integer", "description": "Max items per source (default 5)."},
@@ -527,6 +600,7 @@ TOOL_SCHEMAS = [
         ),
         "inputSchema": {
             "type": "object",
+            "additionalProperties": False,
             "properties": {
                 "task_id": {"type": "string", "description": "Enablement task naming the source doc."},
                 "doc_ref": {"type": "string", "description": "Source document id."},
@@ -536,6 +610,7 @@ TOOL_SCHEMAS = [
                                 "description": "Optional: scope candidate cards to these collections."},
                 "max_cards": {"type": "integer", "description": "Max cards to check (default 5)."},
             },
+            "required": [],
         },
     },
     {
@@ -551,6 +626,7 @@ TOOL_SCHEMAS = [
         ),
         "inputSchema": {
             "type": "object",
+            "additionalProperties": False,
             "properties": {
                 "task_id": {"type": "string", "description": "Enablement task whose scratchpad names the source doc + target card."},
                 "doc_ref": {"type": "string", "description": "Source document id (from search_local_documents)."},
@@ -561,6 +637,7 @@ TOOL_SCHEMAS = [
                 "collections": {"type": "array", "items": {"type": "string"},
                                 "description": "Optional: scope the card search to these collection names/ids."},
             },
+            "required": [],
         },
     },
     {

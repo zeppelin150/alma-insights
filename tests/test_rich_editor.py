@@ -76,12 +76,13 @@ class TestWorkbenchThreeModes:
         from src.ui.pages.enablement.workbench import WorkbenchPage
         return WorkbenchPage()
 
-    def test_three_toggle_buttons(self, qapp):
+    def test_view_toggle_buttons(self, qapp):
         wb = self._wb(qapp)
         assert hasattr(wb, "_preview_btn")
         assert hasattr(wb, "_rich_btn")
         assert hasattr(wb, "_edit_btn")
-        assert wb._body_stack.count() == 3
+        assert hasattr(wb, "_diff_btn")        # Milestone D: "Review changes" diff view
+        assert wb._body_stack.count() == 4     # preview / rich / edit / diff
 
     def test_rich_edit_persists_via_content_edited(self, qapp):
         wb = self._wb(qapp)

@@ -75,19 +75,37 @@ def record_from_result(conn, draft_id, card_id, src, plan, issues) -> None:
 
 
 def finalize_publish(conn, draft_id, *, approved_by="user", card_id=None) -> None:
-    """Push-time: stamp approver + timestamp; this row anchors effectiveness."""
+    """Push-time: stamp approver + timestamp; this row anchors effectiveness.
+
+    Upsert, not update-only: drafts pushed via paths that never staged a
+    proposal row (Drive scans, workbench imports, direct UI/chat pushes of an
+    imported card) have no prior row, so a plain UPDATE would match nothing and
+    leave the published card with no audit trail / effectiveness anchor. When the
+    UPDATE touches no row we INSERT a minimal published anchor instead.
+    """
     ensure_table(conn)
+    now = _now()
     with atomic(conn):
         if card_id:
-            conn.execute(
+            cur = conn.execute(
                 "UPDATE card_update_provenance SET status='published', approved_by=?, "
                 "pushed_at=?, card_id=COALESCE(NULLIF(card_id,''),?) WHERE draft_id=?",
-                (approved_by, _now(), card_id, int(draft_id)))
+                (approved_by, now, card_id, int(draft_id)))
         else:
-            conn.execute(
+            cur = conn.execute(
                 "UPDATE card_update_provenance SET status='published', approved_by=?, "
                 "pushed_at=? WHERE draft_id=?",
-                (approved_by, _now(), int(draft_id)))
+                (approved_by, now, int(draft_id)))
+        if cur.rowcount == 0:
+            conn.execute(
+                """INSERT INTO card_update_provenance
+                   (draft_id, card_id, status, approved_by, created_at, pushed_at)
+                   VALUES (?,?,'published',?,?,?)
+                   ON CONFLICT(draft_id) DO UPDATE SET
+                     status='published', approved_by=excluded.approved_by,
+                     pushed_at=excluded.pushed_at,
+                     card_id=COALESCE(NULLIF(card_update_provenance.card_id,''), excluded.card_id)""",
+                (int(draft_id), card_id or "", approved_by, now, now))
 
 
 def get(conn, draft_id):
@@ -104,6 +122,62 @@ def history(conn, card_id, *, limit=20) -> list[dict]:
         "ORDER BY COALESCE(NULLIF(pushed_at,''), created_at) DESC LIMIT ?",
         (card_id, limit)).fetchall()
     return [_row(r) for r in rows]
+
+
+def _latest(conn, card_id):
+    """The most recent provenance row for a card (published or staged)."""
+    ensure_table(conn)
+    return conn.execute(
+        "SELECT * FROM card_update_provenance WHERE card_id=? "
+        "ORDER BY COALESCE(NULLIF(pushed_at,''), created_at) DESC LIMIT 1",
+        (card_id,)).fetchone()
+
+
+def _change_evidence(c) -> dict:
+    """Normalize one stored change into a reviewer row (evidence may be absent)."""
+    if not isinstance(c, dict):
+        return {"type": "", "section": "", "reason": "", "evidence": str(c)}
+    return {"type": c.get("type", ""), "section": c.get("section", ""),
+            "reason": c.get("reason", ""), "evidence": c.get("evidence", "")}
+
+
+def _empty_pack(card_id=None) -> dict:
+    """Reviewer pack for a card/draft with no recorded provenance."""
+    return {"card_id": card_id, "source_ref": "", "source_title": "",
+            "changes": [], "dropped": [], "issues": [],
+            "pushed_at": "", "approved_by": ""}
+
+
+def evidence_pack(conn, *, card_id=None, draft_id=None) -> dict:
+    """Reviewer-facing pack: source + per-change evidence for one update.
+
+    By ``card_id`` reshapes the latest published-or-staged row; by ``draft_id``
+    reshapes that exact draft. Reads ONLY ``card_update_provenance`` (no tickets).
+    A missing card/draft returns an empty-but-well-formed pack.
+    """
+    if draft_id is not None:
+        rec = get(conn, draft_id)
+        if not rec:
+            return _empty_pack()
+        return _pack(rec)
+    row = _latest(conn, card_id)
+    if not row:
+        return _empty_pack(card_id)
+    return _pack(_row(row))
+
+
+def _pack(rec: dict) -> dict:
+    """Reshape one provenance dict into the reviewer pack."""
+    return {
+        "card_id": rec["card_id"],
+        "source_ref": rec["source_ref"],
+        "source_title": rec["source_title"],
+        "changes": [_change_evidence(c) for c in rec["changes"]],
+        "dropped": rec["dropped"],
+        "issues": rec["issues"],
+        "pushed_at": rec["pushed_at"],
+        "approved_by": rec["approved_by"],
+    }
 
 
 def _row(r) -> dict:

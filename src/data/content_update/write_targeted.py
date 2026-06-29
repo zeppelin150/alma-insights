@@ -17,6 +17,7 @@ from .models import ProposedUpdate
 from .write_updates import write_updates
 
 _HEADING = re.compile(r"^(#{1,6})\s+(.*)$")
+_FENCE = re.compile(r"^\s*(```|~~~)")
 _MIN_MATCH = 0.4
 
 
@@ -25,7 +26,12 @@ def write_targeted_updates(llm_client, pulled, plan, source, style_block) -> Pro
     if sum(1 for s in sections if s["level"] > 0) < 2:
         return write_updates(llm_client, pulled, plan, source, style_block)  # no structure
 
-    per, additions = _match(sections, plan.changes)
+    per, additions, unplaceable = _match(sections, plan.changes)
+    # An update/remove whose section we can't locate must NOT be appended as a
+    # new section (that would duplicate content, or "add" for a removal). Hand
+    # the whole card to the holistic writer, which sees every change in context.
+    if unplaceable:
+        return write_updates(llm_client, pulled, plan, source, style_block)
     if not any(per) and not additions:
         return write_updates(llm_client, pulled, plan, source, style_block)
 
@@ -54,8 +60,14 @@ def write_targeted_updates(llm_client, pulled, plan, source, style_block) -> Pro
 def _split_sections(md: str) -> list[dict]:
     out: list[dict] = []
     cur: dict | None = None
+    in_fence = False
     for line in (md or "").split("\n"):
-        m = _HEADING.match(line)
+        if _FENCE.match(line):
+            in_fence = not in_fence
+        # A '#'-prefixed line INSIDE a fenced code block (e.g. a bash/python
+        # comment) is not a heading — treating it as one splits the code block
+        # and orphans the closing fence, corrupting the card on rewrite.
+        m = None if in_fence else _HEADING.match(line)
         if m:
             if cur is not None:
                 out.append(cur)
@@ -72,28 +84,39 @@ def _split_sections(md: str) -> list[dict]:
 def _match(sections, changes):
     per = [[] for _ in sections]
     additions = []
+    unplaceable = []
     for ch in changes:
         idx = _best_section(sections, ch.section)
-        if idx is None:
-            additions.append(ch)
-        else:
+        if idx is not None:
             per[idx].append(ch)
-    return per, additions
+        elif (ch.type or "").strip().lower() == "add":
+            additions.append(ch)  # genuine addition → new section
+        else:
+            # update/remove with no matching section: cannot be a new section.
+            unplaceable.append(ch)
+    return per, additions, unplaceable
 
 
 def _best_section(sections, name) -> int | None:
     sn = set(tokenize(name))
     if not sn:
         return None
-    best, best_score = None, 0.0
+    nm = (name or "").strip().lower()
+    best, best_score, best_ht = None, 0.0, 10 ** 9
     for i, s in enumerate(sections):
         if s["level"] == 0:
             continue
         ht = set(tokenize(s["heading"]))
-        if ht:
-            score = len(sn & ht) / len(sn)
-            if score > best_score:
-                best, best_score = i, score
+        if not ht:
+            continue
+        if (s["heading"] or "").strip().lower() == nm:
+            return i  # exact heading match wins outright
+        score = len(sn & ht) / len(sn)
+        # Strictly-higher score wins; on a TIE prefer the tighter heading (fewer
+        # extra tokens) so a single shared keyword (e.g. "Policy") binds to the
+        # most specific heading rather than whichever was scanned first.
+        if score > best_score or (score == best_score and score > 0 and len(ht) < best_ht):
+            best, best_score, best_ht = i, score, len(ht)
     return best if best_score >= _MIN_MATCH else None
 
 

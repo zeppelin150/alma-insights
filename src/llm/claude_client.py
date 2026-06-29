@@ -103,14 +103,35 @@ class ClaudeClient:
         """Return True if we have an API key configured."""
         return bool(self._api_key)
 
+    def _default_max_tokens(self) -> int:
+        """The default output-token budget for a no-arg call.
+
+        Deliberately the legacy 4096 for ALL models, so every existing caller
+        that passes nothing is byte-for-byte unchanged (sending the profile's
+        full ceiling here would silently double output limits app-wide — chat,
+        reports, the guru pipelines). A model's larger ceiling lives in its
+        ``CapabilityProfile.max_output_tokens`` (e.g. 8192 for Claude); callers
+        that need headroom — card drafting, long rewrites — opt in explicitly
+        with ``max_tokens=ModelRegistry.instance().profile(model).max_output_tokens``.
+        Centralised here so the per-call default stays one tunable choke point.
+        """
+        return 4096
+
     def generate(self, prompt: str, system_prompt: str = "",
-                 timeout: int = 120, max_tokens: int = 4096) -> str:
+                 timeout: int = 120, max_tokens: int | None = None) -> str:
         """Send a prompt to Claude and return the response text.
 
         PII redaction is applied identically to GeminiClient:
         - Base redaction always runs (emails, phones, SSNs, cards, member IDs)
         - Aggressive name redaction controlled by ``self.pii_redaction``
+
+        ``max_tokens=None`` (the default) resolves to 4096 — the legacy
+        default — so callers that pass nothing are unchanged. A model's larger
+        ceiling is opt-in via its ``CapabilityProfile.max_output_tokens``. An
+        explicit value is always honored as-is.
         """
+        if max_tokens is None:
+            max_tokens = self._default_max_tokens()
         if not self._api_key:
             raise ClaudeAuthError("Anthropic API key not configured")
 
@@ -179,11 +200,17 @@ class ClaudeClient:
         return response_text
 
     def generate_streaming(self, prompt: str, system_prompt: str = "",
-                           max_tokens: int = 4096, timeout: int = 120) -> Iterator[str]:
+                           max_tokens: int | None = None, timeout: int = 120) -> Iterator[str]:
         """Stream response tokens via SSE.
 
         Yields text delta strings as they arrive.
+
+        ``max_tokens=None`` (the default) resolves to 4096, matching
+        ``generate()``; a model's larger ceiling is opt-in via its
+        ``CapabilityProfile.max_output_tokens``. An explicit value is honored.
         """
+        if max_tokens is None:
+            max_tokens = self._default_max_tokens()
         if not self._api_key:
             raise ClaudeAuthError("Anthropic API key not configured")
 

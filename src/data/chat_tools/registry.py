@@ -22,6 +22,39 @@ _MAX_RESULT_JSON_LEN = 4096  # PHI-safe: truncate result_json to 4KB
 _CHAT_TOOLS: dict[str, dict[str, Any]] = {}
 _logger_instance: ToolLogger | None = None
 
+# Lazily populated map of tool_name -> strict MCP inputSchema. Only tools
+# that opt in via additionalProperties:false (the enablement tools) appear
+# here; everything else (and the whole Gemini text-loop) is never enforced.
+_STRICT_SCHEMAS: dict[str, dict] | None = None
+
+# Reserved arg key the dispatcher merges into session filters for every
+# tool — never part of a tool's own declared schema, so exclude it from
+# strict validation rather than rejecting it.
+_RESERVED_ARG_KEYS = ("filters",)
+
+
+def _strict_schema_for(tool_name: str) -> dict | None:
+    """Return the strict inputSchema for a tool, or None when it has no
+    strict schema (so the validator stays inert for it).
+
+    Sourced from chat_mcp_server.TOOL_SCHEMAS, indexed once. Best-effort:
+    any import/shape failure leaves enforcement off (fail-open) so a schema
+    problem can never block dispatch."""
+    global _STRICT_SCHEMAS
+    if _STRICT_SCHEMAS is None:
+        _STRICT_SCHEMAS = {}
+        try:
+            from src.data.chat_tools._schema import is_strict
+            from src.mcp.chat_mcp_server import TOOL_SCHEMAS
+            for t in TOOL_SCHEMAS:
+                schema = t.get("inputSchema")
+                if is_strict(schema):
+                    _STRICT_SCHEMAS[t["name"]] = schema
+        except Exception as exc:  # noqa: BLE001 — fail-open, never block dispatch
+            logger.debug("Strict-schema index unavailable: %s", exc)
+            _STRICT_SCHEMAS = {}
+    return _STRICT_SCHEMAS.get(tool_name)
+
 
 def _ensure_registered():
     """Populate the registry on first call (avoids circular imports)."""
@@ -175,6 +208,9 @@ def _ensure_registered():
         handle_update_cards_from_doc,
         handle_card_history,
         handle_card_effectiveness,
+        handle_find_cards_to_update,
+        handle_find_stale_cards,
+        handle_find_content_gaps,
     )
     _register("import_guru_card", handle_import_guru_card,
               phi_level=0, desc="Import an existing Guru card as an editable draft (publish updates it)")
@@ -200,6 +236,13 @@ def _ensure_registered():
               phi_level=0, desc="Audit trail for a Guru card: every update — what changed, from what source, who approved, when")
     _register("card_effectiveness", handle_card_effectiveness,
               phi_level=1, desc="Did-it-work feedback for a card: update history + measured ticket-volume impact (delta_pct)")
+    # ── Task-shaped attention queue (reason over INTENT, not raw queries) ──
+    _register("find_cards_to_update", handle_find_cards_to_update,
+              phi_level=0, desc="Call this when the user asks 'what should I work on / update next' — returns the ranked Guru-card attention queue (most-in-need first) with a reason per card; optional bucket filter (source_changed | verification_overdue | gap_dup | healthy)")
+    _register("find_stale_cards", handle_find_stale_cards,
+              phi_level=0, desc="Call this when the user asks which cards are stale / overdue for verification — returns overdue cards (falling back to the least-fresh cards) ranked staleest-first")
+    _register("find_content_gaps", handle_find_content_gaps,
+              phi_level=0, desc="Call this when the user asks about content gaps or duplicate cards — returns cards flagged as a coverage gap or a near-duplicate, each noting the gap vs the duplicated card ids")
 
     # ── Backward-compat aliases for old tool names ──
     # These map old names to new handlers so existing prompts keep working
@@ -265,6 +308,19 @@ def dispatch_tool(
     tool_def = _CHAT_TOOLS.get(tool_name)
     if tool_def is None:
         return json.dumps({"error": f"Unknown tool: {tool_name}"})
+
+    # Strict-schema arg validation (enablement tools only). Tools without a
+    # declared strict schema — and the entire Gemini text-loop — skip this
+    # entirely (_strict_schema_for returns None → validate_args is a no-op).
+    schema = _strict_schema_for(tool_name)
+    if schema is not None:
+        from src.data.chat_tools._schema import validate_args
+        to_check = {k: v for k, v in (args or {}).items()
+                    if k not in _RESERVED_ARG_KEYS}
+        ok, err = validate_args(schema, to_check)
+        if not ok:
+            logger.warning("Tool %s arg validation failed: %s", tool_name, err)
+            return json.dumps({"error": f"invalid_arguments: {err}", "tool": tool_name})
 
     # Merge session filters as base, tool args override
     effective_filters = dict(session_filters or {})

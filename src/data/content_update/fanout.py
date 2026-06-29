@@ -42,7 +42,17 @@ def run_fanout_update(conn, request: ContentUpdateRequest, deps: Deps,
 def _process_card(conn, deps, src, cand, style) -> dict:
     base = {"card_id": cand["card_id"], "title": cand["title"],
             "score": cand["score"], "via": cand.get("via")}
+    # Isolate one card's failure from the rest of the fan-out: an LLM/transport
+    # error on card N must not abort cards 1..N-1 (already staged) or N+1..end.
+    # Without this guard a single raise unwinds the whole batch and the caller
+    # returns an error with no `cards` list, orphaning already-staged drafts.
+    try:
+        return _process_card_inner(conn, deps, src, cand, style, base)
+    except Exception as exc:  # noqa: BLE001
+        return {**base, "status": "failed", "stage": "exception", "error": str(exc)[:200]}
 
+
+def _process_card_inner(conn, deps, src, cand, style, base) -> dict:
     fetched = fetch_card_markdown(deps.guru_client, cand["card_id"])
     if not fetched:
         return {**base, "status": "failed", "stage": "fetch"}

@@ -274,7 +274,13 @@ def _update_task_impl(conn, task_id, fields) -> dict:
     from src.data import enablement_tasks as tasks
     if not task_id:
         return {"ok": False, "error": "task_id_required"}
-    return {"ok": tasks.update_task(conn, str(task_id), **(fields or {}))}
+    # Distinguish a missing task from a valid-but-no-op update — a bare
+    # {"ok": False} hid both (the task could not be found OR no field changed).
+    if tasks.get_task(conn, str(task_id)) is None:
+        return {"ok": False, "error": "task_not_found", "task_id": str(task_id)}
+    if not tasks.update_task(conn, str(task_id), **(fields or {})):
+        return {"ok": False, "error": "no_updatable_fields", "task_id": str(task_id)}
+    return {"ok": True, "task_id": str(task_id)}
 
 
 def _list_tasks_impl(conn, *, status=None, source=None, kind=None, due_before=None, limit=50) -> dict:
@@ -525,6 +531,10 @@ def _update_card_from_doc_impl(conn, *, task_id=None, doc_ref=None, doc_query=No
         docs = store.search_documents(conn, doc_query, limit=1)
         if docs:
             source_doc_ref = docs[0].get("doc_id")
+        else:
+            # A query WAS given but matched nothing — distinct from "no doc param".
+            return {"ok": False,
+                    "error": f"no_matching_doc: no stored document matched query '{doc_query}'"}
     if not source_doc_ref:
         return {"ok": False, "error": "source_doc_required: pass doc_ref, doc_query, or a task_id whose scratchpad names one"}
 
@@ -660,6 +670,7 @@ def _research_topic_impl(conn, topic, *, limit=5, collections=None) -> dict:
     live Guru cards, locally-stored docs, and ticket signals. Each source is
     best-effort — a failure in one never blocks the others.
     """
+    limit = int(limit or 5)  # a model/bridge may pass "5" as a string; coerce once
     out = {"ok": True, "topic": topic, "guru_cards": [], "documents": [], "ticket_signals": []}
 
     g = _search_guru_cards_impl(conn, topic, collections=collections, limit=limit)
@@ -675,15 +686,15 @@ def _research_topic_impl(conn, topic, *, limit=5, collections=None) -> dict:
     except Exception as exc:  # noqa: BLE001
         out["doc_error"] = str(exc)[:120]
 
-    try:
-        # FTS conversation search (no torch — keeps enablement mode lightweight;
-        # semantic_search would load the embedding model, which enablement avoids).
-        from src.data.chat_tools.fast_path import handle_legacy_search_conversations
-        sig = handle_legacy_search_conversations(conn, {"query": topic, "limit": limit}, {})
-        rows = sig.get("results") if isinstance(sig, dict) else None
-        out["ticket_signals"] = rows or []
-    except Exception as exc:  # noqa: BLE001
-        out["ticket_error"] = str(exc)[:120]
+    # Ticket signals are intentionally DISABLED pending a PHI-boundary decision.
+    # The enablement lane disables aggressive PII redaction, so it must NEVER pull
+    # raw ticket conversations (patient text). Do NOT wire this to
+    # handle_legacy_search_conversations — its results carry raw subjects/snippets
+    # (PHI). Re-enable later only as a DE-IDENTIFIED aggregate (counts by TRC, no
+    # ticket text). (Previously read a wrong dict key, so it returned [] anyway;
+    # made explicit here so a future "key fix" can't silently leak PHI.)
+    out["ticket_signals"] = []
+    out["ticket_signals_note"] = "Disabled pending a PHI-safe de-identified aggregate."
 
     out["note"] = ("Reference points gathered. Use these as authoritative input — "
                    "pass relevant card_ids/doc_ids as reference_refs when updating a card.")
@@ -743,14 +754,17 @@ def _guru_items(conn, query, collections, limit) -> list[dict]:
         return []
     allowed = {c.lower() for c in (collections or [])}
     out = []
-    for c in cards[:limit]:
+    for c in (cards or [])[:limit]:
+        cid = c.get("id")
+        if not cid:
+            continue  # a card with no id would index as 'card:None' and break pull/fetch
         coll = (c.get("collection", "") or "").lower()
         coll_id = (c.get("collection_id", "") or "").lower()
         if allowed and coll not in allowed and coll_id not in allowed:
             continue
-        out.append({"item_id": f"card:{c.get('id')}", "item_type": "card",
+        out.append({"item_id": f"card:{cid}", "item_type": "card",
                     "title": c.get("title", ""), "source": "guru",
-                    "url": _card_url(c.get("id")), "text": _strip_html(c.get("content", ""))})
+                    "url": _card_url(cid), "text": _strip_html(c.get("content", ""))})
     return out
 
 
@@ -835,6 +849,10 @@ def _update_cards_from_doc_impl(conn, *, task_id=None, doc_ref=None, doc_query=N
         docs = store.search_documents(conn, doc_query, limit=1)
         if docs:
             source_doc_ref = docs[0].get("doc_id")
+        else:
+            # A query WAS given but matched nothing — distinct from "no doc param".
+            return {"ok": False,
+                    "error": f"no_matching_doc: no stored document matched query '{doc_query}'"}
     if not source_doc_ref:
         return {"ok": False, "error": "source_doc_required: pass doc_ref, doc_query, or a task_id"}
 
@@ -880,7 +898,9 @@ def handle_card_history(conn, args, session_filters) -> dict:
     cid = _card_ref_arg(args)
     if not cid:
         return {"ok": False, "error": "card_ref_required"}
-    return {"ok": True, "card_id": cid, "history": provenance.history(conn, cid)}
+    return {"ok": True, "card_id": cid,
+            "history": provenance.history(conn, cid),
+            "evidence": provenance.evidence_pack(conn, card_id=cid)}
 
 
 def handle_card_effectiveness(conn, args, session_filters) -> dict:
@@ -890,3 +910,113 @@ def handle_card_effectiveness(conn, args, session_filters) -> dict:
     if not cid:
         return {"ok": False, "error": "card_ref_required"}
     return card_effectiveness(conn, cid)
+
+
+# ── Task-shaped attention queue (reason over INTENT, not raw queries) ──
+#
+# Three verbs wrap enablement_health.compute_health so Renn asks "what needs
+# my attention?" instead of running ad-hoc analytics. All three share one
+# compute → filter → rank → shape pipeline (no copy-paste); each verb only
+# differs in which bucket(s) it keeps. compute_health is already fully
+# decoupled (Guru live + enablement-local tables) — no warehouse reads added.
+
+_NOT_CONNECTED = {"ok": True, "cards": [], "note": "Guru not connected"}
+
+
+def _health_guru_client():
+    """Build a GuruClient from stored creds, or None when Guru isn't connected.
+
+    Mirrors compute_health's own None-handling: an unconfigured client makes
+    compute_health return [] (graceful), so callers never raise.
+    """
+    from src.data.guru_client import GuruClient
+    email, token = GuruClient.load_credentials()
+    if not (email and token):
+        return None
+    return GuruClient(email, token)
+
+
+def _why(card) -> str:
+    """A short, human reason a card is on the queue, from its bucket/signals."""
+    sig = card.signals
+    if card.bucket == "source_changed":
+        return "A source document changed after this card was last updated."
+    if card.bucket == "verification_overdue":
+        days = int(round(sig.days_overdue)) if sig else 0
+        return f"Verification is {days} day(s) overdue."
+    if card.bucket == "gap_dup":
+        if sig and sig.duplicate_of:
+            return f"Duplicates {len(sig.duplicate_of)} other card(s): {', '.join(sig.duplicate_of)}."
+        return "Covers a content gap not fully addressed by any card."
+    return "Healthy — no outstanding attention items."
+
+
+def _shape(card) -> dict:
+    """One CardHealth → the compact attention-queue row Renn reads."""
+    sig = card.signals
+    return {
+        "card_id": card.card_id,
+        "title": (sig.title if sig else "") or "",
+        "score": round(card.score, 4),
+        "bucket": card.bucket,
+        "why": _why(card),
+    }
+
+
+def _rank(cards) -> list:
+    """Lowest health first — the cards most in need of attention lead."""
+    return sorted(cards, key=lambda c: c.score)
+
+
+def _coerce_limit(limit, default=10) -> int:
+    """Coerce an optional (possibly string) limit to a positive int."""
+    try:
+        n = int(limit)
+    except (TypeError, ValueError):
+        return default
+    return n if n > 0 else default
+
+
+def _attention_queue(conn, *, limit, bucket=None) -> dict:
+    """Shared pipeline: compute health → optional bucket filter → rank → top-N.
+
+    Returns the graceful not-connected payload when Guru isn't configured.
+    """
+    from src.data.enablement_health import compute_health
+    guru_client = _health_guru_client()
+    if guru_client is None:
+        return dict(_NOT_CONNECTED)
+    cards = compute_health(conn, guru_client)
+    if bucket:
+        cards = [c for c in cards if c.bucket == bucket]
+    top = _rank(cards)[: _coerce_limit(limit)]
+    return {"ok": True, "count": len(top), "cards": [_shape(c) for c in top]}
+
+
+def handle_find_cards_to_update(conn, args, session_filters) -> dict:
+    """Ranked attention queue across all buckets (optional single-bucket filter)."""
+    return _attention_queue(conn, limit=args.get("limit", 10), bucket=args.get("bucket"))
+
+
+def _freshness(card) -> float:
+    """A card's freshness component (lower = staler); 1.0 when absent."""
+    return card.components.get("freshness", 1.0) if card.components else 1.0
+
+
+def handle_find_stale_cards(conn, args, session_filters) -> dict:
+    """Cards whose verification is overdue; fall back to lowest-freshness."""
+    from src.data.enablement_health import compute_health
+    limit = _coerce_limit(args.get("limit", 10))
+    guru_client = _health_guru_client()
+    if guru_client is None:
+        return dict(_NOT_CONNECTED)
+    cards = compute_health(conn, guru_client)
+    overdue = [c for c in cards if c.bucket == "verification_overdue"]
+    pool = overdue if overdue else cards
+    top = sorted(pool, key=_freshness)[:limit]
+    return {"ok": True, "count": len(top), "cards": [_shape(c) for c in top]}
+
+
+def handle_find_content_gaps(conn, args, session_filters) -> dict:
+    """Cards flagged as a content gap or a duplicate, ranked."""
+    return _attention_queue(conn, limit=args.get("limit", 10), bucket="gap_dup")

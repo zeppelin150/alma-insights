@@ -137,6 +137,10 @@ C:\alma-insights*
 /file_manifest.txt
 /feature-manifest.json
 
+# ── Local-only audit/regression tests (never committed) ─────────────
+# Pin local fixes from audit passes without committing the scaffolding.
+tests/test_*_local.py
+
 # ── Exports ─────────────────────────────────────────────────────────
 exports/
 *.pdf

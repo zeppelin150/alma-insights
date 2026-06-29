@@ -236,6 +236,35 @@ def build_bridge_for_task(task_type: str, model: str | None = None) -> Any | Non
     return ACPBridge(model=model)
 
 
+def profile_for_task(task_type: str):
+    """Return the CapabilityProfile for the model that ``task_type`` routes to.
+
+    Additive convenience for enablement builds that want to size requests or
+    gate features (parallel tools, thinking effort) without re-deriving the
+    active model. Resolves the provider, then the registry's active model, and
+    returns its capability profile — falling back to the registry's safe
+    default (max_output_tokens=4096) on any error.
+
+    Returns a CapabilityProfile (never None).
+    """
+    from src.llm.model_registry import ModelRegistry, DEFAULT_PROFILE
+    try:
+        registry = ModelRegistry.instance()
+        provider = resolve_provider_for_task(task_type)
+        active = registry.active()
+        # If the active model already matches the routed provider, use it;
+        # otherwise pick the first available model for that provider.
+        if active and active.provider == provider:
+            return registry.profile(active.id)
+        for m in registry.available():
+            if m.provider == provider:
+                return registry.profile(m.id)
+        return registry.profile(active.id) if active else DEFAULT_PROFILE
+    except Exception as e:
+        logger.debug("profile_for_task fallback to default: %s", e)
+        return DEFAULT_PROFILE
+
+
 def is_provider_available_for_task(task_type: str = "report_generation") -> bool:
     """Return True if the routed provider for ``task_type`` is reachable.
 

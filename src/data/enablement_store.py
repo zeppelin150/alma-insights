@@ -567,5 +567,20 @@ def publish_draft(
         provenance.finalize_publish(conn, draft_id, approved_by=approved_by, card_id=card_id)
     except Exception:  # noqa: BLE001
         pass
+    # Effectiveness baseline (Guru-native, FULLY DECOUPLED): snapshot the card's
+    # per-card view + open-comment counts at publish so a post-window proxy delta
+    # can later be measured (effectiveness_proxy.measure_proxy) with no ticket /
+    # warehouse read. Replaces the moot ticket-volume record_baseline weld. Fires
+    # only when we have both a live guru_client and a card_id; behaviour-preserving
+    # when guru_client is None. Always non-fatal: a Guru hiccup must never fail a
+    # successful publish.
+    if guru_client is not None and card_id:
+        try:
+            from src.data.content_update import effectiveness_proxy
+            from src.data.enablement_health import GuruSignals
+            effectiveness_proxy.snapshot_baseline(
+                conn, GuruSignals(guru_client), card_id, draft_id)
+        except Exception:  # noqa: BLE001
+            pass
     return {"ok": True, "draft_id": draft_id, "status": "pushed",
             "card_id": card_id, "guru_result": guru_result}
