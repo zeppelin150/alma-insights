@@ -166,6 +166,7 @@ def _ensure_registered():
         handle_create_task_from_comment,
         handle_get_guru_analytics,
         handle_import_guru_card,
+        handle_update_card_from_doc,
     )
     _register("import_guru_card", handle_import_guru_card,
               phi_level=0, desc="Import an existing Guru card as an editable draft (publish updates it)")
@@ -173,6 +174,8 @@ def _ensure_registered():
               phi_level=0, desc="Guru usage analytics: top_cards | verification | comments | due_cards")
     _register("create_task_from_comment", handle_create_task_from_comment,
               phi_level=0, desc="Convert an open Guru card comment into an enablement task")
+    _register("update_card_from_doc", handle_update_card_from_doc,
+              phi_level=0, desc="Review a source doc, find the existing Guru card, identify changes, write the update, and stage a draft for review")
 
     # ── Backward-compat aliases for old tool names ──
     # These map old names to new handlers so existing prompts keep working

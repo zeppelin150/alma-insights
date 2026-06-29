@@ -394,6 +394,31 @@ TOOL_SCHEMAS = [
         },
     },
     {
+        "name": "update_card_from_doc",
+        "description": (
+            "Review a source document and update the EXISTING Guru card it relates to: "
+            "find the matching card, identify what must change vs the document, write the "
+            "revision, and STAGE a draft (does not publish). Pass a task_id (it reads the "
+            "source doc + target card from the task's scratchpad), OR pass doc_ref/doc_query "
+            "for the source and card_ref/card_name/search for the target. After it stages a "
+            "draft, show the summary + diff to the user and publish with push_guru_draft only "
+            "once they approve."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "Enablement task whose scratchpad names the source doc + target card."},
+                "doc_ref": {"type": "string", "description": "Source document id (from search_local_documents)."},
+                "doc_query": {"type": "string", "description": "Or find the source document by name/topic."},
+                "card_ref": {"type": "string", "description": "Target Guru card id or app.getguru.com URL."},
+                "card_name": {"type": "string", "description": "Or the exact target card title."},
+                "search": {"type": "string", "description": "Or search Guru for the target card by topic."},
+                "collections": {"type": "array", "items": {"type": "string"},
+                                "description": "Optional: scope the card search to these collection names/ids."},
+            },
+        },
+    },
+    {
         "name": "push_guru_draft",
         "description": (
             "Publish a card draft to Guru — creates a new card, or updates the "

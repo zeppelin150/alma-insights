@@ -485,3 +485,97 @@ def _create_task_from_comment_impl(conn, comment_id) -> dict:
 
 def handle_create_task_from_comment(conn, args, session_filters) -> dict:
     return _create_task_from_comment_impl(conn, args.get("comment_id", ""))
+
+
+# ── Content-update pipeline (review a doc -> update an existing card) ──
+
+def _update_card_from_doc_impl(conn, *, task_id=None, doc_ref=None, doc_query=None,
+                               card_ref=None, card_name=None, search=None,
+                               collections=None) -> dict:
+    """Run the content-update pipeline: read a source doc, find the existing
+    Guru card, identify what changed, write the update, and STAGE a draft.
+
+    Staging only — publishing stays a separate, human-gated push_guru_draft.
+    The LLM stages use the current provider routing (model-agnostic). A
+    ``task_id`` may carry the source/target as a JSON hint in its scratchpad.
+    """
+    import json
+    from src.data import enablement_store as store
+    from src.data import enablement_tasks as tasks
+    from src.data.content_update import ContentUpdateRequest, Deps, run_content_update
+    from src.data.guru_client import GuruClient
+    from src.gemini.client_factory import build_client_for_task
+
+    # A task can carry the source doc + target card as a scratchpad JSON hint.
+    if task_id:
+        t = tasks.get_task(conn, str(task_id))
+        if t:
+            try:
+                hint = json.loads(t.get("scratchpad") or "{}")
+            except (ValueError, TypeError):
+                hint = {}
+            doc_ref = doc_ref or hint.get("source_doc_ref")
+            doc_query = doc_query or hint.get("source_doc_query")
+            card_ref = card_ref or hint.get("target_card_ref")
+            card_name = card_name or hint.get("target_card_name")
+            search = search or hint.get("search_query")
+
+    source_doc_ref = doc_ref
+    if not source_doc_ref and doc_query:
+        docs = store.search_documents(conn, doc_query, limit=1)
+        if docs:
+            source_doc_ref = docs[0].get("doc_id")
+    if not source_doc_ref:
+        return {"ok": False, "error": "source_doc_required: pass doc_ref, doc_query, or a task_id whose scratchpad names one"}
+
+    email, token = GuruClient.load_credentials()
+    if not (email and token):
+        return {"ok": False, "error": "guru_not_connected"}
+    llm = build_client_for_task("enablement_card_update")
+    if llm is None:
+        return {"ok": False, "error": "no_llm_client"}
+
+    req = ContentUpdateRequest(
+        source_doc_ref=source_doc_ref,
+        target_card_ref=card_ref,
+        target_card_name=card_name,
+        search_query=search,
+        collections=collections or [],
+    )
+    res = run_content_update(conn, req,
+                             Deps(llm_client=llm, guru_client=GuruClient(email, token)))
+
+    out = {"ok": res.ok, "status": res.status, "stage": res.stage,
+           "draft_id": res.draft_id, "card_id": res.card_id}
+    if res.error:
+        out["error"] = res.error
+    if res.status == "ambiguous_card":
+        out["candidates"] = [{"card_id": c.card_id, "title": c.title, "score": c.score}
+                             for c in res.candidates]
+        out["note"] = "Several cards matched — ask the user which to update, then call again with card_ref."
+    if res.plan:
+        out["summary"] = res.plan.summary
+        out["changes"] = [{"type": c.type, "section": c.section, "reason": c.reason}
+                          for c in res.plan.changes]
+    if res.issues:
+        out["issues"] = res.issues
+    if res.diff:
+        out["diff"] = res.diff[:1500]
+    if res.ok:
+        out["note"] = (f"Draft {res.draft_id} staged (links Guru card {res.card_id}). "
+                       "Show the summary + diff to the user; publish with "
+                       "push_guru_draft once they approve.")
+    return out
+
+
+def handle_update_card_from_doc(conn, args, session_filters) -> dict:
+    return _update_card_from_doc_impl(
+        conn,
+        task_id=args.get("task_id"),
+        doc_ref=args.get("doc_ref"),
+        doc_query=args.get("doc_query"),
+        card_ref=args.get("card_ref"),
+        card_name=args.get("card_name"),
+        search=args.get("search"),
+        collections=args.get("collections"),
+    )

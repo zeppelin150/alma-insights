@@ -63,3 +63,41 @@ def test_pipeline_no_source_fails_at_load(empty_db):
     deps = Deps(llm_client=StubLLM(), guru_client=FakeGuru())
     res = run_content_update(empty_db.conn, ContentUpdateRequest(), deps)
     assert not res.ok and res.stage == "load_source"
+
+
+def test_update_card_from_doc_handler_stages(empty_db, monkeypatch):
+    """The Renn chat tool wraps the pipeline: doc + card -> staged draft."""
+    import src.data.guru_client as gc
+    import src.gemini.client_factory as cf
+    import src.data.chat_tools.enablement_tools as et
+    from src.data import enablement_store as store
+
+    conn = empty_db.conn
+    store.save_document(conn, source="upload", doc_id="d1", name="Telehealth policy",
+                        full_text="Telehealth copays are waived effective 2026-07-01.")
+
+    class FakeGuruClient(FakeGuru):
+        @staticmethod
+        def load_credentials():
+            return ("e@x", "tok")
+
+        def __init__(self, *a, **k):
+            super().__init__(cards=[{"id": "c1", "title": "Aetna Copay",
+                                     "content": "<p>Collect the copay at time of service.</p>"}])
+
+    monkeypatch.setattr(cf, "build_client_for_task",
+                        lambda task, use_bridge=False: StubLLM(
+                            title="Aetna Copay",
+                            body="Telehealth copays are waived effective 2026-07-01."))
+    monkeypatch.setattr(gc, "GuruClient", FakeGuruClient)
+
+    out = et.handle_update_card_from_doc(conn, {"doc_ref": "d1", "card_ref": "c1"}, {})
+    assert out["ok"] and out["status"] == "staged"
+    assert out["draft_id"] > 0 and out["card_id"] == "c1"
+    assert out.get("changes") and "diff" in out
+
+
+def test_update_card_from_doc_handler_requires_source(empty_db, monkeypatch):
+    import src.data.chat_tools.enablement_tools as et
+    out = et.handle_update_card_from_doc(empty_db.conn, {"card_ref": "c1"}, {})
+    assert not out["ok"] and "source_doc_required" in out["error"]
