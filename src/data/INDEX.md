@@ -2,6 +2,33 @@
 
 > Data layer for Alma Insights: database management, ingestion pipelines, NLP analysis engines, statistical anomaly detection, Guru KB integration, Zendesk connectivity, report generation, and configuration persistence. This package contains all business logic that does not depend on the UI framework.
 
+## Renn content-update pipeline — `content_update/` (2026-06-27)
+
+Deterministic, stage-per-module pipeline that lets Renn review a source doc
+(e.g. a doc attached to an Asana task), find the matching Guru card, identify
+what needs updating, write the update, and stage a draft for human approval.
+The two reasoning stages take an injected `llm_client` (model-agnostic; prod
+wires Haiku via `build_client_for_task("enablement_card_update")`).
+
+| Module | Role |
+|---|---|
+| `models.py` | Dataclasses (`ContentUpdateRequest`, `Deps`, `SourceBundle`, `CardMatch`, `PulledCard`, `UpdatePlan`, `ProposedUpdate`, `PipelineResult`) |
+| `load_source.py` / `refs.py` / `attachment.py` | Stage 1 — resolve primary + reference docs (Asana attachment / Drive / stored doc / file / Guru card) |
+| `find_card.py` | Stage 2 — pick the target card by ref / name / scored live search; `needs_human_pick` when unsure |
+| `pull_card.py` | Stage 3 — import the card into a linked draft (UPDATE on publish) |
+| `identify_updates.py` / `llm_json.py` / `prompts.py` | Stage 4 — LLM → validated JSON change plan (bounded retry) |
+| `write_updates.py` | Stage 5 — LLM → revised card (`TITLE/---/body`, reuses `_parse_card`) |
+| `validate.py` / `diff.py` | Deterministic critic + unified diff |
+| `orchestrator.py` | `run_content_update(conn, request, deps) -> PipelineResult` (flat guard-clause) |
+| `publish.py` | `approve_and_publish(...)` — separate, human-gated Guru push |
+
+**Public API:** `run_content_update`, `approve_and_publish`, `ContentUpdateRequest`, `Deps` (exported from `src.data.content_update`).
+**Depends on:** `enablement_store` (drafts/docs/style guide/publish), `guru_client`, `asana_client` (+ new `list_attachments`/`get_attachment`), `client_factory`. Prompts: `config/prompts/enablement_identify_updates.txt`, `enablement_write_update.txt`.
+**Depended by:** `scripts/run_content_update_demo.py`, `tests/test_content_update_*`, `tests/test_asana_attachments`.
+Plan: `~/.claude/plans/renn-card-update-tonight.md`.
+
+---
+
 ## Source Monitor — Rate-Chart Redesign (2026-05-07)
 
 The "Live Feed" tab now shows a rate-per-hour control chart against a

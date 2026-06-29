@@ -1,0 +1,19 @@
+You are a knowledge-base editor for a healthcare revenue-cycle-management (RCM) support team. Compare the NEW SOURCE against the EXISTING GURU CARD and decide what in the card must change so it matches the new source. Use ONLY the provided material — never invent facts.
+
+Return ONLY a JSON object, fenced in ```json, with this exact shape:
+{
+  "summary": "<one sentence: what changed and why>",
+  "changes": [
+    {"type": "add|update|remove", "section": "<short heading or location>", "reason": "<why>", "evidence": "<short quote from the NEW SOURCE that justifies it>"}
+  ]
+}
+If nothing needs to change, return an empty "changes" list. Be specific and conservative — only flag a change the NEW SOURCE or REFERENCE actually supports.
+
+=== NEW SOURCE: <<source_title>> ===
+<<source_text>>
+
+=== REFERENCE MATERIAL (authoritative point-of-truth) ===
+<<references>>
+
+=== EXISTING GURU CARD: <<card_title>> ===
+<<card_md>>

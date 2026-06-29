@@ -171,6 +171,36 @@ class AsanaClient:
         return [{"gid": s["gid"], "name": s.get("name", ""),
                  "completed": bool(s.get("completed"))} for s in data]
 
+    def list_attachments(self, task_gid: str, *, limit: int = 100) -> list[dict]:
+        """List a task's attachments (gid + name + subtype).
+
+        ``GET /tasks/{task_gid}/attachments``. Returns lightweight rows; call
+        ``get_attachment`` for a single attachment's download URL + host.
+        """
+        data = self._get(f"/tasks/{task_gid}/attachments",
+                         {"opt_fields": "name,resource_subtype", "limit": limit}) or []
+        return [{"gid": a["gid"], "name": a.get("name", ""),
+                 "subtype": a.get("resource_subtype", "")} for a in data]
+
+    def get_attachment(self, attachment_gid: str) -> dict:
+        """Fetch one attachment's download URL + host.
+
+        ``GET /attachments/{attachment_gid}``. Uploaded files carry a pre-signed
+        ``download_url`` (host ``asana``); external hosts (``google_drive`` etc.)
+        carry ``view_url``/``permanent_url`` that the caller resolves separately.
+        """
+        a = self._get(f"/attachments/{attachment_gid}", {
+            "opt_fields": "name,download_url,host,view_url,permanent_url,resource_subtype",
+        }) or {}
+        return {
+            "gid": a.get("gid", attachment_gid),
+            "name": a.get("name", ""),
+            "download_url": a.get("download_url", ""),
+            "host": a.get("host", ""),
+            "view_url": a.get("view_url", "") or a.get("permanent_url", ""),
+            "subtype": a.get("resource_subtype", ""),
+        }
+
     def list_workspace_users(self, workspace_gid: str) -> list[dict]:
         """Workspace members (gid → name/email) for resolving people fields."""
         data = self._get(f"/workspaces/{workspace_gid}/users",

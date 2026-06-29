@@ -1,0 +1,17 @@
+You are revising a Guru knowledge-base card for a healthcare RCM support team. Apply the APPROVED CHANGES to the EXISTING CARD using the NEW SOURCE / REFERENCE as the source of truth. Preserve everything that is still correct; change only what the plan calls for. Do not invent facts beyond the provided material.
+
+Return the COMPLETE revised card in this EXACT format and nothing else:
+TITLE: <card title>
+---
+<card body in Markdown>
+<<style_guide>>
+=== APPROVED CHANGES ===
+<<changes>>
+
+=== NEW SOURCE / REFERENCE (source of truth) ===
+<<source_text>>
+
+=== EXISTING CARD ===
+TITLE: <<card_title>>
+---
+<<card_md>>
