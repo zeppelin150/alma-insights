@@ -80,14 +80,18 @@ size, Mac code-signing/notarization, OS-speech API differences.
 React build step + the QtWebEngine dependency + the static UI bundle, for both
 platforms.
 
-> Status: **M1 spike built + verified** — `src/ui/web/` (`chat_bridge.py`,
-> `agent_page.py`, vendored `qwebchannel.js`, minimal `index.html`); the full
-> JS → QWebChannel → Python → JS round-trip works in a real `QWebEngineView`
-> **with no web server** (Windows, PySide6 6.10.2). Architecture de-risked. Next:
-> wire `AgentPage` into the app + the React build, then M2–M7 (tool-call
-> timeline / token use → past-chat browser → Job-builder MCP + sidebar →
-> in-thread sign-off → voice → installer/cross-platform). Full plan +
-> bridge contract + 7 open decisions: `~/.claude/plans/agent-chat-build.md`.
+> Status: **M1 + M2 + React build shipped** (commits a3332e5, 146279e, 59b6487;
+> not pushed). The Agent is a live page (enablement → ASSISTANT → Agent) driven
+> by a real `ChatEngine`; M2 adds a **live tool-call timeline** (`toolCall`
+> tails `chat_tool_executions` as each tool finishes) + a token/cost meter; the
+> UI is now a **React/Vite app** built (vite-plugin-singlefile) to one inlined
+> `dist/index.html` that loads in `QWebEngineView` from `file://` (no server,
+> no ES-module CORS), with `qwebchannel.js` as a sibling classic script. Build:
+> `npm --prefix web install && npm run build` (installer M7 will run this; the
+> page falls back to the spike HTML if `dist/` is absent). **Next: M3 past-chat
+> browser → M4 Job-builder MCP + sidebar → M5 in-thread sign-off → M6 voice →
+> M7 installer/cross-platform; plus the streaming decision** (per-token streaming
+> needs a streaming client variant). Plan: `~/.claude/plans/agent-chat-build.md`.
 
 ---
 
