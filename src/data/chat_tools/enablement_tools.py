@@ -589,6 +589,40 @@ def _strip_html(html: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def _card_url(card_id) -> str:
+    return f"https://app.getguru.com/card/{card_id}" if card_id else ""
+
+
+_DOC_STOPWORDS = frozenset({
+    "the", "and", "for", "with", "what", "show", "topic", "our", "from",
+    "that", "this", "have", "already", "about", "can", "you", "see", "look",
+})
+
+
+def _search_documents_multi(conn, topic, *, limit=5) -> list[dict]:
+    """Recall-friendly doc search: the whole phrase PLUS each significant word,
+    unioned and ranked by how many terms hit. Fixes the substring-only
+    ``search_documents`` missing e.g. 'Aetna copay telehealth' for a doc named
+    'Aetna Copay Policy Update — Telehealth Waiver'.
+    """
+    import re
+    from src.data import enablement_store as store
+    phrase = (topic or "").strip()
+    hits: dict[str, list] = {}
+    for r in store.search_documents(conn, phrase, limit=limit):
+        hits[r["doc_id"]] = [2, r]  # full-phrase match weighted highest
+    tokens = [t for t in re.split(r"[^A-Za-z0-9]+", phrase.lower())
+              if len(t) >= 3 and t not in _DOC_STOPWORDS]
+    for tok in tokens:
+        for r in store.search_documents(conn, tok, limit=limit):
+            if r["doc_id"] in hits:
+                hits[r["doc_id"]][0] += 1
+            else:
+                hits[r["doc_id"]] = [1, r]
+    ranked = sorted(hits.values(), key=lambda x: x[0], reverse=True)
+    return [r for _, r in ranked[:limit]]
+
+
 def _search_guru_cards_impl(conn, query, *, collections=None, limit=10) -> dict:
     """Live Guru card search (POST /search/cardmgr). Returns id/title/snippet."""
     from src.data.guru_client import GuruClient
@@ -608,6 +642,7 @@ def _search_guru_cards_impl(conn, query, *, collections=None, limit=10) -> dict:
             continue
         out.append({"card_id": c.get("id"), "title": c.get("title"),
                     "collection": c.get("collection"),
+                    "url": _card_url(c.get("id")),
                     "snippet": _strip_html(c.get("content", ""))[:200]})
         if len(out) >= int(limit or 10):
             break
@@ -629,13 +664,13 @@ def _research_topic_impl(conn, topic, *, limit=5, collections=None) -> dict:
 
     g = _search_guru_cards_impl(conn, topic, collections=collections, limit=limit)
     if g.get("ok"):
-        out["guru_cards"] = [{"card_id": c["card_id"], "title": c["title"]} for c in g["cards"]]
+        out["guru_cards"] = [{"card_id": c["card_id"], "title": c["title"],
+                              "url": c.get("url")} for c in g["cards"]]
     else:
         out["guru_error"] = g.get("error")
 
     try:
-        from src.data import enablement_store as store
-        docs = store.search_documents(conn, topic, limit=limit)
+        docs = _search_documents_multi(conn, topic, limit=limit)
         out["documents"] = [{"doc_id": d.get("doc_id"), "name": d.get("name")} for d in docs]
     except Exception as exc:  # noqa: BLE001
         out["doc_error"] = str(exc)[:120]

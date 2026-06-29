@@ -31,6 +31,7 @@ def test_search_guru_cards_returns_snippets(empty_db, monkeypatch):
     assert out["ok"] and out["count"] == 2
     assert out["cards"][0]["card_id"] == "c1"
     assert "Collect the copay" in out["cards"][0]["snippet"]
+    assert out["cards"][0]["url"].endswith("/card/c1")  # clickable link for "let me see that card"
 
 
 def test_search_guru_cards_collection_scope(empty_db, monkeypatch):
@@ -65,3 +66,16 @@ def test_research_topic_gathers_sources(empty_db, monkeypatch):
     assert out["guru_cards"] and out["guru_cards"][0]["card_id"] == "c1"
     assert out["documents"] and out["documents"][0]["doc_id"] == "d1"
     assert "ticket_signals" in out  # best-effort source; may be empty on an empty DB
+
+
+def test_research_topic_tokenized_doc_recall(empty_db, monkeypatch):
+    """Multi-word topic finds a doc even when it isn't a contiguous substring."""
+    from src.data import enablement_store as store
+    store.save_document(empty_db.conn, source="upload", doc_id="d1",
+                        name="Aetna Copay Policy Update — Telehealth Waiver",
+                        full_text="Telehealth copays are waived.")
+    _patch_guru(monkeypatch, [{"id": "c1", "title": "Aetna Copay", "content": "<p>x</p>"}])
+    # "aetna copay telehealth" is NOT a substring of the name, but each token is.
+    out = et.handle_research_topic(empty_db.conn, {"topic": "Aetna copay telehealth"}, {})
+    assert any(d["doc_id"] == "d1" for d in out["documents"])
+    assert out["guru_cards"][0].get("url", "").endswith("/card/c1")
