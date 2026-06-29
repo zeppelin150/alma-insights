@@ -804,3 +804,63 @@ def _search_content_impl(conn, query, *, limit=5) -> dict:
 
 def handle_search_content(conn, args, session_filters) -> dict:
     return _search_content_impl(conn, args.get("query", ""), limit=args.get("limit", 5))
+
+
+# ── Multi-card fan-out (one source change -> the set of cards it affects) ──
+
+def _update_cards_from_doc_impl(conn, *, task_id=None, doc_ref=None, doc_query=None,
+                                search=None, collections=None, max_cards=5) -> dict:
+    """Find every card a source change affects and stage an update for each
+    (catalog-first card selection). Staging only — publish stays human-gated."""
+    import json
+    from src.data import enablement_store as store
+    from src.data import enablement_tasks as tasks
+    from src.data.content_update import ContentUpdateRequest, Deps, run_fanout_update
+    from src.data.guru_client import GuruClient
+    from src.gemini.client_factory import build_client_for_task
+
+    if task_id:
+        t = tasks.get_task(conn, str(task_id))
+        if t:
+            try:
+                hint = json.loads(t.get("scratchpad") or "{}")
+            except (ValueError, TypeError):
+                hint = {}
+            doc_ref = doc_ref or hint.get("source_doc_ref")
+            doc_query = doc_query or hint.get("source_doc_query")
+            search = search or hint.get("search_query")
+
+    source_doc_ref = doc_ref
+    if not source_doc_ref and doc_query:
+        docs = store.search_documents(conn, doc_query, limit=1)
+        if docs:
+            source_doc_ref = docs[0].get("doc_id")
+    if not source_doc_ref:
+        return {"ok": False, "error": "source_doc_required: pass doc_ref, doc_query, or a task_id"}
+
+    email, token = GuruClient.load_credentials()
+    if not (email and token):
+        return {"ok": False, "error": "guru_not_connected"}
+    llm = build_client_for_task("enablement_card_update")
+    if llm is None:
+        return {"ok": False, "error": "no_llm_client"}
+
+    req = ContentUpdateRequest(source_doc_ref=source_doc_ref, search_query=search,
+                               collections=collections or [])
+    res = run_fanout_update(conn, req, Deps(llm_client=llm, guru_client=GuruClient(email, token)),
+                            max_cards=int(max_cards or 5))
+    if not res.get("ok"):
+        return res
+    for c in res["cards"]:
+        if isinstance(c.get("diff"), str):
+            c["diff"] = c["diff"][:1200]
+    res["note"] = (f"Checked {res['candidates']} related card(s); staged {res['staged']} "
+                   "update(s). Review each diff; publish each with push_guru_draft once approved.")
+    return res
+
+
+def handle_update_cards_from_doc(conn, args, session_filters) -> dict:
+    return _update_cards_from_doc_impl(
+        conn, task_id=args.get("task_id"), doc_ref=args.get("doc_ref"),
+        doc_query=args.get("doc_query"), search=args.get("search"),
+        collections=args.get("collections"), max_cards=args.get("max_cards", 5))

@@ -25,3 +25,20 @@ def pull_target_card(conn, guru_client: Any, match: CardMatch) -> PulledCard:
         title=res.get("title", ""),
         current_md=res.get("content", ""),
     )
+
+
+def fetch_card_markdown(guru_client: Any, card_ref) -> tuple[str, str] | None:
+    """Fetch a card's (title, current_markdown) WITHOUT creating a draft.
+
+    Used by fan-out to compare a source against many cards cheaply — a draft is
+    only created (via pull_target_card) for the cards that actually change.
+    """
+    from src.data.enablement_store import parse_guru_card_ref
+    from src.data.html_markdown import html_to_markdown
+    try:
+        card = guru_client.get_card(parse_guru_card_ref(str(card_ref or "")))
+    except Exception:  # noqa: BLE001 — unresolved card
+        return None
+    if not card or not card.get("id"):
+        return None
+    return card.get("title", ""), html_to_markdown(card.get("content", ""))

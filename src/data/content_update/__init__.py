@@ -26,6 +26,8 @@ from .models import (
     UpdatePlan,
 )
 from .orchestrator import run_content_update
+from .fanout import run_fanout_update
+from .find_affected import find_card_candidates
 from .publish import approve_and_publish
 
 __all__ = [
@@ -41,5 +43,7 @@ __all__ = [
     "Change",
     "ProposedUpdate",
     "run_content_update",
+    "run_fanout_update",
+    "find_card_candidates",
     "approve_and_publish",
 ]

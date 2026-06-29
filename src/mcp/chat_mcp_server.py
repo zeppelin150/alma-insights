@@ -484,6 +484,30 @@ TOOL_SCHEMAS = [
         },
     },
     {
+        "name": "update_cards_from_doc",
+        "description": (
+            "FAN-OUT update: a policy/doc change usually affects MORE THAN ONE card. "
+            "This finds the SET of Guru cards a source doc affects (content-aware), and "
+            "for each card that actually needs changing it stages a draft — cards with no "
+            "change are reported but not drafted. Use this instead of update_card_from_doc "
+            "when a change could touch several cards. Pass a task_id or doc_ref/doc_query for "
+            "the source; optionally search/collections to scope, and max_cards. Staging only — "
+            "review each diff and publish each with push_guru_draft once approved."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "Enablement task naming the source doc."},
+                "doc_ref": {"type": "string", "description": "Source document id."},
+                "doc_query": {"type": "string", "description": "Or find the source doc by name/topic."},
+                "search": {"type": "string", "description": "Topic to find affected cards (defaults to the doc's title)."},
+                "collections": {"type": "array", "items": {"type": "string"},
+                                "description": "Optional: scope candidate cards to these collections."},
+                "max_cards": {"type": "integer", "description": "Max cards to check (default 5)."},
+            },
+        },
+    },
+    {
         "name": "update_card_from_doc",
         "description": (
             "Review a source document and update the EXISTING Guru card it relates to: "
