@@ -561,5 +561,11 @@ def publish_draft(
             "card_id=COALESCE(NULLIF(card_id,''), ?) WHERE id=?",
             (approved_by, now, card_id, draft_id),
         )
+    # Finalize the audit trail for this update (anchors effectiveness). Never fatal.
+    try:
+        from src.data.content_update import provenance
+        provenance.finalize_publish(conn, draft_id, approved_by=approved_by, card_id=card_id)
+    except Exception:  # noqa: BLE001
+        pass
     return {"ok": True, "draft_id": draft_id, "status": "pushed",
             "card_id": card_id, "guru_result": guru_result}

@@ -864,3 +864,29 @@ def handle_update_cards_from_doc(conn, args, session_filters) -> dict:
         conn, task_id=args.get("task_id"), doc_ref=args.get("doc_ref"),
         doc_query=args.get("doc_query"), search=args.get("search"),
         collections=args.get("collections"), max_cards=args.get("max_cards", 5))
+
+
+# ── Provenance + effectiveness (the audit trail + did-it-work feedback) ──
+
+def _card_ref_arg(args):
+    from src.data.enablement_store import parse_guru_card_ref
+    ref = args.get("card_ref") or args.get("card_id") or args.get("url")
+    return parse_guru_card_ref(str(ref or ""))
+
+
+def handle_card_history(conn, args, session_filters) -> dict:
+    """Audit trail: every update to a card — what changed, from where, who, when."""
+    from src.data.content_update import provenance
+    cid = _card_ref_arg(args)
+    if not cid:
+        return {"ok": False, "error": "card_ref_required"}
+    return {"ok": True, "card_id": cid, "history": provenance.history(conn, cid)}
+
+
+def handle_card_effectiveness(conn, args, session_filters) -> dict:
+    """Did-it-work feedback: a card's update history + measured ticket-volume impact."""
+    from src.data.content_update.effectiveness import card_effectiveness
+    cid = _card_ref_arg(args)
+    if not cid:
+        return {"ok": False, "error": "card_ref_required"}
+    return card_effectiveness(conn, cid)

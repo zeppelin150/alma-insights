@@ -69,6 +69,8 @@ def _process_card(conn, deps, src, cand, style) -> dict:
                 "error": proposed.error, "draft_id": pulled.draft_id}
     issues = validate_update(pulled, proposed, plan)
     _stage_draft(conn, pulled.draft_id, proposed)
+    from . import provenance
+    provenance.record_from_result(conn, pulled.draft_id, pulled.card_id, src, plan, issues)
     return {**base, "status": "staged", "draft_id": pulled.draft_id,
             "title": proposed.title, "summary": plan.summary,
             "changes": [{"type": c.type, "section": c.section, "reason": c.reason}

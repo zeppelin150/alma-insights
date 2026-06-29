@@ -449,6 +449,37 @@ TOOL_SCHEMAS = [
         },
     },
     {
+        "name": "card_history",
+        "description": (
+            "Show the audit trail for a Guru card: every update — what changed, from what "
+            "source doc, which changes were rejected as ungrounded, who approved, and when. "
+            "Pass the card id or URL."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "card_ref": {"type": "string", "description": "Guru card id or app.getguru.com URL."},
+            },
+            "required": ["card_ref"],
+        },
+    },
+    {
+        "name": "card_effectiveness",
+        "description": (
+            "Did-it-work feedback for a card: its update history plus the measured "
+            "ticket-volume impact (pre/post volume, delta_pct, significance) when available. "
+            "Until post-publish data accrues it reports the push as anchored/pending. Pass the "
+            "card id or URL."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "card_ref": {"type": "string", "description": "Guru card id or app.getguru.com URL."},
+            },
+            "required": ["card_ref"],
+        },
+    },
+    {
         "name": "open_guru_card",
         "description": (
             "Open a Guru card in the operator's default web browser. Pass the card id "

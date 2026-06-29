@@ -50,6 +50,8 @@ def run_content_update(conn, request: ContentUpdateRequest, deps: Deps) -> Pipel
 
     issues = validate_update(pulled, proposed, plan)
     _stage_draft(conn, pulled.draft_id, proposed)
+    from . import provenance
+    provenance.record_from_result(conn, pulled.draft_id, pulled.card_id, src, plan, issues)
     diff = unified(pulled.current_md, proposed.content_md, title=proposed.title)
     return PipelineResult(ok=True, status="staged", stage="staged",
                           draft_id=pulled.draft_id, card_id=pulled.card_id,
