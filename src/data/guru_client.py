@@ -119,12 +119,11 @@ class GuruClient:
 
         Uses the ``POST /search/cardmgr`` endpoint with a JSON body.
         """
-        body = {"queryType": None}
+        # NOTE: do NOT send an empty `query` grouping — Guru rejects it with
+        # 400 "grouping expression requires one or more nestedExpressions".
+        # A text search is just queryType + searchTerms (verified live).
+        body: dict = {"queryType": "cards"}
         if query:
-            body["queryType"] = "cards"
-            body["query"] = {"nestedExpressions": [], "op": "AND",
-                             "type": "grouping"}
-            # Guru search API uses a searchTerms field
             body["searchTerms"] = query
 
         data = self._request("POST", "/search/cardmgr", body=body)

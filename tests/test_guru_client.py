@@ -125,6 +125,20 @@ class TestSearchCards(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["title"], "Billing FAQ")
 
+    @patch.object(GuruClient, "_request")
+    def test_search_payload_has_no_empty_grouping(self, mock_req):
+        # Regression: an empty `query` grouping made Guru 400 with
+        # "grouping expression requires one or more nestedExpressions".
+        # A text search is queryType + searchTerms only (verified live).
+        mock_req.return_value = []
+        GuruClient("a@b.com", "tok").search_cards("aetna copay")
+        args, kwargs = mock_req.call_args
+        self.assertEqual(args[0], "POST")
+        self.assertEqual(args[1], "/search/cardmgr")
+        body = kwargs["body"]
+        self.assertEqual(body.get("searchTerms"), "aetna copay")
+        self.assertNotIn("query", body)  # the broken empty grouping must be gone
+
 
 class TestUpdateCard(unittest.TestCase):
 
