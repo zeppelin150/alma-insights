@@ -66,7 +66,10 @@
       clearThinking();
       var d = document.createElement('div');
       d.className = 'msg assistant thinking'; d.id = 'thinking';
-      d.textContent = text || 'Renn is thinking…';
+      var s = document.createElement('div'); s.id = 'thinking-status';
+      s.textContent = text || 'Renn is thinking…';
+      var tl = document.createElement('div'); tl.id = 'thinking-tools';
+      d.appendChild(s); d.appendChild(tl);
       $('messages').appendChild(d);
       $('messages').scrollTop = $('messages').scrollHeight;
     }
@@ -84,8 +87,21 @@
     });
     bridge.statusUpdate.connect(function(s){
       if (!s) return;
-      if ($('thinking')) $('thinking').textContent = s;   // live status in the bubble
+      if ($('thinking-status')) $('thinking-status').textContent = s;   // live status in the bubble
       else $('status').textContent = s;
+    });
+    bridge.toolCall.connect(function(j){
+      try {
+        var t = JSON.parse(j);
+        if (!$('thinking-tools')) showThinking('Working…');
+        var row = document.createElement('div');
+        row.style.cssText = 'font-size:11.5px; margin-top:3px; color:' + (t.ok ? '#0F6E56' : '#8A1C1C') + ';';
+        row.textContent = (t.ok ? '✓ ' : '✗ ') + t.name
+          + (t.ms ? ' · ' + t.ms + 'ms' : '')
+          + (t.rows !== null && t.rows !== undefined ? ' · ' + t.rows + ' rows' : '');
+        $('thinking-tools').appendChild(row);
+        $('messages').scrollTop = $('messages').scrollHeight;
+      } catch(e){}
     });
     bridge.telemetry.connect(function(j){
       try {

@@ -49,6 +49,29 @@ class AgentChatController(QObject):
         self._teardown_warm_bridge()
         self._teardown_claude_client()
 
+    def recent_tool_calls(self, since_id: int = 0) -> list[dict]:
+        """Newly-finished tool executions for this session (the tool-call
+        timeline). Reads the same DB the MCP server writes to (``db_path``), so
+        it sees tools as the subprocess records them. Best-effort."""
+        db_path = self._db_path()
+        if not self._session_id or not db_path:
+            return []
+        try:
+            from src.data.connection_factory import get_connection
+            conn = get_connection(db_path, readonly=True)
+            try:
+                rows = conn.execute(
+                    "SELECT rowid, tool_name, result_rows, elapsed_ms, error "
+                    "FROM chat_tool_executions WHERE session_id=? AND rowid>? "
+                    "ORDER BY rowid", (self._session_id, int(since_id))).fetchall()
+            finally:
+                conn.close()
+            return [{"id": r[0], "name": r[1], "rows": r[2],
+                     "ms": round(r[3] or 0), "ok": not r[4], "error": r[4]}
+                    for r in rows]
+        except Exception:  # noqa: BLE001 — the timeline is best-effort, never fatal
+            return []
+
     # ── engine ──────────────────────────────────────────────────────
 
     def _db_path(self) -> str | None:
