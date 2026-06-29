@@ -15,7 +15,7 @@ from .load_source import load_source
 from .models import ContentUpdateRequest, Deps, PipelineResult
 from .pull_card import pull_target_card
 from .validate import validate_update
-from .write_updates import write_updates
+from .write_targeted import write_targeted_updates
 
 
 def run_content_update(conn, request: ContentUpdateRequest, deps: Deps) -> PipelineResult:
@@ -43,7 +43,7 @@ def run_content_update(conn, request: ContentUpdateRequest, deps: Deps) -> Pipel
         return PipelineResult(ok=False, status="failed", stage="identify", error=plan.error,
                               draft_id=pulled.draft_id, card_id=pulled.card_id)
 
-    proposed = write_updates(deps.llm_client, pulled, plan, src, _style(conn))
+    proposed = write_targeted_updates(deps.llm_client, pulled, plan, src, _style(conn))
     if not proposed.ok:
         return PipelineResult(ok=False, status="failed", stage="write", error=proposed.error,
                               draft_id=pulled.draft_id, card_id=pulled.card_id, plan=plan)

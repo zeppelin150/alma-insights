@@ -14,7 +14,7 @@ from .load_source import load_source
 from .models import CardMatch, ContentUpdateRequest, Deps, PulledCard
 from .pull_card import fetch_card_markdown, pull_target_card
 from .validate import validate_update
-from .write_updates import write_updates
+from .write_targeted import write_targeted_updates
 
 
 def run_fanout_update(conn, request: ContentUpdateRequest, deps: Deps,
@@ -63,7 +63,7 @@ def _process_card(conn, deps, src, cand, style) -> dict:
                                         card_id=cand["card_id"], title=title))
     if not pulled.ok:
         return {**base, "status": "failed", "stage": "pull", "error": pulled.error}
-    proposed = write_updates(deps.llm_client, pulled, plan, src, style)
+    proposed = write_targeted_updates(deps.llm_client, pulled, plan, src, style)
     if not proposed.ok:
         return {**base, "status": "failed", "stage": "write",
                 "error": proposed.error, "draft_id": pulled.draft_id}

@@ -105,6 +105,7 @@ class UpdatePlan:
     changes: list[Change] = field(default_factory=list)
     summary: str = ""
     error: str = ""
+    dropped: list[dict] = field(default_factory=list)   # changes rejected as ungrounded
 
 
 @dataclass

@@ -19,7 +19,12 @@ def identify_updates(llm_client: Any, source: SourceBundle, pulled: PulledCard) 
         return UpdatePlan(ok=False, error=res["error"])
     data = res["data"]
     changes = [_to_change(c) for c in data.get("changes", []) if isinstance(c, dict)]
-    return UpdatePlan(ok=True, changes=changes, summary=str(data.get("summary", "")))
+    # Grounding gate: reject any change whose cited evidence isn't in the source.
+    from .grounding import verify_grounding
+    from .prompts import _combined_source
+    grounded, dropped = verify_grounding(changes, _combined_source(source))
+    return UpdatePlan(ok=True, changes=grounded, summary=str(data.get("summary", "")),
+                      dropped=dropped)
 
 
 def _validate(data: dict) -> str:
