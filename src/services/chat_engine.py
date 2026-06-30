@@ -82,21 +82,21 @@ class _ChatWorker(QThread):
     # Emits (response_text, telemetry_dict)
     finished = Signal(str, dict)
     error = Signal(str)
+    token_emitted = Signal(str)   # per-token text delta (only when streaming)
 
-    def __init__(self, client, prompt: str, system_prompt: str, timeout: int = 180):
+    def __init__(self, client, prompt: str, system_prompt: str, timeout: int = 180,
+                 stream: bool = False):
         super().__init__()
         self._client = client
         self._prompt = prompt
         self._system_prompt = system_prompt
         self._timeout = timeout
+        self._stream = stream
 
     def run(self):
         try:
             start_ms = time.perf_counter()
-            result = self._client.generate(
-                self._prompt, system_prompt=self._system_prompt,
-                timeout=self._timeout,
-            )
+            result = self._invoke_client()
             elapsed_ms = int((time.perf_counter() - start_ms) * 1000)
 
             model_used = getattr(self._client, "model", None)
@@ -118,6 +118,28 @@ class _ChatWorker(QThread):
         except Exception as e:
             self.error.emit(str(e))
 
+    def _invoke_client(self) -> str:
+        """Call the client's ``.generate()``. When streaming is enabled AND the
+        client exposes an ``on_token`` parameter, forward per-token deltas via
+        ``token_emitted`` (a queued cross-thread signal — safe). Otherwise this
+        is the exact blocking call as before, so non-streaming clients (and the
+        whole-message contract) are unchanged."""
+        if self._stream and self._client_supports_on_token():
+            return self._client.generate(
+                self._prompt, system_prompt=self._system_prompt,
+                timeout=self._timeout, on_token=self.token_emitted.emit,
+            )
+        return self._client.generate(
+            self._prompt, system_prompt=self._system_prompt, timeout=self._timeout,
+        )
+
+    def _client_supports_on_token(self) -> bool:
+        try:
+            import inspect
+            return "on_token" in inspect.signature(self._client.generate).parameters
+        except (TypeError, ValueError):  # builtin/uninspectable — assume no
+            return False
+
 
 # ═══════════════════════════════════════════════════════════
 #  Chat Engine
@@ -135,6 +157,7 @@ class ChatEngine(QObject):
     error_occurred = Signal(str)
     busy_changed = Signal(bool)
     status_update = Signal(str)
+    token_streamed = Signal(str)   # per-token text delta while a turn streams
     # Adaptive bridge-recycle (F-9, bug-bash 2026-04-23):
     # fires when N consecutive responses look degraded. Consumers that
     # own a warm client should shut it down and set_client() a fresh one.
@@ -151,6 +174,7 @@ class ChatEngine(QObject):
         use_mcp_tools: bool = False,
         db_path: Optional[str] = None,
         recycle_threshold: int = _DEFAULT_RECYCLE_THRESHOLD,
+        stream: bool = False,
         parent: Optional[QObject] = None,
     ):
         super().__init__(parent)
@@ -162,6 +186,10 @@ class ChatEngine(QObject):
         self._tools_enabled = tools_enabled
         self._use_mcp_tools = use_mcp_tools
         self._db_path = db_path
+        # Per-token streaming (off by default → whole-message, unchanged for
+        # existing consumers). The Agent page opts in; the worker only streams
+        # if the active client also exposes an ``on_token`` callback.
+        self._stream = stream
 
         self._history: list[dict] = []
         self._warm_client = None
@@ -317,12 +345,19 @@ class ChatEngine(QObject):
             try:
                 self._worker.finished.disconnect(self._on_worker_finished)
                 self._worker.error.disconnect(self._on_worker_error)
+                self._worker.token_emitted.disconnect(self._on_worker_token)
             except (RuntimeError, TypeError):
                 pass
-        self._worker = _ChatWorker(client, prompt, system_prompt, timeout=180)
+        self._worker = _ChatWorker(client, prompt, system_prompt, timeout=180,
+                                   stream=self._stream)
         self._worker.finished.connect(self._on_worker_finished)
         self._worker.error.connect(self._on_worker_error)
+        self._worker.token_emitted.connect(self._on_worker_token)
         self._worker.start()
+
+    def _on_worker_token(self, delta: str):
+        """Relay a worker token delta out as ``token_streamed`` (main thread)."""
+        self.token_streamed.emit(delta)
 
     # ── Default history packing ───────────────────────────
 

@@ -9,6 +9,7 @@ on:
       - 'requirements*.txt'
       - 'requirements.lock'
       - 'src/**'
+      - 'web/**'
       - 'main.py'
       - '.github/workflows/build.yml'
   workflow_dispatch:
@@ -41,6 +42,15 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
+      # Build the React Agent-chat UI into src/ui/web/dist/ (gitignored) so
+      # build_release.py bundles it. Without this the shipped app falls back to
+      # the spike static/index.html.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Build Agent web UI
+        run: npm --prefix web ci && npm --prefix web run build
+
       # Cache the heavy downloads — Python embeddable / python-build-standalone,
       # the Node.js tarball, and the HuggingFace model snapshot. Keyed on the
       # build script + pinned-version files so invalidation is precise.
@@ -50,9 +60,16 @@ jobs:
           path: |
             installer/cache
             ~/.cache/huggingface
+            models
           key: build-${{ matrix.platform }}-${{ hashFiles('installer/build_release.py', 'requirements.txt', 'requirements.lock') }}
           restore-keys: |
             build-${{ matrix.platform }}-
+
+      # Fetch the gitignored, SHA-pinned on-device voice model so build_release
+      # bundles models/*.bin. Without this every shipped bundle has NO model and
+      # dictation is permanently disabled. Idempotent (skips if already cached).
+      - name: Fetch on-device voice model
+        run: python scripts/fetch_voice_model.py
 
       - name: Build bundle
         run: python installer/build_release.py --platform ${{ matrix.platform }}

@@ -139,23 +139,28 @@ def _update_legacy_blob(session_id, role, content, timestamp, tool_calls, conn):
         pass  # Non-critical — the authoritative data is in chat_messages
 
 
-def list_sessions(limit: int = 20, conn=None) -> list[dict]:
+def list_sessions(limit: int = 20, conn=None, source_page: str | None = None) -> list[dict]:
     """Return recent chat sessions with summary stats.
 
     Tries the v_session_summary view first (migration 009+).
     Falls back to raw chat_sessions for pre-009 databases.
+    ``source_page`` optionally restricts to one origin (e.g. ``'enablement'``)
+    so the LIMIT applies *after* scoping — no over-fetch needed.
     """
+    where = "WHERE source_page = ?" if source_page else ""
+    params = (source_page, limit) if source_page else (limit,)
     try:
         rows = conn.execute(
-            """SELECT session_id, created_at, updated_at, source_page, title,
+            f"""SELECT session_id, created_at, updated_at, source_page, title,
                       project_id, message_count, user_messages,
                       assistant_messages, total_tokens_in, total_tokens_out,
                       total_cost, last_message_at, first_question,
                       filter_json, ticket_count
                FROM v_session_summary
+               {where}
                ORDER BY COALESCE(last_message_at, updated_at) DESC
                LIMIT ?""",
-            (limit,),
+            params,
         ).fetchall()
         return [
             {
@@ -180,17 +185,20 @@ def list_sessions(limit: int = 20, conn=None) -> list[dict]:
         ]
     except Exception:
         # Fallback for pre-009 databases
-        return _list_sessions_legacy(limit, conn)
+        return _list_sessions_legacy(limit, conn, source_page)
 
 
-def _list_sessions_legacy(limit: int, conn) -> list[dict]:
+def _list_sessions_legacy(limit: int, conn, source_page: str | None = None) -> list[dict]:
     """Pre-migration-009 fallback."""
+    where = "WHERE source_page = ?" if source_page else ""
+    params = (source_page, limit) if source_page else (limit,)
     rows = conn.execute(
-        """SELECT session_id, created_at, updated_at, source_page, title,
+        f"""SELECT session_id, created_at, updated_at, source_page, title,
                   trc_filter, date_start, date_end
            FROM chat_sessions
+           {where}
            ORDER BY updated_at DESC LIMIT ?""",
-        (limit,),
+        params,
     ).fetchall()
     return [
         {
@@ -251,6 +259,39 @@ def load_session(session_id: str, conn=None) -> dict | None:
         result["active_report_ids"] = []
 
     return result
+
+
+def delete_session(session_id: str, conn=None) -> bool:
+    """Delete a chat session and everything under it (cascade).
+
+    FK enforcement is ON and these tables carry no ON DELETE CASCADE, so children
+    are removed before the parent: tool executions → messages (the FTS5 delete
+    trigger keeps ``chat_messages_fts`` in sync) → the session row. Child deletes
+    are guarded so a pre-009 database (no ``chat_messages``) still drops the
+    session row. Returns True if a session row existed and was removed.
+    """
+    from src.data.connection_factory import atomic
+
+    row = conn.execute(
+        "SELECT session_id FROM chat_sessions WHERE session_id = ?",
+        (session_id,),
+    ).fetchone()
+    if row is None:
+        return False
+
+    with atomic(conn):
+        for table in ("chat_tool_executions", "chat_messages"):
+            try:
+                conn.execute(
+                    f"DELETE FROM {table} WHERE session_id = ?", (session_id,)
+                )
+            except Exception:  # pre-009 db without this table — nothing to orphan
+                pass
+        conn.execute(
+            "DELETE FROM chat_sessions WHERE session_id = ?", (session_id,)
+        )
+    logger.info("Deleted chat session %s (cascade)", session_id)
+    return True
 
 
 def _load_messages_from_table(session_id: str, conn) -> list[dict]:
@@ -459,19 +500,30 @@ def get_message(message_id: str, conn=None) -> dict | None:
     }
 
 
-def search_messages(query: str, limit: int = 20, conn=None) -> list[dict]:
-    """Full-text search across chat messages. Returns matching messages."""
+def search_messages(query: str, limit: int = 20, conn=None,
+                    source_page: str | None = None) -> list[dict]:
+    """Full-text search across chat messages. Returns matching messages.
+
+    ``source_page`` optionally restricts hits to one origin (e.g.
+    ``'enablement'``) so search never leaks content from other modes.
+    """
     try:
+        where = "WHERE chat_messages_fts MATCH ?"
+        params: list = [query]
+        if source_page:
+            where += " AND s.source_page = ?"
+            params.append(source_page)
+        params.append(limit)
         rows = conn.execute(
-            """SELECT m.message_id, m.session_id, m.role, m.content,
+            f"""SELECT m.message_id, m.session_id, m.role, m.content,
                       m.created_at, s.title
                FROM chat_messages_fts fts
                JOIN chat_messages m ON m.rowid = fts.rowid
                JOIN chat_sessions s ON s.session_id = m.session_id
-               WHERE chat_messages_fts MATCH ?
+               {where}
                ORDER BY fts.rank
                LIMIT ?""",
-            (query, limit),
+            tuple(params),
         ).fetchall()
         return [
             {

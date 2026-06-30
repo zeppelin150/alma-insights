@@ -126,6 +126,7 @@ def test_list_guru_folders_tool_resolves_collection_name(monkeypatch, empty_db):
 def test_push_guru_draft_tool_threads_folder(monkeypatch, empty_db):
     from src.data import enablement_store as store
     did = store.save_card_draft(empty_db.conn, title="T", content="body")
+    store.approve_draft(empty_db.conn, did, approved_by="reviewer")  # M5: sign-off gate
     captured = {}
 
     def fake_publish(conn, draft_id, *, guru_client=None, collection_id=None,

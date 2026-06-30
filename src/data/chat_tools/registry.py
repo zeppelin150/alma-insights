@@ -182,6 +182,18 @@ def _ensure_registered():
               phi_level=0, desc="Update an enablement task's status/priority/due date/etc.")
     _register("list_tasks", handle_list_tasks,
               phi_level=0, desc="List enablement tasks with optional filters")
+
+    # ── Agent jobs (M4: multi-phase work tracked in the sidebar) ──
+    from src.data.chat_tools.job_tools import (
+        handle_create_job, handle_update_job, handle_list_jobs,
+    )
+    _register("create_job", handle_create_job,
+              phi_level=0, desc="Create a tracked multi-phase job (header + ordered steps)")
+    _register("update_job", handle_update_job,
+              phi_level=0, desc="Update a job's status/progress or one of its steps")
+    _register("list_jobs", handle_list_jobs,
+              phi_level=0, desc="List recent jobs for the active session")
+
     _register("search_drive_docs", handle_search_drive_docs,
               phi_level=0, desc="Search indexed Drive documents")
     _register("list_style_guides", handle_list_style_guides,

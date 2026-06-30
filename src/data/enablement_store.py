@@ -152,6 +152,54 @@ def get_draft(conn: sqlite3.Connection, draft_id: int) -> dict | None:
     return dict(row) if row else None
 
 
+def mark_push_requested(
+    conn: sqlite3.Connection, draft_id: int,
+    collection_id: str | None = None, folder_id: str | None = None,
+) -> None:
+    """Record that a push was attempted but is awaiting human sign-off (M5).
+
+    Stores the intended publish target so an in-UI approval can complete the
+    push. A non-NULL ``pending_push_json`` is the "awaiting approval" flag.
+    """
+    target = json.dumps({"collection_id": collection_id, "folder_id": folder_id})
+    with atomic(conn):
+        conn.execute(
+            "UPDATE guru_content_drafts SET pending_push_json = ? WHERE id = ?",
+            (target, int(draft_id)),
+        )
+
+
+def approve_draft(conn: sqlite3.Connection, draft_id: int, *, approved_by: str = "user") -> dict | None:
+    """Record human sign-off on a draft, clearing the approval gate (M5)."""
+    with atomic(conn):
+        conn.execute(
+            "UPDATE guru_content_drafts SET approved_at = ?, approved_by = ? WHERE id = ?",
+            (_now(), approved_by, int(draft_id)),
+        )
+    return get_draft(conn, int(draft_id))
+
+
+def clear_push_request(conn: sqlite3.Connection, draft_id: int) -> bool:
+    """Drop a pending push (used after a completed publish, or to reject one)."""
+    with atomic(conn):
+        cur = conn.execute(
+            "UPDATE guru_content_drafts SET pending_push_json = NULL WHERE id = ?",
+            (int(draft_id),),
+        )
+    return cur.rowcount > 0
+
+
+def list_pending_approvals(conn: sqlite3.Connection) -> list[dict]:
+    """Drafts a tool tried to push that await human sign-off (M5)."""
+    rows = conn.execute(
+        """SELECT * FROM guru_content_drafts
+           WHERE require_approval = 1 AND approved_at IS NULL
+                 AND pending_push_json IS NOT NULL
+           ORDER BY created_at DESC""",
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def list_drafts(conn: sqlite3.Connection, *, status: str | None = None, limit: int = 100) -> list[dict]:
     if status:
         rows = conn.execute(

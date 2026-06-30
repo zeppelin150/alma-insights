@@ -632,7 +632,11 @@ class MainWindow(QMainWindow):
                 raise RuntimeError("chat engine unavailable")
             self.agent_page = AgentPage(self._agent_controller.engine,
                                         send_fn=self._agent_controller.send,
-                                        tool_poll=self._agent_controller.recent_tool_calls)
+                                        tool_poll=self._agent_controller.recent_tool_calls,
+                                        session_api=self._agent_controller,
+                                        job_poll=self._agent_controller.recent_jobs,
+                                        draft_api=self._agent_controller,
+                                        voice=self._agent_controller.voice)
             return self.agent_page
         except Exception as exc:  # noqa: BLE001 — graceful placeholder, never break the mode
             import logging

@@ -87,7 +87,7 @@ class ReportBridgeClient:
             return False
 
     def generate(self, prompt: str, system_prompt: str = "",
-                 timeout: int = 120) -> str:
+                 timeout: int = 120, on_token=None) -> str:
         """
         Send a prompt through the persistent bridge and return the response.
 
@@ -144,6 +144,13 @@ class ReportBridgeClient:
                     "name": event.data.get("name", ""),
                     "args": event.data.get("args", {}),
                 })
+            elif event.type == "content" and on_token is not None:
+                delta = event.data.get("delta", "")
+                if delta:
+                    try:
+                        on_token(delta)
+                    except Exception:  # noqa: BLE001 — streaming is best-effort, never fatal
+                        pass
 
         t0 = time.time()
         result = self._bridge.call_streaming(

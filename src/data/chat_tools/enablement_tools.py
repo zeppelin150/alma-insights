@@ -96,6 +96,9 @@ def _push_guru_draft_impl(conn, draft_id, collection_id=None, folder_id=None) ->
         did = int(draft_id)
     except (TypeError, ValueError):
         return {"ok": False, "error": "draft_id_required"}
+    draft = store.get_draft(conn, did)
+    if not draft:
+        return {"ok": False, "error": "draft_not_found"}
     guru_cfg = {}
     try:
         from src.data.settings_manager import get_section
@@ -108,6 +111,15 @@ def _push_guru_draft_impl(conn, draft_id, collection_id=None, folder_id=None) ->
         collection_id = guru_cfg.get("publish_collection_id") or None
     if not folder_id:
         folder_id = guru_cfg.get("publish_folder_id") or None
+    # ── Approval gate (M5) ──────────────────────────────────────────
+    # A draft cannot be published to Guru without a recorded human sign-off.
+    # When blocked, we record the intended target so an in-UI approval can
+    # complete the push, and return a clear, actionable error.
+    if draft.get("require_approval") and not draft.get("approved_at"):
+        store.mark_push_requested(conn, did, collection_id, folder_id)
+        return {"ok": False, "error": "approval_required", "draft_id": did,
+                "message": "This edit needs your sign-off before it publishes to "
+                           "Guru — open the Review panel in the Agent to approve it."}
     client = None
     try:
         from src.data.guru_client import GuruClient

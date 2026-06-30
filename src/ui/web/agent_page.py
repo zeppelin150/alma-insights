@@ -27,9 +27,12 @@ class AgentPage(QWidget):
     """A self-contained Agent chat surface. ``engine`` is the chat runtime
     (a real ``ChatEngine`` in production, a fake in tests)."""
 
-    def __init__(self, engine, send_fn=None, tool_poll=None, parent=None):
+    def __init__(self, engine, send_fn=None, tool_poll=None, session_api=None,
+                 job_poll=None, draft_api=None, voice=None, parent=None):
         super().__init__(parent)
-        self.bridge = ChatBridge(engine, send_fn=send_fn, tool_poll=tool_poll, parent=self)
+        self.bridge = ChatBridge(engine, send_fn=send_fn, tool_poll=tool_poll,
+                                 session_api=session_api, job_poll=job_poll,
+                                 draft_api=draft_api, voice=voice, parent=self)
         self.view = QWebEngineView(self)
         # Let the file:// page load its sibling qwebchannel.js (classic script).
         try:

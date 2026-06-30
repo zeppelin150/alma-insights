@@ -57,7 +57,7 @@ PBS_PY_VERSION = "3.12.8"
 # Exact pins only — this is what actually ships. Must stay in sync with
 # requirements.txt. CI enforces parity via tests/test_phase4_build.py.
 PACKAGES = [
-    "PySide6-Essentials==6.8.1.1",
+    "PySide6==6.8.1.1",   # full PySide6 — Addons carries QtWebEngine (Agent chat)
     "pandas==2.2.3",
     "scikit-learn==1.5.2",
     "nltk==3.9.1",
@@ -74,6 +74,8 @@ PACKAGES = [
     "google-api-python-client==2.149.0",
     "google-auth==2.36.0",
     "google-auth-oauthlib==1.2.1",
+    "pywhispercpp==1.5.0",   # on-device STT (whisper.cpp) — Agent dictation (M6)
+    "sounddevice==0.5.5",    # mic capture (bundles PortAudio)
 ]
 
 # App source files/dirs to include
@@ -242,6 +244,30 @@ def copy_app_source(staging_dir):
 
     # Ensure data/ directory exists (empty, for runtime)
     (app_dir / "data").mkdir(exist_ok=True)
+
+    # The React Agent-chat UI (web/ → src/ui/web/dist/, gitignored) ships as part
+    # of the `src` tree copied above — but ONLY if it was built before packaging.
+    # CI runs `npm --prefix web ci && npm run build` first. Warn loudly if it's
+    # missing so we never silently ship the spike fallback (static/index.html).
+    if (app_dir / "src" / "ui" / "web" / "dist" / "index.html").exists():
+        log("  React Agent UI bundled (src/ui/web/dist)")
+    else:
+        log("  [WARN] src/ui/web/dist not built — Agent chat will use the spike "
+            "fallback. Run `npm --prefix web ci && npm run build` before packaging.")
+
+    # On-device STT model for the Agent's voice dictation (M6). Gitignored (57MB),
+    # so CI/build must fetch it first (scripts/fetch_voice_model.py, SHA-pinned).
+    # Absent → dictation degrades to disabled mic, chat still works.
+    model_src = ROOT / "models"
+    bins = list(model_src.glob("*.bin")) if model_src.is_dir() else []
+    if bins:
+        (app_dir / "models").mkdir(exist_ok=True)
+        for b in bins:
+            shutil.copy2(b, app_dir / "models" / b.name)
+        log(f"  Voice STT model bundled ({', '.join(b.name for b in bins)})")
+    else:
+        log("  [WARN] models/*.bin not present — voice dictation will be disabled. "
+            "Run `python scripts/fetch_voice_model.py` before packaging.")
 
     # Inject the bundled release-update token. See _inject_release_credentials
     # for the full contract — short version: read ALMA_RELEASE_BOT_PAT from

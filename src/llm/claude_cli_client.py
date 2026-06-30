@@ -57,17 +57,42 @@ class ClaudeCliClient:
         system_prompt: str = "",
         timeout: int = 120,
         max_tokens: int | None = None,  # accepted for API parity, not used
+        on_token=None,
     ) -> str:
         """Synchronous .generate() — returns full response text.
 
         Applies PII redaction (base always; aggressive if pii_redaction=True)
-        then delegates to the CLI bridge.
+        then delegates to the CLI bridge. When ``on_token`` is given, streams via
+        the bridge and forwards each text delta in real time (the call still
+        returns the full accumulated text, so callers are unchanged otherwise).
         """
         full_prompt = self._prepare_prompt(prompt, system_prompt)
         bridge = self._ensure_bridge()
         self._call_counter += 1
-        request_id = f"cli_client_{self._call_counter}_{int(time.time())}"
-        return bridge.call_blocking(full_prompt, request_id, timeout=timeout)
+        if on_token is None:
+            request_id = f"cli_client_{self._call_counter}_{int(time.time())}"
+            return bridge.call_blocking(full_prompt, request_id, timeout=timeout)
+
+        request_id = f"cli_client_stream_{self._call_counter}_{int(time.time())}"
+
+        def _on_token(event):
+            if event.type == "content":
+                delta = event.data.get("delta", "")
+                if delta:
+                    try:
+                        on_token(delta)
+                    except Exception:  # noqa: BLE001 — streaming is best-effort, never fatal
+                        pass
+
+        result = bridge.call_streaming(
+            full_prompt, request_id, on_token=_on_token, timeout=timeout,
+        )
+        if result.get("error"):
+            raise RuntimeError(
+                f"Claude CLI streaming call failed: {result['error']} - "
+                f"{result.get('message', '')}"
+            )
+        return result.get("full_text", "")
 
     def generate_streaming(
         self,

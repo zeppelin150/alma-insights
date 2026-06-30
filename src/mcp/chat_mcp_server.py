@@ -910,6 +910,58 @@ TOOL_SCHEMAS = [
             "required": ["comment_id"],
         },
     },
+    {
+        "name": "create_job",
+        "description": (
+            "Turn a multi-phase task into a tracked job the sidebar shows live. "
+            "Provide a title and an ordered list of step/phase names; returns the "
+            "job_id and step ordinals to update as you progress."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Short job title."},
+                "kind": {"type": "string", "description": "Optional label, e.g. 'card_update_batch'."},
+                "steps": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Ordered phase names (step 0..N).",
+                },
+            },
+            "required": ["title"],
+        },
+    },
+    {
+        "name": "update_job",
+        "description": (
+            "Update a job's status/progress/summary, and/or mark one step "
+            "(by ordinal) running/done/error. Step changes auto-derive job progress."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "job_id": {"type": "string"},
+                "status": {"type": "string", "description": "running|done|error|cancelled."},
+                "progress_pct": {"type": "integer", "description": "0..100 (usually auto-derived)."},
+                "summary": {"type": "string", "description": "Current-activity line."},
+                "step_ordinal": {"type": "integer", "description": "Which step to update."},
+                "step_status": {"type": "string", "description": "pending|running|done|error|skipped."},
+                "step_detail": {"type": "string"},
+            },
+            "required": ["job_id"],
+        },
+    },
+    {
+        "name": "list_jobs",
+        "description": "List recent jobs for the active session (each with its steps).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "status": {"type": "string", "description": "Filter by status (optional)."},
+                "limit": {"type": "integer", "description": "Max jobs (default 20)."},
+            },
+        },
+    },
 ]
 
 

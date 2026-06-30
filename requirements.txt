@@ -9,7 +9,10 @@
 #     sentence-transformers compat until sentence-transformers 4.x.
 #   - Bump versions only via a dedicated PR with CI matrix validation.
 
-PySide6-Essentials==6.8.1.1
+# Full PySide6 (Essentials + Addons) — Addons carries QtWebEngine, which the
+# embedded Agent chat (QWebEngineView + QWebChannel) requires. ~100-150MB
+# Chromium is the cost of the in-process web UI (M7).
+PySide6==6.8.1.1
 pandas==2.2.3
 scikit-learn==1.5.2
 nltk==3.9.1
@@ -39,6 +42,12 @@ pytest-timeout==2.3.1
 google-api-python-client==2.149.0
 google-auth==2.36.0
 google-auth-oauthlib==1.2.1
+# On-device speech-to-text for the Agent's dictation (M6) — fully local, no
+# cloud, no PyTorch. Prebuilt wheels for the bundled CPython (3.12 → cp312) on
+# win_amd64 + macos arm64; sounddevice ships a universal2 macOS wheel + bundles
+# PortAudio (no compiler). The GGML model is bundled separately (see installer).
+pywhispercpp==1.5.0
+sounddevice==0.5.5
 
 # Optional — OCR Debug tool (AI assistant visual inspection)
 # mss==10.0.0

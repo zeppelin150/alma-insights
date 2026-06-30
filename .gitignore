@@ -159,6 +159,9 @@ package-lock.json
 
 # ── HuggingFace cache (local dev downloads) ─────────────────────────
 .cache/huggingface/
+
+# ── On-device STT model (bundled by the installer; too big to commit) ─
+models/*.bin
 ~/.cache/huggingface/
 
 # ── E2E runner output artifacts ─────────────────────────────────────

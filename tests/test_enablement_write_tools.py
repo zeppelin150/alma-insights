@@ -94,6 +94,7 @@ def test_revise_draft_calls_llm_and_updates(empty_db):
 def test_push_guru_draft_with_creds(empty_db, mock_guru_client):
     conn = empty_db.conn
     did = S.save_card_draft(conn, title="SSO Guide", content="body")
+    S.approve_draft(conn, did, approved_by="reviewer")  # M5: sign-off gate before push
     guru_mock = MagicMock()
     guru_mock.load_credentials.return_value = ("ops@alma.com", "tok")
     guru_mock.return_value = mock_guru_client
@@ -115,6 +116,7 @@ def test_create_card_draft_from_scratch_then_push(empty_db, mock_guru_client):
     d = S.get_draft(conn, out["draft_id"])
     assert d["title"] == "VS Code authored card"
 
+    S.approve_draft(conn, out["draft_id"], approved_by="reviewer")  # M5: sign-off gate
     guru_mock = MagicMock()
     guru_mock.load_credentials.return_value = ("ops@alma.com", "tok")
     guru_mock.return_value = mock_guru_client
@@ -134,6 +136,7 @@ def test_push_guru_draft_defaults_collection_from_settings(empty_db, mock_guru_c
     configured publish target (Renn rarely knows the Guru collection id)."""
     conn = empty_db.conn
     did = S.save_card_draft(conn, title="Fallback card", content="body")
+    S.approve_draft(conn, did, approved_by="reviewer")  # M5: sign-off gate before push
     guru_mock = MagicMock()
     guru_mock.load_credentials.return_value = ("ops@alma.com", "tok")
     guru_mock.return_value = mock_guru_client

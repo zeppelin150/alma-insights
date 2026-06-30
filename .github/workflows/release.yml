@@ -47,6 +47,14 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
+      # Build the React Agent-chat UI into src/ui/web/dist/ so build_release.py
+      # bundles it (else the shipped app falls back to the spike UI).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Build Agent web UI
+        run: npm --prefix web ci && npm --prefix web run build
+
       # Cache the downloads that build_release.py pulls every run —
       # Python embeddable, Node.js tarball, the HuggingFace model snapshot.
       - name: Cache build downloads
@@ -55,9 +63,15 @@ jobs:
           path: |
             installer/cache
             ~/.cache/huggingface
+            models
           key: bundle-${{ matrix.platform }}-${{ hashFiles('installer/build_release.py', 'requirements.txt', 'requirements.lock') }}
           restore-keys: |
             bundle-${{ matrix.platform }}-
+
+      # Fetch the gitignored, SHA-pinned on-device voice model so build_release
+      # bundles it (else every release ships with dictation disabled).
+      - name: Fetch on-device voice model
+        run: python scripts/fetch_voice_model.py
 
       - name: Build bundle
         run: python installer/build_release.py --platform ${{ matrix.platform }}

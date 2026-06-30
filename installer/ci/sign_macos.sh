@@ -76,15 +76,44 @@ security set-key-partition-list \
   -s -k "${KEYCHAIN_PASSWORD}" \
   "${KEYCHAIN}" >/dev/null
 
-# ── Sign ────────────────────────────────────────────────────────────
-echo "[sign_macos] Signing ${ARTIFACT}"
-codesign --force --deep --options runtime \
-         --keychain "${KEYCHAIN}" \
-         --sign "${APPLE_SIGNING_IDENTITY}" \
-         --timestamp \
-         "${ARTIFACT}"
+# ── Deep-sign every nested Mach-O, then repack ──────────────────────
+# `codesign --deep "<zip>"` is a NO-OP: codesign cannot reach binaries inside a
+# .zip, so the bundled QtWebEngineProcess + Qt frameworks would ship UNSIGNED and
+# Gatekeeper kills the helper → the Agent chat's QWebEngineView renders BLANK.
+# The fix is to unpack, sign every Mach-O leaf inner→outer (the WebEngine helper,
+# then .so/.dylib, then the .framework bundles, then the interpreters), repack
+# preserving symlinks, and notarize the signed archive.
+ARTIFACT_ABS="$(cd "$(dirname "${ARTIFACT}")" && pwd)/$(basename "${ARTIFACT}")"
+WORK="$(mktemp -d)"
+echo "[sign_macos] Unpacking for deep signing → ${WORK}"
+ditto -x -k "${ARTIFACT_ABS}" "${WORK}"
 
-codesign --verify --strict --verbose=2 "${ARTIFACT}"
+sign_one() {
+  codesign --force --options runtime --timestamp \
+           --keychain "${KEYCHAIN}" --sign "${APPLE_SIGNING_IDENTITY}" "$1"
+}
+
+# 1) The QtWebEngine helper(s) — the exact binary Gatekeeper blocks when unsigned.
+while IFS= read -r -d '' f; do echo "[sign_macos]  helper: $f"; sign_one "$f"; done \
+  < <(find "${WORK}" -name 'QtWebEngineProcess' -type f -print0)
+# 2) Mach-O leaves: Python extension modules + shared libs.
+while IFS= read -r -d '' f; do sign_one "$f"; done \
+  < <(find "${WORK}" \( -name '*.so' -o -name '*.dylib' \) -type f -print0)
+# 3) Frameworks (sign the bundle dir after its internals are signed).
+while IFS= read -r -d '' fw; do sign_one "$fw"; done \
+  < <(find "${WORK}" -name '*.framework' -type d -print0)
+# 4) The bundled interpreters.
+while IFS= read -r -d '' exe; do sign_one "$exe"; done \
+  < <(find "${WORK}" \( -path '*/python/bin/*' -o -path '*/node/bin/*' \) -type f -perm +111 -print0)
+
+# Sanity-check that the helper Gatekeeper cares about is actually signed.
+HELPER="$(find "${WORK}" -name 'QtWebEngineProcess' -type f | head -1)"
+[ -n "${HELPER}" ] && codesign --verify --strict --verbose=2 "${HELPER}"
+
+echo "[sign_macos] Repacking signed tree (symlinks preserved)"
+rm -f "${ARTIFACT_ABS}"
+( cd "${WORK}" && zip -r -q -y -X "${ARTIFACT_ABS}" . )
+rm -rf "${WORK}"
 
 # ── Notarize ────────────────────────────────────────────────────────
 echo "[sign_macos] Submitting for notarization (blocks until Apple responds)"

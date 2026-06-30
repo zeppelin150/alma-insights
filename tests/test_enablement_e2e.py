@@ -118,7 +118,8 @@ def test_e2e_drive_doc_to_guru_card(empty_db, mock_guru_client, monkeypatch):
     assert rev["ok"]
     assert S.get_draft(conn, draft_id)["title"] == "SSO Setup v2"
 
-    # (3) Load: operator pushes to Guru through the chat tool (stubbed GuruClient).
+    # (3) Load: operator reviews + signs off (M5 gate), then pushes to Guru.
+    S.approve_draft(conn, draft_id, approved_by="operator")
     guru = MagicMock()
     guru.load_credentials.return_value = ("ops@alma.com", "tok")
     guru.return_value = mock_guru_client
