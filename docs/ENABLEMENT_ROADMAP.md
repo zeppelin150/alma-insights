@@ -51,7 +51,7 @@ app-wide `max_tokens` doubling, broken tracked tests).
 
 ---
 
-## Building — Agent: a standalone, polished chat experience *(decided 2026-06-29)*
+## Built — Agent: a standalone, polished chat experience *(M1–M7 done 2026-06-29)*
 
 A dedicated, Claude-app-grade chat surface to drive the enablement workflows,
 built **inside Alma Insights** (not a second app) so the local-first / no-server
@@ -68,7 +68,7 @@ the migration stays clean.
 **Features:**
 - Smooth streaming chat (markdown, code blocks), a live **tool-call timeline**, **token-use** display.
 - **Past-chat review** browser over the existing `chat_sessions`.
-- **Dictation** via the OS's on-device STT (macOS Speech / Windows WinRT) — audio never leaves the machine (HIPAA-safe, no BAA); free fallback is the OS dictation overlay typing into the field.
+- **Dictation** via a bundled on-device **whisper.cpp** engine (`pywhispercpp` + `sounddevice`) — audio never leaves the machine (HIPAA-safe, no BAA, no cloud fallback).
 - **Job-builder MCP** — a tool that turns a task into a first-class **job** (phases / agents / tokens / tools / status, persisted locally), tracked + inspectable in the **native sidebar pop-out** (replicating the background-tasks panel).
 - **In-thread tool-edit review + sign-off** — when the AI edits a tool/card, the user sees the diff and approves inline, reusing `diff_view.py` + the human-gate.
 
@@ -80,40 +80,41 @@ size, Mac code-signing/notarization, OS-speech API differences.
 React build step + the QtWebEngine dependency + the static UI bundle, for both
 platforms.
 
-> Status: **M1 + M2 + React build + M3 shipped** (commits a3332e5, 146279e,
-> 59b6487; M3 not yet committed). The Agent is a live page (enablement →
-> ASSISTANT → Agent) driven by a real `ChatEngine`; M2 adds a **live tool-call
-> timeline** (`toolCall` tails `chat_tool_executions` as each tool finishes) +
-> a token/cost meter; the UI is a **React/Vite app** built (vite-plugin-singlefile)
-> to one inlined `dist/index.html` that loads in `QWebEngineView` from `file://`
-> (no server, no ES-module CORS), with `qwebchannel.js` as a sibling classic
-> script. Build: `npm --prefix web install && npm run build` (installer M7 will
-> run this; the page falls back to the spike HTML if `dist/` is absent).
-> **M3 past-chat browser** is a slide-in History drawer over `chat_sessions` +
-> migration-009 `v_session_summary`/FTS5: recent-list, full-text search,
-> click-to-load (restores the thread + keeps chatting), delete-with-confirm
-> (cascade), and **New chat** — all strictly scoped to `source_page='enablement'`
-> so a product-mode ticket chat can never load into the Agent (verified by a
-> 16-agent adversarial review that also closed a demo-mode DB-target split).
-> **Per-token streaming** is now live: the assistant bubble fills token-by-token
-> as the model produces text (via an optional `on_token` callback on the Gemini
-> and Claude-CLI clients → a `ChatEngine.token_streamed` signal → the React UI),
-> while the whole-message commit still drives M2's telemetry + tool timeline.
-> **M4 Job-builder** turns a multi-phase task into a first-class *job* (migration
-> 036, `agent_jobs` + steps, fully local/decoupled): the Agent calls `create_job`
-> / `update_job` MCP tools and a right-side **Jobs** sidebar tracks status +
-> progress + per-step state live. **M5 review/sign-off** adds a real
-> `require_approval` gate (migration 037): the `push_guru_draft` tool can no longer
-> publish to Guru without a recorded human sign-off — instead a **Review** drawer
-> shows the red/green diff + pre-flight checks and the operator approves or rejects
-> inline (the Workbench's own publish button is unchanged). **M6 voice** is
-> push-to-talk, on-device dictation (Windows WinRT / macOS Speech) — audio never
-> leaves the machine; the mic stays disabled where the OS speech package isn't
-> present. **M7** makes it shippable: full `PySide6` (QtWebEngine) in the bundle,
-> the React build wired into the installer + CI, and a deep-sign of
-> QtWebEngineProcess on macOS (else Gatekeeper blanks the view). Remaining work is
-> on-hardware/CI verification only (Windows mic, macOS Speech + signing, a WebEngine
-> build run). Plan: `~/.claude/plans/agent-chat-build.md`.
+> Status: **M1–M7 built and pushed** — `origin/enablement-content-tabs` at commit
+> `bfb1b6d`, on top of the M1/M2/React commits (a3332e5 … 41f6356). The Agent is a
+> live page (enablement → ASSISTANT → Agent) on a real `ChatEngine`, rendered as a
+> React/Vite app (vite-plugin-singlefile → one inlined `dist/index.html`) in
+> `QWebEngineView` over `QWebChannel` (no server, no localhost). Highlights:
+>
+> - **M2** — live tool-call timeline (`toolCall` tails `chat_tool_executions`) + token/cost meter.
+> - **M3 past-chat browser** — a History drawer over `chat_sessions` + migration-009
+>   FTS5: recent list, full-text search, click-to-load (restores the thread), delete
+>   (cascade), New chat — strictly `source_page='enablement'`-scoped so a product-mode
+>   chat can never load into the Agent. The Agent now **persists its turns** to
+>   `chat_messages` (history had been empty / "Untitled" before).
+> - **Streaming** — the assistant bubble fills token-by-token (optional `on_token` on
+>   the Gemini + Claude-CLI clients → `ChatEngine.token_streamed` → React), with the
+>   whole-message commit still driving telemetry + tools.
+> - **M4 Job-builder** (migration 036) — `create_job`/`update_job`/`list_jobs` MCP
+>   tools + a live **Jobs** sidebar (status/progress/steps), fully local/decoupled.
+> - **M5 review/sign-off** (migration 037) — a real DB-layer **`require_approval`
+>   gate**: `push_guru_draft` cannot publish to Guru without recorded human sign-off;
+>   a **Review** drawer shows the red/green diff + pre-flight checks and the operator
+>   approves/rejects inline (the Workbench's own publish path is unchanged).
+> - **M6 voice** — **on-device dictation via whisper.cpp** (`pywhispercpp` +
+>   `sounddevice`), a supply-chain-vetted, PyTorch-free engine with a bundled,
+>   SHA-256-pinned GGML model verified **fail-closed at load** and raw-PCM inference.
+>   **No cloud fallback** — audio never leaves the machine (the earlier WinRT path was
+>   Microsoft cloud and was removed from the HIPAA path). Click-to-toggle mic.
+> - **M7 packaging** — full `PySide6` (QtWebEngine) in requirements/PACKAGES, the
+>   React build + the voice model bundled by the installer + CI
+>   (`fetch_voice_model.py`), and a real **deep-sign of QtWebEngineProcess** on macOS.
+>
+> Hardened by three adversarial-review workflows (incl. a 30-agent voice review that
+> caught + fixed a cloud-fallback **blocker**). **Remaining = on-hardware/CI
+> verification only:** the macOS Speech.framework path is a scaffold; the macOS
+> deep-sign/notarize + the WebEngine-bundle build need a CI run / a Mac (Developer ID
+> or a free ad-hoc deep-sign for M1 dev/pilot). Plan: `~/.claude/plans/agent-chat-build.md`.
 
 ---
 
