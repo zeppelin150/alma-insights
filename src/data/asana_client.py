@@ -140,14 +140,36 @@ class AsanaClient:
 
     # ── reads ─────────────────────────────────────────────────────
     def test_connection(self) -> tuple[bool, str]:
-        """Return (ok, name-or-error). Use to validate a pasted key."""
+        """Return (ok, name-or-error). Use to validate a pasted key.
+
+        Also requests ``gid`` so the same call warms the cache for
+        :meth:`whoami`; the return contract stays a 2-tuple — three callers
+        unpack exactly ``ok, msg``, so do not widen it.
+        """
         try:
-            me = self._get("/users/me", {"opt_fields": "name,email"})
+            me = self._get("/users/me", {"opt_fields": "name,email,gid"})
             return (bool(me), (me.get("name", "") if me else "no data"))
         except urllib.error.HTTPError as exc:
             return False, f"HTTP {exc.code}: {exc.reason}"
         except Exception as exc:  # noqa: BLE001
             return False, str(exc)
+
+    def whoami(self) -> dict:
+        """Current PAT owner ``{gid, name, email}``, or ``{}`` on any error.
+
+        Resolves the operator's Asana GID for the "only mine" task filter (M2).
+        Mirrors :meth:`test_connection`'s error handling; never raises.
+        """
+        try:
+            me = self._get("/users/me", {"opt_fields": "name,email,gid"})
+            if not me:
+                return {}
+            return {"gid": me.get("gid", ""), "name": me.get("name", ""),
+                    "email": me.get("email", "")}
+        except urllib.error.HTTPError:
+            return {}
+        except Exception:  # noqa: BLE001
+            return {}
 
     def list_workspaces(self) -> list[dict]:
         data = self._get("/workspaces", {"opt_fields": "name", "limit": 100}) or []

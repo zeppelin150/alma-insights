@@ -245,6 +245,31 @@ def load_active_credentials():
     return _active
 
 
+def fetch_account_email() -> str | None:
+    """Resolve the connected account's email WITHOUT widening OAuth scope.
+
+    Uses the Drive v3 ``about`` resource (already covered by the existing
+    ``drive.readonly`` scope — no re-consent, stays least-privilege) rather than
+    adding ``userinfo.email``/``openid``. Main process only (honors the
+    subprocess guard). Returns None when Google isn't active this session or on
+    any error — never raises into a worker, and never logs the email value.
+    """
+    _refuse_in_subprocess("fetch_account_email")
+    if _active is None:
+        return None
+    try:
+        from googleapiclient.discovery import build
+        service = build("drive", "v3", credentials=_active, cache_discovery=False)
+        about = service.about().get(fields="user(emailAddress,displayName)").execute()
+        email = ((about or {}).get("user") or {}).get("emailAddress") or None
+        if email:
+            logger.info("Resolved operator account email from Google (value not logged).")
+        return email
+    except Exception as exc:  # noqa: BLE001 — degrade to None if API/lib unavailable
+        logger.warning("fetch_account_email failed: %s", exc)
+        return None
+
+
 def reconnect():
     """Activate the stored authorization for this session (the ONLY setter
     of the live credentials). Silent — refreshes the access token from the

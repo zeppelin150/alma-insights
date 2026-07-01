@@ -154,6 +154,7 @@ class EnablementPage(QWidget):
 
     connection_changed = Signal()   # compat with GuruPage/GuruWipPage
     connection_status_ready = Signal(str, bool, str)  # (source_key, ok, detail) from the check worker
+    identity_resolved = Signal(str, str, str)  # (email, asana_gid, asana_name) → main-thread persist (M1)
     import_finished = Signal(dict)  # off-thread import result → UI refresh
     analytics_synced = Signal(dict)  # off-thread Guru analytics sync result
     task_action_done = Signal(dict)  # off-thread Asana write-back result
@@ -254,6 +255,9 @@ class EnablementPage(QWidget):
         self.workbench.open_chat_requested.connect(self._open_chat)
         self.calendar.event_clicked.connect(self._on_calendar_event)
         self.settings.asana_setup_requested.connect(self._on_asana_setup)
+        self.settings.identity_detect_email_requested.connect(self._on_detect_operator_email)
+        self.settings.identity_resolve_asana_gid_requested.connect(self._on_resolve_operator_gid)
+        self.identity_resolved.connect(self._on_identity_resolved)
         self.workbench.existing_cards_requested.connect(self._fetch_existing_cards)
         self.workbench.import_requested.connect(self._on_import_requested)
         self.workbench.content_edited.connect(self._on_content_edited)
@@ -616,9 +620,12 @@ class EnablementPage(QWidget):
             n_open = len(tasks.list_tasks(conn, status="open", limit=500))
             active = self.workbench.active_draft_id
             active_line = f" The active draft id is {active}." if active else ""
+            from src.data import enablement_identity as ident
+            who = ident.operator_email(resolve=False)
+            who_line = f" Operator: {who}." if who else ""
             return (
                 f"[ENABLEMENT SCOPE] {n_docs} indexed documents, {n_drafts} pending card "
-                f"drafts, {n_open} open tasks.{active_line} Tools: search_local_documents / "
+                f"drafts, {n_open} open tasks.{who_line}{active_line} Tools: search_local_documents / "
                 f"query_business_drive to find content; revise_draft + push_guru_draft to work "
                 f"a card; create_task / list_tasks / draft_subtasks to manage work; "
                 f"asana_discover + set_asana_board_config to set up an Asana board."
@@ -836,6 +843,64 @@ class EnablementPage(QWidget):
         except Exception as exc:  # noqa: BLE001
             ok, msg = False, str(exc)
         self.connection_status_ready.emit("drive", bool(ok), "" if ok else (msg or "not configured"))
+
+    # ── operator identity (M1) ────────────────────────────────────
+    def _on_detect_operator_email(self):
+        """Resolve the operator email from the connected Google account off-thread."""
+        import threading
+        threading.Thread(target=self._detect_operator_email_worker, daemon=True).start()
+
+    def _detect_operator_email_worker(self):
+        try:
+            from src.data import google_oauth
+            email = google_oauth.fetch_account_email()
+        except Exception:  # noqa: BLE001
+            email = None
+        if email:
+            from src.data.settings_manager import get_section
+            gid = (get_section("enablement", {}) or {}).get("operator_asana_gid", "") or ""
+            self.identity_resolved.emit(email, gid, "")
+        else:
+            self.connection_status_ready.emit(
+                "drive", False, "Connect your Google account first")
+
+    def _on_resolve_operator_gid(self):
+        import threading
+        threading.Thread(target=self._resolve_operator_gid_worker, daemon=True).start()
+
+    def _resolve_operator_gid_worker(self):
+        try:
+            from src.data.asana_client import AsanaClient
+            who = AsanaClient.from_store().whoami()
+        except Exception:  # noqa: BLE001
+            who = {}
+        gid = who.get("gid", "")
+        if gid:
+            from src.data.settings_manager import get_section
+            cfg = get_section("enablement", {}) or {}
+            email = cfg.get("operator_email", "") or who.get("email", "") or ""
+            self.identity_resolved.emit(email, gid, who.get("name", ""))
+        else:
+            self.connection_status_ready.emit(
+                "asana", False, "Connect Asana first (paste your API key)")
+
+    def _on_identity_resolved(self, email: str, asana_gid: str, asana_name: str):
+        """Main-thread slot: persist the resolved identity + reflect it in Settings."""
+        from src.data.settings_manager import update_section
+        updates: dict = {}
+        if email:
+            updates["operator_email"] = email
+            updates["detected_email"] = email
+        if asana_gid:
+            updates["operator_asana_gid"] = asana_gid
+        if asana_name:
+            updates["operator_name"] = asana_name
+        if updates:
+            update_section("enablement", updates)
+        if email:
+            self.settings.set_operator_email(email)
+        if asana_gid:
+            self.settings.set_operator_asana_gid(asana_gid, asana_name)
 
     # ── Drive folder config (Settings → monitor_sources) ──────────
     def _add_drive_folder(self, folder_id: str, name: str):

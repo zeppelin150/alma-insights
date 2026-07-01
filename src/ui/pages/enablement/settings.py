@@ -26,6 +26,8 @@ class SettingsPage(QWidget):
     style_guide_action = Signal(str)       # "paste" | "upload" | "drive" | "clear"
     style_guide_activate = Signal(str)     # doc_id → make this stored guide active
     style_guide_delete = Signal(str)       # doc_id → delete this stored guide
+    identity_detect_email_requested = Signal()       # "Auto-detect from Google"
+    identity_resolve_asana_gid_requested = Signal()  # "Resolve GID"
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -46,7 +48,7 @@ class SettingsPage(QWidget):
         self._tabs = QTabWidget()
         self._tabs.setObjectName("AnalysisTab")
         self._tabs.addTab(self._tab([self._connections()]), "Connections")
-        self._tabs.addTab(self._tab([self.credentials]), "Providers")
+        self._tabs.addTab(self._tab([self._identity(), self.credentials]), "Providers")
         self._tabs.addTab(self._tab([self._asana(), self._drive()]), "Sources")
         self._tabs.addTab(self._tab([self._style_guide()]), "Style Guide")
         outer.addWidget(self._tabs, 1)
@@ -67,6 +69,90 @@ class SettingsPage(QWidget):
         scroll.setStyleSheet("QScrollArea{background:transparent; border:none;}")
         scroll.setWidget(body)
         return scroll
+
+    # ── operator identity (M1: who is Renn working for) ───────────
+    def _identity(self) -> QFrame:
+        """Identity card — auto-detect the operator email from Google, override
+        here, and resolve the Asana GID for the 'only mine' task filter (M2)."""
+        card = card_frame()
+        v = QVBoxLayout(card)
+        v.setContentsMargins(20, 16, 20, 16)
+        v.setSpacing(12)
+        v.addWidget(section_label("OPERATOR IDENTITY"))
+        v.addWidget(self._text(
+            "Renn filters your tasks and calendar to you. Auto-detected from your "
+            "connected Google account — override here if it's wrong (e.g. a shared "
+            "service account).", color=ALMA_TEXT_LIGHT))
+        email_row = QHBoxLayout()
+        email_row.setSpacing(8)
+        email_row.addWidget(self._text("Your email", bold=True))
+        self._identity_email = QLineEdit()
+        self._identity_email.setPlaceholderText("you@company.com")
+        self._identity_email.setFixedHeight(30)
+        self._identity_email.setStyleSheet(
+            f"QLineEdit{{background:{ALMA_BG_ELEVATED}; border:1px solid {ALMA_BORDER}; "
+            f"border-radius:7px; padding:2px 12px; font-size:12.5px; color:{ALMA_TEXT_DARK};}}"
+        )
+        self._identity_email.editingFinished.connect(self._save_operator_email)
+        email_row.addWidget(self._identity_email, 1)
+        detect = QPushButton("Auto-detect from Google")
+        detect.setCursor(Qt.PointingHandCursor)
+        detect.setStyleSheet(
+            f"QPushButton{{background:{ALMA_GREEN_DARK}; color:{ALMA_TEXT_ON_DARK}; border:none; "
+            f"border-radius:7px; padding:7px 16px; font-size:12px; font-weight:600;}}"
+        )
+        detect.clicked.connect(self.identity_detect_email_requested.emit)
+        email_row.addWidget(detect)
+        v.addLayout(email_row)
+        gid_row = QHBoxLayout()
+        gid_row.setSpacing(8)
+        self._identity_asana = self._text("Asana: not resolved", color=ALMA_TEXT_LIGHT)
+        gid_row.addWidget(self._identity_asana, 1)
+        resolve = QPushButton("Resolve GID")
+        resolve.setCursor(Qt.PointingHandCursor)
+        resolve.setStyleSheet(
+            f"QPushButton{{background:transparent; color:{ALMA_GREEN_DARK}; "
+            f"border:1px solid {ALMA_BORDER}; border-radius:7px; padding:6px 14px; "
+            f"font-size:12px; font-weight:600;}}"
+        )
+        resolve.clicked.connect(self.identity_resolve_asana_gid_requested.emit)
+        gid_row.addWidget(resolve)
+        v.addLayout(gid_row)
+        self._identity_you = self._text("", color=ALMA_SUCCESS)
+        v.addWidget(self._identity_you)
+        self._seed_identity()
+        return card
+
+    def _seed_identity(self) -> None:
+        from src.data.settings_manager import get_section
+        cfg = get_section("enablement", {}) or {}
+        email = (cfg.get("operator_email") or cfg.get("detected_email") or "").strip()
+        if email:
+            self._identity_email.setText(email)
+            self._identity_you.setText(f"You are: {email}")
+        gid = (cfg.get("operator_asana_gid") or "").strip()
+        name = (cfg.get("operator_name") or "").strip()
+        if gid:
+            self._identity_asana.setText(f"Asana: {name or 'resolved'} · gid {gid}")
+
+    def _save_operator_email(self) -> None:
+        from src.data.settings_manager import update_section
+        text = self._identity_email.text().strip()
+        update_section("enablement", {"operator_email": text})
+        self._identity_you.setText(f"You are: {text}" if text else "")
+
+    def set_operator_email(self, email: str) -> None:
+        self._identity_email.setText(email or "")
+        self._identity_you.setText(f"You are: {email}" if email else "")
+
+    def set_operator_asana_gid(self, gid: str, name: str = "") -> None:
+        if gid:
+            self._identity_asana.setText(f"Asana: {name or 'resolved'} · gid {gid}")
+        else:
+            self._identity_asana.setText("Asana: not resolved")
+
+    def operator_email(self) -> str:
+        return self._identity_email.text().strip()
 
     # ── helpers ───────────────────────────────────────────────────
     def _text(self, s, size=12.5, color=None, bold=False):
