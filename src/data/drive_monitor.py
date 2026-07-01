@@ -147,3 +147,12 @@ class DriveMonitor(SourceMonitor):
             logger.warning("Drive fetch failed: %s", exc)
         finally:
             self._fetching = False
+
+
+# ── task-source registration (M4) ────────────────────────────────────
+from src.data import task_sources as _task_sources  # noqa: E402
+
+_task_sources.register(_task_sources.TaskSourceSpec(
+    name="drive", display_name="Google Drive", kind="ingest",
+    poll=lambda conn, **kw: poll_once(conn, **kw),
+))

@@ -28,3 +28,12 @@ def poll_once(conn) -> dict:
     except Exception as exc:  # noqa: BLE001 — a poll must never crash the loop
         logger.warning("guru analytics poll failed: %s", exc)
         return {"ok": False, "error": str(exc)}
+
+
+# ── task-source registration (M4) ────────────────────────────────────
+from src.data import task_sources as _task_sources  # noqa: E402
+
+_task_sources.register(_task_sources.TaskSourceSpec(
+    name="guru", display_name="Guru", kind="analytics",
+    poll=lambda conn, **kw: poll_once(conn, **kw),
+))

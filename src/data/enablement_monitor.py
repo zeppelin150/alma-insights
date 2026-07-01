@@ -66,13 +66,16 @@ class EnablementMonitor(QObject):
 
     def _scan_all_worker(self):
         try:
-            from src.data import asana_monitor, drive_monitor, guru_analytics_monitor
+            from src.data import task_sources
             from src.data.connection_factory import get_connection
+            task_sources.ensure_sources_loaded()
             conn = get_connection(str(self.db.db_path))
             try:
-                asana_monitor.poll_once(conn)
-                drive_monitor.poll_once(conn)
-                guru_analytics_monitor.poll_once(conn)  # no-op unless enabled
+                for spec in task_sources.all_specs():
+                    try:
+                        spec.poll(conn)
+                    except Exception as exc:  # noqa: BLE001 — one source can't kill the rest
+                        logger.warning("task source %s poll failed: %s", spec.name, exc)
             finally:
                 conn.close()
         except Exception as exc:  # noqa: BLE001

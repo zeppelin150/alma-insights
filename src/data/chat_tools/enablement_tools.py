@@ -1209,17 +1209,22 @@ def _run_monitor_now_impl(conn, source=None) -> dict:
     """Run a one-off poll of the configured monitors (module-level poll_once so
     it works from the separate MCP-server process). Degrades gracefully until the
     monitors land (Phases 4/5)."""
+    from src.data import task_sources
+    task_sources.ensure_sources_loaded()
     ran, errors = {}, {}
-    targets = (source,) if source else ("asana", "drive")
-    for name in targets:
+    if source:
+        spec = task_sources.get(source)
+        if spec is None:
+            return {"ran": ran, "errors": {source: "not_available"}}
+        targets = [spec]
+    else:
+        targets = task_sources.ingest_specs()   # default {asana, drive}
+    for spec in targets:
         try:
-            mod = __import__(f"src.data.{name}_monitor", fromlist=["poll_once"])
-            res = mod.poll_once(conn)
-            ran[name] = len(res) if isinstance(res, list) else res
-        except ImportError:
-            errors[name] = "not_available"
+            res = spec.poll(conn)
+            ran[spec.name] = len(res) if isinstance(res, list) else res
         except Exception as exc:  # noqa: BLE001 — surface per-source
-            errors[name] = str(exc)
+            errors[spec.name] = str(exc)
     return {"ran": ran, "errors": errors}
 
 

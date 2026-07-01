@@ -354,3 +354,14 @@ class AsanaMonitor(SourceMonitor):
             logger.warning("Asana fetch failed: %s", exc)
         finally:
             self._fetching = False
+
+
+# ── task-source registration (M4) ────────────────────────────────────
+from src.data import task_sources as _task_sources  # noqa: E402
+
+_task_sources.register(_task_sources.TaskSourceSpec(
+    name="asana", display_name="Asana", kind="ingest",
+    # bare `poll_once` name → resolved from this module's globals at call time,
+    # so monkeypatching asana_monitor.poll_once is honored.
+    poll=lambda conn, **kw: poll_once(conn, **kw),
+))
