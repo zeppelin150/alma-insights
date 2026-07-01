@@ -97,8 +97,10 @@ class MainWindow(QMainWindow):
         self._toasts = ToastManager(self)
 
         # Universal drill-down panel (overlay drawer) — created before any
-        # page mounts so factories can attach it.
-        self._drilldown = DrilldownPanel(self.content_stack)
+        # page mounts so factories can attach it. Parented to the ContentArea
+        # frame (NOT the QStackedWidget) so it overlays the content area cleanly
+        # in every mode instead of popping out as a stray top-level window.
+        self._drilldown = DrilldownPanel(self._content_area)
 
         self._mount_mode_pages(self._mode)
         self._populate_sidebar(self._mode)
@@ -454,6 +456,12 @@ class MainWindow(QMainWindow):
     def _build_content_area(self):
         content = QFrame()
         content.setObjectName("ContentArea")
+        # Stable, always-visible parent for the drill-down overlay. Parenting the
+        # overlay to the QStackedWidget below made it misbehave (a QStackedWidget
+        # manages its children's visibility, so a non-page overlay child could
+        # render as a stray top-level window in some modes). The frame is the
+        # correct, layout-stable host.
+        self._content_area = content
         layout = QVBoxLayout(content)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
