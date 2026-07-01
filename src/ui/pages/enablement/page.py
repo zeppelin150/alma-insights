@@ -254,6 +254,12 @@ class EnablementPage(QWidget):
         self.workbench.load_file_requested.connect(self._on_load_file)
         self.workbench.open_chat_requested.connect(self._open_chat)
         self.calendar.event_clicked.connect(self._on_calendar_event)
+        from src.data.settings_manager import get_section as _gs
+        self._task_scope = (_gs("enablement", {}) or {}).get("tasks_default_scope", "mine")
+        self.tasks.set_scope(self._task_scope)
+        self.calendar.set_scope(self._task_scope)
+        self.tasks.scope_changed.connect(self._on_scope_changed)
+        self.calendar.scope_changed.connect(self._on_scope_changed)
         self.settings.asana_setup_requested.connect(self._on_asana_setup)
         self.settings.identity_detect_email_requested.connect(self._on_detect_operator_email)
         self.settings.identity_resolve_asana_gid_requested.connect(self._on_resolve_operator_gid)
@@ -473,7 +479,7 @@ class EnablementPage(QWidget):
         from src.data import enablement_store as store
         from src.data import enablement_tasks as tasks
         conn = self._conn()
-        task_list = tasks.list_tasks(conn)
+        task_list = tasks.list_tasks(conn, **self._list_filters())
         rows = self._tasks_to_rows(task_list, conn)
         self._all_tasks = rows
         self.tasks.load_tasks(rows)
@@ -510,6 +516,33 @@ class EnablementPage(QWidget):
         self._load_pptx()
         self._load_zendesk()
         self._set_status(f"{len(rows)} tasks · {len(drafts)} pending drafts.")
+
+    # ── "only mine" task scope (M2) ───────────────────────────────
+    def _list_filters(self) -> dict:
+        """The 'only mine' filter for list_tasks when scope='mine' and an identity
+        is set; empty (show-all) otherwise so an un-onboarded operator isn't
+        staring at a blank board."""
+        if getattr(self, "_task_scope", "mine") != "mine":
+            return {}
+        from src.data import enablement_identity as ident
+        idn = ident.operator_identity()
+        gid = idn.get("asana_gid") or ""
+        name = idn.get("name") or idn.get("email") or ""
+        if not gid and not name:
+            return {}
+        filt: dict = {}
+        if gid:
+            filt["assignee_gid"] = gid
+        if name:
+            filt["assignee"] = name
+        return filt
+
+    def _on_scope_changed(self, scope: str):
+        """Mine/All toggle → mirror to the other view (no echo) and reload."""
+        self._task_scope = scope
+        self.tasks.set_scope(scope)
+        self.calendar.set_scope(scope)
+        self._load_live()
 
     def _on_scan_now(self):
         """Live 'Scan now' — trigger the monitor if wired (Phase 6), else reload from DB."""

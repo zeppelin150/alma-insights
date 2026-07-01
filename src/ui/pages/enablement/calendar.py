@@ -56,12 +56,14 @@ class CalendarPage(QWidget):
 
     event_clicked = Signal(str)
     event_activated = Signal(dict)   # full task payload (guru chips → targeted update)
+    scope_changed = Signal(str)      # "mine" | "all" — the operator task filter (M2)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setStyleSheet(f"background:{ALMA_CREAM};")
         self._year, self._month = TODAY.year, TODAY.month
         self._view = "month"
+        self._scope = "mine"           # "mine" | "all" — the operator filter
         self._events = dict(_SAMPLE)   # keyed by ISO date string
         self._outer = QVBoxLayout(self)
         self._outer.setContentsMargins(20, 16, 20, 18)
@@ -108,6 +110,8 @@ class CalendarPage(QWidget):
             row.addWidget(t)
             row.addSpacing(6)
         row.addStretch(1)
+        row.addWidget(self._scope_toggle())
+        row.addSpacing(8)
         row.addWidget(self._view_toggle())
         return row
 
@@ -158,6 +162,45 @@ class CalendarPage(QWidget):
         self._view = view
         self._restyle_toggle()
         self._rebuild_grid()
+
+    # ── mine / all scope toggle (M2) ──────────────────────────────
+    def _scope_toggle(self) -> QFrame:
+        seg = QFrame()
+        seg.setStyleSheet(f"background:{ALMA_BG_ELEVATED}; border:1px solid {ALMA_BORDER}; border-radius:8px;")
+        sl = QHBoxLayout(seg)
+        sl.setContentsMargins(3, 3, 3, 3)
+        sl.setSpacing(2)
+        self._mine_btn = QPushButton("Mine")
+        self._mine_btn.setCursor(Qt.PointingHandCursor)
+        self._mine_btn.clicked.connect(lambda: self._set_scope("mine"))
+        self._all_btn = QPushButton("All")
+        self._all_btn.setCursor(Qt.PointingHandCursor)
+        self._all_btn.clicked.connect(lambda: self._set_scope("all"))
+        sl.addWidget(self._mine_btn)
+        sl.addWidget(self._all_btn)
+        self._restyle_scope()
+        return seg
+
+    def _restyle_scope(self):
+        base = "border:none; border-radius:6px; font-size:12px; font-weight:600; padding:5px 16px;"
+        active = f"QPushButton{{background:{ALMA_GREEN_DARK}; color:{ALMA_TEXT_ON_DARK}; {base}}}"
+        plain = f"QPushButton{{background:transparent; color:{ALMA_TEXT_MID}; {base}}}"
+        self._mine_btn.setStyleSheet(active if self._scope == "mine" else plain)
+        self._all_btn.setStyleSheet(active if self._scope == "all" else plain)
+
+    def _set_scope(self, scope: str):
+        if scope == self._scope:
+            return
+        self._scope = scope
+        self._restyle_scope()
+        self.scope_changed.emit(scope)
+
+    def set_scope(self, scope: str):
+        """Host sets the scope without echoing scope_changed (avoids a loop)."""
+        if scope not in ("mine", "all") or scope == self._scope:
+            return
+        self._scope = scope
+        self._restyle_scope()
 
     # ── grid ──────────────────────────────────────────────────────
     def _rebuild_grid(self):

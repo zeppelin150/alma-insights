@@ -23,7 +23,7 @@ VALID_PRIORITY = {"low", "normal", "high"}
 # Columns update_task() is allowed to set (guards against SQL injection via **fields).
 _UPDATABLE = {
     "status", "priority", "due_date", "summary", "title",
-    "assignee", "scratchpad", "draft_id", "source_url", "kind",
+    "assignee", "assignee_gid", "scratchpad", "draft_id", "source_url", "kind",
 }
 
 
@@ -124,9 +124,17 @@ def list_tasks(
     status: str | None = None,
     kind: str | None = None,
     due_before: str | None = None,
+    assignee_gid: str | None = None,
+    assignee: str | None = None,
     limit: int = 200,
 ) -> list[dict]:
-    """List tasks, newest first, with optional filters. Subtask counts included."""
+    """List tasks, newest first, with optional filters. Subtask counts included.
+
+    ``assignee_gid``/``assignee`` implement the "only mine" scope: a task matches
+    on the Asana GID (unambiguous) or, for legacy/manual rows with no GID, a
+    case-insensitive exact match of the display name/email. Pass neither for
+    "all" (the show-all toggle) — never string-interpolate, always parameterized.
+    """
     where, params = [], []
     if source:
         where.append("source = ?"); params.append(source)
@@ -136,6 +144,13 @@ def list_tasks(
         where.append("kind = ?"); params.append(kind)
     if due_before:
         where.append("due_date IS NOT NULL AND due_date <= ?"); params.append(due_before)
+    if assignee_gid and assignee:
+        where.append("(assignee_gid = ? OR (assignee_gid IS NULL AND LOWER(assignee) = LOWER(?)))")
+        params.append(assignee_gid); params.append(assignee)
+    elif assignee_gid:
+        where.append("assignee_gid = ?"); params.append(assignee_gid)
+    elif assignee:
+        where.append("LOWER(assignee) = LOWER(?)"); params.append(assignee)
     clause = (" WHERE " + " AND ".join(where)) if where else ""
     params.append(limit)
     rows = conn.execute(

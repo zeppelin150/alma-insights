@@ -98,9 +98,12 @@ def _fixed_cell(width: int, widget: QWidget) -> QWidget:
 class TasksPage(QWidget):
     """Filterable task list; rows expand to show subtasks + scratch pad."""
 
+    scope_changed = Signal(str)   # "mine" | "all" — the operator task filter (M2)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setStyleSheet(f"background:{ALMA_CREAM};")
+        self._scope = "mine"          # "mine" | "all"
         self._rows = list(_SAMPLE)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(20, 16, 20, 18)
@@ -135,6 +138,8 @@ class TasksPage(QWidget):
         h = QHBoxLayout(card)
         h.setContentsMargins(16, 10, 16, 10)
         h.setSpacing(10)
+        h.addWidget(self._scope_toggle())
+        h.addSpacing(4)
         for f in ("Source: All", "Status: Open", "Due: Any", "Priority: Any"):
             h.addWidget(field(f))
         h.addWidget(field("Search tasks…", w=200))
@@ -146,6 +151,45 @@ class TasksPage(QWidget):
         )
         h.addWidget(new)
         return card
+
+    # ── mine / all scope toggle (M2) ──────────────────────────────
+    def _scope_toggle(self) -> QFrame:
+        seg = QFrame()
+        seg.setStyleSheet(f"background:{ALMA_BG_ELEVATED}; border:1px solid {ALMA_BORDER}; border-radius:8px;")
+        sl = QHBoxLayout(seg)
+        sl.setContentsMargins(3, 3, 3, 3)
+        sl.setSpacing(2)
+        self._mine_btn = QPushButton("Mine")
+        self._mine_btn.setCursor(Qt.PointingHandCursor)
+        self._mine_btn.clicked.connect(lambda: self._set_scope("mine"))
+        self._all_btn = QPushButton("All")
+        self._all_btn.setCursor(Qt.PointingHandCursor)
+        self._all_btn.clicked.connect(lambda: self._set_scope("all"))
+        sl.addWidget(self._mine_btn)
+        sl.addWidget(self._all_btn)
+        self._restyle_scope()
+        return seg
+
+    def _restyle_scope(self):
+        base = "border:none; border-radius:6px; font-size:12px; font-weight:600; padding:5px 16px;"
+        active = f"QPushButton{{background:{ALMA_GREEN_DARK}; color:{ALMA_TEXT_ON_DARK}; {base}}}"
+        plain = f"QPushButton{{background:transparent; color:{ALMA_TEXT_MID}; {base}}}"
+        self._mine_btn.setStyleSheet(active if self._scope == "mine" else plain)
+        self._all_btn.setStyleSheet(active if self._scope == "all" else plain)
+
+    def _set_scope(self, scope: str):
+        if scope == self._scope:
+            return
+        self._scope = scope
+        self._restyle_scope()
+        self.scope_changed.emit(scope)
+
+    def set_scope(self, scope: str):
+        """Host sets the scope without echoing scope_changed."""
+        if scope not in ("mine", "all") or scope == self._scope:
+            return
+        self._scope = scope
+        self._restyle_scope()
 
     def _col(self, text, w, *, header=False, color=None, bold=False, align_right=False):
         lbl = QLabel(text)

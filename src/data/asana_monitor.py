@@ -123,9 +123,13 @@ def _reconcile_existing_task(conn, client, task: dict) -> bool:
         fields["due_date"] = task.get("due_on")        # date, or None to clear
     if task.get("completed"):
         fields["status"] = "done"
-    asg = (task.get("assignee") or {}).get("name")
+    assignee = task.get("assignee") or {}
+    asg = assignee.get("name")
     if asg:
         fields["assignee"] = asg
+    asg_gid = assignee.get("gid")
+    if asg_gid:
+        fields["assignee_gid"] = asg_gid
     if fields:
         etasks.update_task(conn, tid, **fields)
     try:
@@ -198,6 +202,8 @@ def _create_task_from_asana(conn, board: dict, task: dict, mappings: dict) -> st
         assignee = _resolve_people(conn, board, by_gid[af])
     if not assignee:
         assignee = (task.get("assignee") or {}).get("name")
+    # The task's direct assignee GID — the stable key the "only mine" filter uses.
+    assignee_gid = (task.get("assignee") or {}).get("gid")
 
     tid = etasks.create_task(
         conn,
@@ -210,8 +216,13 @@ def _create_task_from_asana(conn, board: dict, task: dict, mappings: dict) -> st
         priority=priority,
         created_by="agent",
     )
+    upd: dict = {}
     if assignee:
-        etasks.update_task(conn, tid, assignee=assignee)
+        upd["assignee"] = assignee
+    if assignee_gid:
+        upd["assignee_gid"] = assignee_gid
+    if upd:
+        etasks.update_task(conn, tid, **upd)
     return tid
 
 

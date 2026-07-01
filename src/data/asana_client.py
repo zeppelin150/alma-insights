@@ -26,7 +26,8 @@ _TIMEOUT = 30
 # custom-field values (enum + people) the indicator/mapping logic reads, plus the
 # task assignee as a fallback.
 _TASK_FIELDS = (
-    "name,due_on,permalink_url,completed,modified_at,assignee.name,"
+    "name,due_on,permalink_url,completed,modified_at,"
+    "assignee.name,assignee.gid,assignee.email,"
     "custom_fields.gid,custom_fields.name,custom_fields.display_value,"
     "custom_fields.enum_value.gid,custom_fields.enum_value.name,"
     "custom_fields.people_value.gid,custom_fields.people_value.name"
@@ -295,6 +296,21 @@ class AsanaClient:
                          {"opt_fields": "name,email", "limit": 100}) or []
         return [{"gid": u["gid"], "name": u.get("name", ""), "email": u.get("email", "")}
                 for u in data]
+
+    def resolve_user_gid(self, workspace_gid: str, email: str) -> str | None:
+        """GID of the workspace member whose email matches (case-insensitive).
+
+        The email→GID bridge for "only mine": Settings stores the operator email
+        (M1); this maps it to the Asana GID that task assignees carry. Returns
+        None on no match / empty workspace.
+        """
+        needle = (email or "").strip().lower()
+        if not needle:
+            return None
+        for u in self.list_workspace_users(workspace_gid):
+            if (u.get("email") or "").strip().lower() == needle:
+                return u.get("gid") or None
+        return None
 
     def discover(self) -> dict:
         """Workspace + projects + custom fields for the first project.
