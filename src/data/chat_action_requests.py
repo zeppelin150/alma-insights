@@ -46,6 +46,7 @@ ACTION_TYPES = frozenset({
     "guru_publish_picker",
     "google_connect",
     "confirm_write",
+    "research_plan",
 })
 
 # payload_json may only carry these scalar control keys. Keeping the allowlist
@@ -185,6 +186,34 @@ def create_confirm_write(conn, session_id: str, op: str, summary: str,
         """INSERT INTO chat_action_requests
            (session_id, request_id, type, payload_json, consumed, created_at)
            VALUES (?, ?, 'confirm_write', ?, 0, ?)""",
+        (session_id, request_id, json.dumps(payload), _now()),
+    )
+    conn.commit()
+    return request_id
+
+
+def create_research_plan(conn, session_id: str, task_id: str, summary: str,
+                         plan_steps: list) -> str:
+    """Mint a server-side ``request_id`` (uuid4) and INSERT one ``research_plan``
+    row carrying ``{task_id, summary, steps}`` — the ASK-FIRST envelope.
+
+    Like ``create_confirm_write`` this takes its own scoped path (not the picker
+    scalar allowlist): the payload is operational enablement metadata (a task id, a
+    short summary, and step LABELS), never PHI/listing data. The id is minted HERE
+    (invariant 4). The row rides the SAME free-running action channel + single-
+    winner claim as the pickers, so a double-approve can't spawn two jobs.
+    """
+    if not session_id:
+        raise ValueError("session_id is required")
+    if not task_id:
+        raise ValueError("task_id is required")
+    steps = [str(s) for s in (plan_steps or []) if str(s).strip()]
+    payload = {"task_id": str(task_id), "summary": str(summary or ""), "steps": steps}
+    request_id = uuid.uuid4().hex
+    conn.execute(
+        """INSERT INTO chat_action_requests
+           (session_id, request_id, type, payload_json, consumed, created_at)
+           VALUES (?, ?, 'research_plan', ?, 0, ?)""",
         (session_id, request_id, json.dumps(payload), _now()),
     )
     conn.commit()

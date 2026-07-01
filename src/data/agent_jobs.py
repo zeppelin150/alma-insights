@@ -103,6 +103,31 @@ def update_job(conn, job_id: str, **fields) -> bool:
     return cur.rowcount > 0
 
 
+def cancel_job(conn, job_id: str) -> bool:
+    """Cooperatively cancel a RUNNING job (single-winner) — done/error/cancelled
+    are left untouched. Returns True iff this call flipped it to cancelled. The
+    research runner crosses the thread/process boundary via this DB flag (a Qt
+    signal can't reach its own get_connection)."""
+    now = _now()
+    try:
+        cur = conn.execute(
+            "UPDATE agent_jobs SET status='cancelled', completed_at=?, updated_at=? "
+            "WHERE job_id=? AND status='running'",
+            (now, now, job_id))
+        conn.commit()
+    except Exception:
+        _safe_rollback(conn)
+        raise
+    return cur.rowcount == 1
+
+
+def is_cancelled(conn, job_id: str) -> bool:
+    """Cheap read the research runner polls at each step boundary to stop."""
+    row = conn.execute(
+        "SELECT status FROM agent_jobs WHERE job_id = ?", (job_id,)).fetchone()
+    return row is not None and row["status"] == "cancelled"
+
+
 def add_step(conn, job_id: str, name: str, *, ordinal: int | None = None) -> str:
     now = _now()
     if ordinal is None:

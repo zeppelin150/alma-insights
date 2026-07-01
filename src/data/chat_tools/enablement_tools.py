@@ -902,6 +902,68 @@ def handle_request_create_asana_task(conn, args, session_filters) -> str:
         notes=args.get("notes"), due_on=args.get("due_on"))
 
 
+# ── ask-first research (M6) ──────────────────────────────────────────
+_RESEARCH_PLAN_WAIT_MESSAGE = (
+    "A research plan card is open in the app — STOP and wait for the operator to "
+    "Approve or Decline. You cannot start research yourself and must NEVER spend "
+    "budget on startup. You'll get a [SYSTEM: operator approved/declined the "
+    "research plan …] message; after approval, report that the job is running."
+)
+
+
+def _emit_research_plan(conn, session_id: str, task_id: str, summary: str,
+                        plan_steps: list) -> str:
+    """Mint a research_plan row (the ask-first envelope) and return ONLY the
+    minimal model-facing wait string. The single chokepoint the propose tool
+    calls — the model never learns the request_id and has NO path to start
+    research itself (only the operator's Approve click does)."""
+    from src.data.chat_action_requests import create_research_plan
+    create_research_plan(conn, session_id, task_id, summary, plan_steps)
+    return _RESEARCH_PLAN_WAIT_MESSAGE
+
+
+def _request_research_plan_impl(conn, session_id, task_id, summary, plan_steps) -> str:
+    """Propose a research plan for a task → opens the ask-first card. No research
+    here (runs in the MCP subprocess; reads NO PHI). Writes only a tiny non-PHI
+    plan envelope {task_id, summary, steps}."""
+    sid = session_id or _active_session_id()
+    if not sid:
+        return ("No active chat session — open the Agent chat and try again so the "
+                "research plan card can be shown.")
+    tid = str(task_id or "").strip()
+    steps = [str(s).strip() for s in (plan_steps or []) if str(s).strip()]
+    if not tid:
+        return "I need a task id to propose research for."
+    if not steps:
+        return ("Give me a short numbered plan (2-5 steps) of what to research, "
+                "and I'll open the approval card.")
+    return _emit_research_plan(conn, sid, tid, str(summary or ""), steps)
+
+
+def _get_task_research_impl(conn, task_id) -> dict:
+    """Read back the latest stored research MD for a task (RAG on a later turn)."""
+    from src.data import research_store
+    tid = str(task_id or "").strip()
+    if not tid:
+        return {"ok": False, "error": "task_id required"}
+    row = research_store.latest_for_task(conn, tid)
+    if not row or not (row.get("markdown") or "").strip():
+        return {"ok": True, "markdown": None,
+                "note": "No research yet for this task. Propose a plan with request_research_plan."}
+    return {"ok": True, "status": row.get("status"),
+            "summary": row.get("summary"), "markdown": row.get("markdown")}
+
+
+def handle_request_research_plan(conn, args, session_filters) -> str:
+    return _request_research_plan_impl(
+        conn, _active_session_id(), args.get("task_id"), args.get("summary"),
+        args.get("plan_steps") or args.get("steps"))
+
+
+def handle_get_task_research(conn, args, session_filters) -> dict:
+    return _get_task_research_impl(conn, args.get("task_id"))
+
+
 # ═══════════════════════════════════════════════════════════════════════
 #  Workbench action tools (the "give Renn tools" surface).
 #
