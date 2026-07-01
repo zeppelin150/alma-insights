@@ -282,8 +282,14 @@ class AgentChatController(QObject):
         # idle, else appends here; one is drained on each ``busy_changed(False)``.
         # (Infra for the M3 picker→resolve path; landed + unit-tested now.)
         self._pending_triggers: list[str] = []
+        # M5 one-shot "here's your day" greeting, ported to the Agent surface
+        # (the surface the operator actually chats on).
+        self._greeting_sent = False
+        self._greeting_block = None
         self._setup_engine()
         self._setup_voice()
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(0, self._open_greeting)
 
     @property
     def engine(self):
@@ -1400,14 +1406,54 @@ class AgentChatController(QObject):
             self._engine = None
 
     def _agent_context(self, user_message, history):
-        """Per-turn context for the Agent surface — surfaces the operator identity
-        so Renn can confirm 'who am I' (the enablement Qt page injects it via its
-        own _chat_context; the Agent engine previously had no context provider)."""
+        """Per-turn context for the Agent surface — the operator identity (so Renn
+        can confirm 'who am I') plus, on the first turn only, the [TODAY'S PLAN]
+        greeting block. The enablement Qt page injects these via its own
+        _chat_context; the Agent engine previously had no context provider."""
         try:
             from src.data import enablement_identity as ident
-            return ident.operator_context_line()
+            line = ident.operator_context_line()
         except Exception:  # noqa: BLE001 — the chat still works without the line
-            return ""
+            line = ""
+        block = self._greeting_block
+        if block:
+            self._greeting_block = None   # one-shot: inject the plan on the first turn
+            return f"{block}\n\n{line}" if line else block
+        return line
+
+    def _open_greeting(self):
+        """One-shot proactive greeting on the Agent surface: arm the [TODAY'S PLAN]
+        block and auto-send a summarize-only opening turn WITHOUT a user bubble
+        (send() persists the user turn; here we drive the engine directly). No-ops
+        without an engine / identity / dated tasks (fail-closed)."""
+        if self._greeting_sent or self._engine is None:
+            return
+        conn = self._open_conn(readonly=True)
+        if conn is None:
+            return
+        try:
+            from src.data import startup_greeting
+            block = startup_greeting.build_greeting_block(conn)
+        except Exception:  # noqa: BLE001 — a greeting must never break page load
+            block = ""
+        finally:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+        if not block:
+            return
+        self._greeting_block = block
+        self._greeting_sent = True
+        trigger = ("Give me my morning briefing: what is due today, what is overdue, "
+                   "and what I should tackle first. Do not spend any budget on research "
+                   "— just summarize my current tasks.")
+        # Auto-greeting, NOT a user turn → set up session/provider and drive the
+        # engine directly, skipping send()'s _persist_message('user', …) so no user
+        # bubble appears (only Renn's greeting).
+        self._ensure_session()
+        self._prepare_provider()
+        self._engine.send(trigger)
 
     def _build_mcp_config(self) -> list[dict]:
         import sys
