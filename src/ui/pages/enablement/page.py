@@ -177,9 +177,15 @@ class EnablementPage(QWidget):
         self._engine = None
         self._chat_session_id = None
         self._existing_cards_loaded = False
+        self._greeting_sent = False       # one-shot "here's your day" greeting (M5)
+        self._greeting_block = None
         self.setStyleSheet(f"background:{ALMA_CREAM};")
         self._build()
         self._setup_engine()
+        # Proactive "here's your day" greeting — deferred so the UI finishes
+        # building first; no-ops when there's no engine / identity / dated tasks.
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(0, self._open_greeting)
         self._load_pptx()
         self._load_zendesk()
 
@@ -670,15 +676,40 @@ class EnablementPage(QWidget):
             from src.data import enablement_identity as ident
             who = ident.operator_email(resolve=False)
             who_line = f" Operator: {who}." if who else ""
-            return (
+            scope = (
                 f"[ENABLEMENT SCOPE] {n_docs} indexed documents, {n_drafts} pending card "
                 f"drafts, {n_open} open tasks.{who_line}{active_line} Tools: search_local_documents / "
                 f"query_business_drive to find content; revise_draft + push_guru_draft to work "
                 f"a card; create_task / list_tasks / draft_subtasks to manage work; "
                 f"asana_discover + set_asana_board_config to set up an Asana board."
             )
+            block = self._greeting_block
+            if block:
+                self._greeting_block = None   # one-shot: inject the plan on the first turn only
+                return block + "\n\n" + scope
+            return scope
         except Exception:
             return ""
+
+    def _open_greeting(self):
+        """One-shot proactive greeting: arm the [TODAY'S PLAN] context block and
+        auto-send a summarize-only opening turn (no user bubble). No-ops without
+        an engine, identity, or dated tasks (fail-closed)."""
+        if self._greeting_sent or self._engine is None:
+            return
+        try:
+            from src.data import startup_greeting
+            block = startup_greeting.build_greeting_block(self._conn())
+        except Exception:  # noqa: BLE001 — a greeting must never break page load
+            block = ""
+        if not block:
+            return
+        self._greeting_block = block
+        self._greeting_sent = True
+        trigger = ("Give me my morning briefing: what is due today, what is overdue, "
+                   "and what I should tackle first. Do not spend any budget on research "
+                   "— just summarize my current tasks.")
+        self._dispatch_chat(trigger)
 
     def select_tab(self, key: str):
         """Select a tab by key — the enablement-mode sidebar drives this."""
