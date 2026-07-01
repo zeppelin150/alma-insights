@@ -204,6 +204,61 @@ Plan + full checklist: `~/.claude/plans/renn-google-asana-integration.md`.
 
 ## Left
 
+### Phase 1.5 — proactive "chief-of-staff": identity · my-tasks calendar · background research *(next; slots before Phase 2)*
+
+Turns Renn from reactive ("ask and I fetch") to proactive ("here's your day, I've
+started"). Three acts — **know you → plan your day → do the first pass** — and
+mostly *assembly*: recon (workflow `wf_30b7f3d5`) found the calendar, unified task
+spine, Asana ingestion, rich task detail, and a durable job system with a live
+React sidebar **already built**. The one net-new engine is background research.
+
+**Decisions locked (2026-06-30):** task views filter to **only mine** (hard filter
++ show-all toggle) · identity = the operator's email, **auto-detected from the
+connected Google account** with a Settings override · background research is
+**ask-first** — Renn proposes a plan and waits (no auto-spend) · **no email
+integration** (email is not a task source).
+
+- **M1 — Operator identity.** Identity field in enablement Settings
+  (`enablement.operator_email` + Asana user GID); auto-extract the email from the
+  connected Google account (`google_oauth`, via id_token/UserInfo — not captured
+  today) with a manual override; resolve the Asana GID via the existing `/users/me`
+  call. *Reuses `settings.py`, `google_oauth.py`, `asana_client`.*
+- **M2 — "My tasks" filter.** Filter the whole stack to the operator: Asana
+  `assignee` query param + email→GID resolution (`asana_client`), an optional
+  operator filter in `asana_monitor`, an `assignee` filter in
+  `enablement_tasks.list_tasks`, and a **mine / all** toggle in the calendar + task
+  list (hard-filter by default).
+- **M3 — Calendar go-live + Asana-parity detail.** Feed `CalendarPage.set_tasks()`
+  live `enablement_tasks` (today it's demo-static); wire the
+  `event_clicked → TaskDetailPanel` drilldown in production; enrich the expanded
+  task to full Asana parity — description, **requester/submitter** (capture the
+  Asana creator; new field), source URL, due date — plus a day-cell expand.
+  *Reuses `calendar.py`, `task_detail.py`, `tasks.py`.*
+- **M4 — Pluggable task sources.** Extract a small `TaskSource` registry from
+  `asana_monitor` so sources plug into `scan_all` + `enablement_tasks.create_task`
+  uniformly and "add a source" becomes a Settings action — the calendar fills from
+  more places over time. (No email source.)
+- **M5 — "Here's your day" startup.** On session start, read the calendar (today +
+  overdue, filtered to the operator) and inject a **prioritized** summary via the
+  existing per-turn `_chat_context` hook; Renn opens with what's due and what to
+  tackle first. *Reuses `page._chat_context`, `_ensure_session`.*
+- **M6 — Background research engine.** Renn **proposes a research plan** for the
+  prioritized tasks and, on approval, runs a **cancelable background job** per task
+  (reuse `agent_jobs` for durable progress) that writes a **per-task manifest MD**
+  the user can talk to; **mount the live jobs sidebar into Renn's enablement UI**
+  (it exists for the Agent page — `chat_bridge._job_poll → jobsListed` — but isn't
+  in the enablement Workbench yet). The manifest is the "researched,
+  talk-to-able" artifact.
+
+> **Reuse vs net-new:** reuse = calendar + task spine (`calendar.py`,
+> `enablement_tasks`/mig 027), Asana ingestion (`asana_monitor.py`), task detail
+> (`task_detail.py`), durable jobs + React sidebar (`agent_jobs`/mig 036,
+> `chat_bridge`). Net-new = operator identity + assignee filter, live-data wiring,
+> the source registry, the startup greeting, and the research→manifest engine
+> (+ a manifest store). Full decoupling holds — Guru/Asana/Drive + enablement-local,
+> no PHI. *Build caveat: pin down the exact React side-panel components +
+> `content_update` manifest doc shape before M6 (one recon lens errored).*
+
 ### Phase 2 — policy / product-update signal *(the biggest missing input; the RCM wedge)*
 - **2.1** GitHub ingestion — releases + `compare` filtered to watched files → fire an update task when a release post-dates a card.
 - **2.2** Asana launch-trigger — read custom fields; `Status=Shipped` / launch date → KB-update task. *(✅ the create-task gap is closed — M7 added a gated `create_asana_task`; the remaining work is the launch-field → task **trigger** wiring on `asana_monitor`.)*
