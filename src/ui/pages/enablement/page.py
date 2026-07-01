@@ -291,6 +291,7 @@ class EnablementPage(QWidget):
         self.analytics_synced.connect(self._on_analytics_synced)
         self.task_action_done.connect(self._on_task_action_done)
         self.calendar.event_activated.connect(self._on_calendar_event_activated)
+        self.calendar.day_expanded.connect(self._on_calendar_day)
         # PowerPoint
         self.pptx.model_topic_requested.connect(self._on_pptx_model_topic)
         self.pptx.deck_selected.connect(self._on_pptx_deck_selected)
@@ -432,6 +433,10 @@ class EnablementPage(QWidget):
                 "subs": f"{t.get('subtask_done', 0)} / {t.get('subtask_total', 0)}",
                 "subtasks": [(s["text"], bool(s["done"])) for s in subs],
                 "scratch": t.get("scratchpad") or "",
+                "due_date": t.get("due_date"),
+                "description": t.get("description") or "",
+                "submitter": t.get("submitter") or "",
+                "source_url": t.get("source_url") or "",
             })
         return rows
 
@@ -484,7 +489,10 @@ class EnablementPage(QWidget):
         rows = self._tasks_to_rows(task_list, conn)
         self._all_tasks = rows
         self.tasks.load_tasks(rows)
-        cal_rows = list(task_list)
+        # Feed the calendar the SAME enriched rows the list uses, so a chip's
+        # payload carries the detail-panel-ready fields (description, submitter,
+        # source_url, subtasks) and the two views never disagree.
+        cal_rows = list(rows)
         try:
             from src.data import guru_analytics as ga
             for c in ga.cards_due_for_update(conn):
@@ -1422,6 +1430,44 @@ class EnablementPage(QWidget):
     def _on_calendar_event_activated(self, task: dict):
         if task.get("kind") == "guru_card_due" and task.get("card_id"):
             self._on_targeted_update(task["card_id"])
+        elif task.get("task_id"):
+            # a real task chip → open its detail panel directly (robust; avoids the
+            # fragile label-substring match in _find_task)
+            self._show_task_detail(task)
+
+    def _open_source_url(self, url: str):
+        """Open a task's source URL in the browser — http/https ONLY (reject
+        file:/javascript:/custom schemes from an untrusted Asana permalink)."""
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        u = QUrl(url)
+        if u.scheme().lower() in ("http", "https"):
+            QDesktopServices.openUrl(u)
+        else:
+            self._set_status("Refused to open a non-web source link.")
+
+    def _on_calendar_day(self, iso: str):
+        """Calendar '+N more' → show that day's tasks as a compact clickable list."""
+        if self._drilldown is None:
+            return
+        from PySide6.QtWidgets import QPushButton, QVBoxLayout, QWidget
+        day_tasks = [t for t in (self._all_tasks or []) if (t.get("due_iso") or "") == iso]
+        panel = QWidget()
+        lay = QVBoxLayout(panel)
+        lay.setContentsMargins(16, 16, 16, 16)
+        lay.setSpacing(6)
+        for t in day_tasks:
+            b = QPushButton(t.get("title", "Task"))
+            b.setCursor(Qt.PointingHandCursor)
+            b.setStyleSheet(
+                "QPushButton{background:#FFFFFF; color:#2C2A26; border:1px solid #E4E1DA; "
+                "border-radius:8px; padding:9px 12px; font-size:12.5px; font-weight:600; text-align:left;}"
+                "QPushButton:hover{border:1px solid #B7CFC7;}"
+            )
+            b.clicked.connect(lambda _=False, task=t: self._show_task_detail(task))
+            lay.addWidget(b)
+        lay.addStretch(1)
+        self._drilldown.show_widget(iso, f"{len(day_tasks)} tasks", panel)
 
     def _on_attention_open(self, card_id: str):
         """Home → 'Open targeted update': land in the Workbench and route the
@@ -1837,6 +1883,7 @@ class EnablementPage(QWidget):
             return
         panel = TaskDetailPanel(task)
         panel.open_in_workbench.connect(lambda: self.tabs.setCurrentWidget(self.workbench))
+        panel.open_source.connect(self._open_source_url)
         tid = task.get("task_id")
         if tid:
             panel.subtask_added.connect(

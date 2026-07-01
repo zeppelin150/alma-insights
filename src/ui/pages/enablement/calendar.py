@@ -24,7 +24,10 @@ from src.ui.theme import (
 WEEK = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"]
 _MONTHS = ["January", "February", "March", "April", "May", "June", "July",
            "August", "September", "October", "November", "December"]
-TODAY = date(2026, 6, 8)   # demo "today"
+def _today() -> date:
+    """The real current date (indirected through a helper so tests can pin it,
+    and so the grid always opens on the true month — never a hardcoded demo day)."""
+    return date.today()
 
 # Sample events keyed by ISO date (June 2026), shown before a scan loads real tasks.
 _SAMPLE = {
@@ -57,14 +60,17 @@ class CalendarPage(QWidget):
     event_clicked = Signal(str)
     event_activated = Signal(dict)   # full task payload (guru chips → targeted update)
     scope_changed = Signal(str)      # "mine" | "all" — the operator task filter (M2)
+    day_expanded = Signal(str)       # ISO date — "+N more" clicked → day drilldown (M3)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setStyleSheet(f"background:{ALMA_CREAM};")
-        self._year, self._month = TODAY.year, TODAY.month
+        _t = _today()
+        self._year, self._month = _t.year, _t.month
         self._view = "month"
         self._scope = "mine"           # "mine" | "all" — the operator filter
-        self._events = dict(_SAMPLE)   # keyed by ISO date string
+        self._live = False             # flips True once set_tasks feeds real data
+        self._events = dict(_SAMPLE)   # sample chips until the first scan
         self._outer = QVBoxLayout(self)
         self._outer.setContentsMargins(20, 16, 20, 18)
         self._outer.setSpacing(12)
@@ -74,6 +80,7 @@ class CalendarPage(QWidget):
 
     def set_tasks(self, tasks: list[dict]):
         """Populate events from real tasks (keyed by their ISO due_date)."""
+        self._live = True
         ev: dict = {}
         for t in tasks:
             due = t.get("due_date") or ""
@@ -247,8 +254,9 @@ class CalendarPage(QWidget):
         g.setSpacing(0)
         for c, d in enumerate(WEEK):
             g.addWidget(self._weekday_label(d), 0, c)
-        dow = (TODAY.weekday() + 1) % 7         # Sunday = 0
-        start = TODAY - timedelta(days=dow)
+        today = _today()
+        dow = (today.weekday() + 1) % 7         # Sunday = 0
+        start = today - timedelta(days=dow)
         for c in range(7):
             g.addWidget(self._cell(start + timedelta(days=c), in_month=True), 1, c)
         for c in range(7):
@@ -262,7 +270,7 @@ class CalendarPage(QWidget):
         v = QVBoxLayout(f)
         v.setContentsMargins(8, 6, 8, 6)
         v.setSpacing(3)
-        if dt == TODAY:
+        if dt == _today():
             n = QLabel(str(dt.day))
             n.setFixedSize(22, 22)
             n.setAlignment(Qt.AlignCenter)
@@ -277,7 +285,11 @@ class CalendarPage(QWidget):
             n.setStyleSheet(f"color:{ALMA_TEXT_LIGHT if not in_month else ALMA_TEXT_MID}; font-size:12px; font-weight:700; border:none;")
             v.addWidget(n)
         if in_month:
-            for entry in self._events.get(dt.isoformat(), []):
+            entries = self._events.get(dt.isoformat(), [])
+            # Cap the cell so a busy day doesn't blow out row height; the overflow
+            # collapses into a clickable "+N more" that opens the day drilldown.
+            visible = entries if len(entries) <= 3 else entries[:2]
+            for entry in visible:
                 # sample data is (label, kind); real tasks carry a payload
                 label, kind = entry[0], entry[1]
                 payload = entry[2] if len(entry) > 2 else None
@@ -292,5 +304,13 @@ class CalendarPage(QWidget):
                         lambda p=payload: self.event_activated.emit(p)
                     )
                 v.addWidget(chip)
+            if len(entries) > 3:
+                bg, fg = TINT.get("normal", ("#ECEAE5", ALMA_TEXT_LIGHT))
+                more = _Chip(f"+{len(entries) - 2} more")
+                more.setFixedHeight(17)
+                more.setCursor(Qt.PointingHandCursor)
+                more.setStyleSheet(f"background:{bg}; color:{fg}; border-radius:5px; padding:1px 6px; font-size:10.5px; font-weight:600; border:none;")
+                more.clicked.connect(lambda iso=dt.isoformat(): self.day_expanded.emit(iso))
+                v.addWidget(more)
         v.addStretch(1)
         return f

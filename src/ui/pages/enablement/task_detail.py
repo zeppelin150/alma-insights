@@ -30,6 +30,7 @@ class TaskDetailPanel(QWidget):
     subtask_added = Signal(str)      # subtask text (synced to Asana if linked)
     comment_posted = Signal(str)     # comment text → Asana story
     due_changed = Signal(str)        # ISO date YYYY-MM-DD (or "" to clear)
+    open_source = Signal(str)        # source_url → host opens it (scheme-validated)
 
     def __init__(self, task: dict, parent=None):
         super().__init__(parent)
@@ -42,6 +43,7 @@ class TaskDetailPanel(QWidget):
 
         title = QLabel(self._task.get("title", "Task"))
         title.setWordWrap(True)
+        title.setTextFormat(Qt.PlainText)   # untrusted Asana title — no rich text/HTML
         title.setStyleSheet(f"color:{ALMA_TEXT_DARK}; font-size:18px; font-weight:700; border:none;")
         v.addWidget(title)
 
@@ -54,18 +56,47 @@ class TaskDetailPanel(QWidget):
         asg = self._task.get("assignee", "—")
         if asg and asg != "—":
             a = QLabel(asg)
+            a.setTextFormat(Qt.PlainText)
             a.setStyleSheet(f"color:{ALMA_TEXT_MID}; font-size:12px; border:none;")
             meta.addWidget(a)
+        sub = (self._task.get("submitter") or "").strip()
+        if sub:
+            rb = QLabel(f"· requested by {sub}")
+            rb.setTextFormat(Qt.PlainText)
+            rb.setStyleSheet(f"color:{ALMA_TEXT_LIGHT}; font-size:12px; border:none;")
+            meta.addWidget(rb)
         if self._is_asana:
             meta.addWidget(badge("Asana two-way", "asana"))
         meta.addStretch(1)
         v.addLayout(meta)
 
+        # ── Description (full Asana body) + source link ──
+        desc = (self._task.get("description") or "").strip()
+        if desc:
+            v.addWidget(self._label("DESCRIPTION"))
+            body = QLabel(desc)
+            body.setWordWrap(True)
+            body.setTextFormat(Qt.PlainText)   # untrusted Asana text — no rich text/HTML
+            body.setStyleSheet(
+                f"background:{ALMA_BG_INSET}; color:{ALMA_TEXT_MID}; border:1px solid {ALMA_BORDER}; "
+                f"border-radius:8px; padding:10px 12px; font-size:12px;"
+            )
+            v.addWidget(body)
+        url = (self._task.get("source_url") or "").strip()
+        if url:
+            src_btn = self._action_btn("Open in Asana ›" if self._is_asana else "Open source ›")
+            src_btn.clicked.connect(lambda: self.open_source.emit(url))
+            src_row = QHBoxLayout()
+            src_row.addWidget(src_btn)
+            src_row.addStretch(1)
+            v.addLayout(src_row)
+
         # ── Due date (editable; pushes to Asana when linked) ──
         v.addWidget(self._label("DUE DATE"))
         due_row = QHBoxLayout()
         due_row.setSpacing(8)
-        self._due_edit = QLineEdit(self._task.get("due_iso", "") or "")
+        due_val = self._task.get("due_iso") or (self._task.get("due_date") or "")[:10]
+        self._due_edit = QLineEdit(due_val or "")
         self._due_edit.setPlaceholderText("YYYY-MM-DD")
         self._due_edit.setStyleSheet(self._input_css())
         self._due_edit.setFixedWidth(140)

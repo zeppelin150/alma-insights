@@ -22,8 +22,9 @@ VALID_PRIORITY = {"low", "normal", "high"}
 
 # Columns update_task() is allowed to set (guards against SQL injection via **fields).
 _UPDATABLE = {
-    "status", "priority", "due_date", "summary", "title",
-    "assignee", "assignee_gid", "scratchpad", "draft_id", "source_url", "kind",
+    "status", "priority", "due_date", "summary", "title", "description",
+    "assignee", "assignee_gid", "submitter", "scratchpad", "draft_id",
+    "source_url", "kind",
 }
 
 
@@ -55,6 +56,8 @@ def create_task(
     source_ref: str | None = None,
     source_url: str | None = None,
     summary: str | None = None,
+    description: str | None = None,
+    submitter: str | None = None,
     due_date: str | None = None,
     priority: str = "normal",
     status: str = "open",
@@ -75,13 +78,13 @@ def create_task(
         conn.execute(
             """INSERT INTO enablement_tasks
                (task_id, source, source_ref, source_url, kind, title, summary,
-                due_date, priority, status, draft_id, llm_rationale, dedup_key,
-                created_by, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                description, submitter, due_date, priority, status, draft_id,
+                llm_rationale, dedup_key, created_by, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(dedup_key) DO NOTHING""",
             (tid, source, source_ref, source_url, kind, title, summary,
-             due_date, priority, status, draft_id, llm_rationale, key,
-             created_by, now, now),
+             description, submitter, due_date, priority, status, draft_id,
+             llm_rationale, key, created_by, now, now),
         )
     row = conn.execute(
         "SELECT task_id FROM enablement_tasks WHERE dedup_key = ?", (key,)

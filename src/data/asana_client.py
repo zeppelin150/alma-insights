@@ -26,8 +26,8 @@ _TIMEOUT = 30
 # custom-field values (enum + people) the indicator/mapping logic reads, plus the
 # task assignee as a fallback.
 _TASK_FIELDS = (
-    "name,due_on,permalink_url,completed,modified_at,"
-    "assignee.name,assignee.gid,assignee.email,"
+    "name,due_on,permalink_url,completed,modified_at,notes,"
+    "assignee.name,assignee.gid,assignee.email,created_by.name,"
     "custom_fields.gid,custom_fields.name,custom_fields.display_value,"
     "custom_fields.enum_value.gid,custom_fields.enum_value.name,"
     "custom_fields.people_value.gid,custom_fields.people_value.name"

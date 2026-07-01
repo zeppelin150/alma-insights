@@ -130,6 +130,11 @@ def _reconcile_existing_task(conn, client, task: dict) -> bool:
     asg_gid = assignee.get("gid")
     if asg_gid:
         fields["assignee_gid"] = asg_gid
+    if task.get("notes") is not None:
+        fields["description"] = task.get("notes")   # Asana is source-of-truth for the body
+    creator = (task.get("created_by") or {}).get("name")
+    if creator:
+        fields["submitter"] = creator
     if fields:
         etasks.update_task(conn, tid, **fields)
     try:
@@ -212,6 +217,8 @@ def _create_task_from_asana(conn, board: dict, task: dict, mappings: dict) -> st
         title=task.get("name") or "Asana task",
         source_ref=task.get("gid"),
         source_url=task.get("permalink_url"),
+        description=task.get("notes"),
+        submitter=(task.get("created_by") or {}).get("name"),
         due_date=task.get("due_on"),
         priority=priority,
         created_by="agent",
