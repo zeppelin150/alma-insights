@@ -1407,9 +1407,9 @@ class AgentChatController(QObject):
 
     def _agent_context(self, user_message, history):
         """Per-turn context for the Agent surface — the operator identity (so Renn
-        can confirm 'who am I') plus, on the first turn only, the [TODAY'S PLAN]
-        greeting block. The enablement Qt page injects these via its own
-        _chat_context; the Agent engine previously had no context provider."""
+        can confirm 'who am I'), a PERSISTENT note that the operator's tasks are real
+        (so Renn never recants a briefing on a later turn, once the one-shot plan
+        block is gone), plus, on the first turn only, the [TODAY'S PLAN] block."""
         try:
             from src.data import enablement_identity as ident
             line = ident.operator_context_line()
@@ -1417,9 +1417,15 @@ class AgentChatController(QObject):
             line = ""
         block = self._greeting_block
         if block:
-            self._greeting_block = None   # one-shot: inject the plan on the first turn
-            return f"{block}\n\n{line}" if line else block
-        return line
+            self._greeting_block = None   # one-shot: the full plan only on the first turn
+        if not line:
+            return block or ""
+        # Injected EVERY turn so Renn never later calls a real briefing "fabricated".
+        reality = ("[NOTE] The operator's tasks and the morning briefing are REAL data "
+                   "from the task store (the same records list_tasks returns) — never call "
+                   "them invented or fabricated, and don't re-query just to verify them.")
+        core = line + "\n" + reality
+        return f"{block}\n\n{core}" if block else core
 
     def _open_greeting(self):
         """One-shot proactive greeting on the Agent surface: arm the [TODAY'S PLAN]
