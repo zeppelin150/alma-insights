@@ -207,8 +207,11 @@ def create_research_plan(conn, session_id: str, task_id: str, summary: str,
         raise ValueError("session_id is required")
     if not task_id:
         raise ValueError("task_id is required")
-    steps = [str(s) for s in (plan_steps or []) if str(s).strip()]
-    payload = {"task_id": str(task_id), "summary": str(summary or ""), "steps": steps}
+    # Bound the ask-first envelope like the picker channel bounds its control keys:
+    # a single Approve click must never authorize an unbounded number of steps.
+    steps = [str(s).strip()[:200] for s in (plan_steps or []) if str(s).strip()][:8]
+    payload = {"task_id": str(task_id)[:200], "summary": str(summary or "")[:200],
+               "steps": steps}
     request_id = uuid.uuid4().hex
     conn.execute(
         """INSERT INTO chat_action_requests

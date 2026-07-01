@@ -15,7 +15,11 @@ from datetime import date, timedelta
 _PRIORITY_RANK = {"high": 3, "normal": 2, "low": 1}
 _MAX_BULLETS = 8
 _LOOKAHEAD_DAYS = 3
-_SANITIZE = re.compile(r"[`\r\n]+")
+# Strip backticks, square brackets, and newlines so an untrusted Asana title can
+# neither open a fenced block nor forge a "[SYSTEM: …]" out-of-band marker in the
+# injected plan block (that marker is the codebase's authoritative approve/decline
+# convention — it must never originate from task data).
+_SANITIZE = re.compile(r"[`\[\]\r\n]+")
 
 
 @dataclass
@@ -31,11 +35,10 @@ class DayPlan:
 
 def _is_mine(task: dict, aliases: set[str]) -> bool:
     """Mirror M2 'only mine': the assignee name/email is one of the operator's
-    aliases, or it's a manual task the operator created (assignee None)."""
+    aliases. Unassigned tasks are excluded (matching M2's default board scope —
+    no writer stamps a 'this is the operator's' marker on manual tasks)."""
     assignee = (task.get("assignee") or "").strip().lower()
-    if assignee:
-        return assignee in aliases
-    return task.get("created_by") == "user"
+    return bool(assignee) and assignee in aliases
 
 
 def _sort_key(t: dict):
@@ -100,7 +103,9 @@ def build_greeting_block(conn, *, today: date | None = None,
     aliases = aliases if aliases is not None else operator_aliases(conn)
     if not aliases:
         return ""  # fail-closed: unknown identity → never greet with others' tasks
-    tasks = et.list_tasks(conn, status="open", limit=500)
+    # No status filter here — prioritize_today selects {open, in_progress} itself,
+    # so an in-progress overdue/due-today task still surfaces in the briefing.
+    tasks = et.list_tasks(conn, limit=500)
     plan = prioritize_today(tasks, today=today, operator_aliases=aliases)
     if plan.total == 0:
         return ""

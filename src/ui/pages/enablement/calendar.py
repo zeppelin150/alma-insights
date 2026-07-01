@@ -49,6 +49,11 @@ class _Chip(QLabel):
 
     clicked = Signal()
 
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(text, parent)
+        # Chips render untrusted Asana task titles — never interpret as rich text.
+        self.setTextFormat(Qt.PlainText)
+
     def mousePressEvent(self, e):
         self.clicked.emit()
         super().mousePressEvent(e)

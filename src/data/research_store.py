@@ -63,7 +63,7 @@ def latest_for_task(conn, task_id: str) -> dict | None:
     """The newest research row for a task — the RAG-next-turn read for Renn."""
     row = conn.execute(
         "SELECT * FROM task_research WHERE task_id = ? "
-        "ORDER BY updated_at DESC, research_id DESC LIMIT 1", (task_id,)).fetchone()
+        "ORDER BY updated_at DESC, rowid DESC LIMIT 1", (task_id,)).fetchone()
     return dict(row) if row else None
 
 

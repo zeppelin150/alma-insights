@@ -71,6 +71,12 @@ def run_research_job(conn, *, job_id: str, task_id: str, research_id: str,
             return {"status": "error", "error": str(exc)}
         md_parts.append(f"## {step}\n\n{answer}\n")
         agent_jobs.update_job(conn, job_id, progress_pct=int((i + 1) / total * 100))
+    if is_cancelled and is_cancelled():
+        # cancel issued during the final step — honor it, never regress to 'done'
+        research_store.update_research(conn, research_id, status="cancelled",
+                                       markdown="\n".join(md_parts))
+        agent_jobs.update_job(conn, job_id, status="cancelled")
+        return {"status": "cancelled", "markdown": "\n".join(md_parts)}
     markdown = "\n".join(md_parts)
     research_store.update_research(conn, research_id, status="complete",
                                    markdown=markdown,
