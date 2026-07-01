@@ -34,11 +34,24 @@ class ChatBridge(QObject):
     jobsListed = Signal(str)      # JSON: {items: [ {job_id, title, status, progress_pct, steps:[…]} ]}
     draftsPending = Signal(str)   # JSON: {items: [ {draft_id, title, diff:[{tag,text}], checks:[…]} ]}
     draftResolved = Signal(str)   # JSON: {draft_id, ok, rejected?, error?}
+    actionRequested = Signal(str)  # JSON per claimed action: {id, request_id, type, payload} (M0)
+    googleAuthState = Signal(str)  # JSON: {state: 'connecting'|'connected'|'failed'} (M2) — STATUS ONLY
+    driveFoldersListed = Signal(str)  # JSON: {request_id, parent_id?, folders:[{id,name,driveId}]} | {request_id, needs_connect} (M3)
+    actionResolved = Signal(str)   # JSON: {request_id} once an action resolves → React closes the picker (M3)
+    asanaProjectsListed = Signal(str)  # JSON: {request_id, projects:[{gid,name}]} | {request_id, asana_not_connected} (M4)
+    guruTargetsListed = Signal(str)  # JSON: {request_id, level:'collections'|'folders', collection_id?, items:[{id,name}]} | {request_id, guru_not_connected} (M5)
     voiceTranscript = Signal(str)  # a recognized on-device dictation utterance
     voiceState = Signal(str)       # 'listening' | 'transcribing' | 'idle' | 'error' | 'unavailable'
 
     def __init__(self, engine, send_fn=None, tool_poll=None, session_api=None,
-                 job_poll=None, draft_api=None, voice=None, parent=None):
+                 job_poll=None, draft_api=None, voice=None, action_poll=None,
+                 connect_fn=None, google_state_signal=None, list_fn=None,
+                 resolve_fn=None, drive_folders_signal=None,
+                 action_resolved_signal=None, asana_list_fn=None,
+                 asana_resolve_fn=None, asana_projects_signal=None,
+                 guru_list_fn=None, guru_resolve_fn=None,
+                 guru_targets_signal=None, confirm_fn=None, cancel_fn=None,
+                 parent=None):
         super().__init__(parent)
         self._engine = engine
         self._prior_telemetry = None   # a controller's persistence callback, if any
@@ -78,6 +91,91 @@ class ChatBridge(QObject):
         self._tool_timer.timeout.connect(self._poll_tools)
         self._tool_timer.timeout.connect(self._poll_jobs)
         self._tool_timer.timeout.connect(self._poll_drafts)
+        # ``action_poll(session_id|None) -> [ {id, request_id, type, payload}, … ]``
+        # atomically claims this session's unconsumed action requests (M0). It runs
+        # on a SEPARATE, FREE-RUNNING timer (~500ms) — NOT gated on ``busy`` —
+        # because the envelope-bearing resolver turn ends the instant the tool
+        # returns; a busy-gated poll + cross-process WAL commit latency would miss
+        # the single final poll and the picker would never open (invariant 2). The
+        # claim is atomic (single-winner) so the always-on cadence is safe.
+        self._action_poll = action_poll
+        self._action_timer = QTimer(self)
+        self._action_timer.setInterval(500)
+        self._action_timer.timeout.connect(self._poll_actions)
+        if action_poll is not None:
+            self._action_timer.start()
+        # ``connect_fn`` (the controller's ``start_google_connect``) runs the
+        # in-chat Google OAuth flow (M2). Injected, not imported, so the bridge
+        # stays the only JS<->Python boundary and tests can supply a fake. The
+        # controller emits its connect-card state on ``google_state_signal``; we
+        # re-emit it as ``googleAuthState`` so React drives idle/connecting/
+        # connected/failed.
+        self._connect_fn = connect_fn
+        if google_state_signal is not None:
+            try:
+                google_state_signal.connect(self.googleAuthState)
+            except Exception:  # noqa: BLE001 — best-effort wiring
+                pass
+        # ── Drive folder picker round-trip (M3) ──
+        # ``list_fn(parent_id, request_id)`` lists folders OFF-THREAD (the
+        # controller spawns a DriveListWorker and emits ``drive_folders_signal``);
+        # ``resolve_fn(request_id, folder_id, folder_name, drive_id)`` commits the
+        # pick on the main thread and emits ``action_resolved_signal``. Both are
+        # injected (not imported) so the bridge stays the only JS<->Python boundary
+        # and tests can supply fakes. We re-emit the controller's signals as the
+        # bridge's so React (driveFoldersListed / actionResolved) drives the picker.
+        self._list_fn = list_fn
+        self._resolve_fn = resolve_fn
+        if drive_folders_signal is not None:
+            try:
+                drive_folders_signal.connect(self.driveFoldersListed)
+            except Exception:  # noqa: BLE001 — best-effort wiring
+                pass
+        if action_resolved_signal is not None:
+            try:
+                action_resolved_signal.connect(self.actionResolved)
+            except Exception:  # noqa: BLE001 — best-effort wiring
+                pass
+        # ── Asana board picker round-trip (M4) ──
+        # ``asana_list_fn(request_id)`` lists the projects/boards OFF-THREAD (the
+        # controller spawns an AsanaListWorker and emits ``asana_projects_signal``);
+        # ``asana_resolve_fn(request_id, project_gid, project_name)`` commits the
+        # pick on the main thread and emits ``action_resolved_signal`` (shared with
+        # M3). Both injected (not imported) so the bridge stays the only
+        # JS<->Python boundary and tests can supply fakes. We re-emit the
+        # controller's project signal as the bridge's so React drives the picker.
+        self._asana_list_fn = asana_list_fn
+        self._asana_resolve_fn = asana_resolve_fn
+        if asana_projects_signal is not None:
+            try:
+                asana_projects_signal.connect(self.asanaProjectsListed)
+            except Exception:  # noqa: BLE001 — best-effort wiring
+                pass
+        # ── Guru publish-target picker round-trip (M5) ──
+        # ``guru_list_fn(collection_id, request_id)`` lists the targets OFF-THREAD
+        # (empty collection_id → collections; non-empty → that collection's folders;
+        # the controller spawns a GuruListWorker and emits ``guru_targets_signal``);
+        # ``guru_resolve_fn(request_id, collection_id, folder_id)`` commits the pick
+        # on the main thread and emits ``action_resolved_signal`` (shared with M3/M4).
+        # Both injected (not imported) so the bridge stays the only JS<->Python
+        # boundary and tests can supply fakes. We re-emit the controller's target
+        # signal as the bridge's so React drives the two-level picker.
+        self._guru_list_fn = guru_list_fn
+        self._guru_resolve_fn = guru_resolve_fn
+        if guru_targets_signal is not None:
+            try:
+                guru_targets_signal.connect(self.guruTargetsListed)
+            except Exception:  # noqa: BLE001 — best-effort wiring
+                pass
+        # ── GATED write confirm channel (M7b) ──
+        # ``confirm_fn(request_id)`` (the controller's ``execute_write``) runs the
+        # gated, non-idempotent live write on a real operator Confirm click;
+        # ``cancel_fn(request_id)`` (``cancel_write``) resolves the row without any
+        # write on Cancel. Both injected (not imported) so the bridge stays the only
+        # JS<->Python boundary and tests can supply fakes. There is NO direct-execute
+        # tool — these slots are the ONLY way a write runs, and only via a click.
+        self._confirm_fn = confirm_fn
+        self._cancel_fn = cancel_fn
         # Re-emit the engine's signals as the bridge's (signal-to-signal).
         engine.response_ready.connect(self.responseReady)
         engine.error_occurred.connect(self.errorOccurred)
@@ -104,6 +202,141 @@ class ChatBridge(QObject):
     def ping(self):
         """Liveness probe for the JS<->Python round-trip (no engine call)."""
         return "pong"
+
+    # ── connect Google in chat (M2) ─────────────────────────────────
+
+    @Slot()
+    def connectGoogle(self):
+        """Begin the in-chat Google OAuth flow (the ConnectGoogleCard button).
+
+        QWebChannel is the trust boundary: any webview script could call this, so
+        the human-gate is enforced controller-side — ``start_google_connect`` is
+        single-flight (one worker per real click). React must drive the button
+        from a real click only and never auto-invoke this off a signal."""
+        if self._connect_fn is None:
+            return
+        try:
+            self._connect_fn()
+        except Exception:  # noqa: BLE001 — never crash the chat
+            self._safe_emit_str(self.googleAuthState, "{\"state\": \"failed\"}")
+
+    # ── Drive folder picker round-trip (M3) ─────────────────────────
+
+    @Slot(str, str)
+    def driveListFolders(self, parent_id, request_id):
+        """Lazy-tree expand: list the Drive folders under ``parent_id`` for the
+        picker. Delegates to the controller's OFF-THREAD lister; results arrive
+        on ``driveFoldersListed``. QWebChannel is the trust boundary — the
+        controller checks ``is_active()`` and never reads Drive when not active."""
+        if self._list_fn is None:
+            return
+        try:
+            self._list_fn(parent_id or "", request_id or "")
+        except Exception:  # noqa: BLE001 — never crash the chat
+            pass
+
+    @Slot(str, str, str, str)
+    def driveFolderPicked(self, request_id, folder_id, folder_name, drive_id):
+        """The operator chose a folder: commit the pick on the main thread. The
+        controller validates session ownership + single-winner resolves, persists
+        the id (settings is source of truth), notifies Renn with the id ONLY, and
+        emits ``actionResolved`` so React closes the picker."""
+        if self._resolve_fn is None:
+            return
+        try:
+            self._resolve_fn(request_id or "", folder_id or "",
+                             folder_name or "", drive_id or "")
+        except Exception:  # noqa: BLE001 — never crash the chat
+            pass
+
+    # ── Asana board picker round-trip (M4) ──────────────────────────
+
+    @Slot(str)
+    def asanaListProjects(self, request_id):
+        """Open-time fetch: list the Asana projects/boards for the picker.
+        Delegates to the controller's OFF-THREAD lister; results arrive on
+        ``asanaProjectsListed``. QWebChannel is the trust boundary — the worker
+        reports asana_not_connected when no shared PAT is set."""
+        if self._asana_list_fn is None:
+            return
+        try:
+            self._asana_list_fn(request_id or "")
+        except Exception:  # noqa: BLE001 — never crash the chat
+            pass
+
+    @Slot(str, str, str)
+    def asanaBoardPicked(self, request_id, project_gid, project_name):
+        """The operator chose a board: commit the pick on the main thread. The
+        controller validates session ownership + single-winner resolves, persists
+        the board (settings is source of truth), notifies Renn, and emits
+        ``actionResolved`` so React closes the picker."""
+        if self._asana_resolve_fn is None:
+            return
+        try:
+            self._asana_resolve_fn(request_id or "", project_gid or "",
+                                   project_name or "")
+        except Exception:  # noqa: BLE001 — never crash the chat
+            pass
+
+    # ── Guru publish-target picker round-trip (M5) ──────────────────
+
+    @Slot(str, str)
+    def guruListTargets(self, collection_id, request_id):
+        """Two-level lazy fetch: empty ``collection_id`` lists the Guru collections;
+        a non-empty one lists THAT collection's folders. Delegates to the
+        controller's OFF-THREAD lister; results arrive on ``guruTargetsListed``.
+        QWebChannel is the trust boundary — the worker reports guru_not_connected
+        when Guru creds aren't set."""
+        if self._guru_list_fn is None:
+            return
+        try:
+            self._guru_list_fn(collection_id or "", request_id or "")
+        except Exception:  # noqa: BLE001 — never crash the chat
+            pass
+
+    @Slot(str, str, str)
+    def guruTargetPicked(self, request_id, collection_id, folder_id):
+        """The operator chose a publish target: commit the pick on the main thread.
+        The controller validates session ownership + single-winner resolves,
+        persists the collection (+ optional folder) ids (settings is source of
+        truth, read by push_guru_draft), notifies Renn, and emits ``actionResolved``
+        so React closes the picker. folder_id may be empty (collection-level publish)."""
+        if self._guru_resolve_fn is None:
+            return
+        try:
+            self._guru_resolve_fn(request_id or "", collection_id or "",
+                                  folder_id or "")
+        except Exception:  # noqa: BLE001 — never crash the chat
+            pass
+
+    # ── gated write confirm channel (M7b) ──────────────────────────
+
+    @Slot(str)
+    def confirmWrite(self, request_id):
+        """The operator clicked Confirm on a write card: run the gated write on the
+        main thread. The controller validates session ownership, mark_resolves FIRST
+        (single-winner — one click = one write), then dispatches the non-idempotent
+        live write off-thread. QWebChannel is the trust boundary; the controller's
+        single-winner claim is the enforcement that a double/forged invoke writes
+        exactly once."""
+        if self._confirm_fn is None:
+            return
+        try:
+            self._confirm_fn(request_id or "")
+        except Exception:  # noqa: BLE001 — never crash the chat
+            pass
+
+    @Slot(str)
+    def cancelWrite(self, request_id):
+        """The operator clicked Cancel on a write card: resolve the row with NO
+        write. The controller validates session ownership, mark_resolves (re-opens
+        the human-gate), and notifies Renn it was cancelled."""
+        if self._cancel_fn is None:
+            return
+        try:
+            self._cancel_fn(request_id or "")
+        except Exception:  # noqa: BLE001 — never crash the chat
+            pass
 
     # ── past-chat browser (M3) ──────────────────────────────────────
 
@@ -221,6 +454,25 @@ class ChatBridge(QObject):
         if payload != self._jobs_last:   # only emit on change (cheap dedupe)
             self._jobs_last = payload
             self.jobsListed.emit(payload)
+
+    # ── action channel — free-running picker/connect poll (M0) ──────
+
+    def _poll_actions(self):
+        """Claim any unconsumed action requests for the active session and emit
+        ``actionRequested`` per row. Free-running (always on while the page is
+        alive); the underlying claim is atomic, so each action emits exactly once
+        even though this fires continuously."""
+        if self._action_poll is None:
+            return
+        try:
+            rows = self._action_poll(None) or []
+        except Exception:  # noqa: BLE001 — the action channel is best-effort
+            return
+        for r in rows:
+            try:
+                self.actionRequested.emit(json.dumps(r, default=str))
+            except Exception:  # noqa: BLE001
+                pass
 
     # ── in-thread review / sign-off (M5) ────────────────────────────
 

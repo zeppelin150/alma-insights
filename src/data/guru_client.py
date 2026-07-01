@@ -67,7 +67,11 @@ class GuruClient:
     def list_collections(self) -> list[dict]:
         """List all Guru collections (folders).
 
-        Returns list of dicts with keys: id, name, description, slug.
+        Returns list of dicts with keys: id, name, description, slug, read_only.
+        ``read_only`` (from the raw collection's ``readOnly`` flag) marks a
+        Guru-managed collection that rejects writes (e.g. "Welcome to Guru!") —
+        M8 surfaces it so the pre-flight/picker can steer folder creation to a
+        writable collection instead of opening a doomed Confirm card.
         """
         data = self._request("GET", "/collections")
         return [
@@ -76,23 +80,32 @@ class GuruClient:
                 "name": c.get("name", ""),
                 "description": c.get("description", ""),
                 "slug": c.get("slug", ""),
+                "read_only": bool(c.get("readOnly")),
             }
             for c in (data if isinstance(data, list) else [])
         ]
 
-    def list_cards(self, collection_id: str | None = None) -> list[dict]:
-        """List cards, optionally filtered by collection.
+    def list_cards(self, collection_id: str | None = None, *,
+                   max_pages: int = 50) -> list[dict]:
+        """DETERMINISTICALLY enumerate cards, optionally filtered by collection.
 
-        Returns list of dicts with keys: id, title, collection,
+        This is the COMPLETE enumeration of a collection (``GET
+        /collections/{id}/cards``) — it follows the RFC5988 Link ``rel="next"``
+        cursor to the end (up to ``max_pages``) via :meth:`_paged_get`, so a
+        collection with more than one page of cards is fully returned (not just
+        the first ~100). Unlike :meth:`search_cards` (a query-ranked search that
+        may miss cards), this answers "what cards are in this collection".
+
+        With no ``collection_id`` it falls back to ``search_cards("")`` (all
+        cards). Returns list of dicts with keys: id, title, collection,
         content_hash, lastModified.
         """
-        if collection_id:
-            path = f"/collections/{collection_id}/cards"
-        else:
+        if not collection_id:
             # Use search with empty query to get all cards
             return self.search_cards("")
 
-        data = self._request("GET", path)
+        path = f"/collections/{collection_id}/cards"
+        data = self._paged_get(path, max_pages=max_pages)
         return self._normalize_cards(data)
 
     def get_card(self, card_id: str) -> dict:
@@ -227,6 +240,106 @@ class GuruClient:
             data = self._request("POST", "/cards", body=payload)
             logger.info("Created Guru card '%s' in collection %s", title, collection_id)
         return data if isinstance(data, dict) else {}
+
+    # ── Folder writes (M7 — Renn create/rename folders) ─────────
+
+    def get_collection(self, collection_id: str) -> dict:
+        """Fetch a single collection (``GET /collections/{id}``).
+
+        The response carries ``homeBoardSlug`` — the id of the collection's
+        root board/folder, used as the default target when creating a
+        top-level folder.
+        """
+        data = self._request("GET", f"/collections/{collection_id}")
+        return data if isinstance(data, dict) else {}
+
+    def create_folder(self, collection_id: str, title: str, *,
+                      parent_folder_id: str | None = None,
+                      description: str | None = None) -> dict:
+        """Create a Guru folder under a collection or a parent folder.
+
+        **HUMAN-GATED ONLY** — never called without explicit user approval.
+
+        The target board is ``parent_folder_id`` if given, else the
+        collection's ``homeBoardSlug`` (fetched via :meth:`get_collection`).
+        Folders are created with the board *action* endpoint —
+        ``POST /folders/{target}/action`` with ``actionType="add"`` and a
+        single ``folderEntries`` entry. The action response often omits the
+        new folder's id, so we resolve it by re-listing the collection's
+        folders and matching on ``title``. The id may legitimately be ``None``
+        if the match fails (defensive).
+        """
+        if parent_folder_id:
+            # A board/folder slug is "{shortId}/{name-slug}"; the action endpoint
+            # routes on the SHORT id only — the trailing slash-path 404s. Take the
+            # leading segment (a plain id has no slash and is unchanged).
+            target = parent_folder_id.split("/", 1)[0]
+        else:
+            collection = self.get_collection(collection_id)
+            # Guru-managed / read-only collections (e.g. "Welcome to Guru!")
+            # reject writes with a 403 — fail fast with a clear, actionable error
+            # instead of the cryptic raw API failure.
+            if collection.get("readOnly"):
+                raise GuruAPIError(
+                    f"Collection '{collection.get('name') or collection_id}' is "
+                    "read-only (Guru-managed) — folders can't be created in it. "
+                    "Choose a writable collection.")
+            # homeBoardSlug is "{shortId}/{name-slug}"; the endpoint routes on the
+            # short id (the full slash-bearing slug 404s).
+            target = (collection.get("homeBoardSlug", "") or "").split("/", 1)[0]
+
+        if not target:
+            raise GuruAPIError(
+                f"Could not resolve a target board for collection {collection_id!r} "
+                "(no homeBoardSlug).")
+
+        body = {
+            "actionType": "add",
+            "folderEntries": [
+                {
+                    "description": description,
+                    "entryType": "folder",
+                    "title": title,
+                }
+            ],
+            "prevSiblingItemId": "first",
+        }
+        resp = self._request("POST", f"/folders/{target}/action", body=body)
+        logger.info("Created Guru folder '%s' under target %s", title, target)
+
+        # The action response is a list of the resulting entries — prefer the new
+        # folder's id from there; fall back to re-listing on a title match.
+        new_id = None
+        if isinstance(resp, list):
+            for e in resp:
+                if isinstance(e, dict) and e.get("title") == title:
+                    new_id = e.get("folderId") or e.get("id") or None
+                    break
+        if new_id is None:
+            try:
+                for f in self.list_folders(collection_id):
+                    if isinstance(f, dict) and f.get("title") == title:
+                        new_id = f.get("id") or None
+                        break
+            except Exception as exc:  # noqa: BLE001 — resolution is best-effort
+                logger.debug("Folder id resolution failed for '%s': %s", title, exc)
+
+        return {"ok": True, "id": new_id, "title": title}
+
+    def rename_folder(self, folder_id: str, new_title: str, *,
+                      description: str | None = None) -> dict:
+        """Rename a Guru folder (``PUT /folders/{id}``).
+
+        **HUMAN-GATED ONLY**. Sets the folder ``title`` (and ``description``
+        when supplied). Guru's public API has no delete-folder endpoint, so
+        there is intentionally no ``delete_folder`` counterpart.
+        """
+        body: dict = {"title": new_title}
+        if description is not None:
+            body["description"] = description
+        self._request("PUT", f"/folders/{folder_id}", body=body)
+        logger.info("Renamed Guru folder %s -> '%s'", folder_id, new_title)
+        return {"ok": True, "id": folder_id, "title": new_title}
 
     # ── Credential Persistence ──────────────────────────────────
 

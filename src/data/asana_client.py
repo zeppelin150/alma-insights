@@ -58,6 +58,19 @@ class AsanaClient:
             payload = json.loads(resp.read().decode("utf-8"))
         return payload.get("data")
 
+    def _get_raw(self, path: str, params: dict | None = None) -> dict:
+        """Like :meth:`_get` but returns the FULL payload (``data`` +
+        ``next_page``) so paginating callers can follow ``next_page.offset``."""
+        url = f"{_BASE}{path}"
+        if params:
+            url += "?" + urlencode(params)
+        req = urllib.request.Request(url, headers={
+            "Authorization": f"Bearer {self.api_key}",
+            "Accept": "application/json",
+        })
+        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
     def _send(self, method: str, path: str, body: dict):
         """POST/PUT helper. Asana wraps request bodies in {"data": {...}}."""
         url = f"{_BASE}{path}"
@@ -86,6 +99,29 @@ class AsanaClient:
         if due_on:
             body["due_on"] = due_on
         return self._send("POST", f"/tasks/{parent_gid}/subtasks", body) or {}
+
+    def create_task(self, project_gid: str, name: str, *,
+                    notes: str | None = None, due_on: str | None = None) -> dict:
+        """Create a new Asana task inside a project.
+
+        **Human-gated by the caller.** ``POST /tasks`` with
+        ``{"data": {"name", "projects": [gid], notes?, due_on?}}`` (the
+        ``_send`` helper supplies the ``data`` wrapper). Returns the created
+        task's gid, name, and permalink (``permalink_url`` may be ``None`` if
+        the create response omits it).
+        """
+        body: dict = {"name": name, "projects": [project_gid]}
+        if notes is not None:
+            body["notes"] = notes
+        if due_on:
+            body["due_on"] = due_on
+        data = self._send("POST", "/tasks", body) or {}
+        return {
+            "ok": True,
+            "gid": data.get("gid"),
+            "name": name,
+            "permalink_url": data.get("permalink_url"),
+        }
 
     def add_comment(self, task_gid: str, text: str) -> dict:
         """Post a comment (story) on an Asana task.
@@ -158,6 +194,36 @@ class AsanaClient:
         if modified_since:
             params["modified_since"] = modified_since
         return self._get("/tasks", params) or []
+
+    def list_tasks_paged(self, project_gid: str, *, opt_fields: str = _TASK_FIELDS,
+                         modified_since: str | None = None, page_size: int = 100,
+                         max_pages: int = 10) -> list[dict]:
+        """Enumerate ALL tasks in a project, following Asana pagination to the end.
+
+        Asana pages via ``limit`` + an ``offset`` token returned in the response's
+        ``next_page.offset``; this follows that cursor up to ``max_pages`` (a hard
+        cap so a runaway cursor can't spin). This is the COMPLETE enumeration the
+        "what tasks are on the board" tool needs — :meth:`list_tasks` returns only
+        the first page.
+        """
+        out: list[dict] = []
+        params: dict = {"project": project_gid, "opt_fields": opt_fields,
+                        "limit": page_size}
+        if modified_since:
+            params["modified_since"] = modified_since
+        offset: str | None = None
+        for _ in range(max_pages):
+            page_params = dict(params)
+            if offset:
+                page_params["offset"] = offset
+            payload = self._get_raw("/tasks", page_params)
+            data = payload.get("data") or []
+            out.extend(data)
+            nxt = payload.get("next_page") or {}
+            offset = nxt.get("offset") if isinstance(nxt, dict) else None
+            if not offset:
+                break
+        return out
 
     def get_task(self, task_gid: str, *,
                  opt_fields: str = "name,due_on,completed,assignee.name,modified_at") -> dict:

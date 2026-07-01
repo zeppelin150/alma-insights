@@ -118,12 +118,96 @@ platforms.
 
 ---
 
+## Built — Connect & Configure: in-chat Google OAuth + Drive/Asana pickers + conversational routing + gated writes *(M0–M9 built + GUI-tested 2026-06-30; uncommitted on `enablement-content-tabs`)*
+
+> **Status: built and live-tested in the app** (enablement → ASSISTANT → Agent).
+> Real-data GUI test confirmed the Asana board picker (your live projects), the
+> Guru collection picker + routing, the in-chat Connect-Google card, and the gated
+> write Confirm cards. ~140 gitignored `*_local.py` tests across M0–M9, green
+> (verified via PowerShell — Qt tests swallow stdout under Git Bash). Plan + the
+> 16-point MUST-FIX checklist: `~/.claude/plans/renn-google-asana-integration.md`.
+> **Not yet committed** — the whole M0–M9 stack + the picker restyle sits in the
+> working tree, kept separate from the uncommitted redaction/corpus workstream.
+
+
+The operator OAuths their **own Google account from chat**, browses the
+**Drives/folders they can access** (My Drive + Shared Drives), browses **live
+Asana boards + tasks**, and sets routing (active Drive folder, Asana board, Guru
+publish target) **conversationally** — Renn lets them **pick** GIDs/folders
+instead of demanding pasted IDs. Closes the transcript gaps: Renn couldn't
+initiate OAuth, the Drive index was empty (drive.readonly never activated), and
+Renn had **no tool to list tasks on a board**.
+
+**Decisions (operator, 2026-06-30):** full interactive pickers · single operator
+per install (global `enablement.*` prefs, creds in keyring) · My Drive **+ Shared
+Drives** (`corpora=allDrives`) · Asana **shared PAT, browse + routing** (no Asana
+OAuth, no task-create — that's 2.2).
+
+**~80% of the backend already exists, just unwired to Renn:** `google_oauth.py`
+(PKCE, keyring, disable-on-launch) + `GoogleOAuthWorker`, `DriveReader`,
+`AsanaClient.list_tasks()` (**built, never exposed**), `set_asana_board_config`,
+the Guru collection/folder listers. The one real problem: the MCP tool server is
+a **subprocess with no Qt loop**, so a tool can't pop a browser/picker itself.
+
+**Architecture (adversarially hardened — design panel + dual pre-mortem):**
+**Two-Phase Resolver Tools.** A resolver tool (subprocess) only mints a
+server-side `request_id` and writes a row to a **new `chat_action_requests`
+table** (migration 038, AUTOINCREMENT + `consumed` flag); it returns the LLM a
+**minimal "a picker is open — stop and wait"** string (envelope never reaches the
+model). A **free-running ~500ms poll** in the main process atomically claims the
+row and emits `actionRequested` → a React picker. The picker lazily loads its
+tree via bridge slots that run Drive/Asana HTTP **off-thread in the main process**
+(data never touches the LLM). On pick, the controller **persists to settings
+first** (durable, out of band), then notifies Renn with a `[SYSTEM]` turn that
+injects the **id only (names redacted — folder names can be PHI)**, busy-queued.
+OAuth reuses `GoogleOAuthWorker` in-process; **disable-on-launch preserved**.
+
+> Pre-mortems killed the naive "piggyback the tool-call poll" design
+> (turn-lifecycle inversion: in ACP mode the tool loop runs in one opaque turn, so
+> an envelope can't pause it) and forced: a dedicated action table (not a
+> non-monotonic `rowid` cursor), a free-running poll (not busy-gated — else a
+> cross-process commit race never opens the picker), a non-forgeable channel
+> (resolver-name allowlist + server-minted id, so a PHI tool result can't spoof an
+> OAuth prompt), and a human-gate (writers refuse while a pick is pending).
+
+**7 core milestones (M0 action-channel → M1 Drive shared-drive surface → M2 connect
+→ M3 Drive picker → M4 Asana picker+tasks → M5 Guru target → M6 prompt+E2E),** each
+built + shipped through an adversarial-review workflow against the MUST-FIX
+checklist + a fresh pre-mortem. Review caught one real defect (M3 `resolve_drive_folder`
+ran `mark_resolved` before the settings persist → data-loss + a TOCTOU human-gate
+window); fixed to persist-first.
+
+**Extensions added during GUI testing (M7–M9):**
+- **M7 — gated write actions.** Renn can **create/rename a Guru folder** and
+  **create a top-level Asana task**, each behind a **sidebar Confirm/Cancel card** —
+  the model gets no direct-write tool, so the only path to a mutation is the
+  operator's click. Non-idempotent writes, so `execute_write` does `mark_resolved`
+  **first** (one click = one write). Guru folder *delete* isn't in the public API →
+  Renn routes to the Guru web app.
+- **M8 — write pre-flight.** The propose tools pre-check feasibility and **steer**
+  before opening a doomed card (read-only Guru collection → lists writable ones;
+  unknown Asana board → lists boards); the Guru picker badges read-only collections.
+  Pre-flight only gates card *opening* — the human-gate is unchanged.
+- **M9 — content search & listing.** The list-vs-search fix: `list_guru_cards` /
+  `list_guru_folder_items` / `list_zendesk_articles` / `list_zendesk_macros`
+  **enumerate completely** (paginate to the end), distinct from the query-ranked
+  `search_*` tools; `search_zendesk_articles` + `search_asana_tasks` added;
+  `list_asana_tasks` + `GuruClient.list_cards` now paginate; a unified
+  `search_content` fans out across Guru+Zendesk+Drive. Renn's prompt teaches which
+  to use. (Live bug fixed during testing: `create_folder` routed on the full
+  slash-bearing `homeBoardSlug` → 404; now routes on the short id + guards read-only
+  collections.)
+
+Plan + full checklist: `~/.claude/plans/renn-google-asana-integration.md`.
+
+---
+
 ## Left
 
 ### Phase 2 — policy / product-update signal *(the biggest missing input; the RCM wedge)*
 - **2.1** GitHub ingestion — releases + `compare` filtered to watched files → fire an update task when a release post-dates a card.
-- **2.2** Asana launch-trigger — read custom fields; `Status=Shipped` / launch date → KB-update task. *(Also: Renn cannot create a top-level Asana task today — only subtasks on board-sourced tasks; needs an Asana create-task tool + scope.)*
-- **2.3** Drive un-mock — service-account share → real policy-doc ingestion + mod-timestamp staleness.
+- **2.2** Asana launch-trigger — read custom fields; `Status=Shipped` / launch date → KB-update task. *(✅ the create-task gap is closed — M7 added a gated `create_asana_task`; the remaining work is the launch-field → task **trigger** wiring on `asana_monitor`.)*
+- **2.3** Drive un-mock — real policy-doc ingestion + mod-timestamp staleness. *(✅ the live-access blocker is gone — M1–M3 shipped per-user OAuth + the Drive folder picker + `DriveReader` shared-drive surface; remaining is feeding the picked `active_folders` into the ingestion monitor + the staleness signal.)*
 - **2.4** Rising-term → card-staleness wiring.
 
 > External dependencies: a GitHub token + watched repos, an Asana create scope, a Drive service-account share. Confirm sources before building.

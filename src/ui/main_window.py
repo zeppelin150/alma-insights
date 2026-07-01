@@ -636,7 +636,22 @@ class MainWindow(QMainWindow):
                                         session_api=self._agent_controller,
                                         job_poll=self._agent_controller.recent_jobs,
                                         draft_api=self._agent_controller,
-                                        voice=self._agent_controller.voice)
+                                        voice=self._agent_controller.voice,
+                                        action_poll=self._agent_controller.poll_action_requests,
+                                        connect_fn=self._agent_controller.start_google_connect,
+                                        google_state_signal=self._agent_controller.googleAuthState,
+                                        list_fn=self._agent_controller.list_drive_folders,
+                                        resolve_fn=self._agent_controller.resolve_drive_folder,
+                                        drive_folders_signal=self._agent_controller.driveFoldersListed,
+                                        action_resolved_signal=self._agent_controller.actionResolved,
+                                        asana_list_fn=self._agent_controller.list_asana_projects_for_picker,
+                                        asana_resolve_fn=self._agent_controller.resolve_asana_board,
+                                        asana_projects_signal=self._agent_controller.asanaProjectsListed,
+                                        guru_list_fn=self._agent_controller.list_guru_targets,
+                                        guru_resolve_fn=self._agent_controller.resolve_guru_target,
+                                        guru_targets_signal=self._agent_controller.guruTargetsListed,
+                                        confirm_fn=self._agent_controller.execute_write,
+                                        cancel_fn=self._agent_controller.cancel_write)
             return self.agent_page
         except Exception as exc:  # noqa: BLE001 — graceful placeholder, never break the mode
             import logging

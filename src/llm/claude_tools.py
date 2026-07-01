@@ -241,6 +241,328 @@ TOOL_DEFINITIONS = [
         },
     },
     {
+        "name": "request_google_connect",
+        "description": (
+            "Open the in-chat 'Connect Google' card so the operator can authorize "
+            "their own Google account and turn on Drive read access for this "
+            "session. Call this when the user asks to connect Google/Drive, or when "
+            "Drive access is needed but not yet active. This does NOT connect "
+            "anything itself — it opens a card in the app with a button the operator "
+            "clicks. After calling it, STOP and wait for a [SYSTEM: the operator "
+            "connected …] message before using any Drive tool."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "request_drive_picker",
+        "description": (
+            "Open the in-chat Google Drive folder picker so the operator can "
+            "browse the Drives/folders they can access and choose the active "
+            "folder. Call this when the user wants to pick or set a Drive folder. "
+            "This does NOT read Drive itself — it opens a picker in the app. After "
+            "calling it, STOP and wait for a [SYSTEM: operator selected the active "
+            "Drive folder …] message before using any Drive tool."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "set_drive_folder",
+        "description": (
+            "Set the active Drive folder BY ID — the fallback for when you already "
+            "know the folder id (otherwise use request_drive_picker so the operator "
+            "picks). Refuses with needs_picker while a folder picker is open in the "
+            "app; let the operator finish picking first."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "folder_id": {"type": "string", "description": "The Drive folder id to set active."},
+                "folder_name": {"type": "string", "description": "Optional human label for the folder."},
+                "drive_id": {"type": "string", "description": "Optional Shared Drive id (omit for My Drive)."},
+            },
+            "required": ["folder_id"],
+        },
+    },
+    {
+        "name": "request_asana_board_picker",
+        "description": (
+            "Open the in-chat Asana board picker so the operator can browse the "
+            "Asana projects/boards they can access and choose the active board. "
+            "Call this when the user wants to pick or set an Asana board. This does "
+            "NOT read Asana itself — it opens a picker in the app. After calling it, "
+            "STOP and wait for a [SYSTEM: operator set the active Asana board …] "
+            "message before listing tasks."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "list_asana_projects",
+        "description": (
+            "List the Asana projects/boards the shared access token can see "
+            "(returns [{gid, name}]). Use this to name available boards or resolve "
+            "a board the user mentioned WITHOUT opening the picker."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "list_asana_tasks",
+        "description": (
+            "List the tasks on an Asana board — name, due date, link, and assignee. "
+            "THE tool to answer 'what tasks are on the board'. Omit project_gid to "
+            "use the active board the operator set; if no board is set it returns "
+            "no_board (ask the operator to pick one with request_asana_board_picker)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "project_gid": {"type": "string", "description": "Optional — the Asana project/board gid (defaults to the active board)."},
+            },
+        },
+    },
+    {
+        "name": "set_asana_board",
+        "description": (
+            "Set the active Asana board BY project_gid — the fallback for when you "
+            "already know the gid (otherwise use request_asana_board_picker so the "
+            "operator picks). Refuses with needs_picker while a board picker is open "
+            "in the app; let the operator finish picking first."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "project_gid": {"type": "string", "description": "The Asana project/board gid to set active."},
+                "project_name": {"type": "string", "description": "Optional human label for the board."},
+            },
+            "required": ["project_gid"],
+        },
+    },
+    {
+        "name": "request_guru_publish_picker",
+        "description": (
+            "Open the in-chat Guru publish-target picker so the operator can choose "
+            "the collection (and optionally a folder) where cards publish. Call this "
+            "when the user wants to pick or set the Guru publish destination. This "
+            "does NOT read Guru itself — it opens a picker in the app. After calling "
+            "it, STOP and wait for a [SYSTEM: operator set the Guru publish target …] "
+            "message before publishing."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "set_guru_publish_target",
+        "description": (
+            "Set the Guru publish target BY ID — the fallback for when you already "
+            "know the collection id (otherwise use request_guru_publish_picker so the "
+            "operator picks). folder_id is optional (omit to publish at the collection "
+            "level). Refuses with needs_picker while a publish-target picker is open "
+            "in the app; let the operator finish picking first."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "collection_id": {"type": "string", "description": "The Guru collection id to publish into."},
+                "folder_id": {"type": "string", "description": "Optional sub-folder id within the collection (omit to publish at the collection level)."},
+            },
+            "required": ["collection_id"],
+        },
+    },
+    {
+        "name": "request_create_guru_folder",
+        "description": (
+            "PROPOSE creating a new Guru folder. This does NOT create anything — it "
+            "opens a Confirm/Cancel card in the app; only an operator click runs the "
+            "write. Pass collection_id + title (and optionally a parent_folder_id to "
+            "nest it). After calling, STOP and wait for a [SYSTEM: operator "
+            "confirmed/cancelled …] message — you cannot run the write yourself."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "collection_id": {"type": "string", "description": "The Guru collection to create the folder in."},
+                "title": {"type": "string", "description": "The new folder's title."},
+                "collection_name": {"type": "string", "description": "Optional collection name, for the confirmation summary only."},
+                "parent_folder_id": {"type": "string", "description": "Optional parent folder id to nest under (omit for a top-level folder)."},
+                "parent_folder_name": {"type": "string", "description": "Optional parent folder name, for the confirmation summary only."},
+            },
+            "required": ["collection_id", "title"],
+        },
+    },
+    {
+        "name": "request_rename_guru_folder",
+        "description": (
+            "PROPOSE renaming a Guru folder. This does NOT rename anything — it opens "
+            "a Confirm/Cancel card in the app; only an operator click runs the write. "
+            "Pass folder_id + new_title. After calling, STOP and wait for a [SYSTEM: "
+            "operator confirmed/cancelled …] message — you cannot run the write "
+            "yourself. (There is NO way to DELETE a Guru folder via the app — to "
+            "delete one, the operator must do it in the Guru web app.)"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "folder_id": {"type": "string", "description": "The Guru folder id to rename."},
+                "new_title": {"type": "string", "description": "The folder's new title."},
+                "current_name": {"type": "string", "description": "Optional current folder name, for the confirmation summary only."},
+            },
+            "required": ["folder_id", "new_title"],
+        },
+    },
+    {
+        "name": "request_create_asana_task",
+        "description": (
+            "PROPOSE creating a new Asana task. This does NOT create anything — it "
+            "opens a Confirm/Cancel card in the app; only an operator click runs the "
+            "write. Pass project_gid + name (and optionally notes, due_on). After "
+            "calling, STOP and wait for a [SYSTEM: operator confirmed/cancelled …] "
+            "message — you cannot run the write yourself."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "project_gid": {"type": "string", "description": "The Asana project/board gid to create the task in."},
+                "name": {"type": "string", "description": "The task name."},
+                "board_name": {"type": "string", "description": "Optional board name, for the confirmation summary only."},
+                "notes": {"type": "string", "description": "Optional task notes/description."},
+                "due_on": {"type": "string", "description": "Optional due date (YYYY-MM-DD)."},
+            },
+            "required": ["project_gid", "name"],
+        },
+    },
+    {
+        "name": "get_enablement_routing",
+        "description": (
+            "Report the CURRENT enablement routing so you can answer 'what's set "
+            "up'. Returns drive {active_folder_ids, count, configured}, asana "
+            "{active_board_gid, active_board_name, connected}, and guru "
+            "{publish_collection_id, publish_folder_id, connected}. Read-only — it "
+            "reads saved settings, opens nothing. NOTE: the Drive block gives "
+            "folder IDS and a count, never folder NAMES — do not ask for or echo a "
+            "Drive folder name."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "list_guru_cards",
+        "description": (
+            "LIST (enumerate) every card in a Guru collection — DETERMINISTIC and "
+            "COMPLETE (paginates to the end). THE tool that answers 'what cards are "
+            "in this collection'; reports the total count. Prefer this over "
+            "search_guru_cards when you need ALL cards. Returns cards [{id, title, "
+            "collection_name, verification_state?}]."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "collection_id": {"type": "string", "description": "The Guru collection id to enumerate."},
+                "limit": {"type": "integer", "description": "Max cards in the returned window (default 100)."},
+                "offset": {"type": "integer", "description": "Skip this many cards (paging; default 0)."},
+            },
+            "required": ["collection_id"],
+        },
+    },
+    {
+        "name": "list_guru_folder_items",
+        "description": (
+            "LIST (enumerate) a Guru folder's items — cards AND nested sub-folders. "
+            "DETERMINISTIC; answers 'what's in this folder'. Returns items [{id, "
+            "item_id, type ('card'|'folder'), title}]. Recurse into a sub-folder by "
+            "calling again with its id."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "folder_id": {"type": "string", "description": "The Guru folder id to enumerate."},
+            },
+            "required": ["folder_id"],
+        },
+    },
+    {
+        "name": "search_zendesk_articles",
+        "description": (
+            "SEARCH the Zendesk Help Center by query — query-ranked and MAY MISS "
+            "articles. To ENUMERATE the Help Center completely use "
+            "list_zendesk_articles. Returns articles [{id, title, html_url, "
+            "section}]. Returns zendesk_not_connected when creds aren't configured."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "What to search the Help Center for."},
+                "limit": {"type": "integer", "description": "Max articles to return (default 25)."},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "list_zendesk_articles",
+        "description": (
+            "LIST (enumerate) the Zendesk Help Center articles — DETERMINISTIC and "
+            "COMPLETE; reports the total count. Returns articles [{id, title, "
+            "html_url, section}]. Returns zendesk_not_connected when creds aren't "
+            "configured."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "description": "Max articles in the returned window (default 100)."},
+                "offset": {"type": "integer", "description": "Skip this many articles (paging; default 0)."},
+            },
+        },
+    },
+    {
+        "name": "list_zendesk_macros",
+        "description": (
+            "LIST the Zendesk account's macros (id, title, active). Returns "
+            "zendesk_not_connected when creds aren't configured."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "description": "Max macros to return (default 100)."},
+            },
+        },
+    },
+    {
+        "name": "search_asana_tasks",
+        "description": (
+            "SEARCH the tasks on an Asana board by a case-insensitive NAME substring "
+            "(lists the paginated board, then filters by name). Omit project_gid to "
+            "search the active board. Use list_asana_tasks to enumerate ALL tasks. "
+            "Returns matched tasks [{name, due_on, permalink_url, assignee_name}] + a count."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "Case-insensitive substring to match in task names."},
+                "project_gid": {"type": "string", "description": "Optional — the Asana board gid (defaults to the active board)."},
+            },
+            "required": ["text"],
+        },
+    },
+    {
+        "name": "search_content",
+        "description": (
+            "UNIFIED cross-source SEARCH. Fan out ONE query to LIVE Guru cards + Zendesk "
+            "Help Center + Drive docs at once and return a single merged list, each result "
+            "LABELED with its source ({source, title, id, snippet, url?}). Use this to "
+            "check 'do we have anything on X ANYWHERE'. It is QUERY-RANKED (may be partial) "
+            "— to ENUMERATE a whole collection/folder/board use a LIST tool (list_guru_cards, "
+            "list_guru_folder_items, list_zendesk_articles, list_asana_tasks) instead. A "
+            "source that isn't connected is SKIPPED (its status is reported under 'sources') "
+            "and never fails the call. Read-only."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "What to search for across sources."},
+                "sources": {"type": "array", "items": {"type": "string"},
+                            "description": "Optional subset to fan out to: guru | zendesk | drive (default all three)."},
+                "limit": {"type": "integer", "description": "Max merged results to return (default 8)."},
+            },
+            "required": ["query"],
+        },
+    },
+    {
         "name": "search_local_documents",
         "description": (
             "Search the enablement document library stored locally — source "
@@ -943,6 +1265,179 @@ def _ent_conn(db):
     return db.get_connection() if hasattr(db, 'get_connection') else db.conn
 
 
+def _request_google_connect(args: dict, db) -> str:
+    """Resolver twin (Claude path). Returns ONLY the minimal wait STRING — the
+    action envelope/request_id never rides the model-visible result (invariant 3).
+    Session id comes from the active-session pointer (the enablement chat runs the
+    Claude path through the same MCP subprocess + pointer file)."""
+    from src.data.chat_tools.enablement_tools import (
+        _active_session_id, _request_google_connect_impl)
+    return _request_google_connect_impl(_ent_conn(db), _active_session_id())
+
+
+def _request_drive_picker(args: dict, db) -> str:
+    """Resolver twin (Claude path). Returns ONLY the minimal wait STRING — the
+    action envelope/request_id never rides the model-visible result (invariant 3)."""
+    from src.data.chat_tools.enablement_tools import (
+        _active_session_id, _request_drive_picker_impl)
+    return _request_drive_picker_impl(_ent_conn(db), _active_session_id())
+
+
+def _set_drive_folder(args: dict, db) -> dict:
+    """Scoped-write twin (Claude path). Human-gated by-id Drive folder write —
+    refuses with needs_picker while a picker is open for the session (invariant 5)."""
+    from src.data.chat_tools.enablement_tools import (
+        _active_session_id, _set_drive_folder_gated)
+    return _set_drive_folder_gated(
+        _ent_conn(db), _active_session_id(),
+        args.get("folder_id"), args.get("folder_name"), args.get("drive_id"))
+
+
+def _request_asana_board_picker(args: dict, db) -> str:
+    """Resolver twin (Claude path). Returns ONLY the minimal wait STRING — the
+    action envelope/request_id never rides the model-visible result (invariant 3)."""
+    from src.data.chat_tools.enablement_tools import (
+        _active_session_id, _request_asana_board_picker_impl)
+    return _request_asana_board_picker_impl(_ent_conn(db), _active_session_id())
+
+
+def _list_asana_projects(args: dict, db) -> dict:
+    """Live read twin (Claude path). Projects the shared PAT can see (gid+name)."""
+    from src.data.chat_tools.enablement_tools import _list_asana_projects_impl
+    return _list_asana_projects_impl(_ent_conn(db))
+
+
+def _list_asana_tasks(args: dict, db) -> dict:
+    """Live read twin (Claude path). Tasks on a board, filtered + defaulting to the
+    active board — the tool that answers 'what tasks are on the board'."""
+    from src.data.chat_tools.enablement_tools import _list_asana_tasks_impl
+    return _list_asana_tasks_impl(_ent_conn(db), args.get("project_gid"))
+
+
+def _set_asana_board(args: dict, db) -> dict:
+    """Scoped-write twin (Claude path). Human-gated by-gid Asana board write —
+    refuses with needs_picker while a picker is open for the session (invariant 5)."""
+    from src.data.chat_tools.enablement_tools import (
+        _active_session_id, _set_asana_board_gated)
+    return _set_asana_board_gated(
+        _ent_conn(db), _active_session_id(),
+        args.get("project_gid"), args.get("project_name"))
+
+
+def _search_asana_tasks(args: dict, db) -> dict:
+    """Search-read twin (Claude path). Substring name search over the board tasks."""
+    from src.data.chat_tools.enablement_tools import _search_asana_tasks_impl
+    return _search_asana_tasks_impl(_ent_conn(db), args.get("text", ""),
+                                    project_gid=args.get("project_gid"))
+
+
+def _list_guru_cards(args: dict, db) -> dict:
+    """LIST twin (Claude path). Deterministic complete enumeration of a collection."""
+    from src.data.chat_tools.enablement_tools import _list_guru_cards_impl
+    return _list_guru_cards_impl(_ent_conn(db), args.get("collection_id"),
+                                 limit=args.get("limit", 100),
+                                 offset=args.get("offset", 0))
+
+
+def _list_guru_folder_items(args: dict, db) -> dict:
+    """LIST twin (Claude path). Enumerate a folder's cards + sub-folders."""
+    from src.data.chat_tools.enablement_tools import _list_guru_folder_items_impl
+    return _list_guru_folder_items_impl(_ent_conn(db), args.get("folder_id"))
+
+
+def _search_zendesk_articles(args: dict, db) -> dict:
+    """Search twin (Claude path). Query-ranked Help Center search."""
+    from src.data.chat_tools.enablement_tools import _search_zendesk_articles_impl
+    return _search_zendesk_articles_impl(_ent_conn(db), args.get("query", ""),
+                                         limit=args.get("limit", 25))
+
+
+def _list_zendesk_articles(args: dict, db) -> dict:
+    """LIST twin (Claude path). Deterministic Help Center enumeration."""
+    from src.data.chat_tools.enablement_tools import _list_zendesk_articles_impl
+    return _list_zendesk_articles_impl(_ent_conn(db), limit=args.get("limit", 100),
+                                       offset=args.get("offset", 0))
+
+
+def _list_zendesk_macros(args: dict, db) -> dict:
+    """LIST twin (Claude path). Zendesk macros list."""
+    from src.data.chat_tools.enablement_tools import _list_zendesk_macros_impl
+    return _list_zendesk_macros_impl(_ent_conn(db), limit=args.get("limit", 100))
+
+
+def _search_content(args: dict, db) -> dict:
+    """UNIFIED cross-source SEARCH twin (Claude path). Fans out to the live
+    Guru/Zendesk/Drive search impls, merges + labels by source, degrades
+    per-source (a not-connected source is skipped, reported in `sources`)."""
+    from src.data.chat_tools.enablement_tools import _search_content_impl
+    return _search_content_impl(_ent_conn(db), args.get("query", ""),
+                                sources=args.get("sources"),
+                                limit=args.get("limit", 8))
+
+
+def _request_guru_publish_picker(args: dict, db) -> str:
+    """Resolver twin (Claude path). Returns ONLY the minimal wait STRING — the
+    action envelope/request_id never rides the model-visible result (invariant 3)."""
+    from src.data.chat_tools.enablement_tools import (
+        _active_session_id, _request_guru_publish_picker_impl)
+    return _request_guru_publish_picker_impl(_ent_conn(db), _active_session_id())
+
+
+def _set_guru_publish_target(args: dict, db) -> dict:
+    """Scoped-write twin (Claude path). Human-gated by-id Guru publish-target write —
+    refuses with needs_picker while a picker is open for the session (invariant 5).
+    folder_id is optional (collection-level publish)."""
+    from src.data.chat_tools.enablement_tools import (
+        _active_session_id, _set_guru_publish_target_gated)
+    return _set_guru_publish_target_gated(
+        _ent_conn(db), _active_session_id(),
+        args.get("collection_id"), args.get("folder_id"))
+
+
+def _request_create_guru_folder(args: dict, db) -> str:
+    """Write-propose twin (Claude path). Opens a Confirm card; returns ONLY the
+    minimal wait STRING — no request_id, no direct-execute path (M7b)."""
+    from src.data.chat_tools.enablement_tools import (
+        _active_session_id, _request_create_guru_folder_impl)
+    return _request_create_guru_folder_impl(
+        _ent_conn(db), _active_session_id(),
+        args.get("collection_id"), args.get("title"),
+        collection_name=args.get("collection_name"),
+        parent_folder_id=args.get("parent_folder_id"),
+        parent_folder_name=args.get("parent_folder_name"))
+
+
+def _request_rename_guru_folder(args: dict, db) -> str:
+    """Write-propose twin (Claude path). Opens a Confirm card; returns ONLY the
+    minimal wait STRING — no request_id, no direct-execute path (M7b)."""
+    from src.data.chat_tools.enablement_tools import (
+        _active_session_id, _request_rename_guru_folder_impl)
+    return _request_rename_guru_folder_impl(
+        _ent_conn(db), _active_session_id(),
+        args.get("folder_id"), args.get("new_title"),
+        current_name=args.get("current_name"))
+
+
+def _request_create_asana_task(args: dict, db) -> str:
+    """Write-propose twin (Claude path). Opens a Confirm card; returns ONLY the
+    minimal wait STRING — no request_id, no direct-execute path (M7b)."""
+    from src.data.chat_tools.enablement_tools import (
+        _active_session_id, _request_create_asana_task_impl)
+    return _request_create_asana_task_impl(
+        _ent_conn(db), _active_session_id(),
+        args.get("project_gid"), args.get("name"),
+        board_name=args.get("board_name"),
+        notes=args.get("notes"), due_on=args.get("due_on"))
+
+
+def _get_enablement_routing(args: dict, db) -> dict:
+    """Read-only routing report twin (Claude path). SETTINGS + keyring presence
+    ONLY — never google_oauth.is_active() (invariant 15). Drive block returns ids
+    + a configured flag, never folder names (invariant 13)."""
+    from src.data.chat_tools.enablement_tools import _get_enablement_routing_impl
+    return _get_enablement_routing_impl(_ent_conn(db))
+
+
 def _create_card_draft(args: dict, db) -> dict:
     from src.data.chat_tools.enablement_tools import _create_card_draft_impl
     return _create_card_draft_impl(_ent_conn(db), args.get("title", ""), args.get("content", ""))
@@ -1083,6 +1578,26 @@ _DISPATCH = {
     "propose_guru_edit": _propose_guru_edit,
     "query_issues": _query_issues,
     "audit_tag_correlation": _audit_tag_correlation,
+    "request_google_connect": _request_google_connect,
+    "request_drive_picker": _request_drive_picker,
+    "set_drive_folder": _set_drive_folder,
+    "request_asana_board_picker": _request_asana_board_picker,
+    "list_asana_projects": _list_asana_projects,
+    "list_asana_tasks": _list_asana_tasks,
+    "search_asana_tasks": _search_asana_tasks,
+    "set_asana_board": _set_asana_board,
+    "list_guru_cards": _list_guru_cards,
+    "list_guru_folder_items": _list_guru_folder_items,
+    "search_zendesk_articles": _search_zendesk_articles,
+    "list_zendesk_articles": _list_zendesk_articles,
+    "list_zendesk_macros": _list_zendesk_macros,
+    "search_content": _search_content,
+    "request_guru_publish_picker": _request_guru_publish_picker,
+    "set_guru_publish_target": _set_guru_publish_target,
+    "request_create_guru_folder": _request_create_guru_folder,
+    "request_rename_guru_folder": _request_rename_guru_folder,
+    "request_create_asana_task": _request_create_asana_task,
+    "get_enablement_routing": _get_enablement_routing,
     "search_local_documents": _search_local_documents,
     "query_business_drive": _query_business_drive,
     "asana_discover": _asana_discover,

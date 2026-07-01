@@ -98,6 +98,64 @@ class DriveReader:
         except Exception as e:  # noqa: BLE001
             return False, f"Connection failed: {e}"
 
+    def list_drives(self) -> list[dict]:
+        """Enumerate the Drives the connected account can browse.
+
+        Returns a synthetic My Drive entry FIRST (id='root', the alias the
+        Drive API accepts as a `parents` target for the user's personal drive),
+        then one entry per Shared Drive via drives().list. Pages through
+        nextPageToken. Honors the disable-on-launch gate: if Drive read is not
+        configured/active this session, returns [] WITHOUT building a service —
+        no Drive call at import/boot.
+        """
+        if not self.is_configured():
+            return []
+        svc = self._build_service()
+        drives: list[dict] = [{"id": "root", "name": "My Drive", "is_my_drive": True}]
+        page_token = None
+        while True:
+            resp = svc.drives().list(
+                pageSize=100, pageToken=page_token, fields="nextPageToken, drives(id, name)",
+            ).execute()
+            for d in resp.get("drives", []):
+                drives.append({"id": d.get("id"), "name": d.get("name"),
+                               "is_my_drive": False})
+            page_token = resp.get("nextPageToken")
+            if not page_token:
+                break
+        return drives
+
+    def list_folders(self, parent_id: str) -> list[dict]:
+        """List immediate child FOLDERS of parent_id (id+name+driveId ONLY).
+
+        parent_id may be 'root' (My Drive). corpora='allDrives' +
+        includeItemsFromAllDrives + supportsAllDrives so Shared-Drive folders
+        are visible. Returns no file bodies — only folder rows for lazy-tree
+        navigation. Honors the disable-on-launch gate (returns [] without
+        building a service when not configured/active).
+        """
+        if not self.is_configured():
+            return []
+        svc = self._build_service()
+        q = (f"{_q(parent_id)} in parents "
+             "and mimeType = 'application/vnd.google-apps.folder' "
+             "and trashed = false")
+        folders: list[dict] = []
+        page_token = None
+        while True:
+            resp = svc.files().list(
+                q=q, corpora="allDrives", includeItemsFromAllDrives=True,
+                supportsAllDrives=True, pageSize=100, pageToken=page_token,
+                fields="nextPageToken, files(id, name, driveId)",
+            ).execute()
+            for f in resp.get("files", []):
+                folders.append({"id": f.get("id"), "name": f.get("name"),
+                                "drive_id": f.get("driveId")})
+            page_token = resp.get("nextPageToken")
+            if not page_token:
+                break
+        return folders
+
     def list_changed_files(self, folder_id: str, *, modified_after: str | None = None,
                            recursive: bool = True, mime_types: list[str] | None = None) -> list[dict]:
         """Files in a folder changed since modified_after (incremental watermark)."""
@@ -113,7 +171,9 @@ class DriveReader:
         page_token = None
         while True:
             resp = svc.files().list(
-                q=q, pageSize=100, pageToken=page_token, orderBy="modifiedTime",
+                q=q, corpora="allDrives", includeItemsFromAllDrives=True,
+                supportsAllDrives=True, pageSize=100, pageToken=page_token,
+                orderBy="modifiedTime",
                 fields="nextPageToken, files(id, name, mimeType, modifiedTime, webViewLink)",
             ).execute()
             files.extend(resp.get("files", []))
@@ -126,7 +186,7 @@ class DriveReader:
         """Metadata for a single file (the import-by-URL Workbench path)."""
         svc = self._build_service()
         f = svc.files().get(
-            fileId=file_id,
+            fileId=file_id, supportsAllDrives=True,
             fields="id, name, mimeType, webViewLink, modifiedTime",
         ).execute()
         return {
@@ -152,7 +212,9 @@ class DriveReader:
         q = (f"fullText contains {_q(query)} and trashed = false"
              if query else "trashed = false")
         resp = svc.files().list(
-            q=q, pageSize=limit, fields="files(id, name, mimeType, webViewLink)").execute()
+            q=q, corpora="allDrives", includeItemsFromAllDrives=True,
+            supportsAllDrives=True, pageSize=limit,
+            fields="files(id, name, mimeType, webViewLink)").execute()
         return [{"name": f.get("name"), "id": f.get("id"),
                  "url": f.get("webViewLink"), "mime_type": f.get("mimeType")}
                 for f in resp.get("files", [])]

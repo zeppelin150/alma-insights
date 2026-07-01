@@ -235,3 +235,135 @@ body {
   padding: 10px 18px; font-size: 14px; font-weight: 600; cursor: pointer;
 }
 .composer .send:disabled { opacity: 0.5; cursor: default; }
+
+/* ── connect & configure pickers (M2–M5) ──────────────────── */
+.action-drawer { width: 360px; }
+.action-drawer .drawer-list { padding: 8px 10px; }
+
+/* shared selectable row — drive tree / asana boards / guru levels */
+.drive-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 10px; border-radius: 9px;
+}
+.drive-row:hover { background: var(--bg); }
+.drive-name {
+  flex: 1; min-width: 0; font-size: 13px; font-weight: 600; color: var(--ink);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.drive-pick {
+  flex-shrink: 0; background: transparent; color: var(--accent);
+  border: 1px solid #CFE0D6; border-radius: 7px; padding: 5px 12px;
+  font-size: 12px; font-weight: 600; cursor: pointer;
+  transition: background .12s ease, color .12s ease, border-color .12s ease;
+}
+.drive-row:hover .drive-pick,
+.drive-pick:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
+.drive-pick:disabled,
+.drive-row:hover .drive-pick:disabled {
+  opacity: .5; background: transparent; color: var(--light); border-color: var(--line);
+}
+
+/* leading icon tiles for the flat lists */
+.asana-board-row::before,
+.guru-collection-row::before,
+.guru-folder-row::before {
+  content: ""; flex-shrink: 0; width: 30px; height: 30px; border-radius: 8px;
+  background-color: #F1EFE8; background-repeat: no-repeat;
+  background-position: center; background-size: 17px;
+}
+.asana-board-row:hover::before,
+.guru-collection-row:hover::before,
+.guru-folder-row:hover::before { background-color: #E3F0EA; }
+.asana-board-row::before {
+  background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="%230F6E56" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="6" height="16" rx="1.5"/><rect x="14" y="4" width="6" height="11" rx="1.5"/></svg>');
+}
+.guru-collection-row::before {
+  background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="%230F6E56" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 19a9 9 0 0 1 9 0a9 9 0 0 1 9 0"/><path d="M3 6a9 9 0 0 1 9 0a9 9 0 0 1 9 0"/><path d="M3 6v13"/><path d="M12 6v13"/><path d="M21 6v13"/></svg>');
+}
+.guru-folder-row::before,
+.drive-tree .drive-name::before {
+  background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="%230F6E56" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h4l3 3h7a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-11a2 2 0 0 1 2 -2"/></svg>');
+}
+
+/* drive tree */
+.drive-tree { padding: 2px 0; }
+.drive-twisty {
+  flex-shrink: 0; width: 16px; height: 16px; padding: 0; line-height: 1;
+  background: transparent; border: none; color: var(--light);
+  font-size: 10px; cursor: pointer;
+}
+.drive-twisty:hover { color: var(--accent); }
+.drive-tree .drive-name::before {
+  content: ""; display: inline-block; width: 16px; height: 16px;
+  margin-right: 7px; vertical-align: -3px; background-repeat: no-repeat;
+  background-position: center; background-size: 16px;
+}
+.drive-children { margin-left: 2px; }
+.drive-loading, .drive-error, .drive-empty-node {
+  font-size: 12px; color: var(--light); padding: 7px 12px;
+}
+.drive-error { color: var(--err); }
+
+/* search field (asana boards) */
+.asana-board-list { padding-top: 2px; }
+.asana-search {
+  width: calc(100% - 4px); box-sizing: border-box; margin: 2px 2px 8px;
+  padding: 8px 11px 8px 32px; border: 1px solid var(--line); border-radius: 9px;
+  font-size: 13px; outline: none; color: var(--ink);
+  background: #fff url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="%239AA39C" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="10" r="7"/><path d="M21 21l-6 -6"/></svg>') 10px center / 15px no-repeat;
+}
+.asana-search:focus { border-color: var(--accent); }
+
+/* not-connected / empty hints */
+.drive-connect-hint, .asana-connect-hint, .guru-connect-hint {
+  text-align: center; padding: 26px 18px; color: var(--mid);
+}
+.drive-connect-hint p, .asana-connect-hint p, .guru-connect-hint p {
+  font-size: 12.5px; line-height: 1.5; margin: 0 0 12px;
+}
+
+/* connect-google card */
+.connect-card { padding: 6px 4px 4px; }
+.connect-card > p {
+  font-size: 12.5px; line-height: 1.55; color: var(--mid); margin: 4px 6px 12px;
+}
+.connect-note {
+  font-size: 12px; line-height: 1.45; margin: 0 6px 12px; padding: 9px 11px;
+  border-radius: 8px; border: 1px solid var(--line);
+}
+.connect-warn { background: #FBF3DC; border-color: #EAD9A8; color: #8A6D1C; }
+.connect-ok { background: #D9EFE2; border-color: #CDE7DB; color: var(--accent); }
+.connect-err { background: #F7E2E2; border-color: #E7C4C4; color: var(--err); }
+.connect-btn {
+  width: calc(100% - 12px); margin: 2px 6px 0; background: var(--accent); color: #fff;
+  border: none; border-radius: 9px; padding: 10px 14px; font-size: 13px;
+  font-weight: 600; cursor: pointer;
+}
+.connect-btn:hover:not(:disabled) { background: var(--green); }
+.connect-btn:disabled { opacity: .5; cursor: default; }
+.connect-btn.connecting { background: var(--green); opacity: .85; }
+
+/* gated write Confirm/Cancel card (M7b) — reuses .drawer / .connect-card */
+.confirm-write .confirm-summary {
+  font-size: 13px; line-height: 1.55; color: var(--ink); font-weight: 500;
+  margin: 4px 6px 14px;
+}
+.confirm-write .confirm-actions { display: flex; gap: 8px; margin: 0 6px; }
+.confirm-write .confirm-actions .connect-btn { width: auto; flex: 1; margin: 0; }
+.confirm-write .confirm-yes { background: var(--accent); color: #fff; }
+.confirm-write .confirm-no { background: var(--line); color: var(--ink); }
+.confirm-write .confirm-no:hover:not(:disabled) { background: var(--mid); color: #fff; }
+
+/* guru two-level extras */
+.drawer-back {
+  flex-shrink: 0; background: transparent; border: none; color: var(--mid);
+  font-size: 20px; line-height: 1; cursor: pointer; padding: 0 8px 0 0;
+}
+.drawer-back:hover { color: var(--accent); }
+.guru-collection-level-btn {
+  width: calc(100% - 4px); margin: 2px 2px 8px; padding: 8px 11px;
+  background: var(--bg); border: 1px dashed var(--line); border-radius: 9px;
+  font-size: 12px; color: var(--mid); cursor: pointer; text-align: left;
+}
+.guru-collection-level-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.guru-collection-level-btn:disabled { opacity: .5; cursor: default; }

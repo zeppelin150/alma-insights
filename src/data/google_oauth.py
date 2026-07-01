@@ -31,8 +31,27 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 
 logger = logging.getLogger("alma.google_oauth")
+
+
+def _refuse_in_subprocess(fn_name: str) -> None:
+    """Hard-refuse live-credential access from the MCP tool subprocess.
+
+    Invariant 15 — tokens never cross the subprocess boundary. The resolver
+    tools run in the MCP subprocess (``ALMA_MCP_MODE`` set by the host); they
+    must NEVER load/refresh OAuth credentials. All Google HTTP runs in the main
+    process (the controller's worker thread). This guard makes the credential
+    setters/getters raise if ever called there, so a future code path can't
+    accidentally pull a refresh token into the subprocess.
+    """
+    if os.environ.get("ALMA_MCP_MODE"):
+        raise RuntimeError(
+            f"google_oauth.{fn_name}() is refused in the MCP tool subprocess "
+            "(ALMA_MCP_MODE set): OAuth tokens never cross the subprocess "
+            "boundary. Google access runs in the main process only."
+        )
 
 _SCOPES = [
     "https://www.googleapis.com/auth/drive.readonly",
@@ -195,6 +214,7 @@ def has_stored_credentials() -> bool:
 
 def is_active() -> bool:
     """True only after an explicit reconnect() this session."""
+    _refuse_in_subprocess("is_active")
     return _active is not None
 
 
@@ -221,6 +241,7 @@ def load_active_credentials():
     Honors disable-on-launch: returns None unless reconnect() has run this
     session. Never triggers a browser; refreshes silently when expired.
     """
+    _refuse_in_subprocess("load_active_credentials")
     return _active
 
 
@@ -229,6 +250,7 @@ def reconnect():
     of the live credentials). Silent — refreshes the access token from the
     stored refresh token; opens NO browser. Returns Credentials or None.
     """
+    _refuse_in_subprocess("reconnect")
     global _active
     record = _stored_record()
     if record is None:

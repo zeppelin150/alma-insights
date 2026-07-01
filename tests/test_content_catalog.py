@@ -99,11 +99,13 @@ def test_index_and_search_content_tools(empty_db, monkeypatch):
     monkeypatch.setattr(cf, "build_client_for_task", lambda task, use_bridge=False: None)
     idx = et.handle_index_content(conn, {"scope": "docs"}, {})
     assert idx["ok"] and idx["indexed"] == 2
-    res = et.handle_search_content(conn, {"query": "telehealth waiver"}, {})
+    # The local summary-catalog search is now `search_catalog` (the tool named
+    # `search_content` became the UNIFIED cross-source fan-out in M9 part 2).
+    res = et.handle_search_catalog(conn, {"query": "telehealth waiver"}, {})
     assert res["ok"] and res["count"] >= 1 and res["results"][0]["item_id"] == "doc:t1"
 
 
 def test_search_content_empty_catalog(empty_db):
     import src.data.chat_tools.enablement_tools as et
-    out = et.handle_search_content(empty_db.conn, {"query": "x"}, {})
+    out = et.handle_search_catalog(empty_db.conn, {"query": "x"}, {})
     assert out["ok"] and out["count"] == 0 and "index_content" in out["note"]

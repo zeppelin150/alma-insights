@@ -75,19 +75,24 @@ class TestListCollections(unittest.TestCase):
 
 class TestListCards(unittest.TestCase):
 
-    @patch.object(GuruClient, "_request")
-    def test_list_cards_by_collection(self, mock_req):
-        mock_req.return_value = [
-            {"id": "card1", "preferredPhrase": "Title 1",
-             "content": "Body", "collection": {"name": "Support", "id": "c1"},
-             "lastModified": "2026-03-10"},
-        ]
+    @patch.object(GuruClient, "_request_raw")
+    def test_list_cards_by_collection(self, mock_raw):
+        # list_cards now enumerates via _paged_get (Link-paged), which calls
+        # _request_raw — one page with no next link.
+        mock_raw.return_value = (
+            [{"id": "card1", "preferredPhrase": "Title 1",
+              "content": "Body", "collection": {"name": "Support", "id": "c1"},
+              "lastModified": "2026-03-10"}],
+            {"link": ""},
+        )
         client = GuruClient("a@b.com", "tok")
         result = client.list_cards(collection_id="c1")
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["title"], "Title 1")
         self.assertEqual(result[0]["collection"], "Support")
-        mock_req.assert_called_with("GET", "/collections/c1/cards")
+        # First page targets the collection cards path.
+        self.assertEqual(mock_raw.call_args_list[0].args[:2],
+                         ("GET", "/collections/c1/cards"))
 
 
 class TestGetCard(unittest.TestCase):

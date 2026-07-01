@@ -140,6 +140,53 @@ def _ensure_registered():
         handle_set_active_style_guide,
         handle_run_monitor_now,
     )
+    # ── Resolver tools (M2+): action-only — open an in-chat picker/connect card ──
+    from src.data.chat_tools.enablement_tools import (
+        handle_request_google_connect,
+        handle_request_drive_picker,
+        handle_set_drive_folder,
+        handle_request_asana_board_picker,
+        handle_list_asana_projects,
+        handle_list_asana_tasks,
+        handle_set_asana_board,
+        handle_request_guru_publish_picker,
+        handle_set_guru_publish_target,
+        handle_get_enablement_routing,
+        handle_request_create_guru_folder,
+        handle_request_rename_guru_folder,
+        handle_request_create_asana_task,
+    )
+    _register("request_google_connect", handle_request_google_connect,
+              phi_level=0, desc="Open the in-chat Connect Google card so the operator can authorize Drive read access; returns a wait instruction (the card opens in the app)")
+    _register("request_drive_picker", handle_request_drive_picker,
+              phi_level=0, desc="Open the in-chat Google Drive folder picker so the operator can browse and choose the active folder; returns a wait instruction (the picker opens in the app). STOP and wait for a [SYSTEM: operator selected …] message.")
+    _register("set_drive_folder", handle_set_drive_folder,
+              phi_level=0, desc="Set the active Drive folder by id (fallback when you already know the folder id). Refuses with needs_picker while a folder picker is open — let the operator pick in the app first.")
+    # ── Asana board picker + live reads (M4) ──
+    _register("request_asana_board_picker", handle_request_asana_board_picker,
+              phi_level=0, desc="Open the in-chat Asana board picker so the operator can browse and choose the active board; returns a wait instruction (the picker opens in the app). STOP and wait for a [SYSTEM: operator set the active Asana board …] message.")
+    _register("list_asana_projects", handle_list_asana_projects,
+              phi_level=0, desc="List the Asana projects/boards the shared PAT can see (gid + name). Use to name boards without opening the picker.")
+    _register("list_asana_tasks", handle_list_asana_tasks,
+              phi_level=0, desc="LIST (enumerate) the tasks on an Asana board — paginated to completion (name, due date, link, assignee). Defaults to the active board when project_gid is omitted. THE tool that answers 'what tasks are on the board'; reports the true count.")
+    _register("set_asana_board", handle_set_asana_board,
+              phi_level=0, desc="Set the active Asana board by project_gid (fallback when you already know the gid). Refuses with needs_picker while a board picker is open — let the operator pick in the app first.")
+    # ── Guru publish-target picker (M5) ──
+    _register("request_guru_publish_picker", handle_request_guru_publish_picker,
+              phi_level=0, desc="Open the in-chat Guru publish-target picker so the operator can choose a collection (and optionally a folder) where cards publish; returns a wait instruction (the picker opens in the app). STOP and wait for a [SYSTEM: operator set the Guru publish target …] message.")
+    _register("set_guru_publish_target", handle_set_guru_publish_target,
+              phi_level=0, desc="Set the Guru publish target by collection_id (+ optional folder_id) — fallback when you already know the ids (otherwise use request_guru_publish_picker so the operator picks). Refuses with needs_picker while a publish-target picker is open in the app.")
+    # ── Routing report (M6) ──
+    _register("get_enablement_routing", handle_get_enablement_routing,
+              phi_level=0, desc="Report the CURRENT enablement routing across the 3 touchpoints — the active Drive folder ids + count + a configured flag (NO folder names), the active Asana board (gid + name + connected), and the Guru publish target (collection/folder ids + connected). Read-only; call this to answer 'what's set up'.")
+    # ── Gated write proposals (M7b) — propose a write; the OPERATOR confirms ──
+    _register("request_create_guru_folder", handle_request_create_guru_folder,
+              phi_level=0, desc="PROPOSE creating a new Guru folder (collection_id + title; optional parent_folder_id). Opens a Confirm/Cancel card in the app — it does NOT create the folder. STOP and wait for a [SYSTEM: operator confirmed/cancelled …] message; you cannot run the write yourself.")
+    _register("request_rename_guru_folder", handle_request_rename_guru_folder,
+              phi_level=0, desc="PROPOSE renaming a Guru folder (folder_id + new_title). Opens a Confirm/Cancel card in the app — it does NOT rename. STOP and wait for a [SYSTEM: operator confirmed/cancelled …] message; you cannot run the write yourself. (There is no way to DELETE a Guru folder via the app.)")
+    _register("request_create_asana_task", handle_request_create_asana_task,
+              phi_level=0, desc="PROPOSE creating an Asana task (project_gid + name; optional notes, due_on). Opens a Confirm/Cancel card in the app — it does NOT create the task. STOP and wait for a [SYSTEM: operator confirmed/cancelled …] message; you cannot run the write yourself.")
+
     _register("search_local_documents", handle_search_local_documents,
               phi_level=0, desc="Find stored enablement documents + card drafts by name/topic")
     _register("query_business_drive", handle_query_business_drive,
@@ -213,9 +260,16 @@ def _ensure_registered():
         handle_import_guru_card,
         handle_update_card_from_doc,
         handle_search_guru_cards,
+        handle_list_guru_cards,
+        handle_list_guru_folder_items,
+        handle_search_zendesk_articles,
+        handle_list_zendesk_articles,
+        handle_list_zendesk_macros,
+        handle_search_asana_tasks,
         handle_research_topic,
         handle_open_guru_card,
         handle_index_content,
+        handle_search_catalog,
         handle_search_content,
         handle_update_cards_from_doc,
         handle_card_history,
@@ -233,15 +287,29 @@ def _ensure_registered():
     _register("update_card_from_doc", handle_update_card_from_doc,
               phi_level=0, desc="Review a source doc, find the existing Guru card, identify changes, write the update, and stage a draft for review")
     _register("search_guru_cards", handle_search_guru_cards,
-              phi_level=0, desc="Search LIVE Guru for existing cards by topic/title (returns id, title, snippet)")
+              phi_level=0, desc="SEARCH LIVE Guru for cards by topic/title — query-ranked, MAY MISS cards that don't match (returns id, title, snippet; offset for paging). To ENUMERATE a whole collection completely use list_guru_cards; for a folder's contents use list_guru_folder_items.")
+    _register("list_guru_cards", handle_list_guru_cards,
+              phi_level=0, desc="LIST (enumerate) every card in a Guru collection — DETERMINISTIC + COMPLETE (paginates to the end). Answers 'what cards are in this collection'; reports the total count. Prefer this over search_guru_cards when you need ALL cards in a collection.")
+    _register("list_guru_folder_items", handle_list_guru_folder_items,
+              phi_level=0, desc="LIST (enumerate) a Guru folder's items — cards AND nested sub-folders (id, item_id, type, title). DETERMINISTIC; answers 'what's in this folder'. Recurse into sub-folders with another call.")
+    _register("search_zendesk_articles", handle_search_zendesk_articles,
+              phi_level=0, desc="SEARCH the Zendesk Help Center by query — query-ranked, MAY MISS articles. To enumerate the Help Center completely use list_zendesk_articles. Degrades to zendesk_not_connected when creds are absent.")
+    _register("list_zendesk_articles", handle_list_zendesk_articles,
+              phi_level=0, desc="LIST (enumerate) the Zendesk Help Center articles — DETERMINISTIC + COMPLETE; reports the total count (id, title, url, section). Degrades to zendesk_not_connected when creds are absent.")
+    _register("list_zendesk_macros", handle_list_zendesk_macros,
+              phi_level=0, desc="LIST (enumerate) the Zendesk account's macros — DETERMINISTIC + COMPLETE (id, title, active). Degrades to zendesk_not_connected when creds are absent.")
+    _register("search_asana_tasks", handle_search_asana_tasks,
+              phi_level=0, desc="SEARCH the tasks on an Asana board by a case-insensitive name substring (lists the paginated board, then filters by name). Defaults to the active board when project_gid is omitted.")
     _register("research_topic", handle_research_topic,
               phi_level=1, desc="Gather reference points on a topic from every source: Guru cards + local docs + ticket signals")
     _register("open_guru_card", handle_open_guru_card,
               phi_level=0, desc="Open a Guru card in the operator's default web browser by id or URL")
     _register("index_content", handle_index_content,
               phi_level=0, desc="Build/refresh the summary catalog over PHI-free content (docs + Guru cards) for fast scalable search")
+    _register("search_catalog", handle_search_catalog,
+              phi_level=0, desc="Deterministic hybrid search over the LOCAL content-catalog summaries (torch-free; disambiguates look-alike titles by content). Needs index_content run first. For a LIVE cross-source lookup use search_content.")
     _register("search_content", handle_search_content,
-              phi_level=0, desc="Deterministic hybrid search over the content catalog summaries (torch-free; disambiguates look-alike titles by content)")
+              phi_level=0, desc="UNIFIED cross-source SEARCH: fan out one query to LIVE Guru + Zendesk + Drive search and return one merged list, each result LABELED with its source. Answers 'do we have anything on X ANYWHERE'. Query-ranked (may be partial); to ENUMERATE a collection/folder/board use a LIST tool (list_guru_cards / list_zendesk_articles / list_asana_tasks). A not-connected source is skipped (reported in sources), never fatal. sources? filters the fan-out; limit? default 8.")
     _register("update_cards_from_doc", handle_update_cards_from_doc,
               phi_level=0, desc="Fan-out: find the SET of Guru cards a source doc affects and stage an update for each changed card (human-gated publish)")
     _register("card_history", handle_card_history,

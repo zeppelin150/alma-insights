@@ -28,11 +28,31 @@ class AgentPage(QWidget):
     (a real ``ChatEngine`` in production, a fake in tests)."""
 
     def __init__(self, engine, send_fn=None, tool_poll=None, session_api=None,
-                 job_poll=None, draft_api=None, voice=None, parent=None):
+                 job_poll=None, draft_api=None, voice=None, action_poll=None,
+                 connect_fn=None, google_state_signal=None, list_fn=None,
+                 resolve_fn=None, drive_folders_signal=None,
+                 action_resolved_signal=None, asana_list_fn=None,
+                 asana_resolve_fn=None, asana_projects_signal=None,
+                 guru_list_fn=None, guru_resolve_fn=None,
+                 guru_targets_signal=None, confirm_fn=None, cancel_fn=None,
+                 parent=None):
         super().__init__(parent)
         self.bridge = ChatBridge(engine, send_fn=send_fn, tool_poll=tool_poll,
                                  session_api=session_api, job_poll=job_poll,
-                                 draft_api=draft_api, voice=voice, parent=self)
+                                 draft_api=draft_api, voice=voice,
+                                 action_poll=action_poll, connect_fn=connect_fn,
+                                 google_state_signal=google_state_signal,
+                                 list_fn=list_fn, resolve_fn=resolve_fn,
+                                 drive_folders_signal=drive_folders_signal,
+                                 action_resolved_signal=action_resolved_signal,
+                                 asana_list_fn=asana_list_fn,
+                                 asana_resolve_fn=asana_resolve_fn,
+                                 asana_projects_signal=asana_projects_signal,
+                                 guru_list_fn=guru_list_fn,
+                                 guru_resolve_fn=guru_resolve_fn,
+                                 guru_targets_signal=guru_targets_signal,
+                                 confirm_fn=confirm_fn, cancel_fn=cancel_fn,
+                                 parent=self)
         self.view = QWebEngineView(self)
         # Let the file:// page load its sibling qwebchannel.js (classic script).
         try:

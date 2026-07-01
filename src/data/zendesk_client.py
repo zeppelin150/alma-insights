@@ -298,6 +298,30 @@ class ZendeskClient(SourceClient):
                 raise ZendeskRateLimitError(retry) from exc
             raise
 
+    def _paged(self, key: str, path: str, *, max_pages: int = 50) -> tuple[list, int]:
+        """Enumerate a Zendesk offset-paginated collection to completion.
+
+        Follows the ``next_page`` full-URL cursor (``_get`` accepts an absolute
+        URL) up to ``max_pages`` and returns ``(items, total)`` — ``total`` is
+        Zendesk's own ``count`` (the true collection size), falling back to the
+        number actually fetched. This is what makes the LIST tools complete
+        rather than single-page.
+        """
+        items: list = []
+        total: int | None = None
+        url: str | None = path
+        for _ in range(max_pages):
+            data = self._get(url)
+            if not isinstance(data, dict):
+                break
+            items.extend(data.get(key, []) or [])
+            if total is None and isinstance(data.get("count"), int):
+                total = data["count"]
+            url = data.get("next_page")
+            if not url:
+                break
+        return items, (total if total is not None else len(items))
+
     def _write(self, method: str, path: str, body: dict) -> dict:
         """Authenticated POST/PUT with a JSON body (Help Center + macros)."""
         url = f"{self._base}{path}"
@@ -332,6 +356,13 @@ class ZendeskClient(SourceClient):
         data = self._get(f"/help_center/{locale}/articles.json?per_page={per_page}")
         return data.get("articles", []) if isinstance(data, dict) else []
 
+    def get_articles_paged(self, *, locale: str = "en-us", per_page: int = 100,
+                           max_pages: int = 50) -> tuple[list[dict], int]:
+        """ALL Help Center articles (follows ``next_page`` to the end) + true total."""
+        return self._paged(
+            "articles", f"/help_center/{locale}/articles.json?per_page={per_page}",
+            max_pages=max_pages)
+
     def get_article(self, article_id, *, locale: str = "en-us") -> dict:
         data = self._get(f"/help_center/{locale}/articles/{article_id}.json")
         return data.get("article", {}) if isinstance(data, dict) else {}
@@ -365,6 +396,12 @@ class ZendeskClient(SourceClient):
     def list_macros(self, *, per_page: int = 100) -> list[dict]:
         data = self._get(f"/macros.json?per_page={per_page}")
         return data.get("macros", []) if isinstance(data, dict) else []
+
+    def list_macros_paged(self, *, per_page: int = 100,
+                          max_pages: int = 50) -> tuple[list[dict], int]:
+        """ALL account macros (follows ``next_page`` to the end) + true total."""
+        return self._paged("macros", f"/macros.json?per_page={per_page}",
+                           max_pages=max_pages)
 
     def get_macro(self, macro_id) -> dict:
         data = self._get(f"/macros/{macro_id}.json")
