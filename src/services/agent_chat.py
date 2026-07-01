@@ -1380,6 +1380,7 @@ class AgentChatController(QObject):
             from src.ui.pages.enablement.page import RENN_SYSTEM_PROMPT
             self._engine = ChatEngine(
                 system_prompt=RENN_SYSTEM_PROMPT,
+                context_provider=self._agent_context,
                 task_type="enablement_chat",
                 tools_enabled=True,
                 use_mcp_tools=True,
@@ -1397,6 +1398,16 @@ class AgentChatController(QObject):
         except Exception as exc:  # noqa: BLE001 — chat degrades, the page still loads
             logger.warning("Agent chat engine unavailable: %s", exc)
             self._engine = None
+
+    def _agent_context(self, user_message, history):
+        """Per-turn context for the Agent surface — surfaces the operator identity
+        so Renn can confirm 'who am I' (the enablement Qt page injects it via its
+        own _chat_context; the Agent engine previously had no context provider)."""
+        try:
+            from src.data import enablement_identity as ident
+            return ident.operator_context_line()
+        except Exception:  # noqa: BLE001 — the chat still works without the line
+            return ""
 
     def _build_mcp_config(self) -> list[dict]:
         import sys

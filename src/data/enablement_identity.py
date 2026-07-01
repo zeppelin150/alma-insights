@@ -82,6 +82,20 @@ def operator_identity() -> dict:
     }
 
 
+def operator_context_line() -> str:
+    """A one-line, per-turn context string naming the operator (or '' if unknown)
+    so ANY Renn surface can answer 'who am I'. Read-only, no network."""
+    idn = operator_identity()
+    email = (idn.get("email") or "").strip()
+    name = (idn.get("name") or "").strip()
+    if not email and not name:
+        return ""
+    who = email or name
+    tail = f" ({name})" if (name and email) else ""
+    return (f"[OPERATOR] You are assisting {who}{tail}. If they ask who they are or "
+            f"to confirm their identity, answer with this.")
+
+
 def set_operator_email(email: str) -> None:
     update_section("enablement", {"operator_email": (email or "").strip()})
 
