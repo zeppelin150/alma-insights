@@ -290,12 +290,22 @@ class AsanaClient:
             "subtype": a.get("resource_subtype", ""),
         }
 
-    def list_workspace_users(self, workspace_gid: str) -> list[dict]:
-        """Workspace members (gid → name/email) for resolving people fields."""
-        data = self._get(f"/workspaces/{workspace_gid}/users",
-                         {"opt_fields": "name,email", "limit": 100}) or []
-        return [{"gid": u["gid"], "name": u.get("name", ""), "email": u.get("email", "")}
-                for u in data]
+    def list_workspace_users(self, workspace_gid: str, *, max_pages: int = 50) -> list[dict]:
+        """Workspace members (gid → name/email), following ``next_page`` so orgs
+        with >100 members resolve fully (Asana caps a page at 100). ``max_pages``
+        bounds a runaway cursor."""
+        out: list[dict] = []
+        params: dict = {"opt_fields": "name,email", "limit": 100}
+        for _ in range(max_pages):
+            payload = self._get_raw(f"/workspaces/{workspace_gid}/users", params)
+            for u in payload.get("data") or []:
+                out.append({"gid": u["gid"], "name": u.get("name", ""),
+                            "email": u.get("email", "")})
+            offset = (payload.get("next_page") or {}).get("offset")
+            if not offset:
+                break
+            params["offset"] = offset
+        return out
 
     def resolve_user_gid(self, workspace_gid: str, email: str) -> str | None:
         """GID of the workspace member whose email matches (case-insensitive).

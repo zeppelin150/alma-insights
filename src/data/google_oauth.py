@@ -245,29 +245,38 @@ def load_active_credentials():
     return _active
 
 
-def fetch_account_email() -> str | None:
-    """Resolve the connected account's email WITHOUT widening OAuth scope.
+def fetch_account_profile() -> dict:
+    """Resolve the connected account's ``{email, name}`` WITHOUT widening scope.
 
     Uses the Drive v3 ``about`` resource (already covered by the existing
     ``drive.readonly`` scope — no re-consent, stays least-privilege) rather than
     adding ``userinfo.email``/``openid``. Main process only (honors the
-    subprocess guard). Returns None when Google isn't active this session or on
-    any error — never raises into a worker, and never logs the email value.
+    subprocess guard). Returns ``{}`` when Google isn't active this session or on
+    any error — never raises into a worker, and never logs the values. The
+    display name is what the "only mine" task filter matches Asana assignees on,
+    so it is captured alongside the email.
     """
-    _refuse_in_subprocess("fetch_account_email")
+    _refuse_in_subprocess("fetch_account_profile")
     if _active is None:
-        return None
+        return {}
     try:
         from googleapiclient.discovery import build
         service = build("drive", "v3", credentials=_active, cache_discovery=False)
         about = service.about().get(fields="user(emailAddress,displayName)").execute()
-        email = ((about or {}).get("user") or {}).get("emailAddress") or None
+        user = (about or {}).get("user") or {}
+        email = user.get("emailAddress") or ""
         if email:
-            logger.info("Resolved operator account email from Google (value not logged).")
-        return email
-    except Exception as exc:  # noqa: BLE001 — degrade to None if API/lib unavailable
-        logger.warning("fetch_account_email failed: %s", exc)
-        return None
+            logger.info("Resolved operator account profile from Google (value not logged).")
+        return {"email": email, "name": user.get("displayName") or ""}
+    except Exception as exc:  # noqa: BLE001 — degrade to {} if API/lib unavailable
+        logger.warning("fetch_account_profile failed: %s", exc)
+        return {}
+
+
+def fetch_account_email() -> str | None:
+    """The connected account's email, or None. Thin wrapper over
+    :func:`fetch_account_profile` (kept for callers that only need the email)."""
+    return fetch_account_profile().get("email") or None
 
 
 def reconnect():

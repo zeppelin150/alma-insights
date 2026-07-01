@@ -1229,11 +1229,18 @@ class AgentChatController(QObject):
 
     def _approver_identity(self) -> str:
         """Reuse the operator's configured identity for the audit trail; 'user'
-        is the safe fallback (the approval timestamp is the load-bearing part)."""
+        is the safe fallback (the approval timestamp is the load-bearing part).
+
+        Delegates to the M1 single source of truth so the detected_email
+        precedence tier is honored (no network on this hot path)."""
         try:
+            from src.data import enablement_identity as ident
             from src.data.settings_manager import get_section
+            who = ident.operator_email(resolve=False)
+            if who:
+                return who
             en = get_section("enablement", {}) or {}
-            return en.get("operator_email") or (en.get("guru") or {}).get("email") or "user"
+            return (en.get("guru") or {}).get("email") or "user"
         except Exception:  # noqa: BLE001
             return "user"
 

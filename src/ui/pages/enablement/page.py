@@ -255,7 +255,8 @@ class EnablementPage(QWidget):
         self.workbench.open_chat_requested.connect(self._open_chat)
         self.calendar.event_clicked.connect(self._on_calendar_event)
         from src.data.settings_manager import get_section as _gs
-        self._task_scope = (_gs("enablement", {}) or {}).get("tasks_default_scope", "mine")
+        _scope0 = (_gs("enablement", {}) or {}).get("tasks_default_scope", "mine")
+        self._task_scope = _scope0 if _scope0 in ("mine", "all") else "mine"
         self.tasks.set_scope(self._task_scope)
         self.calendar.set_scope(self._task_scope)
         self.tasks.scope_changed.connect(self._on_scope_changed)
@@ -527,7 +528,10 @@ class EnablementPage(QWidget):
         from src.data import enablement_identity as ident
         idn = ident.operator_identity()
         gid = idn.get("asana_gid") or ""
-        name = idn.get("name") or idn.get("email") or ""
+        # assignee stores the Asana display NAME / gid, never an email — so an
+        # email-only identity must NOT become a name filter (it matches nothing);
+        # fall through to show-all instead of a silently empty board.
+        name = idn.get("name") or ""
         if not gid and not name:
             return {}
         filt: dict = {}
@@ -538,8 +542,10 @@ class EnablementPage(QWidget):
         return filt
 
     def _on_scope_changed(self, scope: str):
-        """Mine/All toggle → mirror to the other view (no echo) and reload."""
+        """Mine/All toggle → persist, mirror to the other view (no echo), reload."""
         self._task_scope = scope
+        from src.data.settings_manager import update_section
+        update_section("enablement", {"tasks_default_scope": scope})
         self.tasks.set_scope(scope)
         self.calendar.set_scope(scope)
         self._load_live()
@@ -886,13 +892,16 @@ class EnablementPage(QWidget):
     def _detect_operator_email_worker(self):
         try:
             from src.data import google_oauth
-            email = google_oauth.fetch_account_email()
+            profile = google_oauth.fetch_account_profile()
         except Exception:  # noqa: BLE001
-            email = None
+            profile = {}
+        email = profile.get("email") or ""
         if email:
             from src.data.settings_manager import get_section
             gid = (get_section("enablement", {}) or {}).get("operator_asana_gid", "") or ""
-            self.identity_resolved.emit(email, gid, "")
+            # Carry Google's display name — the "only mine" filter matches Asana
+            # assignees by name until a GID is resolved.
+            self.identity_resolved.emit(email, gid, profile.get("name") or "")
         else:
             self.connection_status_ready.emit(
                 "drive", False, "Connect your Google account first")
@@ -918,20 +927,27 @@ class EnablementPage(QWidget):
                 "asana", False, "Connect Asana first (paste your API key)")
 
     def _on_identity_resolved(self, email: str, asana_gid: str, asana_name: str):
-        """Main-thread slot: persist the resolved identity + reflect it in Settings."""
-        from src.data.settings_manager import update_section
+        """Main-thread slot: persist the resolved identity + reflect it in Settings.
+
+        A deliberate Settings override wins over auto-detect (the precedence
+        contract in enablement_identity): the detected email is always cached, but
+        only populates the override when none is set."""
+        from src.data.settings_manager import get_section, update_section
+        override = ((get_section("enablement", {}) or {}).get("operator_email") or "").strip()
         updates: dict = {}
         if email:
-            updates["operator_email"] = email
             updates["detected_email"] = email
+            if not override:
+                updates["operator_email"] = email
         if asana_gid:
             updates["operator_asana_gid"] = asana_gid
         if asana_name:
             updates["operator_name"] = asana_name
         if updates:
             update_section("enablement", updates)
-        if email:
-            self.settings.set_operator_email(email)
+        shown = override or email
+        if shown:
+            self.settings.set_operator_email(shown)
         if asana_gid:
             self.settings.set_operator_asana_gid(asana_gid, asana_name)
 
