@@ -203,6 +203,20 @@ class ChatBridge(QObject):
         """Liveness probe for the JS<->Python round-trip (no engine call)."""
         return "pong"
 
+    @Slot(str)
+    def openExternal(self, url):
+        """Open a rendered-markdown link in the system browser — http/https ONLY
+        (a webview link must never navigate the app away or launch a local-scheme
+        handler)."""
+        try:
+            from PySide6.QtCore import QUrl
+            from PySide6.QtGui import QDesktopServices
+            u = QUrl(url or "")
+            if u.scheme().lower() in ("http", "https"):
+                QDesktopServices.openUrl(u)
+        except Exception:  # noqa: BLE001 — never crash the chat
+            pass
+
     # ── connect Google in chat (M2) ─────────────────────────────────
 
     @Slot()

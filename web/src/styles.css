@@ -212,6 +212,17 @@ body {
 .msg.assistant .md-h1 { font-size: 1.12em; }
 .msg.assistant .md-h2 { font-size: 1.05em; }
 .msg.assistant .md-h3, .msg.assistant .md-h4 { font-size: 1em; }
+.msg.assistant .mdlink { color: var(--accent); text-decoration: underline; cursor: pointer; }
+.msg.assistant .mdlink:hover { color: var(--green); }
+.msg.assistant .mdtable {
+  border-collapse: collapse; margin: 8px 0; width: 100%; font-size: 0.93em;
+  display: block; overflow-x: auto;
+}
+.msg.assistant .mdtable th, .msg.assistant .mdtable td {
+  border: 1px solid var(--line); padding: 5px 9px; text-align: left; vertical-align: top;
+}
+.msg.assistant .mdtable th { background: rgba(15, 81, 50, 0.06); font-weight: 700; }
+.msg.assistant .mdtable tr:nth-child(even) td { background: rgba(15, 81, 50, 0.02); }
 .caret {
   display: inline-block; margin-left: 1px; color: var(--accent);
   animation: blink 1s step-start infinite;
