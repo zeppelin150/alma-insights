@@ -155,8 +155,23 @@ def main():
         try:
             from src.data.settings_manager import get_section
             from src.ui import app_modes
-            if (app_modes.current_mode() == app_modes.MODE_ENABLEMENT
-                    and str((get_section("enablement", {}) or {}).get("provider", "")).lower() == "claude"):
+            # The load-bearing signal: is Gemini actually the ACTIVE LLM? If the
+            # active model is Claude, Gemini is never called and the sign-in notice
+            # is pure noise — suppress it regardless of mode (this runs once at
+            # startup, before the user may switch to enablement, so keying only off
+            # the mode missed the common "active model = Claude" case).
+            provider_is_gemini = True
+            try:
+                from src.llm.model_registry import ModelRegistry
+                active = ModelRegistry.instance().active()
+                provider_is_gemini = bool(active) and active.provider == "gemini"
+            except Exception:  # noqa: BLE001 — registry unreadable → keep the notice
+                pass
+            enablement_on_claude = (
+                app_modes.current_mode() == app_modes.MODE_ENABLEMENT
+                and str((get_section("enablement", {}) or {}).get("provider", "")).lower() == "claude"
+            )
+            if (not provider_is_gemini) or enablement_on_claude:
                 _show_gemini_notice = False
         except Exception:  # noqa: BLE001 — default to showing the notice
             pass
