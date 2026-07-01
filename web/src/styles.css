@@ -192,6 +192,26 @@ body {
 .msg.thinking { font-style: italic; color: var(--mid); }
 .msg.streaming { color: var(--ink); }
 .streamtext { white-space: pre-wrap; word-wrap: break-word; }
+
+/* ── markdown rendering in assistant bubbles ─────────────────────── */
+.msg.assistant { white-space: normal; }
+.msg.assistant > p { margin: 0 0 8px; }
+.msg.assistant > *:last-child { margin-bottom: 0; }
+.msg.assistant > *:first-child { margin-top: 0; }
+.msg.assistant ul, .msg.assistant ol { margin: 4px 0 10px; padding-left: 20px; }
+.msg.assistant li { margin: 3px 0; }
+.msg.assistant li::marker { color: var(--mid); }
+.msg.assistant strong { font-weight: 700; }
+.msg.assistant em { font-style: italic; }
+.msg.assistant code {
+  background: rgba(15, 81, 50, 0.08); border-radius: 4px; padding: 1px 5px;
+  font-size: 0.9em; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.msg.assistant hr { border: none; border-top: 1px solid var(--line); margin: 10px 0; }
+.msg.assistant .md-h { font-weight: 700; margin: 12px 0 4px; line-height: 1.35; }
+.msg.assistant .md-h1 { font-size: 1.12em; }
+.msg.assistant .md-h2 { font-size: 1.05em; }
+.msg.assistant .md-h3, .msg.assistant .md-h4 { font-size: 1em; }
 .caret {
   display: inline-block; margin-left: 1px; color: var(--accent);
   animation: blink 1s step-start infinite;

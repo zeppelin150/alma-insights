@@ -1,5 +1,59 @@
 import { useEffect, useRef, useState } from "react";
 
+// ── lightweight markdown → JSX (dependency-free, XSS-safe: all text enters as
+// escaped React string children; we only ever emit known elements). Renders the
+// subset Renn uses: **bold** / *italic* / `code`, "-" and "1." lists, #/## headings,
+// "---" rules, and paragraphs. ─────────────────────────────────────────────────
+function mdInline(text, keyBase) {
+  const nodes = [];
+  const re = /\*\*([^*]+)\*\*|__([^_]+)__|`([^`]+)`|\*([^*\s][^*]*)\*/;
+  let rest = String(text);
+  let k = 0;
+  while (rest) {
+    const m = rest.match(re);
+    if (!m) { nodes.push(rest); break; }
+    if (m.index > 0) nodes.push(rest.slice(0, m.index));
+    if (m[1] || m[2]) nodes.push(<strong key={keyBase + "s" + k++}>{m[1] || m[2]}</strong>);
+    else if (m[3]) nodes.push(<code key={keyBase + "c" + k++}>{m[3]}</code>);
+    else nodes.push(<em key={keyBase + "e" + k++}>{m[4]}</em>);
+    rest = rest.slice(m.index + m[0].length);
+  }
+  return nodes;
+}
+
+function Markdown({ text }) {
+  const lines = String(text || "").split("\n");
+  const out = [];
+  let list = null;   // { ordered, items: [] }
+  let para = [];
+  const flushPara = () => {
+    if (para.length) { const key = "b" + out.length; out.push(<p key={key}>{mdInline(para.join(" "), key)}</p>); para = []; }
+  };
+  const flushList = () => {
+    if (list) {
+      const base = "b" + out.length;
+      const items = list.items.map((it, i) => <li key={i}>{mdInline(it, base + "i" + i)}</li>);
+      out.push(list.ordered ? <ol key={base}>{items}</ol> : <ul key={base}>{items}</ul>);
+      list = null;
+    }
+  };
+  for (const raw of lines) {
+    const line = raw.replace(/\s+$/, "");
+    if (/^\s*(---+|\*\*\*+|___+)\s*$/.test(line)) { flushPara(); flushList(); out.push(<hr key={"b" + out.length} />); continue; }
+    if (!line.trim()) { flushPara(); flushList(); continue; }
+    const head = line.match(/^(#{1,4})\s+(.*)$/);
+    if (head) { flushPara(); flushList(); const key = "b" + out.length; out.push(<div key={key} className={"md-h md-h" + head[1].length}>{mdInline(head[2], key)}</div>); continue; }
+    const ol = line.match(/^\s*\d+[.)]\s+(.*)$/);
+    const ul = line.match(/^\s*[-*]\s+(.*)$/);
+    if (ol) { flushPara(); if (!list || !list.ordered) { flushList(); list = { ordered: true, items: [] }; } list.items.push(ol[1]); continue; }
+    if (ul) { flushPara(); if (!list || list.ordered) { flushList(); list = { ordered: false, items: [] }; } list.items.push(ul[1]); continue; }
+    flushList();
+    para.push(line);
+  }
+  flushPara(); flushList();
+  return <>{out}</>;
+}
+
 // Connect to the Python ChatBridge over QWebChannel (in-process, no server).
 // qwebchannel.js is loaded as a classic script in index.html, so QWebChannel +
 // qt.webChannelTransport are globals on window.
@@ -1311,7 +1365,7 @@ export default function App() {
       <div className="messages" ref={scrollRef}>
         {messages.map((m, i) => (
           <div key={i} className={"msg " + m.role}>
-            {m.text}
+            {m.role === "assistant" ? <Markdown text={m.text} /> : m.text}
           </div>
         ))}
         {busy && (
