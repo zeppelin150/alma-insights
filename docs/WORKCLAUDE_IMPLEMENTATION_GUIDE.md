@@ -36,6 +36,10 @@
 
 **1.4 — Read `docs/SECURITY_COMPLIANCE_REVIEW.md`.** It is the source for all Task A items and has file:line detail and rationale.
 
+**1.5 — QtWebEngine native libraries are a PIP dependency, NOT a repo file. Do not hunt for them in the tree.** The Agent chat uses `QWebEngineView`, whose native runtime (`.so` on Linux, `.dll`/`.pyd`/`QtWebEngineProcess.exe` on Windows, `.dylib` on macOS — ~150 MB of Chromium) ships **inside the `PySide6` wheel**, installed to `site-packages/PySide6/`, alongside the `.pyi` type stubs. **None of it is in git (verified: zero WebEngine/`.so`/`.pyi` files in the repo) — and it never should be** (platform-specific, huge). This is the opposite of caveat 1.2: the React *bundle* is a 186 KB platform-agnostic file so it's committed; the QtWebEngine *runtime* is not.
+- **If you see `.pyi` stubs but no `.so`/native libs, your PySide6 install is partial** — almost certainly `PySide6-Essentials` (which EXCLUDES QtWebEngine) or a stubs-only package, not the full `PySide6==6.8.1.1`. A clean full install puts stubs *and* native libs in the same directory. Fix: `pip install --force-reinstall PySide6==6.8.1.1` (the full package pulls the Addons that carry QtWebEngine), then verify `python -c "from PySide6 import QtWebEngineWidgets"`. Airgapped: you need the pre-downloaded full PySide6 wheel for your platform — it cannot come from the repo.
+- **This does NOT block your tasks.** Your work is Python edits verified by `py_compile` (syntax only — it does **not** execute imports, so it works without QtWebEngine). QtWebEngine is only needed to *run* the Agent UI, which the guide already treats as unverifiable headless (Section 2). For any file that transitively imports QtWebEngine (e.g. `src/services/agent_chat.py`, `src/ui/web/*`), rely on `py_compile`, not the runtime `python -c "import ..."` check, and note it in your report. **Do not treat the missing `.so` as a blocker or try to "restore" it into the repo.**
+
 ---
 
 ## 2. How to verify (since local tests don't travel)
