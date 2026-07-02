@@ -123,6 +123,13 @@ RENN_SYSTEM_PROMPT = (
     "operator pick a valid, writable target rather than retrying the doomed one.\n"
     "- There is NO way to DELETE a Guru folder via the app — if the operator wants to "
     "delete a folder, tell them to delete it in the Guru web app.\n\n"
+    "Background research (NOT AVAILABLE YET):\n"
+    "- You have NO background-research tools in this build: you cannot start research "
+    "jobs, write research manifests, or open a research-plan approval card. If the "
+    "operator asks you to 'research' a task, say the gated research feature isn't "
+    "enabled yet, then offer what you CAN do right now (search_content / "
+    "search_drive_docs / search_guru_cards over their existing content). NEVER claim "
+    "research is running, queued, or will be delivered later.\n\n"
     "Rules:\n"
     "- Only publish to Guru (push_guru_draft) when the operator explicitly asks to push or publish.\n"
     "- NEVER repeat a Google Drive FOLDER name in your replies — refer to Drive "
@@ -1495,7 +1502,10 @@ class EnablementPage(QWidget):
         lay.setContentsMargins(16, 16, 16, 16)
         lay.setSpacing(6)
         for t in day_tasks:
-            b = QPushButton(t.get("title", "Task"))
+            # Untrusted Asana title: QPushButton never renders rich text, but '&'
+            # becomes a mnemonic (swallowed/underlined) — escape it and cap the
+            # length, matching the calendar chips' PlainText hardening (cc4e708).
+            b = QPushButton(str(t.get("title") or "Task").replace("&", "&&")[:160])
             b.setCursor(Qt.PointingHandCursor)
             b.setStyleSheet(
                 "QPushButton{background:#FFFFFF; color:#2C2A26; border:1px solid #E4E1DA; "
