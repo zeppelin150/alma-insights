@@ -10,7 +10,9 @@
 
 > **This application is NOT fully airgap-capable by design, and it does not currently meet a HIPAA/SOC 2 bar without remediation.** Its core value features (NLP scanning, Renn chat, report generation, and every third-party integration) depend on outbound cloud calls. On a truly offline machine those features go dark; several channels also *phone home by default* even when they aren't needed, and the PHI-redaction layer **fails open**.
 
-Nothing here is a reason to withhold the push — these are pre-existing posture issues plus two Phase-1.5 items, and they are exactly the backlog the surgical-update pass should burn down. But **do not represent the app as "airgapped / SOC 2 / HIPAA compliant" until the P0 items below are closed and the UNVERIFIED findings are confirmed or cleared.**
+Nothing here is a reason to withhold the push — these are pre-existing posture issues plus two Phase-1.5 items, and they are exactly the backlog the surgical-update pass should burn down. But **do not represent the app as "airgapped / SOC 2 / HIPAA compliant" until the P0 items below are closed.**
+
+**Update 2026-07-01 — both starved clusters re-verified (one reader per finding).** The PHI/egress cluster is now confirmed and it is worse than "needs remediation": there are **confirmed code paths where raw ticket PHI reaches the non-BAA Anthropic API** — the MCP tool-result path has no central redaction (P1/P6), `phi_level` is never enforced so Renn can call warehouse tools (P2), and "BAA via Bedrock" is comment-only with the direct API as the default (P3). One myth busted: the Gemini client fails *closed* (P4), so only the Claude lane fails open. See **"PHI/egress cluster — verified verdicts"** and **"Secrets cluster — verified verdicts"** below.
 
 ---
 
@@ -59,20 +61,32 @@ Nothing here is a reason to withhold the push — these are pre-existing posture
 
 These were surfaced by the sweep but **NOT** confirmed. Most concern the **uncommitted redaction/PHI workstream or pre-existing PHI plumbing — outside this push.** Treat as leads to confirm, not facts. **Two I re-verified by hand are marked ✓.**
 
-**PHI / HIPAA (confirm before any HIPAA claim):**
-- ✓ **Redaction fails open** — `src/llm/claude_client.py:83`: `logger.warning("PII redaction failed, sending un-redacted")` then sends. An exception anywhere in the redaction pipeline ⇒ PHI to the API unredacted. **Confirmed true. Should fail CLOSED (block/raise).** *(pre-existing)*
-- ✓ **Config can route raw ticket text to the non-BAA Anthropic API** — `src/gemini/client_factory.py:80` (`resolve_provider_for_task`): `ai.task_routing.override_all=claude` or `enablement.provider=claude` routes ticket-bearing tasks (e.g. `nlp_classification`) to Claude, gated only by the fail-open redaction above. **Confirmed architecturally possible.** *(pre-existing)*
-- [UNVERIFIED] MCP-native tool results bypass redaction; thread tools use a 3-pattern mini-redactor — `src/data/chat_tools/thread_tools.py`
-- [UNVERIFIED] Legacy chat tools return raw subjects/previews/full rows — `src/data/chat_tools/fast_path.py` *(uncommitted workstream)*
-- [UNVERIFIED] Renn agent chat can reach warehouse ticket threads despite the "decoupled" boundary — `src/services/agent_chat.py`
-- [UNVERIFIED] "BAA-routed through Bedrock" asserted in comments, not enforced — `src/gemini/client_factory.py`
-- [UNVERIFIED] PHI at rest unencrypted (SQLite warehouse, FTS, chat transcripts) — `src/data/connection_factory.py` *(known posture)*
+**PHI / HIPAA — RE-VERIFIED 2026-07-01** (one reader per finding; moved to the CONFIRMED table below). See **"PHI/egress cluster — verified verdicts"**.
+- Still open leads (lower priority): PHI at rest unencrypted (SQLite warehouse/FTS/transcripts, `src/data/connection_factory.py` — *known accepted posture*); Zendesk 2-min poll + Settings-page `npm install` egress (below).
 
 **Secrets / SOC 2 — RE-VERIFIED 2026-07-01** (the starved secrets cluster, each hand-confirmed by reading the cited code; moved to the CONFIRMED table below). See **"Secrets cluster — verified verdicts"**.
 
 **Egress / offline:**
 - [UNVERIFIED] Zendesk polling timer — egress every 2 min at startup — `src/ui/main_window.py`
 - [UNVERIFIED] Runtime `npm install` of the Gemini CLI from the Settings page (`registry.npmjs.org`) — `src/data/gemini_setup.py`
+
+---
+
+## PHI/egress cluster — verified verdicts (re-ran the starved verification, 2026-07-01)
+
+Six readers, one per finding. **This is the HIPAA crux — 4 CONFIRMED HIGH, 2 PARTIAL.** They share ONE root cause: **there is no central redaction chokepoint on the MCP tool-result path, `phi_level` is recorded but never enforced, the enablement/Renn lane boundary is a prompt instruction (not an allowlist), and the Claude lane defaults to the non-BAA direct Anthropic API.** These are *pre-existing* PHI plumbing (not introduced by Phase 1.5), present on HEAD (what's on GitHub).
+
+| ID | Finding | Verdict | Where |
+|---|---|---|---|
+| **P1** | **Tool results bypass redaction.** `registry.dispatch_tool` returns `json.dumps(handler_output)` verbatim — no central redaction. `ClaudeClient._redact_text` scrubs only the outbound prompt, and the native-MCP path (the only working Claude tool path) feeds results straight to the model. `thread_tools` self-redacts with a **3-of-10 mini-regex** (SSN/email/phone — omits MRN/member-ID/DOB/address); `search_conversations` redacts **nothing**. | **CONFIRMED · HIGH** | `registry.py:415` · `thread_tools.py:19,155` · `chat_mcp_server.py:1447` |
+| **P2** | **Renn can reach warehouse PHI.** The Agent chat launches the *full* `chat_mcp_server`; the only lane scoping is `ALMA_MCP_EXCLUDE_TOOLS=semantic_search` (one tool). `read_thread`(phi 2)/`read_threads_batch`/`list_tickets`/`query_*` stay callable; `dispatch_tool` has no `phi_level` gate. Boundary = the RENN_SYSTEM_PROMPT "use only enablement tools" line — overridable by the model or by prompt-injection from an Asana title/Drive doc/Guru card. `client_factory.py:128` also sets `pii_redaction=False` for enablement lanes. | **CONFIRMED · HIGH** | `agent_chat.py:1478,1464` · `registry.py:79-99` |
+| **P3** | **"BAA via Bedrock" is unenforced.** Task→claude builds the **direct `api.anthropic.com`** client when an API key is present; Bedrock only if `bedrock.enabled=true` (default **false**). Grep `force.*bedrock`/`phi.*bedrock` = zero. `force_cli=True` (enablement only) forces the *CLI*, not Bedrock. | **CONFIRMED · HIGH (P0)** | `client_factory.py:113-170` · `claude_client.py:27` · `settings.yaml:7` |
+| **P4** | **Redaction fail-open — Claude only.** `claude_client.py:82` returns raw text on a redaction exception (fail-OPEN, non-BAA lane = HIGH). **`gemini_client.py` has no try/except → fails CLOSED** (the "both layers" claim is **refuted for Gemini**). Base redaction is non-disableable on both; aggressive/name pass is off for `enablement_*`. | **PARTIAL** (Claude HIGH; Gemini refuted) | `claude_client.py:82` · `gemini_client.py:194-329` |
+| **P5** | **`watchlist_triage` → non-BAA Claude with raw ticket text.** `_llm_triage` inlines raw `subject` + `description[:500]`; routes to Claude (`force_cli=False`) → direct API when a key is set. **Mitigated** by the client's base-redaction pass — **but** a latent bug (`from …gemini_client import _redact_base`, an *instance* method → always `ImportError`) silently degrades the in-engine layer to email-only. | **PARTIAL · HIGH** | `watchlist_engine.py:387,390` · `client_factory.py:38,116` |
+| **P6** | **Legacy `fast_path` tools return raw `SELECT *` rows** (subject/body/`issue_snippet`/`thread_preview`) with **zero** redaction — identical on HEAD and working-tree (the uncommitted rework only adds date-filter coercion, **not** redaction). Reachable by the Claude lane via `override_all=claude`. | **CONFIRMED · HIGH** | `fast_path.py:651,736,112` |
+
+### The one fix that closes most of this
+A **central redaction chokepoint in `registry.dispatch_tool`** — run `RedactionEngine.scrub()` over every tool result with `phi_level ≥ 1` before `json.dumps`, and delete the per-handler mini-redactors — collapses P1 + most of P6 and the tool-result half of P2. Pair it with a **hard per-lane tool allowlist** (reject `phi_level>0` for enablement sessions) for the rest of P2, and a **BAA hard-fail** in routing (P3/P5) so a PHI task can never silently use the direct Anthropic API. **These touch the redaction path you are actively reworking — coordinate; don't double-implement.**
 
 ---
 
@@ -135,8 +149,10 @@ Six per-finding verifiers each read the cited code. **4 CONFIRMED (2 HIGH, 2 MED
 
 **P0 — before any compliance attestation**
 - [ ] **C1** Disable Claude CLI telemetry/auto-updater/error-reporting via env (`env_guard.py`).
-- [ ] **Redaction fail-CLOSED** (`claude_client.py:83`) — block/raise on redaction failure instead of sending un-redacted; add a test.
-- [ ] **Routing guardrail** (`client_factory.py`) — refuse to route any ticket-bearing task type to `claude`/non-BAA even under `override_all`; make PHI lanes non-overridable.
+- [ ] **P1/P6 [HIGH] Central redaction chokepoint** — run `RedactionEngine.scrub()` over every `phi_level ≥ 1` tool result in `registry.dispatch_tool` before `json.dumps`; delete the per-handler mini-redactors. *(Coordinate with the active redaction rework.)*
+- [ ] **P2 [HIGH] Hard per-lane tool allowlist** — reject `phi_level>0` tools for enablement/Renn sessions at the dispatch chokepoint (not a prompt instruction, not a one-tool exclude).
+- [ ] **P3/P5 [HIGH] BAA hard-fail routing** (`client_factory.py`) — PHI-bearing task types non-overridable to `claude`; if a PHI task resolves to Claude without `bedrock.enabled`, **raise**, don't silently use direct Anthropic. Fix the dead `_redact_base` import in `watchlist_engine.py:390`.
+- [ ] **P4 [HIGH] Redaction fail-CLOSED** (`claude_client.py:82`) — raise on redaction failure instead of sending un-redacted; add a test. (Gemini already fails closed.)
 - [ ] **`scan_server/` node-forge → ≥1.4.0** (`npm audit fix`) and rebuild the bridge.
 - [ ] **S2 [HIGH]** `pat_store` migration: scrub+`unlink` the legacy file (not `.rename`) + startup sweep of `*.migrated`.
 - [ ] **S3 [HIGH]** operator-rotate the exposed GCP service-account key + stop sourcing it from a plaintext Downloads path.
@@ -157,4 +173,4 @@ Six per-finding verifiers each read the cited code. **4 CONFIRMED (2 HIGH, 2 MED
 
 ---
 
-*Scanner raw output archived in the workflow run `wf_65c8ce68-e60`. The secrets cluster was re-verified 2026-07-01 (see "Secrets cluster — verified verdicts"). The remaining UNVERIFIED items — the PHI/egress cluster (redaction bypass, Renn→warehouse reach, BAA-Bedrock enforcement, Zendesk/npm egress) — should be hand-confirmed before this document backs any formal HIPAA attestation.*
+*Scanner raw output archived in the workflow run `wf_65c8ce68-e60`. Both the secrets cluster and the PHI/egress cluster were re-verified 2026-07-01 (see their verified-verdict sections). **The confirmed PHI-to-non-BAA paths (P1–P3, P6) mean the current build does not meet a HIPAA bar without the P0 fixes — do not sign a BAA-dependent attestation until those land.** Remaining low-priority leads: PHI-at-rest encryption (known posture), Zendesk 2-min poll + Settings-page `npm install` egress (airgap items).*
