@@ -68,17 +68,38 @@ These were surfaced by the sweep but **NOT** confirmed. Most concern the **uncom
 - [UNVERIFIED] "BAA-routed through Bedrock" asserted in comments, not enforced — `src/gemini/client_factory.py`
 - [UNVERIFIED] PHI at rest unencrypted (SQLite warehouse, FTS, chat transcripts) — `src/data/connection_factory.py` *(known posture)*
 
-**Secrets / SOC 2 (each needs a file read to confirm):**
-- [UNVERIFIED] GitHub PAT written to plaintext `ui_state.json` — `src/ui/pages/settings_page.py`
-- [UNVERIFIED] Legacy plaintext credentials file retained after keyring migration — `src/data/pat_store.py`
-- [UNVERIFIED] Google service-account private key in plaintext in Downloads, referenced by `data/settings.yaml`
-- [UNVERIFIED] Gemini API key transits a plaintext temp file, no cleanup on spawn failure — `src/data/scan_server_manager.py`
-- [UNVERIFIED] `ALMA_TRACE=1` debug facility records raw credentials passed as function args — `src/data/call_trace.py`
-- [UNVERIFIED] GitHub App private key inline in plaintext `settings.yaml` — `src/updater/github_app_auth.py`
+**Secrets / SOC 2 — RE-VERIFIED 2026-07-01** (the starved secrets cluster, each hand-confirmed by reading the cited code; moved to the CONFIRMED table below). See **"Secrets cluster — verified verdicts"**.
 
 **Egress / offline:**
 - [UNVERIFIED] Zendesk polling timer — egress every 2 min at startup — `src/ui/main_window.py`
 - [UNVERIFIED] Runtime `npm install` of the Gemini CLI from the Settings page (`registry.npmjs.org`) — `src/data/gemini_setup.py`
+
+---
+
+## Secrets cluster — verified verdicts (re-ran the starved verification, 2026-07-01)
+
+Six per-finding verifiers each read the cited code. **4 CONFIRMED (2 HIGH, 2 MED), 2 PARTIAL (real mechanism, dormant in this checkout).** Secret *values* were never printed. **`data/settings.yaml` is gitignored/untracked — nothing here leaked via the GitHub push;** the exposures are plaintext-at-rest on the local machine plus code defects that travel.
+
+| ID | Finding | Verdict | Where |
+|---|---|---|---|
+| **S1** | GitHub PAT saved to plaintext `ui_state.json` — writer uses key `"github_pat"` but `pat_store._SECRET_KEYS` only allowlists `"github_update_token"`, so it falls through to cleartext JSON (Windows skips the `0o600` guard). **Latent** — no PAT on disk yet; triggers on first Save. | **CONFIRMED · MED** | `settings_page.py:1645` · `pat_store.py:53,157` |
+| **S2** | `pat_store` migrates to the OS keyring (real encryption — good) but disposes of the legacy `credentials.json` by **`.rename()` to `.json.migrated`**, never deleting/scrubbing. That file **exists on this machine with live cleartext tokens** (Lightdash, Guru len-36, Zendesk len-40). | **CONFIRMED · HIGH** | `pat_store.py:240` · on-disk `~/.alma-insights/credentials.json.migrated` |
+| **S3** | `enablement.drive.credentials_path` points **active** code (`drive_reader`→`drive_monitor`/`enablement_monitor`/`agent_chat`) at a **real GCP service-account private key** in `~/Downloads/claims-automation-*.json` — outside the secret store, unencrypted, non-expiring. "claims-automation" ⇒ likely PHI-adjacent Drive access. | **CONFIRMED · HIGH** | `settings.yaml:96` · `drive_reader.py:80` |
+| **S4** | Gemini key written to a plaintext temp file (`--api-key-file`); Node unlinks after read, but **no Python-side `finally`** — a failed `Popen` orphans the cleartext key (mkstemp `0600` weak on Windows). Sibling spawners use env vars and are clean. | **CONFIRMED · MED** | `scan_server_manager.py:124-173` |
+| **S5** | `github_app_auth._load_private_key()` **can** read a `private_key_pem` inline from plaintext `settings.yaml` (bypassing `pat_store`) — but no key present, `auth_mode` defaults to `pat` (not `github_app`), feature dormant. Latent design risk MED. | **PARTIAL · LOW** | `github_app_auth.py:107` |
+| **S6** | `call_trace` logs args/kwargs verbatim with **no redaction** to a persistent `data/trace/*.jsonl` — but **off by default**, never wired into `main.py` (only tests + a dev script opt in), and traced methods get `self` (no custom `__repr__` ⇒ key not serialized). One edge: `asana_setup.discover(api_key=…)` would log a raw key, but the in-app caller passes none. | **PARTIAL · LOW** | `call_trace.py:55,130` |
+
+### ⚠️ Operator actions (live secrets on THIS machine — not workclaude's job, do these yourself)
+- **Rotate/revoke the GCP service-account key** `claims-automation-*` in the GCP console, move the JSON out of `~/Downloads` into an OS-restricted path (or switch Drive to `oauth_user`), and update `settings.yaml`. *(S3 — highest urgency: a live, non-expiring, possibly PHI-scoped key in a sync-prone folder.)*
+- **Delete `~/.alma-insights/credentials.json.migrated`** after confirming the keyring has your Lightdash/Guru/Zendesk tokens (Settings still works). *(S2)*
+
+### Code fixes (fold into workclaude Task A)
+- **S2 [HIGH]:** `pat_store.migrate_legacy_credentials()` — overwrite-then-`unlink` the legacy file (not `.rename`), + a startup sweep of any existing `*.migrated`.
+- **S1 [MED]:** `settings_page.py` — use `"github_update_token"` for the PAT save/read (the canonical key already in `_SECRET_KEYS`).
+- **S4 [MED]:** `scan_server_manager.py` — wrap spawn in `try/finally` and always `os.unlink(api_key_file)`, or pass the key via `env` like the sibling spawners.
+- **S3 [HIGH, code side]:** don't source a service-account key from a plaintext settings path pointed at Downloads — route through `pat_store` / an OS-restricted location.
+- **S5 [LOW]:** route `private_key_pem` through `pat_store` or drop the inline option.
+- **S6 [LOW]:** add a sensitive-name denylist to `call_trace._short` (mirror `src/core/crash_handler.py`'s redaction).
 
 ---
 
@@ -117,7 +138,9 @@ These were surfaced by the sweep but **NOT** confirmed. Most concern the **uncom
 - [ ] **Redaction fail-CLOSED** (`claude_client.py:83`) — block/raise on redaction failure instead of sending un-redacted; add a test.
 - [ ] **Routing guardrail** (`client_factory.py`) — refuse to route any ticket-bearing task type to `claude`/non-BAA even under `override_all`; make PHI lanes non-overridable.
 - [ ] **`scan_server/` node-forge → ≥1.4.0** (`npm audit fix`) and rebuild the bridge.
-- [ ] Confirm or clear the **UNVERIFIED secrets cluster** (PAT/service-account-key/temp-key/call_trace).
+- [ ] **S2 [HIGH]** `pat_store` migration: scrub+`unlink` the legacy file (not `.rename`) + startup sweep of `*.migrated`.
+- [ ] **S3 [HIGH]** operator-rotate the exposed GCP service-account key + stop sourcing it from a plaintext Downloads path.
+- [ ] **S1 / S4 [MED]** GitHub-PAT key-name fix (`settings_page.py`) and Gemini temp-key `try/finally` cleanup (`scan_server_manager.py`).
 
 **P1 — airgap hardening**
 - [ ] **C2** Gate the GitHub update check behind `updates.enabled=false` default; strip the bundled token.
@@ -134,4 +157,4 @@ These were surfaced by the sweep but **NOT** confirmed. Most concern the **uncom
 
 ---
 
-*Scanner raw output archived in the workflow run `wf_65c8ce68-e60`. The rate-limited verifier phase should be re-run (or the UNVERIFIED items hand-confirmed) before this document backs any formal attestation.*
+*Scanner raw output archived in the workflow run `wf_65c8ce68-e60`. The secrets cluster was re-verified 2026-07-01 (see "Secrets cluster — verified verdicts"). The remaining UNVERIFIED items — the PHI/egress cluster (redaction bypass, Renn→warehouse reach, BAA-Bedrock enforcement, Zendesk/npm egress) — should be hand-confirmed before this document backs any formal HIPAA attestation.*
