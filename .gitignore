@@ -151,7 +151,10 @@ scan_server/node_modules/
 
 # ── Agent web UI (React/Vite) — generated bundle + deps ─────────────
 web/node_modules/
-src/ui/web/dist/
+# NOTE: src/ui/web/dist/ (the built Agent-chat bundle) is intentionally
+# COMMITTED so airgapped/offline installs run the chat UI with no npm build
+# step. It is a single self-contained index.html (~186KB) + qwebchannel.js.
+# Re-running `npm run build` in web/ overwrites it in place; re-commit after.
 npm-debug.log
 yarn-debug.log
 yarn-error.log
