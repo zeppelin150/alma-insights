@@ -317,6 +317,11 @@ class EnablementPage(QWidget):
         self.settings.style_guide_action.connect(self._on_style_guide_action)
         self.settings.style_guide_activate.connect(self._on_style_guide_activate)
         self.settings.style_guide_delete.connect(self._on_style_guide_delete)
+        self.settings.style_guide_saved.connect(self._on_style_guide_saved)
+        self.settings.card_template_action.connect(self._on_card_template_action)
+        self.settings.card_template_activate.connect(self._on_card_template_activate)
+        self.settings.card_template_delete.connect(self._on_card_template_delete)
+        self.settings.card_template_saved.connect(self._on_card_template_saved)
         self.import_finished.connect(self._on_import_finished)
         self.connection_status_ready.connect(
             lambda key, ok, detail: self.settings.set_connection_status(key, ok, detail))
@@ -350,6 +355,7 @@ class EnablementPage(QWidget):
         self.zendesk.macro_push.connect(self._on_zd_macro_push)
         self.zendesk_synced.connect(self._on_zendesk_synced)
         self._refresh_style_guide_status()
+        self._refresh_card_template_status()
 
         if not self.demo:
             try:
@@ -1227,6 +1233,12 @@ class EnablementPage(QWidget):
                                 conn, doc.get("full_text", ""),
                                 name=doc.get("name") or "Card style guide",
                             )
+                        elif res.get("ok") and kind == "template":
+                            doc = store.get_document(conn, res["doc_id"]) or {}
+                            store.set_card_template(
+                                conn, doc.get("full_text", ""),
+                                name=doc.get("name") or "Card/article template",
+                            )
                         elif res.get("ok"):
                             try:
                                 from src.gemini.client_factory import build_client_for_task
@@ -1259,6 +1271,10 @@ class EnablementPage(QWidget):
         if kind == "style":
             self._set_status("Style guide imported from Drive — generation now follows it.")
             self._refresh_style_guide_status()
+            return
+        if kind == "template":
+            self._set_status("Card template imported from Drive — generation now follows it.")
+            self._refresh_card_template_status()
             return
         if kind == "guru":
             self._set_status(
@@ -1805,69 +1821,170 @@ class EnablementPage(QWidget):
         else:
             self.zendesk.set_status(f"Push failed: {res.get('error')}")
 
-    # ── style guide ─────────────────────────────────────────────────
+    # ── style guide + card template (tagged guide documents) ────────
+    # One generalized handler drives both sections; the per-kind bits
+    # (store functions, demo seed, import kind) are parameterized.
+
+    _GUIDE_FILE_FILTER = ("Documents (*.md *.markdown *.txt *.docx *.html *.htm)"
+                          ";;All files (*)")
+    _GUIDE_EXTS = {".md", ".markdown", ".txt", ".docx", ".html", ".htm"}
 
     def _on_style_guide_action(self, action: str):
         from src.data import enablement_store as store
+        self._guide_action(
+            action, label="Style guide", import_kind="style",
+            getter=store.get_style_guide, setter=store.set_style_guide,
+            clear=store.clear_style_guide, slug_prefix="style-guide",
+            refresh=self._refresh_style_guide_status,
+            demo_loader=lambda conn: store.set_style_guide(
+                conn,
+                "Tone: confident, plain language. Cards open with a one-line "
+                "summary, use numbered steps for any process, and end with a "
+                "short FAQ.",
+                name="Enablement style guide (demo)",
+            ),
+            paste_prompt="Paste the style guide card generation should follow:",
+        )
+
+    def _on_card_template_action(self, action: str):
+        from src.data import enablement_store as store
+        self._guide_action(
+            action, label="Card template", import_kind="template",
+            getter=store.get_card_template, setter=store.set_card_template,
+            clear=store.clear_card_template, slug_prefix="card-template",
+            refresh=self._refresh_card_template_status,
+            demo_loader=self._load_bundled_card_template,
+            paste_prompt="Paste the card/article template (exact headings) "
+                         "generation should follow:",
+        )
+
+    def _guide_action(self, action: str, *, label, import_kind, getter, setter,
+                      clear, slug_prefix, refresh, demo_loader, paste_prompt):
+        import os
         conn = self._conn()
         if action == "paste":
             from PySide6.QtWidgets import QInputDialog
             text, ok = QInputDialog.getMultiLineText(
-                self, "Card style guide",
-                "Paste the style guide card generation should follow:",
-                store.get_style_guide(conn),
-            )
+                self, label, paste_prompt, getter(conn))
             if ok:
                 if text.strip():
-                    store.set_style_guide(conn, text)
-                    self._set_status("Style guide saved — card generation and revisions now follow it.")
+                    setter(conn, text)
+                    self._set_status(f"{label} saved — generation now follows it.")
                 else:
-                    store.clear_style_guide()
-                    self._set_status("Style guide cleared.")
+                    clear()
+                    self._set_status(f"{label} cleared.")
         elif action == "upload":
             from PySide6.QtWidgets import QFileDialog
-            path, _ = QFileDialog.getOpenFileName(
-                self, "Upload style guide", "",
-                "Documents (*.md *.markdown *.txt *.docx *.html *.htm)")
-            if path:
-                try:
-                    text = self._read_local_text(path)
-                except Exception as exc:  # noqa: BLE001
-                    self._set_status(f"Could not read that file: {exc}")
-                    return
-                if text.strip():
-                    import os
-                    import re
-                    stem = os.path.splitext(os.path.basename(path))[0]
-                    slug = re.sub(r"[^a-z0-9]+", "-", stem.lower()).strip("-") or "guide"
-                    store.set_style_guide(conn, text, name=stem,
-                                          doc_id=f"style-guide-{slug}")
+            # Start at home (macOS native dialogs otherwise open on an opaque
+            # default) and keep an "All files" fallback so documents the name
+            # filter greys out stay reachable. Multi-select: uploading several
+            # guides at once stores each; the last becomes active.
+            paths, _ = QFileDialog.getOpenFileNames(
+                self, f"Upload {label.lower()}", os.path.expanduser("~"),
+                self._GUIDE_FILE_FILTER)
+            if paths:
+                self._store_guide_files(conn, paths, setter, slug_prefix, label)
+        elif action == "upload_folder":
+            from PySide6.QtWidgets import QFileDialog
+            folder = QFileDialog.getExistingDirectory(
+                self, f"Upload a folder of {label.lower()}s",
+                os.path.expanduser("~"),
+                QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks)
+            if folder:
+                files = self._guide_files_in_folder(folder)
+                if not files:
                     self._set_status(
-                        f"Style guide “{stem}” uploaded — card generation now follows it.")
+                        "No readable documents (.md .txt .docx .html) in that folder.")
                 else:
-                    self._set_status("That file was empty — style guide unchanged.")
+                    self._store_guide_files(conn, files, setter, slug_prefix, label)
         elif action == "drive":
             if self.demo:
-                store.set_style_guide(
-                    conn,
-                    "Tone: confident, plain language. Cards open with a one-line "
-                    "summary, use numbered steps for any process, and end with a "
-                    "short FAQ.",
-                    name="Enablement style guide (demo)",
-                )
-                self._set_status("Demo style guide loaded.")
+                demo_loader(conn)
+                self._set_status(f"Demo {label.lower()} loaded.")
             else:
                 from PySide6.QtWidgets import QInputDialog
                 ref, ok = QInputDialog.getText(
-                    self, "Style guide from Drive", "Google Doc URL or file id:"
-                )
+                    self, f"{label} from Drive", "Google Doc URL or file id:")
                 if ok and ref.strip():
-                    self._run_import("style", ref.strip())
+                    self._run_import(import_kind, ref.strip())
                     return
         elif action == "clear":
-            store.clear_style_guide()
-            self._set_status("Style guide cleared.")
-        self._refresh_style_guide_status()
+            clear()
+            self._set_status(f"{label} cleared.")
+        refresh()
+
+    def _store_guide_files(self, conn, paths, setter, slug_prefix, label):
+        """Read each document (docx/html resolved to markdown) and store it as
+        a tagged guide doc; the last stored becomes active. Reports a per-file
+        read error only when NOTHING could be stored."""
+        import os
+        import re
+        count, last, first_err = 0, "", ""
+        for path in paths:
+            try:
+                text = self._read_local_text(path)
+            except Exception as exc:  # noqa: BLE001
+                first_err = first_err or f"{os.path.basename(path)}: {exc}"
+                continue
+            if not text.strip():
+                continue
+            stem = os.path.splitext(os.path.basename(path))[0]
+            slug = re.sub(r"[^a-z0-9]+", "-", stem.lower()).strip("-") or "doc"
+            setter(conn, text, name=stem, doc_id=f"{slug_prefix}-{slug}")
+            count += 1
+            last = stem
+        if count == 0:
+            self._set_status(
+                f"Could not read those files — nothing stored."
+                f"{' (' + first_err + ')' if first_err else ''}")
+        elif count == 1:
+            self._set_status(
+                f"{label} “{last}” uploaded — generation now follows it.")
+        else:
+            self._set_status(
+                f"{count} documents uploaded — “{last}” is the active {label.lower()}.")
+
+    @classmethod
+    def _guide_files_in_folder(cls, folder: str, cap: int = 50) -> list[str]:
+        """Supported documents inside a picked folder (recursive, sorted,
+        capped; skips hidden/Office-lock files)."""
+        from pathlib import Path
+        out: list[str] = []
+        for p in sorted(Path(folder).rglob("*")):
+            if len(out) >= cap:
+                break
+            if not p.is_file() or p.name.startswith((".", "~$")):
+                continue
+            if p.suffix.lower() in cls._GUIDE_EXTS:
+                out.append(str(p))
+        return out
+
+    # bundled default template (assets/ ships with the app; used as the demo
+    # seed and as the fallback when no template has been uploaded yet)
+    @staticmethod
+    def _bundled_card_template_text() -> str:
+        from pathlib import Path
+        p = (Path(__file__).resolve().parents[4]
+             / "assets" / "templates" / "support_center_article_template.md")
+        try:
+            return p.read_text(encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _load_bundled_card_template(self, conn):
+        from src.data import enablement_store as store
+        text = self._bundled_card_template_text() or (
+            "# [Article Title — clear and action-oriented]\n\n"
+            "[2–3 sentences stating the purpose — used as the metadata "
+            "description, ~140 characters]\n\n## [H2 action-based title]\n"
+            "Step 1: [Heading for first action]\n\n## FAQs\n"
+            "### [Question exactly as a user would search it]\n[Answer]\n\n"
+            "## Still Need Help?\nContact us by selecting the Help button in "
+            "the bottom right of the page.\n"
+        )
+        store.set_card_template(
+            conn, text, name="Unified Support Center/Guru Article Template",
+            doc_id="card-template-unified-support-center")
 
     def _refresh_style_guide_status(self):
         try:
@@ -1879,11 +1996,56 @@ class EnablementPage(QWidget):
             else:
                 self.settings.set_style_guide_status("Not set")
             try:
+                self.settings.set_style_guide_content(text)
+            except Exception:
+                pass
+            try:
                 self.settings.set_style_guides(store.list_style_guides(conn))
             except Exception:
                 pass
         except Exception:
             pass
+
+    def _refresh_card_template_status(self):
+        try:
+            from src.data import enablement_store as store
+            conn = self._conn()
+            text = store.get_card_template(conn)
+            if text.strip():
+                self.settings.set_card_template_status(f"Set — {len(text):,} chars")
+            else:
+                self.settings.set_card_template_status("Not set")
+            try:
+                self.settings.set_card_template_content(text)
+            except Exception:
+                pass
+            try:
+                self.settings.set_card_templates(store.list_card_templates(conn))
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _on_style_guide_saved(self, text: str):
+        """Inline-editor Save → rewrite the ACTIVE guide in place (name kept)."""
+        from src.data import enablement_store as store
+        if text.strip():
+            store.update_style_guide_text(self._conn(), text)
+            self._set_status("Style guide edits saved.")
+        else:
+            store.clear_style_guide()
+            self._set_status("Style guide cleared.")
+        self._refresh_style_guide_status()
+
+    def _on_card_template_saved(self, text: str):
+        from src.data import enablement_store as store
+        if text.strip():
+            store.update_card_template_text(self._conn(), text)
+            self._set_status("Card template edits saved.")
+        else:
+            store.clear_card_template()
+            self._set_status("Card template cleared.")
+        self._refresh_card_template_status()
 
     def _on_style_guide_activate(self, doc_id):
         from src.data import enablement_store as store
@@ -1896,6 +2058,18 @@ class EnablementPage(QWidget):
         store.delete_style_guide(self._conn(), str(doc_id))
         self._set_status("Style guide removed.")
         self._refresh_style_guide_status()
+
+    def _on_card_template_activate(self, doc_id):
+        from src.data import enablement_store as store
+        if store.set_active_card_template(self._conn(), str(doc_id)):
+            self._set_status("Active card template switched.")
+        self._refresh_card_template_status()
+
+    def _on_card_template_delete(self, doc_id):
+        from src.data import enablement_store as store
+        store.delete_card_template(self._conn(), str(doc_id))
+        self._set_status("Card template removed.")
+        self._refresh_card_template_status()
 
     def _on_asana_setup(self):
         """Setup mode: Renn discovers Asana GIDs and writes the (scoped) board config."""

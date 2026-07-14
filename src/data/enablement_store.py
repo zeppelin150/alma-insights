@@ -363,19 +363,100 @@ _STYLE_GUIDE_KEY = "style_guide_doc_id"
 # Searchable identifier prepended to every style-guide document name so Renn can
 # isolate style guides via search_local_documents / list_style_guides.
 _STYLE_GUIDE_TAG = "[STYLE-GUIDE]"
+# The card/article template is the SAME tagged-document pattern under its own
+# settings pointer: the structural skeleton (exact headings) every generated
+# card follows, alongside the style guide's tone/formatting rules.
+_CARD_TEMPLATE_KEY = "card_template_doc_id"
+_CARD_TEMPLATE_TAG = "[CARD-TEMPLATE]"
 
 
-def get_style_guide(conn: sqlite3.Connection) -> str:
-    """The operator's card style guide text ('' when unset)."""
+# ── tagged guide documents (style guide / card template) ─────────────
+# One mechanism, two instances: a "guide" is an enablement document whose
+# name carries a searchable tag, with the active doc_id stored in the
+# enablement settings section under `key`.
+
+def _get_guide(conn: sqlite3.Connection, key: str) -> str:
     try:
         from src.data.settings_manager import get_section
-        doc_id = (get_section("enablement", {}) or {}).get(_STYLE_GUIDE_KEY, "")
+        doc_id = (get_section("enablement", {}) or {}).get(key, "")
         if not doc_id:
             return ""
         doc = get_document(conn, str(doc_id))
         return (doc or {}).get("full_text", "") or ""
     except Exception:
         return ""
+
+
+def _set_guide(conn: sqlite3.Connection, text: str, *, key: str, tag: str,
+               default_doc_id: str, name: str, doc_id: str | None) -> str:
+    from src.data.settings_manager import get_section, set_section
+    # Guides are prompt inputs, not rendered cards: inline color spans that
+    # doc_reader preserves from Word headings are noise here (and Qt's
+    # markdown preview would show them literally) — strip them.
+    text = re.sub(r"</?span[^>]*>", "", text or "")
+    if tag not in name:
+        name = f"{tag} {name}"
+    cfg = dict(get_section("enablement", {}) or {})
+    did = str(doc_id or cfg.get(key) or default_doc_id)
+    did = save_document(
+        conn, source="manual", name=name, doc_id=did, full_text=text or ""
+    )
+    cfg[key] = did   # active pointer
+    set_section("enablement", cfg)
+    return did
+
+
+def _list_guides(conn: sqlite3.Connection, key: str, tag: str) -> list[dict]:
+    from src.data.settings_manager import get_section
+    active = (get_section("enablement", {}) or {}).get(key, "")
+    rows = conn.execute(
+        "SELECT doc_id, name, LENGTH(full_text) AS chars, "
+        "       COALESCE(modified_time, indexed_at) AS ts "
+        "FROM enablement_documents WHERE name LIKE ? "
+        "ORDER BY ts DESC",
+        (tag + "%",),
+    ).fetchall()
+    return [{"doc_id": r["doc_id"], "name": r["name"], "chars": r["chars"],
+             "active": r["doc_id"] == active} for r in rows]
+
+
+def _set_active_guide(conn: sqlite3.Connection, doc_id: str, key: str) -> bool:
+    if not get_document(conn, str(doc_id)):
+        return False
+    from src.data.settings_manager import get_section, set_section
+    cfg = dict(get_section("enablement", {}) or {})
+    cfg[key] = str(doc_id)
+    set_section("enablement", cfg)
+    return True
+
+
+def _delete_guide(conn: sqlite3.Connection, doc_id: str, key: str, tag: str) -> bool:
+    from src.data.settings_manager import get_section, set_section
+    with atomic(conn):
+        cur = conn.execute(
+            "DELETE FROM enablement_documents WHERE doc_id = ?", (str(doc_id),))
+    cfg = dict(get_section("enablement", {}) or {})
+    if cfg.get(key) == str(doc_id):
+        cfg.pop(key, None)
+        remaining = _list_guides(conn, key, tag)
+        if remaining:
+            cfg[key] = remaining[0]["doc_id"]
+        set_section("enablement", cfg)
+    return cur.rowcount > 0
+
+
+def _clear_guide(key: str) -> None:
+    from src.data.settings_manager import get_section, set_section
+    cfg = dict(get_section("enablement", {}) or {})
+    if cfg.pop(key, None) is not None:
+        set_section("enablement", cfg)
+
+
+# ── style guide (public API — tone/formatting rules) ─────────────────
+
+def get_style_guide(conn: sqlite3.Connection) -> str:
+    """The operator's card style guide text ('' when unset)."""
+    return _get_guide(conn, _STYLE_GUIDE_KEY)
 
 
 def set_style_guide(conn: sqlite3.Connection, text: str, *,
@@ -388,67 +469,38 @@ def set_style_guide(conn: sqlite3.Connection, text: str, *,
     a slug of an uploaded filename) to keep distinct guides as separate, searchable
     documents; omit it to update the single default guide (paste/demo flows).
     """
-    from src.data.settings_manager import get_section, set_section
-    name = name or "Card style guide"
-    if _STYLE_GUIDE_TAG not in name:
-        name = f"{_STYLE_GUIDE_TAG} {name}"
-    cfg = dict(get_section("enablement", {}) or {})
-    did = str(doc_id or cfg.get(_STYLE_GUIDE_KEY) or "style-guide")
-    did = save_document(
-        conn, source="manual", name=name, doc_id=did, full_text=text or ""
-    )
-    cfg[_STYLE_GUIDE_KEY] = did   # active pointer (get_style_guide/style_guide_block)
-    set_section("enablement", cfg)
-    return did
+    return _set_guide(conn, text, key=_STYLE_GUIDE_KEY, tag=_STYLE_GUIDE_TAG,
+                      default_doc_id="style-guide",
+                      name=name or "Card style guide", doc_id=doc_id)
 
 
 def list_style_guides(conn: sqlite3.Connection) -> list[dict]:
     """Every stored style guide (tagged docs), newest first, active one flagged."""
-    from src.data.settings_manager import get_section
-    active = (get_section("enablement", {}) or {}).get(_STYLE_GUIDE_KEY, "")
-    rows = conn.execute(
-        "SELECT doc_id, name, LENGTH(full_text) AS chars, "
-        "       COALESCE(modified_time, indexed_at) AS ts "
-        "FROM enablement_documents WHERE name LIKE ? "
-        "ORDER BY ts DESC",
-        (_STYLE_GUIDE_TAG + "%",),
-    ).fetchall()
-    return [{"doc_id": r["doc_id"], "name": r["name"], "chars": r["chars"],
-             "active": r["doc_id"] == active} for r in rows]
+    return _list_guides(conn, _STYLE_GUIDE_KEY, _STYLE_GUIDE_TAG)
 
 
 def set_active_style_guide(conn: sqlite3.Connection, doc_id: str) -> bool:
     """Make an existing style-guide document the active one (used for injection)."""
-    if not get_document(conn, str(doc_id)):
-        return False
-    from src.data.settings_manager import get_section, set_section
-    cfg = dict(get_section("enablement", {}) or {})
-    cfg[_STYLE_GUIDE_KEY] = str(doc_id)
-    set_section("enablement", cfg)
-    return True
+    return _set_active_guide(conn, doc_id, _STYLE_GUIDE_KEY)
 
 
 def delete_style_guide(conn: sqlite3.Connection, doc_id: str) -> bool:
     """Delete a stored style guide; if it was active, promote the newest remaining."""
-    from src.data.settings_manager import get_section, set_section
-    with atomic(conn):
-        cur = conn.execute(
-            "DELETE FROM enablement_documents WHERE doc_id = ?", (str(doc_id),))
-    cfg = dict(get_section("enablement", {}) or {})
-    if cfg.get(_STYLE_GUIDE_KEY) == str(doc_id):
-        cfg.pop(_STYLE_GUIDE_KEY, None)
-        remaining = list_style_guides(conn)
-        if remaining:
-            cfg[_STYLE_GUIDE_KEY] = remaining[0]["doc_id"]
-        set_section("enablement", cfg)
-    return cur.rowcount > 0
+    return _delete_guide(conn, doc_id, _STYLE_GUIDE_KEY, _STYLE_GUIDE_TAG)
 
 
 def clear_style_guide() -> None:
-    from src.data.settings_manager import get_section, set_section
-    cfg = dict(get_section("enablement", {}) or {})
-    if cfg.pop(_STYLE_GUIDE_KEY, None) is not None:
-        set_section("enablement", cfg)
+    _clear_guide(_STYLE_GUIDE_KEY)
+
+
+def update_style_guide_text(conn: sqlite3.Connection, text: str) -> str:
+    """Rewrite the ACTIVE style guide's text in place (its name is kept, so an
+    inline edit doesn't rename an uploaded guide to the default)."""
+    from src.data.settings_manager import get_section
+    did = (get_section("enablement", {}) or {}).get(_STYLE_GUIDE_KEY)
+    doc = get_document(conn, str(did)) if did else None
+    return set_style_guide(conn, text, name=(doc or {}).get("name")
+                           or "Card style guide")
 
 
 def style_guide_block(conn: sqlite3.Connection) -> str:
@@ -461,6 +513,69 @@ def style_guide_block(conn: sqlite3.Connection) -> str:
         "--- STYLE GUIDE START ---\n"
         f"{text.strip()}\n"
         "--- STYLE GUIDE END ---\n"
+    )
+
+
+# ── card/article template (public API — structural skeleton) ─────────
+
+def get_card_template(conn: sqlite3.Connection) -> str:
+    """The active card/article template text ('' when unset)."""
+    return _get_guide(conn, _CARD_TEMPLATE_KEY)
+
+
+def set_card_template(conn: sqlite3.Connection, text: str, *,
+                      name: str = "Card/article template",
+                      doc_id: str | None = None) -> str:
+    """Store/replace the card/article template + set it active (same
+    tagged-document pattern as the style guide)."""
+    return _set_guide(conn, text, key=_CARD_TEMPLATE_KEY, tag=_CARD_TEMPLATE_TAG,
+                      default_doc_id="card-template",
+                      name=name or "Card/article template", doc_id=doc_id)
+
+
+def list_card_templates(conn: sqlite3.Connection) -> list[dict]:
+    """Every stored template, newest first, active one flagged."""
+    return _list_guides(conn, _CARD_TEMPLATE_KEY, _CARD_TEMPLATE_TAG)
+
+
+def set_active_card_template(conn: sqlite3.Connection, doc_id: str) -> bool:
+    return _set_active_guide(conn, doc_id, _CARD_TEMPLATE_KEY)
+
+
+def delete_card_template(conn: sqlite3.Connection, doc_id: str) -> bool:
+    return _delete_guide(conn, doc_id, _CARD_TEMPLATE_KEY, _CARD_TEMPLATE_TAG)
+
+
+def clear_card_template() -> None:
+    _clear_guide(_CARD_TEMPLATE_KEY)
+
+
+def update_card_template_text(conn: sqlite3.Connection, text: str) -> str:
+    """Rewrite the ACTIVE card template's text in place (name kept)."""
+    from src.data.settings_manager import get_section
+    did = (get_section("enablement", {}) or {}).get(_CARD_TEMPLATE_KEY)
+    doc = get_document(conn, str(did)) if did else None
+    return set_card_template(conn, text, name=(doc or {}).get("name")
+                             or "Card/article template")
+
+
+def card_template_block(conn: sqlite3.Connection) -> str:
+    """The prompt block injected into card-gen/revise ('' when unset).
+
+    The template is a heading skeleton: generation must reproduce its exact
+    heading structure and order, filling the bracketed slots and dropping the
+    template's own instructional notes/examples from the finished card."""
+    text = get_card_template(conn)
+    if not text.strip():
+        return ""
+    return (
+        "\nCARD/ARTICLE TEMPLATE — structure the card with EXACTLY this heading "
+        "layout: same headings, same order. Fill each bracketed [slot] with real "
+        "content; the template's instructional notes and examples are guidance "
+        "for you, not text to copy into the card:\n"
+        "--- TEMPLATE START ---\n"
+        f"{text.strip()}\n"
+        "--- TEMPLATE END ---\n"
     )
 
 
@@ -511,11 +626,13 @@ def draft_card_from_document(
             "{style_guide}"
             "Return:\nTITLE: <title>\n---\n<body>"
         )
+        # The template block rides the same {style_guide} slot so older prompt
+        # files (without a dedicated placeholder) still receive it.
         prompt = template.format(
             doc_name=doc.get("name", "Untitled"),
             doc_text=doc.get("full_text", ""),
             collection=collection,
-            style_guide=style_guide_block(conn),
+            style_guide=style_guide_block(conn) + card_template_block(conn),
         )
         response = llm_client.generate(prompt)
         title, content = _parse_card(response, fallback_title=doc.get("name", "Untitled"))

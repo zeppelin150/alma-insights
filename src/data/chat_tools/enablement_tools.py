@@ -1075,7 +1075,7 @@ def _revise_draft_impl(conn, draft_id, instruction) -> dict:
     if client is None:
         return {"ok": False, "error": "no_llm_client"}
     try:
-        style_block = store.style_guide_block(conn)
+        style_block = store.style_guide_block(conn) + store.card_template_block(conn)
     except Exception:
         style_block = ""
     prompt = (

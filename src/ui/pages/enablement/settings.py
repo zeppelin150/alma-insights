@@ -4,18 +4,261 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea,
-    QTabWidget, QVBoxLayout, QWidget,
+    QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit,
+    QPushButton, QScrollArea, QTabWidget, QTextBrowser, QVBoxLayout, QWidget,
 )
 
 from src.ui.pages.enablement._common import card_frame, field, pill, section_label, toggle
 from src.ui.theme import (
-    ALMA_BG_ELEVATED, ALMA_BG_INSET, ALMA_BORDER, ALMA_CREAM, ALMA_GREEN_DARK,
-    ALMA_GREEN_LIGHT, ALMA_INFO, ALMA_SUCCESS, ALMA_TEXT_DARK, ALMA_TEXT_LIGHT, ALMA_TEXT_MID,
-    ALMA_TEXT_ON_DARK, ALMA_WARNING,
+    ALMA_BG_ELEVATED, ALMA_BG_INSET, ALMA_BORDER, ALMA_BORDER_LIGHT, ALMA_CREAM,
+    ALMA_GREEN_DARK, ALMA_GREEN_LIGHT, ALMA_INFO, ALMA_SUCCESS, ALMA_TEXT_DARK,
+    ALMA_TEXT_LIGHT, ALMA_TEXT_MID, ALMA_TEXT_ON_DARK, ALMA_WARNING,
 )
 
 from src.ui.theme import ALMA_ACCENT_TEAL as _TEAL  # noqa: E402
+
+
+class _GuideSection(QFrame):
+    """One tagged-guide card (style guide / card-article template): the
+    Paste / Upload / Upload folder / From Drive / Clear actions, a rendered
+    preview of the ACTIVE document that flips into an inline markdown editor
+    (Edit → Save), and the stored-document library (switch / delete)."""
+
+    action = Signal(str)      # "paste" | "upload" | "upload_folder" | "drive" | "clear"
+    activate = Signal(str)    # doc_id → make this stored doc active
+    delete_doc = Signal(str)  # doc_id → delete this stored doc
+    saved = Signal(str)       # edited text saved from the inline editor
+
+    _TAGS = ("[STYLE-GUIDE]", "[CARD-TEMPLATE]")
+
+    def __init__(self, title: str, hint: str, parent=None):
+        super().__init__(parent)
+        self._raw = ""
+        self._editing = False
+        # objectName-scoped style so child QFrames (preview inset, library
+        # rows) don't inherit the card chrome.
+        self.setObjectName("GuideCard")
+        self.setStyleSheet(
+            f"QFrame#GuideCard{{background:{ALMA_BG_ELEVATED}; "
+            f"border:1px solid {ALMA_BORDER_LIGHT}; border-radius:12px;}}")
+        v = QVBoxLayout(self)
+        v.setContentsMargins(20, 16, 20, 16)
+        v.setSpacing(12)
+
+        head = QHBoxLayout()
+        head.addWidget(section_label(title))
+        head.addStretch(1)
+        paste = self._btn("Paste…", kind="outline")
+        paste.clicked.connect(lambda: self.action.emit("paste"))
+        head.addWidget(paste)
+        v.addLayout(head)
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self._status = QLabel("Not set")
+        self._status.setStyleSheet(
+            f"color:{ALMA_TEXT_LIGHT}; font-size:12.5px; border:none; background:transparent;")
+        row.addWidget(self._status)
+        row.addStretch(1)
+        for label, act in (("Upload…", "upload"),
+                           ("Upload folder…", "upload_folder"),
+                           ("From Drive…", "drive")):
+            b = self._btn(label, kind="elevated")
+            b.clicked.connect(lambda _=False, a=act: self.action.emit(a))
+            row.addWidget(b)
+        clear = self._btn("Clear", kind="quiet")
+        clear.clicked.connect(lambda: self.action.emit("clear"))
+        row.addWidget(clear)
+        v.addLayout(row)
+
+        hint_lbl = QLabel(hint)
+        hint_lbl.setWordWrap(True)
+        hint_lbl.setStyleSheet(
+            f"color:{ALMA_TEXT_LIGHT}; font-size:12.5px; border:none; background:transparent;")
+        v.addWidget(hint_lbl)
+
+        # rendered preview ⇄ inline editor of the ACTIVE document
+        self._preview = QFrame()
+        self._preview.setObjectName("GuidePreview")
+        self._preview.setStyleSheet(
+            f"QFrame#GuidePreview{{background:{ALMA_BG_INSET}; border:none; "
+            f"border-radius:10px;}}")
+        pv = QVBoxLayout(self._preview)
+        pv.setContentsMargins(14, 10, 14, 12)
+        pv.setSpacing(8)
+        ph = QHBoxLayout()
+        self._preview_cap = QLabel("ACTIVE — RENDERED PREVIEW")
+        self._preview_cap.setStyleSheet(
+            f"color:{ALMA_TEXT_LIGHT}; font-size:10px; font-weight:700; "
+            f"letter-spacing:0.7px; border:none; background:transparent;")
+        ph.addWidget(self._preview_cap)
+        ph.addStretch(1)
+        self._edit_btn = self._btn("Edit", kind="outline")
+        self._edit_btn.clicked.connect(self._begin_edit)
+        ph.addWidget(self._edit_btn)
+        self._save_btn = self._btn("Save", kind="primary")
+        self._save_btn.clicked.connect(self._save_edit)
+        self._save_btn.hide()
+        ph.addWidget(self._save_btn)
+        self._cancel_btn = self._btn("Cancel", kind="quiet")
+        self._cancel_btn.clicked.connect(self._cancel_edit)
+        self._cancel_btn.hide()
+        ph.addWidget(self._cancel_btn)
+        pv.addLayout(ph)
+        self._view = QTextBrowser()
+        self._view.setOpenExternalLinks(False)
+        self._view.setStyleSheet(
+            f"QTextBrowser{{background:transparent; border:none; "
+            f"color:{ALMA_TEXT_DARK}; font-size:13px;}}")
+        self._view.setMinimumHeight(150)
+        self._view.setMaximumHeight(380)
+        pv.addWidget(self._view)
+        self._editor = QPlainTextEdit()
+        self._editor.setStyleSheet(
+            f"QPlainTextEdit{{background:{ALMA_BG_ELEVATED}; border:1px solid "
+            f"{ALMA_BORDER}; border-radius:7px; padding:8px; "
+            f"color:{ALMA_TEXT_DARK}; font-size:12.5px;}}")
+        self._editor.setMinimumHeight(220)
+        self._editor.setMaximumHeight(380)
+        self._editor.hide()
+        pv.addWidget(self._editor)
+        v.addWidget(self._preview)
+        self._preview.hide()
+
+        self._library = QVBoxLayout()
+        self._library.setSpacing(4)
+        v.addLayout(self._library)
+
+    # ── content / preview state ───────────────────────────────────
+    def set_status(self, text: str):
+        self._status.setText(text or "Not set")
+
+    def set_content(self, text: str):
+        """Show the active document rendered as markdown; empty hides the
+        preview block entirely (and always exits edit mode)."""
+        self._raw = text or ""
+        if not self._raw.strip():
+            self._end_edit_mode()
+            self._preview.hide()
+            return
+        self._view.setMarkdown(self._raw)
+        self._preview.show()
+        self._end_edit_mode()
+
+    def content(self) -> str:
+        return self._raw
+
+    def in_edit_mode(self) -> bool:
+        return self._editing
+
+    def _begin_edit(self):
+        self._editing = True
+        self._editor.setPlainText(self._raw)
+        self._view.hide()
+        self._editor.show()
+        self._edit_btn.hide()
+        self._save_btn.show()
+        self._cancel_btn.show()
+        self._preview_cap.setText("EDITING — MARKDOWN SOURCE")
+
+    def _end_edit_mode(self):
+        self._editing = False
+        self._editor.hide()
+        self._view.show()
+        self._save_btn.hide()
+        self._cancel_btn.hide()
+        self._edit_btn.show()
+        self._preview_cap.setText("ACTIVE — RENDERED PREVIEW")
+
+    def _cancel_edit(self):
+        self.set_content(self._raw)
+
+    def _save_edit(self):
+        text = self._editor.toPlainText()
+        self.set_content(text)     # optimistic; host refresh re-syncs from the DB
+        self.saved.emit(text)
+
+    # ── stored-document library ───────────────────────────────────
+    def set_library(self, docs: list):
+        while self._library.count():
+            item = self._library.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        for d in docs or []:
+            self._library.addWidget(self._doc_row(d))
+
+    def _doc_row(self, d: dict) -> QWidget:
+        doc_id = d.get("doc_id", "")
+        name = d.get("name", "") or "Untitled"
+        for tag in self._TAGS:
+            name = name.replace(tag, "")
+        name = name.strip() or "Untitled"
+        active = bool(d.get("active"))
+        frame = QFrame()
+        frame.setStyleSheet(
+            f"QFrame{{background:{ALMA_BG_ELEVATED}; border:1px solid "
+            f"{ALMA_GREEN_LIGHT if active else ALMA_BORDER}; border-radius:7px;}}"
+        )
+        h = QHBoxLayout(frame)
+        h.setContentsMargins(10, 5, 8, 5)
+        h.setSpacing(8)
+        lbl = QLabel(name)
+        lbl.setStyleSheet(
+            f"color:{ALMA_TEXT_DARK}; font-size:12px; font-weight:600; border:none;")
+        h.addWidget(lbl)
+        chars = d.get("chars")
+        if chars is not None:
+            c = QLabel(f"{int(chars):,} chars")
+            c.setStyleSheet(f"color:{ALMA_TEXT_LIGHT}; font-size:10.5px; border:none;")
+            h.addWidget(c)
+        h.addStretch(1)
+        if active:
+            badge_lbl = QLabel("Active")
+            badge_lbl.setStyleSheet(
+                f"background:{ALMA_GREEN_LIGHT}; color:{ALMA_GREEN_DARK}; border:none; "
+                f"border-radius:6px; padding:2px 9px; font-size:10.5px; font-weight:700;")
+            h.addWidget(badge_lbl)
+        else:
+            act = QPushButton("Make active")
+            act.setCursor(Qt.PointingHandCursor)
+            act.setStyleSheet(
+                f"QPushButton{{background:transparent; color:{ALMA_GREEN_DARK}; "
+                f"border:1px solid {ALMA_BORDER}; border-radius:6px; padding:3px 9px; "
+                f"font-size:10.5px; font-weight:600;}}")
+            act.clicked.connect(lambda _=False, d_=doc_id: self.activate.emit(d_))
+            h.addWidget(act)
+        rm = QPushButton("Delete")
+        rm.setCursor(Qt.PointingHandCursor)
+        rm.setStyleSheet(
+            f"QPushButton{{background:transparent; color:{ALMA_TEXT_LIGHT}; border:none; "
+            f"font-size:10.5px; font-weight:600;}}")
+        rm.clicked.connect(lambda _=False, d_=doc_id: self.delete_doc.emit(d_))
+        h.addWidget(rm)
+        return frame
+
+    # ── button factory (matches the section-card button chrome) ───
+    @staticmethod
+    def _btn(label: str, kind: str) -> QPushButton:
+        b = QPushButton(label)
+        b.setCursor(Qt.PointingHandCursor)
+        if kind == "primary":
+            css = (f"QPushButton{{background:{ALMA_GREEN_DARK}; color:{ALMA_TEXT_ON_DARK}; "
+                   f"border:none; border-radius:7px; padding:5px 14px; "
+                   f"font-size:11px; font-weight:600;}}")
+        elif kind == "outline":
+            css = (f"QPushButton{{background:transparent; color:{ALMA_GREEN_DARK}; "
+                   f"border:1px solid {ALMA_BORDER}; border-radius:7px; padding:5px 12px; "
+                   f"font-size:11.5px; font-weight:600;}}")
+        elif kind == "quiet":
+            css = (f"QPushButton{{background:transparent; color:{ALMA_TEXT_LIGHT}; "
+                   f"border:none; padding:5px 8px; font-size:11px; font-weight:600;}}")
+        else:  # elevated
+            css = (f"QPushButton{{background:{ALMA_BG_ELEVATED}; color:{ALMA_TEXT_DARK}; "
+                   f"border:1px solid {ALMA_BORDER}; border-radius:7px; padding:5px 12px; "
+                   f"font-size:11px; font-weight:600;}}")
+        b.setStyleSheet(css)
+        return b
 
 
 class SettingsPage(QWidget):
@@ -23,9 +266,14 @@ class SettingsPage(QWidget):
 
     asana_setup_requested = Signal()       # "Set up with Renn" clicked
     drive_folder_added = Signal(str, str)  # (folder_id, display_name) from "+ Add folder"
-    style_guide_action = Signal(str)       # "paste" | "upload" | "drive" | "clear"
+    style_guide_action = Signal(str)       # "paste" | "upload" | "upload_folder" | "drive" | "clear"
     style_guide_activate = Signal(str)     # doc_id → make this stored guide active
     style_guide_delete = Signal(str)       # doc_id → delete this stored guide
+    style_guide_saved = Signal(str)        # edited text saved from the inline editor
+    card_template_action = Signal(str)     # same verbs as style_guide_action
+    card_template_activate = Signal(str)   # doc_id → make this stored template active
+    card_template_delete = Signal(str)     # doc_id → delete this stored template
+    card_template_saved = Signal(str)      # edited text saved from the inline editor
     identity_detect_email_requested = Signal()       # "Auto-detect from Google"
     identity_resolve_asana_gid_requested = Signal()  # "Resolve GID"
     _kb_bootstrap_finished = Signal(str)             # worker thread → main (queued)
@@ -52,7 +300,8 @@ class SettingsPage(QWidget):
         self._tabs.addTab(self._tab([self._identity(), self.credentials]), "Providers")
         self._tabs.addTab(self._tab([self._asana(), self._drive(),
                                      self._knowledge_base()]), "Sources")
-        self._tabs.addTab(self._tab([self._style_guide()]), "Style Guide")
+        self._tabs.addTab(self._tab([self._style_guide(), self._card_template()]),
+                          "Style Guide")
         outer.addWidget(self._tabs, 1)
         # Host may wire a connection factory (page._conn) so the KB card can
         # show counts + run the bootstrap; absent, the card degrades to
@@ -401,113 +650,64 @@ class SettingsPage(QWidget):
         set_section("enablement", cfg)
 
     def _style_guide(self):
-        """Style guide card — the first-class input to card generation."""
-        card, v = self._section(
-            "STYLE GUIDE", "Paste…",
-            lambda: self.style_guide_action.emit("paste"),
-        )
-        row = QHBoxLayout()
-        row.setSpacing(8)
-        self._style_guide_status = self._text("Not set", color=ALMA_TEXT_LIGHT)
-        row.addWidget(self._style_guide_status)
-        row.addStretch(1)
-        _btn_css = (
-            f"QPushButton{{background:{ALMA_BG_ELEVATED}; color:{ALMA_TEXT_DARK}; "
-            f"border:1px solid {ALMA_BORDER}; border-radius:7px; padding:5px 12px; "
-            f"font-size:11px; font-weight:600;}}"
-        )
-        upload = QPushButton("Upload…")
-        upload.setCursor(Qt.PointingHandCursor)
-        upload.setStyleSheet(_btn_css)
-        upload.clicked.connect(lambda: self.style_guide_action.emit("upload"))
-        row.addWidget(upload)
-        from_drive = QPushButton("From Drive…")
-        from_drive.setCursor(Qt.PointingHandCursor)
-        from_drive.setStyleSheet(_btn_css)
-        from_drive.clicked.connect(lambda: self.style_guide_action.emit("drive"))
-        row.addWidget(from_drive)
-        clear = QPushButton("Clear")
-        clear.setCursor(Qt.PointingHandCursor)
-        clear.setStyleSheet(
-            f"QPushButton{{background:transparent; color:{ALMA_TEXT_LIGHT}; "
-            f"border:none; padding:5px 8px; font-size:11px; font-weight:600;}}"
-        )
-        clear.clicked.connect(lambda: self.style_guide_action.emit("clear"))
-        row.addWidget(clear)
-        v.addLayout(row)
-        hint = self._text(
+        """Style guide card — the tone/formatting input to card generation."""
+        self._sg_section = _GuideSection(
+            "STYLE GUIDE",
             "Card generation and Renn's revisions follow the active guide. Upload "
             "several — the active one is used; switch or remove them below.",
-            color=ALMA_TEXT_LIGHT,
         )
-        v.addWidget(hint)
-        self._sg_library = QVBoxLayout()
-        self._sg_library.setSpacing(4)
-        v.addLayout(self._sg_library)
-        return card
+        self._sg_section.action.connect(self.style_guide_action.emit)
+        self._sg_section.activate.connect(self.style_guide_activate.emit)
+        self._sg_section.delete_doc.connect(self.style_guide_delete.emit)
+        self._sg_section.saved.connect(self.style_guide_saved.emit)
+        return self._sg_section
 
+    def _card_template(self):
+        """Card/article template card — the heading skeleton every generated
+        card follows exactly (alongside the style guide's tone rules)."""
+        self._ct_section = _GuideSection(
+            "CARD / ARTICLE TEMPLATE",
+            "Generated cards reproduce the active template's exact heading "
+            "structure — upload the Unified Support Center/Guru article "
+            "template (.docx or .md); switch or remove stored templates below.",
+        )
+        self._ct_section.action.connect(self.card_template_action.emit)
+        self._ct_section.activate.connect(self.card_template_activate.emit)
+        self._ct_section.delete_doc.connect(self.card_template_delete.emit)
+        self._ct_section.saved.connect(self.card_template_saved.emit)
+        return self._ct_section
+
+    # host-facing setters (style guide) ─ preserved API
     def set_style_guides(self, guides: list):
         """Render the stored style-guide library (active flagged; switch / delete)."""
-        lib = getattr(self, "_sg_library", None)
-        if lib is None:
-            return
-        while lib.count():
-            item = lib.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.deleteLater()
-        for g in guides or []:
-            lib.addWidget(self._sg_row(g))
-
-    def _sg_row(self, g: dict) -> QWidget:
-        doc_id = g.get("doc_id", "")
-        name = (g.get("name", "") or "Untitled").replace("[STYLE-GUIDE]", "").strip()
-        active = bool(g.get("active"))
-        frame = QFrame()
-        frame.setStyleSheet(
-            f"QFrame{{background:{ALMA_BG_ELEVATED}; border:1px solid "
-            f"{ALMA_GREEN_LIGHT if active else ALMA_BORDER}; border-radius:7px;}}"
-        )
-        h = QHBoxLayout(frame)
-        h.setContentsMargins(10, 5, 8, 5)
-        h.setSpacing(8)
-        lbl = QLabel(name)
-        lbl.setStyleSheet(
-            f"color:{ALMA_TEXT_DARK}; font-size:12px; font-weight:600; border:none;")
-        h.addWidget(lbl)
-        chars = g.get("chars")
-        if chars is not None:
-            c = QLabel(f"{int(chars):,} chars")
-            c.setStyleSheet(f"color:{ALMA_TEXT_LIGHT}; font-size:10.5px; border:none;")
-            h.addWidget(c)
-        h.addStretch(1)
-        if active:
-            badge_lbl = QLabel("Active")
-            badge_lbl.setStyleSheet(
-                f"background:{ALMA_GREEN_LIGHT}; color:{ALMA_GREEN_DARK}; border:none; "
-                f"border-radius:6px; padding:2px 9px; font-size:10.5px; font-weight:700;")
-            h.addWidget(badge_lbl)
-        else:
-            act = QPushButton("Make active")
-            act.setCursor(Qt.PointingHandCursor)
-            act.setStyleSheet(
-                f"QPushButton{{background:transparent; color:{ALMA_GREEN_DARK}; "
-                f"border:1px solid {ALMA_BORDER}; border-radius:6px; padding:3px 9px; "
-                f"font-size:10.5px; font-weight:600;}}")
-            act.clicked.connect(lambda _=False, d=doc_id: self.style_guide_activate.emit(d))
-            h.addWidget(act)
-        rm = QPushButton("Delete")
-        rm.setCursor(Qt.PointingHandCursor)
-        rm.setStyleSheet(
-            f"QPushButton{{background:transparent; color:{ALMA_TEXT_LIGHT}; border:none; "
-            f"font-size:10.5px; font-weight:600;}}")
-        rm.clicked.connect(lambda _=False, d=doc_id: self.style_guide_delete.emit(d))
-        h.addWidget(rm)
-        return frame
+        self._sg_section.set_library(guides)
 
     def set_style_guide_status(self, text: str):
         try:
-            self._style_guide_status.setText(text)
+            self._sg_section.set_status(text)
+        except Exception:
+            pass
+
+    def set_style_guide_content(self, text: str):
+        """Rendered, editable preview of the ACTIVE guide's text."""
+        try:
+            self._sg_section.set_content(text)
+        except Exception:
+            pass
+
+    # host-facing setters (card template)
+    def set_card_templates(self, templates: list):
+        self._ct_section.set_library(templates)
+
+    def set_card_template_status(self, text: str):
+        try:
+            self._ct_section.set_status(text)
+        except Exception:
+            pass
+
+    def set_card_template_content(self, text: str):
+        try:
+            self._ct_section.set_content(text)
         except Exception:
             pass
 
