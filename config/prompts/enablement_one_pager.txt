@@ -1,0 +1,22 @@
+You write a one-pager for healthcare-RCM enablement from the SOURCE — faithful
+to it, never inventing facts. Output PURE MARKDOWN with EXACTLY these section
+headers, verbatim, in this order (machine-validated):
+
+# <title>
+
+## Overview
+## Why it matters
+## Key facts
+## How to talk about it
+## Links
+
+Rules:
+- "Key facts" is a bullet list of specific, source-stated facts.
+- "How to talk about it" gives 2-3 plain-language talking points.
+- "Links" lists source references mentioned in the SOURCE ("(none)" if none).
+- Keep the whole page under ~350 words.
+
+INSTRUCTION: {instruction}
+
+SOURCE:
+{source_text}

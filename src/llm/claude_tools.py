@@ -811,49 +811,24 @@ TOOL_DEFINITIONS = [
         },
     },
     {
-        "name": "create_asana_subtask",
+        "name": "request_asana_task_update",
         "description": (
-            "Add a subtask to a task AND create it back in Asana under the parent Asana "
-            "task. Use when the operator wants the subtask to appear in Asana too. Saves "
-            "locally and reports whether it synced (it won't for non-Asana tasks)."
+            "Propose ONE update to an Asana-sourced task — the operator confirms it "
+            "on a card before anything is written to Asana. action: complete | "
+            "reopen | set_due (value=YYYY-MM-DD, empty clears) | comment "
+            "(value=text) | add_subtask (value=title)."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "task_id": {"type": "string", "description": "The enablement task id."},
-                "text": {"type": "string", "description": "The subtask text."},
+                "action": {"type": "string",
+                           "enum": ["complete", "reopen", "set_due",
+                                    "comment", "add_subtask"]},
+                "value": {"type": "string",
+                          "description": "Required for set_due/comment/add_subtask."},
             },
-            "required": ["task_id", "text"],
-        },
-    },
-    {
-        "name": "post_asana_comment",
-        "description": (
-            "Post a comment back to the linked Asana task (a story). Only works for tasks "
-            "that came from Asana."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "task_id": {"type": "string", "description": "The enablement task id."},
-                "text": {"type": "string", "description": "The comment text."},
-            },
-            "required": ["task_id", "text"],
-        },
-    },
-    {
-        "name": "update_asana_due_date",
-        "description": (
-            "Update a task's due date locally AND push it to the linked Asana task. "
-            "due_on is an ISO date (YYYY-MM-DD) or null to clear."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "task_id": {"type": "string", "description": "The enablement task id."},
-                "due_on": {"type": "string", "description": "ISO date YYYY-MM-DD, or null to clear."},
-            },
-            "required": ["task_id"],
+            "required": ["task_id", "action"],
         },
     },
     {
@@ -1504,19 +1479,12 @@ def _update_scratchpad(args: dict, db) -> dict:
     return _update_scratchpad_impl(_ent_conn(db), args.get("task_id"), args.get("text", ""))
 
 
-def _create_asana_subtask(args: dict, db) -> dict:
-    from src.data.chat_tools.enablement_tools import _create_asana_subtask_impl
-    return _create_asana_subtask_impl(_ent_conn(db), args.get("task_id"), args.get("text", ""))
-
-
-def _post_asana_comment(args: dict, db) -> dict:
-    from src.data.chat_tools.enablement_tools import _post_asana_comment_impl
-    return _post_asana_comment_impl(_ent_conn(db), args.get("task_id"), args.get("text", ""))
-
-
-def _update_asana_due_date(args: dict, db) -> dict:
-    from src.data.chat_tools.enablement_tools import _update_asana_due_date_impl
-    return _update_asana_due_date_impl(_ent_conn(db), args.get("task_id"), args.get("due_on"))
+def _request_asana_task_update(args: dict, db) -> str:
+    from src.data.chat_tools.enablement_tools import (
+        _active_session_id, _request_asana_task_update_impl)
+    return _request_asana_task_update_impl(
+        _ent_conn(db), _active_session_id(),
+        args.get("task_id"), args.get("action"), value=args.get("value"))
 
 
 def _create_enablement_task(args: dict, db) -> dict:
@@ -1612,9 +1580,7 @@ _DISPATCH = {
     "add_subtask": _add_subtask,
     "toggle_subtask": _toggle_subtask,
     "update_scratchpad": _update_scratchpad,
-    "create_asana_subtask": _create_asana_subtask,
-    "post_asana_comment": _post_asana_comment,
-    "update_asana_due_date": _update_asana_due_date,
+    "request_asana_task_update": _request_asana_task_update,
     "create_task": _create_enablement_task,
     "update_task": _update_enablement_task,
     "list_tasks": _list_enablement_tasks,

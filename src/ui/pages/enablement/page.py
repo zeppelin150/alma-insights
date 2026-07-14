@@ -66,6 +66,22 @@ RENN_SYSTEM_PROMPT = (
     "list, each result labeled with its source; a source that isn't connected is simply "
     "skipped and reported (e.g. tell the operator '(Zendesk not connected)'), never an "
     "error. Use search_catalog only for the local pre-indexed summary catalog.\n"
+    "- KNOWLEDGE BASE (check it FIRST for product/policy questions): kb_search "
+    "(query-ranked over the index cards Renn built, plus a full-text floor over "
+    "stored docs), kb_list_topics / kb_list_cards (complete enumeration), "
+    "kb_get_card (read one card in full). index_drive_folder queues a product "
+    "folder for indexing (runs on the next sync tick; progress in the jobs "
+    "sidebar). KB index cards are maintained automatically — you never write "
+    "them directly.\n"
+    "- CONTENT STUDIO (generated artifacts): generate_diagram (Mermaid, for "
+    "process-shaped content), generate_quiz (knowledge checks), generate_doc "
+    "(style: one_pager | battle_card), generate_deck (branded .pptx as a tracked "
+    "job). Each takes EXACTLY ONE source (source_task_id | source_research_id | "
+    "source_doc_id | source_text). list_artifacts finds what exists. "
+    "attach_artifact_to_draft puts a diagram/quiz/doc into a card draft (the "
+    "operator still reviews + approves before publish); "
+    "request_upload_artifact_to_drive publishes a rendered file (e.g. a deck) to "
+    "the knowledge-base Drive folder behind a Confirm card.\n"
     "- Work a card draft: render_card_preview (read the current draft), revise_draft "
     "(apply an edit and re-render), push_guru_draft (publish to Guru). Use the active "
     "draft id from the [ENABLEMENT SCOPE] context unless the user names another draft.\n"
@@ -76,9 +92,10 @@ RENN_SYSTEM_PROMPT = (
     "one to follow it), set_active_style_guide (switch which one card generation uses).\n"
     "- Manage work: list_tasks, create_task, update_task, draft_subtasks, add_subtask, "
     "toggle_subtask, update_scratchpad.\n"
-    "- Two-way Asana: create_asana_subtask (adds a subtask AND creates it in Asana), "
-    "post_asana_comment (comment on the linked Asana task), update_asana_due_date "
-    "(set the due date locally and in Asana). These act only on Asana-sourced tasks.\n"
+    "- Two-way Asana: request_asana_task_update (task_id + action: complete | reopen | "
+    "set_due | comment | add_subtask, plus a value for the last three) — opens a "
+    "Confirm card; the operator's click performs the Asana write. STOP and wait for "
+    "the [SYSTEM: operator confirmed/cancelled] message. Acts only on Asana-sourced tasks.\n"
     "- Set up Asana: asana_discover (find projects + field/enum GIDs), then "
     "set_asana_board_config (save the board config). Never ask the user for GIDs — "
     "discover them yourself.\n"
@@ -104,12 +121,13 @@ RENN_SYSTEM_PROMPT = (
     "- get_enablement_routing reports the CURRENT setup (active Drive folder ids + "
     "count, active Asana board, Guru publish target) — call it to answer 'what's "
     "set up' / 'what's connected'.\n\n"
-    "Gated writes (create/rename a Guru folder, create an Asana task):\n"
+    "Gated writes (Guru folders, Asana tasks/updates, Drive uploads):\n"
     "- You CANNOT run these writes yourself — there is no direct-execute tool. To "
     "make a change you PROPOSE it with a request_* tool: request_create_guru_folder "
     "(collection_id + title; optional parent_folder_id), request_rename_guru_folder "
     "(folder_id + new_title), request_create_asana_task (project_gid + name; optional "
-    "notes, due_on).\n"
+    "notes, due_on), request_asana_task_update (see Two-way Asana above), "
+    "request_upload_artifact_to_drive (artifact_id).\n"
     "- WRITE CONTRACT: calling a request_* write tool opens a Confirm card in the "
     "app. STOP and wait — do NOT call any further tools — until you receive a "
     "'[SYSTEM: operator confirmed/cancelled …]' message. Only the operator's click "
@@ -217,6 +235,9 @@ class EnablementPage(QWidget):
         self.tasks = TasksPage()
         self.workbench = WorkbenchPage()
         self.settings = SettingsPage()
+        # KB card (WS2-M7): give Settings a connection factory so it can show
+        # card counts and run the EC bootstrap off-thread.
+        self.settings.kb_conn_factory = self._conn
         # Scroll-wrap the tall pages so content scrolls instead of compressing
         # (compression was overlapping rows on Settings). Workbench fills exactly.
         from src.ui.pages.enablement.analytics import AnalyticsPage
@@ -690,9 +711,21 @@ class EnablementPage(QWidget):
             from src.data import enablement_identity as ident
             who = ident.operator_email(resolve=False)
             who_line = f" Operator: {who}." if who else ""
+            kb_line = ""
+            try:
+                from src.data.kb import store as kb_store
+                n_cards = kb_store.cards_count(conn)
+                if n_cards:
+                    n_topics = conn.execute(
+                        "SELECT COUNT(*) FROM kb_folders WHERE role='topic' "
+                        "AND status='ok'").fetchone()[0]
+                    kb_line = (f" KB: {n_cards} cards across {n_topics} topics "
+                               f"(kb_search checks it first).")
+            except Exception:  # noqa: BLE001 — scope line is enrichment
+                kb_line = ""
             scope = (
                 f"[ENABLEMENT SCOPE] {n_docs} indexed documents, {n_drafts} pending card "
-                f"drafts, {n_open} open tasks.{who_line}{active_line} Tools: search_local_documents / "
+                f"drafts, {n_open} open tasks.{who_line}{kb_line}{active_line} Tools: search_local_documents / "
                 f"query_business_drive to find content; revise_draft + push_guru_draft to work "
                 f"a card; create_task / list_tasks / draft_subtasks to manage work; "
                 f"asana_discover + set_asana_board_config to set up an Asana board."
@@ -1929,6 +1962,31 @@ class EnablementPage(QWidget):
     def _show_task_detail(self, task: dict):
         if self._drilldown is None:
             return
+        # Lazy per-task extras + brief join (WS1-M3/M4): the list/calendar
+        # query stays lean; comments/attachments/custom fields and the Haiku
+        # brief load only when a panel opens.
+        tid_for_extras = task.get("task_id")
+        if tid_for_extras and task.get("source") == "asana" and "extras" not in task:
+            try:
+                import json as _json
+                from src.data import asana_extras, enablement_tasks
+                from src.data.connection_factory import get_connection
+                conn = get_connection(self._engine_db_path())
+                try:
+                    extras = asana_extras.get_extras(conn, tid_for_extras)
+                    fresh = enablement_tasks.get_task(conn, tid_for_extras) or {}
+                finally:
+                    conn.close()
+                task = dict(task)
+                if extras:
+                    task["extras"] = extras
+                if fresh.get("brief_status") == "ok" and fresh.get("brief_json"):
+                    try:
+                        task["brief"] = _json.loads(fresh["brief_json"])
+                    except (ValueError, TypeError):
+                        pass
+            except Exception:  # noqa: BLE001 — extras/brief are enrichment only
+                pass
         panel = TaskDetailPanel(task)
         panel.open_in_workbench.connect(lambda: self.tabs.setCurrentWidget(self.workbench))
         panel.open_source.connect(self._open_source_url)
@@ -1940,7 +1998,12 @@ class EnablementPage(QWidget):
                 lambda text, tid=tid: self._run_task_writeback("post_comment_to_asana", tid, text))
             panel.due_changed.connect(
                 lambda due, tid=tid: self._run_task_writeback("update_due_in_asana", tid, due or None))
+            panel.completed_changed.connect(
+                lambda done, tid=tid: self._run_task_writeback("set_completed_in_asana", tid, done))
         self._open_task_title = task.get("title")
+        # WS1-M5 fix: reopen-by-id — the title-substring _find_task match is
+        # ambiguous once writes flow both ways.
+        self._open_task_id = task.get("task_id")
         self._drilldown.show_widget("Task", task.get("source", "").capitalize(), panel)
         self._set_status(f"Opened “{task.get('title', 'task')}”.")
 
@@ -1979,11 +2042,21 @@ class EnablementPage(QWidget):
                 self._set_status(f"Saved locally{(' — ' + note) if note else ''}.")
             else:
                 self._set_status("Done.")
+        elif res.get("conflict"):
+            # CAS blocked the write (WS1-M5) — normal concurrency, not an error.
+            self._set_status("Task changed in Asana — refreshed. Please retry.")
         else:
             self._set_status(f"Asana action failed: {res.get('error', 'unknown')}")
         # Refresh the task views, then re-open the same task's detail with fresh data.
         try:
             self._load_live()
+            tid = getattr(self, "_open_task_id", None)
+            if tid:
+                fresh = next((t for t in self._all_tasks
+                              if t.get("task_id") == tid), None)
+                if fresh:
+                    self._show_task_detail(fresh)
+                    return
             title = getattr(self, "_open_task_title", None)
             if title:
                 self._show_task_detail(self._find_task(title))
@@ -2016,13 +2089,48 @@ class EnablementPage(QWidget):
             pass
 
     def set_monitor(self, monitor):
-        """Host wires the EnablementMonitor; its 'changed' signal refreshes the views."""
+        """Host wires the EnablementMonitor; its 'changed' signal refreshes the
+        views. WS1-M7: refreshes are DEBOUNCED (500ms single-shot) so a burst
+        of Asana events doesn't thrash the calendar repaint, and a changed
+        Asana task auto-refreshes an OPEN detail panel with a status note —
+        no modal, no interruption."""
         self._monitor = monitor
-        if monitor is not None:
-            try:
-                monitor.changed.connect(lambda: self._load_live())
-            except Exception:
-                pass
+        if monitor is None:
+            return
+        try:
+            from PySide6.QtCore import QTimer
+            if not hasattr(self, "_refresh_debounce"):
+                self._refresh_debounce = QTimer(self)
+                self._refresh_debounce.setSingleShot(True)
+                self._refresh_debounce.setInterval(500)
+                self._refresh_debounce.timeout.connect(self._load_live)
+            monitor.changed.connect(self._refresh_debounce.start)
+            asana = getattr(monitor, "asana", None)
+            if asana is not None and hasattr(asana, "tasks_updated"):
+                asana.tasks_updated.connect(self._on_asana_tasks_updated)
+        except Exception:
+            pass
+
+    def _on_asana_tasks_updated(self, task_ids):
+        """A background reconcile changed tracked tasks (WS1-M7): if one of
+        them is open in the drilldown, silently re-open it with fresh data
+        after the debounced reload lands."""
+        open_id = getattr(self, "_open_task_id", None)
+        if not open_id or open_id not in (task_ids or []):
+            return
+        try:
+            from PySide6.QtCore import QTimer
+
+            def _reopen():
+                fresh = next((t for t in self._all_tasks
+                              if t.get("task_id") == open_id), None)
+                if fresh:
+                    self._show_task_detail(fresh)
+                    self._set_status("Updated from Asana.")
+            # After the debounced _load_live (500ms) has refreshed _all_tasks.
+            QTimer.singleShot(700, _reopen)
+        except Exception:  # noqa: BLE001 — freshness polish, never fatal
+            pass
 
     def _open_chat(self):
         """Show Renn (the enablement chat) in the shared right-side Drill Down panel."""

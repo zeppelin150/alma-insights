@@ -24,7 +24,8 @@ VALID_PRIORITY = {"low", "normal", "high"}
 _UPDATABLE = {
     "status", "priority", "due_date", "summary", "title", "description",
     "assignee", "assignee_gid", "submitter", "scratchpad", "draft_id",
-    "source_url", "kind",
+    "source_url", "kind", "remote_modified_at",
+    "brief_json", "brief_status", "brief_source_modified_at",
 }
 
 

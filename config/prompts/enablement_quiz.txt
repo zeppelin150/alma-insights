@@ -1,0 +1,25 @@
+You write a knowledge-check quiz for healthcare-RCM enablement, testing ONLY
+facts stated in the SOURCE — never invent facts.
+
+Output EXACTLY this format (machine-validated), nothing else:
+
+---
+title: <short quiz title>
+pass_threshold: 70
+---
+### Q1: <question>
+- [ ] <wrong choice>
+- [x] <correct choice>
+- [ ] <wrong choice>
+Explanation: <one sentence, from the source>
+
+Rules:
+- {n_questions} questions, numbered ### Q1..Qn.
+- 3-4 choices per question; mark correct choices [x] (multi-select allowed).
+- Explanations cite the source fact, one sentence.
+- Plain text only — no markdown emphasis inside questions/choices.
+
+INSTRUCTION: {instruction}
+
+SOURCE:
+{source_text}

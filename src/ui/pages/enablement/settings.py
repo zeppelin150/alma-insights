@@ -28,6 +28,7 @@ class SettingsPage(QWidget):
     style_guide_delete = Signal(str)       # doc_id → delete this stored guide
     identity_detect_email_requested = Signal()       # "Auto-detect from Google"
     identity_resolve_asana_gid_requested = Signal()  # "Resolve GID"
+    _kb_bootstrap_finished = Signal(str)             # worker thread → main (queued)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -49,9 +50,150 @@ class SettingsPage(QWidget):
         self._tabs.setObjectName("AnalysisTab")
         self._tabs.addTab(self._tab([self._connections()]), "Connections")
         self._tabs.addTab(self._tab([self._identity(), self.credentials]), "Providers")
-        self._tabs.addTab(self._tab([self._asana(), self._drive()]), "Sources")
+        self._tabs.addTab(self._tab([self._asana(), self._drive(),
+                                     self._knowledge_base()]), "Sources")
         self._tabs.addTab(self._tab([self._style_guide()]), "Style Guide")
         outer.addWidget(self._tabs, 1)
+        # Host may wire a connection factory (page._conn) so the KB card can
+        # show counts + run the bootstrap; absent, the card degrades to
+        # settings-only status with the button disabled.
+        self.kb_conn_factory = None
+        self._kb_bootstrap_finished.connect(self._kb_bootstrap_done)
+
+    # ── knowledge base (WS2-M7: status + bootstrap + degraded-state) ──
+    def _knowledge_base(self) -> QFrame:
+        card = card_frame()
+        v = QVBoxLayout(card)
+        v.setContentsMargins(20, 16, 20, 16)
+        v.setSpacing(10)
+        v.addWidget(section_label("KNOWLEDGE BASE (EC folder in Drive)"))
+        self._kb_status = QLabel("")
+        self._kb_status.setWordWrap(True)
+        self._kb_status.setStyleSheet(
+            f"color:{ALMA_TEXT_MID}; font-size:12px; border:none;")
+        v.addWidget(self._kb_status)
+        row = QHBoxLayout()
+        self._kb_toggle_btn = QPushButton("Enable KB")
+        self._kb_toggle_btn.setCursor(Qt.PointingHandCursor)
+        self._kb_toggle_btn.setStyleSheet(
+            f"QPushButton{{background:{ALMA_BG_ELEVATED}; color:{_TEAL}; "
+            f"border:1px solid {_TEAL}; border-radius:7px; padding:6px 12px; "
+            f"font-size:12px; font-weight:600;}}")
+        self._kb_toggle_btn.clicked.connect(self._on_kb_toggle)
+        row.addWidget(self._kb_toggle_btn)
+        self._kb_bootstrap_btn = QPushButton("Bootstrap EC folder")
+        self._kb_bootstrap_btn.setCursor(Qt.PointingHandCursor)
+        self._kb_bootstrap_btn.setStyleSheet(
+            f"QPushButton{{background:{ALMA_GREEN_DARK}; color:white; border:none; "
+            f"border-radius:7px; padding:6px 14px; font-size:12px; font-weight:600;}}")
+        self._kb_bootstrap_btn.clicked.connect(self._on_kb_bootstrap)
+        row.addWidget(self._kb_bootstrap_btn)
+        row.addStretch(1)
+        v.addLayout(row)
+        self.refresh_kb_status()
+        return card
+
+    def refresh_kb_status(self):
+        """The ONE degraded-state surface (cross-cutting finding): enumerate
+        WHY each background capability is inactive so 'the calendar stopped
+        updating' never reads as a silent regression."""
+        from src.data.settings_manager import get_section
+        try:
+            en = get_section("enablement", {}) or {}
+        except Exception:  # noqa: BLE001
+            en = {}
+        kb = en.get("kb") or {}
+        lines = []
+        if en.get("demo_mode", True):
+            lines.append("• Demo mode is ON — no live monitor (Asana sync, "
+                         "briefs, KB) runs until it's disabled.")
+        try:
+            from src.data import asana_setup
+            if not asana_setup.is_asana_connected():
+                lines.append("• Asana: no token — task sync is off.")
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from src.data import google_oauth
+            google_ok = google_oauth.is_active()
+        except Exception:  # noqa: BLE001
+            google_ok = False
+        if not google_ok:
+            lines.append("• Google: not connected this session — Drive reads, "
+                         "KB sync, and uploads wait for Reconnect.")
+        if not kb.get("enabled"):
+            lines.append("• Knowledge base: disabled.")
+        elif not kb.get("ec_folder_id"):
+            lines.append("• Knowledge base: enabled but the EC folder isn't "
+                         "bootstrapped yet.")
+        else:
+            counts = ""
+            factory = getattr(self, "kb_conn_factory", None)
+            if factory is not None:
+                try:
+                    conn = factory()
+                    try:
+                        from src.data.kb import store as kb_store
+                        n_cards = kb_store.cards_count(conn)
+                        n_topics = conn.execute(
+                            "SELECT COUNT(*) FROM kb_folders WHERE role='topic' "
+                            "AND status='ok'").fetchone()[0]
+                        counts = f" — {n_cards} cards across {n_topics} topics"
+                    finally:
+                        conn.close()
+                except Exception:  # noqa: BLE001
+                    counts = ""
+            lines.append(f"• Knowledge base: active{counts}.")
+        self._kb_status.setText("\n".join(lines) or "All background sources active.")
+        enabled = bool(kb.get("enabled"))
+        self._kb_toggle_btn.setText("Disable KB" if enabled else "Enable KB")
+        self._kb_bootstrap_btn.setEnabled(
+            enabled and getattr(self, "kb_conn_factory", None) is not None)
+
+    def _on_kb_toggle(self):
+        from src.data.settings_manager import get_section, set_section
+        cfg = dict(get_section("enablement", {}) or {})
+        kb = dict(cfg.get("kb") or {})
+        kb["enabled"] = not bool(kb.get("enabled"))
+        cfg["kb"] = kb
+        set_section("enablement", cfg)
+        self.refresh_kb_status()
+
+    def _on_kb_bootstrap(self):
+        """Create/verify the EC folder off-thread (requires Google connected)."""
+        factory = getattr(self, "kb_conn_factory", None)
+        if factory is None:
+            return
+        import threading
+        self._kb_bootstrap_btn.setEnabled(False)
+        self._kb_status.setText("Bootstrapping the EC folder…")
+
+        def worker():
+            msg = ""
+            try:
+                from src.data import google_oauth
+                if not google_oauth.is_active():
+                    msg = "Google isn't connected this session — Reconnect first."
+                else:
+                    conn = factory()
+                    try:
+                        from src.data.kb import drive_kb
+                        res = drive_kb.ensure_ec_root(conn)
+                        msg = ("EC folder ready." if res.get("ok")
+                               else res.get("message") or res.get("error") or "failed")
+                    finally:
+                        conn.close()
+            except Exception as exc:  # noqa: BLE001
+                msg = f"Bootstrap failed: {str(exc)[:120]}"
+            # Queued signal — the label update hops back to the Qt thread.
+            self._kb_bootstrap_finished.emit(msg)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _kb_bootstrap_done(self, msg: str):
+        self._kb_status.setText(msg)
+        self._kb_bootstrap_btn.setEnabled(True)
+        self.refresh_kb_status()
 
     def _tab(self, cards: list) -> QScrollArea:
         """Wrap one or more section cards in a top-aligned scroll area so a

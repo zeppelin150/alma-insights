@@ -1,0 +1,22 @@
+You write an internal battle-card for healthcare-RCM enablement from the
+SOURCE — faithful to it, never inventing facts. Output PURE MARKDOWN with
+EXACTLY these section headers, verbatim, in this order (machine-validated):
+
+# <title>
+
+## Positioning
+## Objections and responses
+## Proof points
+## Landmines
+
+Rules:
+- "Objections and responses" is a strict GFM pipe table with a header row
+  `| Objection | Response |` and a separator row.
+- "Proof points" is a bullet list of specific, source-stated facts.
+- "Landmines" lists what NOT to say/claim ("(none)" if the source gives none).
+- Keep it under ~350 words.
+
+INSTRUCTION: {instruction}
+
+SOURCE:
+{source_text}

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import urllib.error
 import urllib.request
 from urllib.parse import urlencode
@@ -22,15 +23,28 @@ logger = logging.getLogger("alma.asana")
 _BASE = "https://app.asana.com/api/1.0"
 _TIMEOUT = 30
 
+# GET-only retry policy (60s polling cadence demands rate-limit safety):
+# 429 → honor Retry-After (capped) up to _MAX_429_RETRIES; 500-503 → one
+# retry after _5XX_BACKOFF_S. POST/PUT are NEVER retried (non-idempotent),
+# and 412 is NEVER retried — it is the /events sync-token handshake, not an
+# error (get_events reads the fresh token out of the 412 body).
+_MAX_429_RETRIES = 2
+_RETRY_AFTER_CAP_S = 30
+_5XX_BACKOFF_S = 2
+_RETRYABLE_5XX = frozenset({500, 501, 502, 503})
+
 # Fields fetched per task when polling a board for enablement sync. Includes the
-# custom-field values (enum + people) the indicator/mapping logic reads, plus the
-# task assignee as a fallback.
+# custom-field values (enum + people + raw number/text/date subtypes) the
+# indicator/mapping/brief logic reads, plus html_notes (rich body — stored raw,
+# never rendered as HTML), start_on, and the task assignee as a fallback.
 _TASK_FIELDS = (
-    "name,due_on,permalink_url,completed,modified_at,notes,"
-    "assignee.name,assignee.gid,assignee.email,created_by.name,"
+    "name,due_on,start_on,permalink_url,completed,modified_at,notes,html_notes,"
+    "num_subtasks,assignee.name,assignee.gid,assignee.email,created_by.name,"
     "custom_fields.gid,custom_fields.name,custom_fields.display_value,"
     "custom_fields.enum_value.gid,custom_fields.enum_value.name,"
-    "custom_fields.people_value.gid,custom_fields.people_value.name"
+    "custom_fields.people_value.gid,custom_fields.people_value.name,"
+    "custom_fields.number_value,custom_fields.text_value,"
+    "custom_fields.date_value.date"
 )
 
 
@@ -47,6 +61,41 @@ class AsanaClient:
         return cls(load_setting("asana_api_key", "") or "")
 
     # ── HTTP ──────────────────────────────────────────────────────
+    def _open_get_with_retry(self, req: urllib.request.Request) -> dict:
+        """urlopen a GET with bounded retry.
+
+        Retries ONLY {429, 500-503}: 429 sleeps min(Retry-After, cap) up to
+        ``_MAX_429_RETRIES`` times; a 5xx gets exactly one retry after a fixed
+        backoff. Everything else — including 412, the load-bearing /events
+        sync handshake — re-raises immediately so callers see it untouched.
+        GETs are idempotent; ``_send`` (POST/PUT) must never route through here.
+        """
+        attempts_429 = 0
+        retried_5xx = False
+        while True:
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    return json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                if exc.code == 429 and attempts_429 < _MAX_429_RETRIES:
+                    attempts_429 += 1
+                    try:
+                        wait = int(exc.headers.get("Retry-After", "1"))
+                    except (TypeError, ValueError):
+                        wait = 1
+                    wait = max(1, min(wait, _RETRY_AFTER_CAP_S))
+                    logger.warning("Asana 429 — retry %d/%d in %ds",
+                                   attempts_429, _MAX_429_RETRIES, wait)
+                    time.sleep(wait)
+                    continue
+                if exc.code in _RETRYABLE_5XX and not retried_5xx:
+                    retried_5xx = True
+                    logger.warning("Asana %d — one retry in %ds",
+                                   exc.code, _5XX_BACKOFF_S)
+                    time.sleep(_5XX_BACKOFF_S)
+                    continue
+                raise
+
     def _get(self, path: str, params: dict | None = None):
         url = f"{_BASE}{path}"
         if params:
@@ -55,9 +104,7 @@ class AsanaClient:
             "Authorization": f"Bearer {self.api_key}",
             "Accept": "application/json",
         })
-        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
-        return payload.get("data")
+        return self._open_get_with_retry(req).get("data")
 
     def _get_raw(self, path: str, params: dict | None = None) -> dict:
         """Like :meth:`_get` but returns the FULL payload (``data`` +
@@ -69,8 +116,7 @@ class AsanaClient:
             "Authorization": f"Bearer {self.api_key}",
             "Accept": "application/json",
         })
-        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+        return self._open_get_with_retry(req)
 
     def _send(self, method: str, path: str, body: dict):
         """POST/PUT helper. Asana wraps request bodies in {"data": {...}}."""
@@ -138,6 +184,17 @@ class AsanaClient:
         or None to clear. Returns the updated task.
         """
         return self._send("PUT", f"/tasks/{task_gid}", {"due_on": due_on or None}) or {}
+
+    def update_task(self, task_gid: str, **fields) -> dict:
+        """Generic task update — ``PUT /tasks/{task_gid}`` with the given fields.
+
+        **Human-gated by the caller.** Supports the write-back verbs the panel
+        and the gated chat tool need, e.g. ``completed=True/False`` or
+        ``due_on="YYYY-MM-DD"``/``due_on=None``. Never retried (non-idempotent
+        path); returns the updated task payload (carries ``modified_at`` so the
+        caller can restamp its check-and-set anchor without a second GET).
+        """
+        return self._send("PUT", f"/tasks/{task_gid}", dict(fields)) or {}
 
     # ── reads ─────────────────────────────────────────────────────
     def test_connection(self) -> tuple[bool, str]:
@@ -252,6 +309,74 @@ class AsanaClient:
                  opt_fields: str = "name,due_on,completed,assignee.name,modified_at") -> dict:
         """Fetch a single task's current state (for read-back reconciliation)."""
         return self._get(f"/tasks/{task_gid}", {"opt_fields": opt_fields}) or {}
+
+    def get_events(self, resource_gid: str, sync_token: str | None = None) -> dict:
+        """Diff-poll a project via Asana's events API — ``GET /events``.
+
+        Returns ``{"events": [...], "sync": <token>, "has_more": bool,
+        "full_resync": bool}``.
+
+        Token lifecycle (the part that looks like an error but isn't):
+        ``sync=None`` — and any expired token (~24h unpolled) — makes Asana
+        answer **HTTP 412** whose *body* carries a fresh ``sync`` token and no
+        events. That 412 is the priming handshake: we catch it here, return
+        ``full_resync=True`` with the new token, and the caller runs a paged
+        baseline re-list before consuming events from that token. The retry
+        helper deliberately never retries 412.
+        """
+        params: dict = {"resource": resource_gid}
+        if sync_token:
+            params["sync"] = sync_token
+        try:
+            payload = self._get_raw("/events", params)
+        except urllib.error.HTTPError as exc:
+            if exc.code != 412:
+                raise
+            try:
+                body = json.loads(exc.read().decode("utf-8"))
+            except Exception:  # noqa: BLE001 — body shape is API-owned
+                body = {}
+            token = body.get("sync") or ""
+            if not token:
+                logger.warning("Asana 412 carried no sync token (resource %s)",
+                               resource_gid)
+            return {"events": [], "sync": token, "has_more": False,
+                    "full_resync": True}
+        return {
+            "events": payload.get("data") or [],
+            "sync": payload.get("sync") or (sync_token or ""),
+            "has_more": bool(payload.get("has_more")),
+            "full_resync": False,
+        }
+
+    def list_stories(self, task_gid: str, *, max_pages: int = 5) -> list[dict]:
+        """A task's comment stories (newest last) — ``GET /tasks/{gid}/stories``.
+
+        Filters to ``resource_subtype == "comment_added"`` (system stories like
+        "assigned to X" are noise for the extras panel). Pages via
+        ``next_page.offset`` up to ``max_pages`` like :meth:`list_workspace_users`.
+        """
+        out: list[dict] = []
+        params: dict = {
+            "opt_fields": "text,created_at,created_by.name,resource_subtype",
+            "limit": 100,
+        }
+        for _ in range(max_pages):
+            payload = self._get_raw(f"/tasks/{task_gid}/stories", params)
+            for s in payload.get("data") or []:
+                if s.get("resource_subtype") != "comment_added":
+                    continue
+                out.append({
+                    "gid": s.get("gid", ""),
+                    "text": s.get("text", ""),
+                    "created_at": s.get("created_at", ""),
+                    "author": (s.get("created_by") or {}).get("name", ""),
+                })
+            offset = (payload.get("next_page") or {}).get("offset")
+            if not offset:
+                break
+            params["offset"] = offset
+        return out
 
     def list_subtasks(self, task_gid: str, *, limit: int = 100) -> list[dict]:
         """List an Asana task's subtasks (gid + name + completed) for read-back."""

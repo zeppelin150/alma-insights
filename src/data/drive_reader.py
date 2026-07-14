@@ -228,6 +228,11 @@ def _extract_text(raw: bytes, mime_type: str) -> str:
             from pypdf import PdfReader
             reader = PdfReader(io.BytesIO(raw))
             return "\n".join((p.extract_text() or "") for p in reader.pages)
+        if "presentationml" in mt:
+            # WS2-M4: .pptx previously fell into the docx branch and silently
+            # extracted '' — product guides are decks, so this was a real hole.
+            from src.data.pptx_reader import pptx_to_markdown
+            return pptx_to_markdown(raw)
         if "word" in mt or "officedocument" in mt:
             import io
             import docx

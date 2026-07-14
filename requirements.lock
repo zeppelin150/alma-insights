@@ -33,6 +33,10 @@ markdown==3.7
 # XlsxWriter, typing_extensions; Pillow already pulled) filled with hashes
 # by the M1 pip-compile run.
 python-pptx==1.0.2
+# pypdf — enablement KB PDF ingestion. Pure-Python wheel; only transitive
+# is typing_extensions (already pulled). Hashes filled by the M1
+# pip-compile run.
+pypdf==6.14.2
 keyring==25.5.0
 # PyJWT[crypto] — pulls `cryptography` for RS256 (GitHub App auth path).
 # Critical for tests/test_github_app_auth.py; without the extra, CI fails

@@ -42,7 +42,8 @@ def test_reconcile_updates_due_status_assignee(empty_db):
     fake = FakeAsana(subtasks={"g1": []})
     task = {"gid": "g1", "due_on": "2026-09-09", "completed": True,
             "assignee": {"name": "Ada"}}
-    assert am._reconcile_existing_task(conn, fake, task) is True
+    # WS1-M2: returns the local task_id (truthy) instead of a bare True.
+    assert am._reconcile_existing_task(conn, fake, task) == tid
     t = et.get_task(conn, tid)
     assert t["due_date"] == "2026-09-09"
     assert t["status"] == "done"
@@ -51,7 +52,8 @@ def test_reconcile_updates_due_status_assignee(empty_db):
 
 def test_reconcile_returns_false_for_untracked(empty_db):
     from src.data import asana_monitor as am
-    assert am._reconcile_existing_task(empty_db.conn, FakeAsana(), {"gid": "nope"}) is False
+    # WS1-M2: returns None (falsy) for untracked gids instead of a bare False.
+    assert am._reconcile_existing_task(empty_db.conn, FakeAsana(), {"gid": "nope"}) is None
 
 
 def test_pull_subtasks_adds_then_syncs_no_dup(empty_db):

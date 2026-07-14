@@ -49,6 +49,18 @@ ACTION_TYPES = frozenset({
     "research_plan",
 })
 
+# INFORMATIONAL action types never gate the human-gate: nothing in their UI
+# resolves them (no pick, no Confirm), so counting them in has_pending_action
+# would permanently close the gate for the session after the first one — the
+# operator would see needs_picker refusals forever (research_plan had exactly
+# this latent bug: a proposed-but-never-accepted research plan bricked every
+# picker/setter until restart). Gating types = pickers/connect/confirm_write,
+# whose cards DO call mark_resolved.
+INFORMATIONAL_ACTION_TYPES = frozenset({
+    "research_plan",
+    "artifact_preview",   # WS3 previews (renders when D-MERMAID lands)
+})
+
 # payload_json may only carry these scalar control keys. Keeping the allowlist
 # tiny is the enforcement for invariant 14 — no folder/board/collection names,
 # no listing data, no PHI ever rides the channel. (This guards the PICKER/connect
@@ -160,6 +172,8 @@ _CONFIRM_WRITE_OPS = frozenset({
     "create_guru_folder",
     "rename_guru_folder",
     "create_asana_task",
+    "asana_task_update",          # WS1-M6: complete/reopen/set_due/comment/add_subtask
+    "upload_artifact_to_drive",   # WS3-M7: publish an artifact into the EC folder
 })
 
 
@@ -297,13 +311,19 @@ def has_pending_action(conn, session_id: str) -> bool:
     actually picks (``mark_resolved``), so the gate stays closed for the whole
     open window. Covers both ``created`` (consumed=0,resolved=0) and
     ``emitted/open`` (consumed=1,resolved=0).
+
+    INFORMATIONAL types (research_plan, artifact_preview) are EXCLUDED: their
+    UI never resolves them, so counting them would close the gate permanently
+    after the first one (the pre-mortem blocker + the latent research_plan bug).
     """
     if not session_id:
         return False
+    placeholders = ",".join("?" for _ in INFORMATIONAL_ACTION_TYPES)
     row = conn.execute(
-        "SELECT 1 FROM chat_action_requests "
-        "WHERE session_id=? AND resolved=0 LIMIT 1",
-        (session_id,),
+        f"SELECT 1 FROM chat_action_requests "
+        f"WHERE session_id=? AND resolved=0 AND type NOT IN ({placeholders}) "
+        f"LIMIT 1",
+        (session_id, *sorted(INFORMATIONAL_ACTION_TYPES)),
     ).fetchone()
     return row is not None
 

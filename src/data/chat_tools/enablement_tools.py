@@ -79,6 +79,8 @@ RESOLVER_ACTION_TOOLS = frozenset({
     "request_create_guru_folder",
     "request_rename_guru_folder",
     "request_create_asana_task",
+    "request_asana_task_update",
+    "request_upload_artifact_to_drive",
 })
 
 # Invariant 3 — the ONLY thing a resolver returns to the model. It carries no
@@ -902,6 +904,87 @@ def handle_request_create_asana_task(conn, args, session_filters) -> str:
         notes=args.get("notes"), due_on=args.get("due_on"))
 
 
+# ── WS1-M6: consolidated gated task update ───────────────────────────
+
+_TASK_UPDATE_ACTIONS = frozenset({"complete", "reopen", "set_due", "comment",
+                                  "add_subtask"})
+_ISO_DATE_RE_STR = r"^\d{4}-\d{2}-\d{2}$"
+
+
+def _request_asana_task_update_impl(conn, session_id, task_id, action,
+                                    value=None) -> str:
+    """Propose ONE Asana task mutation → opens a Confirm card. No write here.
+
+    Replaces the three retired un-gated tools (create_asana_subtask /
+    post_asana_comment / update_asana_due_date): per the locked write-tier
+    decision, EVERY Renn-initiated Asana mutation is Confirm-gated.
+
+    Per-action value validation happens HERE, at propose time (the pre-mortem
+    fix): a strict JSON schema can't express per-action constraints, and a bad
+    value discovered after Confirm burns the operator's click on a write that
+    then 400s. A definitive validation failure returns a steer string naming
+    the expected format and mints NO row — Haiku self-corrects next turn.
+
+    Captures expected_modified_at (and expected_due for set_due's field-level
+    comparison) so the WriteWorker can detect drift between propose and
+    Confirm for the destructive verbs; comment/add_subtask are append-only and
+    execute without drift checks.
+    """
+    import re as _re
+    from src.data import enablement_tasks as _et
+    sid = session_id or _active_session_id()
+    if not sid:
+        return ("No active chat session — open the Agent chat and try again so "
+                "the confirmation card can be shown.")
+    act = str(action or "").strip().lower()
+    if act not in _TASK_UPDATE_ACTIONS:
+        return (f"Unknown action '{act}'. Use one of: "
+                f"{', '.join(sorted(_TASK_UPDATE_ACTIONS))}.")
+    task = _et.get_task(conn, str(task_id or "").strip())
+    if not task:
+        return (f"I can't find task '{task_id}' — call list_tasks to see valid "
+                "task ids.")
+    if task.get("source") != "asana" or not task.get("source_ref"):
+        return ("That task isn't linked to Asana, so there's nothing to update "
+                "there. Use update_task for local-only changes.")
+
+    val = ("" if value is None else str(value)).strip()
+    if act in ("complete", "reopen") and val:
+        return (f"'{act}' takes no value — call request_asana_task_update with "
+                "just the task_id and action.")
+    if act == "set_due" and val and not _re.match(_ISO_DATE_RE_STR, val):
+        return ("set_due needs an ISO date like 2026-08-01 (or an empty value "
+                "to clear the due date) — please reformat and try again.")
+    if act == "comment" and not (0 < len(val) <= 2000):
+        return "comment needs a non-empty value (max 2000 characters)."
+    if act == "add_subtask" and not (0 < len(val) <= 300):
+        return "add_subtask needs a non-empty subtask title (max 300 characters)."
+
+    title = (task.get("title") or "task")[:80]
+    summaries = {
+        "complete": f'Mark "{title}" complete in Asana.',
+        "reopen": f'Reopen "{title}" in Asana.',
+        "set_due": (f'Set the due date of "{title}" to {val} in Asana.'
+                    if val else f'Clear the due date of "{title}" in Asana.'),
+        "comment": f'Post a comment on "{title}" in Asana.',
+        "add_subtask": f'Add subtask "{val[:60]}" to "{title}" in Asana.',
+    }
+    params = {
+        "task_id": task["task_id"], "action": act, "value": val,
+        "expected_modified_at": task.get("remote_modified_at") or "",
+        "expected_due": (task.get("due_date") or "") if act == "set_due" else "",
+    }
+    return _emit_confirm_write(conn, sid, "asana_task_update",
+                               summaries[act], params)
+
+
+def handle_request_asana_task_update(conn, args, session_filters) -> str:
+    """Registry handler (Gemini/MCP path). Returns the minimal write-wait STRING."""
+    return _request_asana_task_update_impl(
+        conn, _active_session_id(),
+        args.get("task_id"), args.get("action"), value=args.get("value"))
+
+
 # ── ask-first research (M6) ──────────────────────────────────────────
 _RESEARCH_PLAN_WAIT_MESSAGE = (
     "A research plan card is open in the app — STOP and wait for the operator to "
@@ -1047,8 +1130,18 @@ def _push_guru_draft_impl(conn, draft_id, collection_id=None, folder_id=None) ->
             client = GuruClient(email, token)
     except Exception:  # noqa: BLE001 — no creds → local mark-pushed
         client = None
-    return store.publish_draft(conn, did, guru_client=client,
-                               collection_id=collection_id, folder_id=folder_id)
+    result = store.publish_draft(conn, did, guru_client=client,
+                                 collection_id=collection_id, folder_id=folder_id)
+    if isinstance(result, dict) and result.get("ok"):
+        # WS2-M5 distill hook (fire-and-forget, never blocks the publish):
+        # queue a KB archive of the published card — the KBWorker distills it
+        # into a full-body published_card .md in the EC folder (owner request).
+        try:
+            from src.data.kb.ingest import enqueue_distill
+            enqueue_distill(conn, did)
+        except Exception:  # noqa: BLE001 — the publish result stands regardless
+            pass
+    return result
 
 
 def _list_guru_collections_impl(conn) -> dict:
@@ -1219,8 +1312,45 @@ def _update_task_impl(conn, task_id, fields) -> dict:
     return {"ok": True, "task_id": str(task_id)}
 
 
-def _list_tasks_impl(conn, *, status=None, source=None, kind=None, due_before=None, limit=50) -> dict:
+def _list_tasks_impl(conn, *, status=None, source=None, kind=None, due_before=None,
+                     limit=50, task_id=None) -> dict:
     from src.data import enablement_tasks as tasks
+    # Detail mode (WS1-M3): a task_id returns that ONE task enriched with its
+    # Asana extras (custom fields, attachment names, latest comments) — richer
+    # payload on the existing tool instead of a new get_task tool (budget).
+    if task_id:
+        task = tasks.get_task(conn, str(task_id))
+        if not task:
+            return {"ok": False, "error": "task_not_found",
+                    "message": f"No task '{task_id}' — call list_tasks without "
+                               "task_id to see valid ids."}
+        try:
+            from src.data import asana_extras
+            extras = asana_extras.get_extras(conn, str(task_id))
+        except Exception:  # noqa: BLE001 — enrichment only
+            extras = None
+        if extras:
+            stories = extras.get("stories") or []
+            task["custom_fields"] = [
+                {"name": cf.get("name"), "value": cf.get("display_value")}
+                for cf in (extras.get("custom_fields") or [])
+                if (cf.get("display_value") or "").strip()]
+            task["attachments"] = [a.get("name") for a in
+                                   (extras.get("attachments") or []) if a.get("name")]
+            task["comment_count"] = len(stories)
+            task["latest_comments"] = [
+                {"author": s.get("author"), "text": (s.get("text") or "")[:500]}
+                for s in stories[-3:]]
+        # Brief (WS1-M4): decoded only when it built cleanly. It is a CACHED
+        # summary — the raw description stays authoritative.
+        if task.get("brief_status") == "ok" and task.get("brief_json"):
+            import json as _json
+            try:
+                task["brief"] = _json.loads(task["brief_json"])
+            except (ValueError, TypeError):
+                pass
+        task.pop("brief_json", None)
+        return {"ok": True, "task": task}
     rows = tasks.list_tasks(conn, source=source, status=status, kind=kind,
                             due_before=due_before, limit=int(limit or 50))
     return {"tasks": rows, "count": len(rows)}
@@ -1357,7 +1487,7 @@ def handle_update_task(conn, args, filters):
 def handle_list_tasks(conn, args, filters):
     return _list_tasks_impl(conn, status=args.get("status"), source=args.get("source"),
                             kind=args.get("kind"), due_before=args.get("due_before"),
-                            limit=args.get("limit", 50))
+                            limit=args.get("limit", 50), task_id=args.get("task_id"))
 
 
 def handle_search_drive_docs(conn, args, filters):

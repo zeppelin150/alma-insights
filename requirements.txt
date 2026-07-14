@@ -26,6 +26,10 @@ markdown==3.7
 # python-pptx — enablement PowerPoint tab generates real .pptx decks.
 # Pulls lxml + XlsxWriter (+ Pillow, already present) as transitives.
 python-pptx==1.0.2
+# pypdf — enablement KB ingestion reads PDF policy docs from Drive
+# (WS2-M4, renn-calendar-kb-studio plan). Pure Python, no new transitives
+# (typing_extensions already pulled).
+pypdf==6.14.2
 keyring==25.5.0
 # PyJWT[crypto] pulls `cryptography` as a transitive dep — required for
 # RS256 signing in the optional GitHub App auth path (see github_app_auth.py).

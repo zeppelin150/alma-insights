@@ -14,10 +14,86 @@ blocks via the task service, and any direct write here commits before returning.
 from __future__ import annotations
 
 import logging
+import threading
 
 from src.data.connection_factory import atomic
 
 logger = logging.getLogger("alma.asana_writeback")
+
+# ── In-flight status-write guard (WS1-M5) ────────────────────────────
+# The optimistic complete-flip races the 60s reconcile: without a guard the
+# poll can read Asana's stale completed=false between our local flip and the
+# PUT, revert the flip, and the user's click visually undoes itself for up to
+# a minute. Poll and write-back run in the SAME main process, so an in-memory
+# guard suffices — the reconcile skips the status field for task_ids here.
+_INFLIGHT_LOCK = threading.Lock()
+_INFLIGHT_STATUS: dict[str, str] = {}   # task_id -> pending local status
+
+
+def is_status_inflight(task_id: str) -> bool:
+    with _INFLIGHT_LOCK:
+        return str(task_id) in _INFLIGHT_STATUS
+
+
+def _set_inflight(task_id: str, status: str) -> None:
+    with _INFLIGHT_LOCK:
+        _INFLIGHT_STATUS[str(task_id)] = status
+
+
+def _clear_inflight(task_id: str) -> None:
+    with _INFLIGHT_LOCK:
+        _INFLIGHT_STATUS.pop(str(task_id), None)
+
+
+def _cas_precheck(conn, task_id: str, gid: str, client) -> dict | None:
+    """Check-and-set for destructive verbs (complete/reopen/due): compare
+    Asana's live modified_at to our stored remote_modified_at anchor.
+
+    Returns None to proceed, or a ``{"ok": False, "conflict": True}`` result.
+    NULL anchor (first write after migration 043) → fetch-and-stamp, proceed.
+    A FAILED CAS read also proceeds (CAS is protection, not a gate — the
+    append-only verbs skip it entirely). Asana has no If-Match, so a
+    sub-second GET→PUT race remains; the poll reconcile self-heals it.
+    """
+    from src.data import enablement_tasks as et
+    row = conn.execute(
+        "SELECT remote_modified_at FROM enablement_tasks WHERE task_id = ?",
+        (str(task_id),),
+    ).fetchone()
+    anchor = (row[0] if row else None) or ""
+    try:
+        remote = (client.get_task(gid, opt_fields="modified_at") or {}).get("modified_at") or ""
+    except Exception as exc:  # noqa: BLE001 — best-effort protection
+        logger.debug("CAS read failed for %s: %s", gid, exc)
+        return None
+    if not anchor:
+        if remote:
+            et.update_task(conn, str(task_id), remote_modified_at=remote)
+        return None
+    if remote and remote != anchor:
+        return {"ok": False, "conflict": True,
+                "error": "task changed in Asana since it was last synced"}
+    return None
+
+
+def _restamp(conn, task_id: str, response: dict | None) -> None:
+    """Record the PUT response's modified_at as the new CAS anchor. For
+    content-neutral verbs (complete/reopen/due — the only restamped ones) it
+    also advances brief_source_modified_at so our own click doesn't burn a
+    Haiku brief rebuild (WS1-M4 self-write suppression) — but only when a
+    brief already exists; a still-pending first build keeps its slot."""
+    from src.data import enablement_tasks as et
+    modified = (response or {}).get("modified_at") or ""
+    if not modified:
+        return
+    fields = {"remote_modified_at": modified}
+    row = conn.execute(
+        "SELECT brief_status FROM enablement_tasks WHERE task_id = ?",
+        (str(task_id),),
+    ).fetchone()
+    if row and (row[0] or "pending") != "pending":
+        fields["brief_source_modified_at"] = modified
+    et.update_task(conn, str(task_id), **fields)
 
 
 def _asana_task_gid(conn, task_id: str) -> str | None:
@@ -96,20 +172,80 @@ def post_comment_to_asana(conn, task_id: str, text: str, *, client=None) -> dict
 
 
 def update_due_in_asana(conn, task_id: str, due_on: str | None, *, client=None) -> dict:
-    """Set the local due date AND push it to the linked Asana task."""
+    """Set the local due date AND push it to the linked Asana task.
+
+    WS1-M5: guarded by check-and-set — a due date can clobber a teammate's
+    concurrent change, so a stale anchor blocks the write (conflict:True; the
+    caller refreshes and the operator retries against fresh data). Unlinked/
+    unconfigured tasks keep the local-only degrade exactly as before.
+    """
     from src.data import enablement_tasks as et
-    et.update_task(conn, str(task_id), due_date=due_on)
     gid = _asana_task_gid(conn, task_id)
     if not gid:
+        et.update_task(conn, str(task_id), due_date=due_on)
         return {"ok": True, "synced": False, "due_on": due_on,
                 "note": "updated locally — this task is not linked to Asana"}
     c = _client(client)
     if c is None:
+        et.update_task(conn, str(task_id), due_date=due_on)
         return {"ok": True, "synced": False, "due_on": due_on,
                 "note": "updated locally — Asana not configured"}
+    conflict = _cas_precheck(conn, task_id, gid, c)
+    if conflict:
+        return conflict
+    et.update_task(conn, str(task_id), due_date=due_on)
     try:
-        c.update_due_date(gid, due_on)
+        res = c.update_due_date(gid, due_on)
     except Exception as exc:  # noqa: BLE001 — local update still applied
         logger.warning("Asana due-date write-back failed: %s", exc)
         return {"ok": True, "synced": False, "due_on": due_on, "error": str(exc)}
+    _restamp(conn, task_id, res)
     return {"ok": True, "synced": True, "due_on": due_on}
+
+
+def set_completed_in_asana(conn, task_id: str, done: bool, *, client=None) -> dict:
+    """Complete/reopen a task locally AND in Asana (WS1-M5 panel verb).
+
+    Order: CAS precheck (a read) → optimistic local flip under the in-flight
+    guard (the reconcile skips status for guarded tasks) → PUT → restamp.
+    Unlike comments/subtasks, a diverged done-state is actively misleading, so
+    an API failure REVERTS the local flip — but only if the status still holds
+    our optimistic value (a mid-flight reconcile of fresher state wins).
+    """
+    from src.data import enablement_tasks as et
+    tid = str(task_id)
+    task = et.get_task(conn, tid)
+    if not task:
+        return {"ok": False, "error": "task_not_found"}
+    new_status = "done" if done else "open"
+    prev_status = task.get("status") or "open"
+
+    gid = _asana_task_gid(conn, tid)
+    if not gid:
+        et.update_task(conn, tid, status=new_status)
+        return {"ok": True, "synced": False, "status": new_status,
+                "note": "updated locally — this task is not linked to Asana"}
+    c = _client(client)
+    if c is None:
+        et.update_task(conn, tid, status=new_status)
+        return {"ok": True, "synced": False, "status": new_status,
+                "note": "updated locally — Asana not configured"}
+    conflict = _cas_precheck(conn, tid, gid, c)
+    if conflict:
+        return conflict
+
+    _set_inflight(tid, new_status)
+    try:
+        et.update_task(conn, tid, status=new_status)   # optimistic flip
+        try:
+            res = c.update_task(gid, completed=bool(done))
+        except Exception as exc:  # noqa: BLE001 — revert, the flip would mislead
+            current = (et.get_task(conn, tid) or {}).get("status")
+            if current == new_status:                  # nothing fresher landed
+                et.update_task(conn, tid, status=prev_status)
+            logger.warning("Asana complete write-back failed: %s", exc)
+            return {"ok": False, "error": str(exc), "reverted": True}
+        _restamp(conn, tid, res)
+        return {"ok": True, "synced": True, "status": new_status}
+    finally:
+        _clear_inflight(tid)

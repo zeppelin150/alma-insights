@@ -30,6 +30,7 @@ class TaskDetailPanel(QWidget):
     subtask_added = Signal(str)      # subtask text (synced to Asana if linked)
     comment_posted = Signal(str)     # comment text → Asana story
     due_changed = Signal(str)        # ISO date YYYY-MM-DD (or "" to clear)
+    completed_changed = Signal(bool) # True=complete, False=reopen (WS1-M5)
     open_source = Signal(str)        # source_url → host opens it (scheme-validated)
 
     def __init__(self, task: dict, parent=None):
@@ -68,7 +69,45 @@ class TaskDetailPanel(QWidget):
         if self._is_asana:
             meta.addWidget(badge("Asana two-way", "asana"))
         meta.addStretch(1)
+        # Complete/Reopen (WS1-M5): direct write — the click IS the consent.
+        is_done = (self._task.get("status") == "done")
+        self._complete_btn = self._action_btn("Reopen" if is_done else "Mark complete")
+        self._complete_btn.clicked.connect(
+            lambda _=False, done=not is_done: self.completed_changed.emit(done))
+        meta.addWidget(self._complete_btn)
         v.addLayout(meta)
+
+        # ── Haiku brief (WS1-M4; only when brief_status='ok' — degrade path
+        # is "render nothing extra", the raw description below stays authoritative) ──
+        brief = self._task.get("brief") or {}
+        if (brief.get("ask") or "").strip():
+            v.addWidget(self._label("BRIEF"))
+            ask_line = f"Ask: {brief.get('ask', '')}\nDeliverable: {brief.get('deliverable', '')}"
+            if brief.get("effective_date"):
+                ask_line += f"\nEffective: {brief['effective_date']}"
+            b = QLabel(ask_line)
+            b.setWordWrap(True)
+            b.setTextFormat(Qt.PlainText)   # LLM output — never rich text
+            b.setStyleSheet(
+                f"background:{ALMA_BG_INSET}; color:{ALMA_TEXT_DARK}; "
+                f"border:1px solid {ALMA_ACCENT_TEAL}; border-radius:8px; "
+                f"padding:10px 12px; font-size:12.5px;")
+            v.addWidget(b)
+            chips = ([f"@{s}" for s in (brief.get("stakeholders") or [])[:4]]
+                     + list((brief.get("links") or [])[:3]))
+            if chips:
+                chip_row = QHBoxLayout()
+                chip_row.setSpacing(6)
+                for text in chips:
+                    chip = QLabel(str(text))
+                    chip.setTextFormat(Qt.PlainText)
+                    chip.setStyleSheet(
+                        f"background:{ALMA_BG_INSET}; color:{ALMA_TEXT_MID}; "
+                        f"border:1px solid {ALMA_BORDER}; border-radius:9px; "
+                        f"padding:3px 9px; font-size:11px;")
+                    chip_row.addWidget(chip)
+                chip_row.addStretch(1)
+                v.addLayout(chip_row)
 
         # ── Description (full Asana body) + source link ──
         desc = (self._task.get("description") or "").strip()
@@ -90,6 +129,58 @@ class TaskDetailPanel(QWidget):
             src_row.addWidget(src_btn)
             src_row.addStretch(1)
             v.addLayout(src_row)
+
+        # ── Rich Asana extras (WS1-M3; read-only, host joins lazily) ──
+        extras = self._task.get("extras") or {}
+        fields = [cf for cf in (extras.get("custom_fields") or [])
+                  if (cf.get("display_value") or "").strip()]
+        if fields:
+            v.addWidget(self._label("CUSTOM FIELDS"))
+            chip_row = QHBoxLayout()
+            chip_row.setSpacing(6)
+            for cf in fields[:6]:
+                chip = QLabel(f"{cf.get('name', '')}: {cf.get('display_value', '')}")
+                chip.setTextFormat(Qt.PlainText)   # untrusted Asana values
+                chip.setStyleSheet(
+                    f"background:{ALMA_BG_INSET}; color:{ALMA_TEXT_MID}; "
+                    f"border:1px solid {ALMA_BORDER}; border-radius:9px; "
+                    f"padding:3px 9px; font-size:11px;")
+                chip_row.addWidget(chip)
+            chip_row.addStretch(1)
+            v.addLayout(chip_row)
+
+        attachments = extras.get("attachments") or []
+        if attachments:
+            v.addWidget(self._label("ATTACHMENTS"))
+            for att in attachments[:8]:
+                name = (att.get("name") or "attachment").strip()
+                a_btn = self._action_btn(f"{name} ›")
+                view = (att.get("view_url") or "").strip()
+                if view:
+                    # Routed through open_source — the host scheme-validates.
+                    a_btn.clicked.connect(
+                        lambda _=False, u=view: self.open_source.emit(u))
+                else:
+                    a_btn.setEnabled(False)
+                a_row = QHBoxLayout()
+                a_row.addWidget(a_btn)
+                a_row.addStretch(1)
+                v.addLayout(a_row)
+
+        stories = extras.get("stories") or []
+        if stories:
+            v.addWidget(self._label("COMMENTS"))
+            for s in stories[-10:]:                       # newest last in Asana order
+                author = (s.get("author") or "").strip() or "someone"
+                when = (s.get("created_at") or "")[:10]
+                c = QLabel(f"{author} · {when}\n{(s.get('text') or '').strip()}")
+                c.setWordWrap(True)
+                c.setTextFormat(Qt.PlainText)             # untrusted Asana text
+                c.setStyleSheet(
+                    f"background:{ALMA_BG_INSET}; color:{ALMA_TEXT_MID}; "
+                    f"border:1px solid {ALMA_BORDER}; border-radius:8px; "
+                    f"padding:8px 10px; font-size:12px;")
+                v.addWidget(c)
 
         # ── Due date (editable; pushes to Asana when linked) ──
         v.addWidget(self._label("DUE DATE"))

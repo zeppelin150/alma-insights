@@ -36,14 +36,29 @@ class EnablementMonitor(QObject):
         self.drive = DriveMonitor(db_manager, self)
         # fold each sub-monitor's background activity into one refresh signal
         self.asana.tasks_created.connect(lambda _rows: self.changed.emit())
+        self.asana.tasks_updated.connect(lambda _rows: self.changed.emit())
         self.drive.documents_indexed.connect(lambda _rows: self.changed.emit())
 
-    def start(self, interval_seconds: int = 300):
-        """Start each sub-monitor's background poll IFF its source is configured."""
+    def start(self, interval_seconds: int = 300,
+              asana_interval_seconds: int | None = None):
+        """Start each sub-monitor's background poll IFF its source is configured.
+
+        ``asana_interval_seconds`` lets Asana run its 60s events cadence while
+        Drive keeps the shared (slower) interval; absent, Asana falls back to
+        the shared value.
+        """
         try:
             from src.data import asana_setup
             if asana_setup.is_asana_connected():
-                self.asana.start(interval_seconds)
+                self.asana.start(asana_interval_seconds or interval_seconds)
+                # Brief worker (WS1-M4): its OWN timer/thread so Haiku latency
+                # can never stall the sync cadence; no-ops when nothing dirty.
+                try:
+                    from src.data.task_brief import BriefWorker
+                    self._briefs = BriefWorker(self.db)
+                    self._briefs.start(asana_interval_seconds or interval_seconds)
+                except Exception as exc:  # noqa: BLE001 — enrichment only
+                    logger.debug("brief worker start skipped: %s", exc)
         except Exception as exc:  # noqa: BLE001
             logger.debug("asana monitor start skipped: %s", exc)
         try:
@@ -52,9 +67,23 @@ class EnablementMonitor(QObject):
                 self.drive.start(interval_seconds)
         except Exception as exc:  # noqa: BLE001
             logger.debug("drive monitor start skipped: %s", exc)
+        try:
+            # KBWorker (WS2-M3): started whenever the KB is ENABLED — it
+            # checks google_oauth.is_active() PER TICK (disable-on-launch
+            # means Google is NEVER active at wiring time; a start-time gate
+            # would silently never run — the pre-mortem blocker).
+            from src.data.kb.worker import KBWorker, kb_enabled
+            if kb_enabled():
+                self._kb = KBWorker(self.db)
+                self._kb.start(interval_seconds)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("kb worker start skipped: %s", exc)
 
     def stop(self):
-        for mon in (self.asana, self.drive):
+        for mon in (self.asana, self.drive, getattr(self, "_briefs", None),
+                    getattr(self, "_kb", None)):
+            if mon is None:
+                continue
             try:
                 mon.stop()
             except Exception:  # noqa: BLE001

@@ -141,16 +141,28 @@ def test_writeback_api_failure_is_graceful(empty_db):
 
 def test_poll_board_skips_unmapped_project(empty_db):
     from src.data import asana_monitor as am
-    out = am._poll_board(empty_db.conn, object(), {"source_id": "s1", "config": {}})
-    assert out == []
+    results = {"created": [], "updated": []}
+    am._poll_board(empty_db.conn, object(), {"source_id": "s1", "config": {}}, results)
+    assert results == {"created": [], "updated": []}
 
 
 def test_writeback_tools_registered():
+    """WS1-M6: the three un-gated write tools are RETIRED from every model
+    surface; the single Confirm-gated request_asana_task_update replaces them."""
     from src.data.chat_tools import registry
     registry._ensure_registered()
-    for t in ("create_asana_subtask", "post_asana_comment", "update_asana_due_date"):
-        assert t in registry._CHAT_TOOLS
+    retired = ("create_asana_subtask", "post_asana_comment", "update_asana_due_date")
+    for t in retired:
+        assert t not in registry._CHAT_TOOLS
+    assert "request_asana_task_update" in registry._CHAT_TOOLS
     from src.llm import claude_tools as CT
     names = {s["name"] for s in CT.TOOL_DEFINITIONS}
-    for t in ("create_asana_subtask", "post_asana_comment", "update_asana_due_date"):
-        assert t in CT._DISPATCH and t in names
+    for t in retired:
+        assert t not in CT._DISPATCH and t not in names
+    assert "request_asana_task_update" in CT._DISPATCH
+    assert "request_asana_task_update" in names
+    # The MCP surface steers retired names instead of a generic unknown-tool.
+    from src.mcp import chat_mcp_server as MCP
+    for t in retired:
+        assert t not in MCP._MCP_ALLOWED_TOOLS
+        assert "request_asana_task_update" in MCP._RETIRED_TOOL_HINTS[t]

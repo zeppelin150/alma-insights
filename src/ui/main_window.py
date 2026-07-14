@@ -922,7 +922,11 @@ class MainWindow(QMainWindow):
             from src.data.enablement_monitor import EnablementMonitor
             self._enablement_monitor = EnablementMonitor(self.db)
             self.guru_page.set_monitor(self._enablement_monitor)
-            self._enablement_monitor.start(int(en.get("poll_interval_seconds", 300)))
+            asana_cfg = en.get("asana") or {}
+            self._enablement_monitor.start(
+                int(en.get("poll_interval_seconds", 300)),
+                asana_interval_seconds=int(asana_cfg.get("poll_interval_seconds", 60)),
+            )
         except Exception as exc:  # noqa: BLE001
             import logging
             logging.getLogger("alma.main").debug("enablement monitor skipped: %s", exc)

@@ -1079,43 +1079,26 @@ TOOL_SCHEMAS = [
         },
     },
     {
-        "name": "create_asana_subtask",
+        "name": "request_asana_task_update",
         "description": (
-            "Add a subtask to a task AND create it back in Asana under the parent "
-            "Asana task. Saves locally; syncs to Asana only for Asana-sourced tasks."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "task_id": {"type": "string"}, "text": {"type": "string"},
-            },
-            "required": ["task_id", "text"],
-        },
-    },
-    {
-        "name": "post_asana_comment",
-        "description": "Post a comment back to the linked Asana task (Asana-sourced tasks only).",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "task_id": {"type": "string"}, "text": {"type": "string"},
-            },
-            "required": ["task_id", "text"],
-        },
-    },
-    {
-        "name": "update_asana_due_date",
-        "description": (
-            "Update a task's due date locally AND push it to the linked Asana task. "
-            "due_on is an ISO date (YYYY-MM-DD) or null to clear."
+            "Propose ONE update to an Asana-sourced task — the operator confirms it "
+            "on a card before anything is written to Asana. action: complete | "
+            "reopen | set_due (value=YYYY-MM-DD, empty clears) | comment "
+            "(value=text) | add_subtask (value=title). Replaces the retired "
+            "create_asana_subtask / post_asana_comment / update_asana_due_date."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "task_id": {"type": "string"},
-                "due_on": {"type": "string", "description": "ISO date YYYY-MM-DD or null."},
+                "action": {"type": "string",
+                           "enum": ["complete", "reopen", "set_due",
+                                    "comment", "add_subtask"]},
+                "value": {"type": "string",
+                          "description": "Required for set_due/comment/add_subtask."},
             },
-            "required": ["task_id"],
+            "required": ["task_id", "action"],
+            "additionalProperties": False,
         },
     },
     {
@@ -1153,7 +1136,11 @@ TOOL_SCHEMAS = [
     },
     {
         "name": "list_tasks",
-        "description": "List enablement tasks, optionally filtered by status/source/kind/due date.",
+        "description": (
+            "List enablement tasks, optionally filtered by status/source/kind/due "
+            "date. Pass task_id to get ONE task in detail — including its Asana "
+            "custom fields, attachment names, and latest comments."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1162,6 +1149,8 @@ TOOL_SCHEMAS = [
                 "kind": {"type": "string"},
                 "due_before": {"type": "string", "description": "ISO date."},
                 "limit": {"type": "integer"},
+                "task_id": {"type": "string",
+                            "description": "Detail mode: return just this task, enriched."},
             },
         },
     },
@@ -1307,6 +1296,238 @@ TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "name": "list_artifacts",
+        "description": (
+            "List content-studio artifacts (generated diagrams, quizzes, decks, "
+            "one-pagers, battle-cards) newest-first, with optional filters. "
+            "Complete enumeration — use this to find an artifact_id."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string",
+                         "description": "diagram|quiz|deck|one_pager|battle_card."},
+                "status": {"type": "string",
+                           "description": "draft|rendered|attached|published|archived."},
+                "task_id": {"type": "string",
+                            "description": "Only artifacts linked to this task."},
+                "limit": {"type": "integer", "description": "Max rows (default 50)."},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "generate_diagram",
+        "description": (
+            "Generate a Mermaid diagram (flowchart/sequence/etc.) from EXACTLY "
+            "ONE source: source_task_id | source_research_id | source_doc_id | "
+            "source_text. The result is stored as a diagram artifact "
+            "(list_artifacts shows it). Diagrams suit process-shaped content: "
+            "claim lifecycles, denial workflows, escalation paths."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "source_task_id": {"type": "string",
+                                   "description": "Draw from this enablement task."},
+                "source_research_id": {"type": "string",
+                                       "description": "Draw from this research manifest."},
+                "source_doc_id": {"type": "string",
+                                  "description": "Draw from this stored document."},
+                "source_text": {"type": "string",
+                                "description": "Draw from inline text (<= 8000 chars)."},
+                "diagram_type": {"type": "string",
+                                 "description": "flowchart TD|flowchart LR|sequenceDiagram|"
+                                                "stateDiagram-v2|classDiagram|erDiagram|journey|pie."},
+                "instruction": {"type": "string",
+                                "description": "What to emphasize or simplify."},
+                "title": {"type": "string", "description": "Artifact title."},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "generate_deck",
+        "description": (
+            "Generate a branded PowerPoint (.pptx) deck from EXACTLY ONE source: "
+            "source_task_id | source_research_id | source_doc_id | source_text. "
+            "Runs as a tracked job in the sidebar; the file lands in the "
+            "artifact store (list_artifacts shows it, kind='deck')."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "source_task_id": {"type": "string"},
+                "source_research_id": {"type": "string"},
+                "source_doc_id": {"type": "string"},
+                "source_text": {"type": "string"},
+                "audience": {"type": "string",
+                             "description": "Who the deck is for (default: the enablement team)."},
+                "instruction": {"type": "string",
+                                "description": "What to emphasize or structure around."},
+                "title": {"type": "string", "description": "Deck/artifact title."},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "kb_search",
+        "description": (
+            "SEARCH the knowledge base (query-ranked): index cards Renn has "
+            "built from product docs/decks, plus a full-text floor over stored "
+            "documents. Check the KB BEFORE live Guru/Zendesk/Drive searches. "
+            "For complete enumeration use kb_list_topics / kb_list_cards."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "topics": {"type": "array", "items": {"type": "string"},
+                           "description": "Optional topic-slug filter."},
+                "type": {"type": "string",
+                         "description": "source_summary|research_note|decision|"
+                                        "glossary|faq|update_diff|published_card."},
+                "limit": {"type": "integer", "description": "Max results (default 8)."},
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "kb_list_topics",
+        "description": "LIST every knowledge-base topic with its card count (complete enumeration).",
+        "inputSchema": {"type": "object", "properties": {},
+                        "additionalProperties": False},
+    },
+    {
+        "name": "kb_list_cards",
+        "description": "LIST every card in one knowledge-base topic (complete enumeration).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "topic": {"type": "string", "description": "Topic slug from kb_list_topics."},
+                "type": {"type": "string", "description": "Optional card-type filter."},
+            },
+            "required": ["topic"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "kb_get_card",
+        "description": "Read one knowledge-base card in full (frontmatter fields + body).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"card_id": {"type": "string"}},
+            "required": ["card_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "index_drive_folder",
+        "description": (
+            "Queue a Google Drive folder for knowledge-base indexing: every "
+            "doc/deck/PDF in it (bounded depth) is read, summarized into an EC "
+            "index card, and kept searchable in full text. Runs as a tracked "
+            "job on the next KB sync tick. No folder_id? Use "
+            "request_drive_picker so the operator picks one."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "folder_id": {"type": "string",
+                              "description": "The Drive folder id to index."},
+                "topic": {"type": "string",
+                          "description": "Optional EC topic to file the cards under."},
+            },
+            "required": ["folder_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "generate_quiz",
+        "description": (
+            "Generate a knowledge-check quiz from EXACTLY ONE source: "
+            "source_task_id | source_research_id | source_doc_id | source_text. "
+            "Stored as a quiz artifact; attach_artifact_to_draft publishes it "
+            "as a card section through the normal review flow."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "source_task_id": {"type": "string"},
+                "source_research_id": {"type": "string"},
+                "source_doc_id": {"type": "string"},
+                "source_text": {"type": "string"},
+                "n_questions": {"type": "integer", "description": "2-12 (default 5)."},
+                "instruction": {"type": "string"},
+                "title": {"type": "string"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "generate_doc",
+        "description": (
+            "Generate a styled enablement doc from EXACTLY ONE source "
+            "(source_task_id | source_research_id | source_doc_id | "
+            "source_text). style: one_pager (Overview/Why it matters/Key "
+            "facts/How to talk about it/Links) or battle_card (Positioning/"
+            "Objections table/Proof points/Landmines)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "style": {"type": "string", "enum": ["one_pager", "battle_card"]},
+                "source_task_id": {"type": "string"},
+                "source_research_id": {"type": "string"},
+                "source_doc_id": {"type": "string"},
+                "source_text": {"type": "string"},
+                "instruction": {"type": "string"},
+                "title": {"type": "string"},
+            },
+            "required": ["style"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "attach_artifact_to_draft",
+        "description": (
+            "Attach a generated artifact (diagram/quiz/one-pager/battle-card) "
+            "to a Guru card DRAFT — pass draft_id for an existing draft or "
+            "new_draft_title to start one. The draft still needs the operator's "
+            "review + approval before it publishes to Guru."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "artifact_id": {"type": "string"},
+                "draft_id": {"type": "integer"},
+                "new_draft_title": {"type": "string"},
+            },
+            "required": ["artifact_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "request_upload_artifact_to_drive",
+        "description": (
+            "Propose uploading a rendered artifact (e.g. a generated .pptx) to "
+            "the knowledge-base Drive folder — the operator confirms on a card "
+            "before anything is uploaded. Defaults to the EC folder; pass "
+            "target_folder_id only when the operator named a different one."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "artifact_id": {"type": "string"},
+                "target_folder_id": {"type": "string",
+                                     "description": "Optional explicit Drive folder id."},
+            },
+            "required": ["artifact_id"],
+            "additionalProperties": False,
+        },
+    },
 ]
 
 
@@ -1335,6 +1556,16 @@ def _get_db_connection():
 
 
 _MCP_ALLOWED_TOOLS = {t["name"] for t in TOOL_SCHEMAS}
+
+# WS1-M6: un-gated Asana write tools retired in favor of the Confirm-gated
+# request_asana_task_update. Remove this shim after a release cycle.
+_RETIRED_TOOL_HINTS = {
+    name: ("This action now requires operator confirmation — call "
+           "request_asana_task_update(task_id, action, value) instead "
+           f"(retired tool: {name}).")
+    for name in ("create_asana_subtask", "post_asana_comment",
+                 "update_asana_due_date")
+}
 
 
 def _read_active_session_id() -> str | None:
@@ -1371,6 +1602,11 @@ def _execute_tool(name, args):
     aliases (query_entities, query_tickets, etc.) don't leak through
     the MCP interface.
     """
+    if name in _RETIRED_TOOL_HINTS:
+        # Purposeful-error shim (WS1-M6): a model imitating its own packed
+        # history may still call a retired write tool — steer it to the gated
+        # replacement in one turn instead of a confusing unknown-tool error.
+        return {"error": _RETIRED_TOOL_HINTS[name]}
     if name not in _MCP_ALLOWED_TOOLS:
         return {"error": f"Unknown tool: {name}"}
 

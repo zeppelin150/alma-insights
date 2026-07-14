@@ -150,17 +150,221 @@ class GuruListWorker(QThread):
             self.failed.emit(self._request_id, str(exc)[:160])
 
 
+# ═══════════════════════════════════════════════════════════════════════
+#  Gated-write op registry (WS1-M6 refactor of the M7b if/elif dispatch).
+#
+#  Each op is a module-level handler ``fn(params: dict, ctx: dict) -> dict``
+#  run inside the WriteWorker thread (``ctx`` currently carries ``db_path``
+#  for handlers that touch the local mirror). New ops REGISTER here instead of
+#  growing an if/elif (WS3-M7's upload_artifact_to_drive slots straight in).
+#
+#  ``PRE_DISPATCH_CHECKS`` maps op → main-thread check run by execute_write
+#  BEFORE mark_resolved: returning a dict BLOCKS the dispatch *without burning
+#  the confirm row* (the card stays open) — the needs_google_connect pattern.
+#  Checks must be cheap READS only; the resolve-first ordering protects the
+#  write itself, not reads.
+# ═══════════════════════════════════════════════════════════════════════
+
+def _write_guru_folder(params: dict, ctx: dict, *, rename: bool) -> dict:
+    from src.data.guru_client import GuruClient
+    email, token = GuruClient.load_credentials()
+    if not (email and token):
+        return {"ok": False, "error": "guru_not_connected"}
+    client = GuruClient(email, token)
+    if rename:
+        return client.rename_folder(params.get("folder_id"), params.get("new_title"))
+    return client.create_folder(
+        params.get("collection_id"), params.get("title"),
+        parent_folder_id=params.get("parent_folder_id") or None)
+
+
+def _write_create_asana_task(params: dict, ctx: dict) -> dict:
+    from src.data.asana_client import AsanaClient
+    client = AsanaClient.from_store()
+    if not client.api_key:
+        return {"ok": False, "error": "asana_not_connected"}
+    return client.create_task(
+        params.get("project_gid"), params.get("name"),
+        notes=params.get("notes") or None, due_on=params.get("due_on") or None)
+
+
+def _write_asana_task_update(params: dict, ctx: dict) -> dict:
+    """WS1-M6: execute one gated task mutation via asana_writeback.
+
+    Drift protection (pre-mortem-corrected): CAS applies ONLY to the
+    destructive verbs — complete/reopen compare live modified_at against the
+    propose-time snapshot; set_due compares the DUE FIELD itself (likes and
+    comments bump modified_at without touching due_on, and whole-task CAS
+    would make the most common confirms spuriously fail). comment/add_subtask
+    are append-only and execute unconditionally. After a drift check passes,
+    the anchor is re-stamped to the live value so asana_writeback's own
+    internal CAS agrees rather than double-jeopardizing the write.
+    """
+    from src.data import asana_writeback as awb
+    from src.data import enablement_tasks as et
+    from src.data.asana_client import AsanaClient
+    from src.data.connection_factory import get_connection
+
+    client = AsanaClient.from_store()
+    if not client.api_key:
+        return {"ok": False, "error": "asana_not_connected"}
+    db_path = ctx.get("db_path") or ""
+    if not db_path:
+        return {"ok": False, "error": "no_db"}
+    conn = get_connection(db_path)
+    try:
+        task_id = str(params.get("task_id") or "")
+        action = params.get("action") or ""
+        value = params.get("value") or ""
+        row = et.get_task(conn, task_id)
+        if not row:
+            return {"ok": False, "error": "task_not_found"}
+        gid = row.get("source_ref") or ""
+
+        if action in ("complete", "reopen", "set_due"):
+            try:
+                live = client.get_task(gid, opt_fields="modified_at,due_on") or {}
+            except Exception as exc:  # noqa: BLE001 — CAS read is protection, not a gate
+                logger.debug("gated-write CAS read failed for %s: %s", gid, exc)
+                live = {}
+            if live:
+                if action == "set_due":
+                    expected_due = params.get("expected_due") or ""
+                    if (live.get("due_on") or "") != expected_due:
+                        return {"ok": False, "conflict": True, "op_action": action,
+                                "error": "the due date changed in Asana since I "
+                                         "proposed this — please re-check the task"}
+                else:
+                    expected = params.get("expected_modified_at") or ""
+                    if expected and (live.get("modified_at") or "") != expected:
+                        return {"ok": False, "conflict": True, "op_action": action,
+                                "error": "the task changed in Asana since I "
+                                         "proposed this — please re-check it"}
+                if live.get("modified_at"):
+                    et.update_task(conn, task_id,
+                                   remote_modified_at=live["modified_at"])
+
+        if action in ("complete", "reopen"):
+            res = awb.set_completed_in_asana(conn, task_id, action == "complete",
+                                             client=client)
+        elif action == "set_due":
+            res = awb.update_due_in_asana(conn, task_id, value or None,
+                                          client=client)
+        elif action == "comment":
+            res = awb.post_comment_to_asana(conn, task_id, value, client=client)
+        elif action == "add_subtask":
+            res = awb.create_subtask_in_asana(conn, task_id, value,
+                                              client=client, created_by="agent")
+        else:
+            return {"ok": False, "error": f"unknown_action: {action}"}
+        res = dict(res or {})
+        res["op_action"] = action
+        res["task_title"] = (row.get("title") or "")[:80]
+        return res
+    finally:
+        conn.close()
+
+
+def _write_upload_artifact(params: dict, ctx: dict) -> dict:
+    """WS3-M7: upload a rendered artifact file into the EC Drive folder via
+    the WS2-M1 THROTTLED exporter surface (never a raw create). Runs in the
+    WriteWorker thread of the MAIN process — legal for oauth_user."""
+    import mimetypes
+    from pathlib import Path
+    from src.data import artifact_store
+    from src.data.connection_factory import get_connection
+    from src.export.gdrive_export import GoogleDriveExporter
+
+    db_path = ctx.get("db_path") or ""
+    if not db_path:
+        return {"ok": False, "error": "no_db"}
+    conn = get_connection(db_path)
+    try:
+        artifact = artifact_store.get_artifact(conn, str(params.get("artifact_id") or ""))
+        if not artifact:
+            return {"ok": False, "error": "artifact_not_found"}
+        path = Path(artifact.get("file_path") or "")
+        if not path.is_file():
+            return {"ok": False, "error": "artifact_file_missing"}
+        folder_id = str(params.get("folder_id") or "")
+        if not folder_id:
+            return {"ok": False, "error": "no_target_folder"}
+        exporter = GoogleDriveExporter.from_settings(folder_id)
+        # Explicit map first — Windows' mimetypes reads the registry and is
+        # not deterministic across machines for Office types.
+        known = {
+            ".pptx": "application/vnd.openxmlformats-officedocument."
+                     "presentationml.presentation",
+            ".svg": "image/svg+xml", ".png": "image/png", ".md": "text/markdown",
+            ".pdf": "application/pdf",
+        }
+        mime = (known.get(path.suffix.lower())
+                or mimetypes.guess_type(path.name)[0]
+                or "application/octet-stream")
+        res = exporter.upload_file(path.name, path.read_bytes(), mime, folder_id)
+        file_id = res.get("id") or ""
+        import json as _json
+        try:
+            prov = _json.loads(artifact.get("provenance_json") or "{}")
+        except (ValueError, TypeError):
+            prov = {}
+        prov["drive_file_id"] = file_id
+        artifact_store.update_artifact(conn, artifact["artifact_id"],
+                                       status="published", provenance_json=prov)
+        return {"ok": True, "op_action": "upload_artifact",
+                "artifact_id": artifact["artifact_id"],
+                "drive_file_id": file_id, "name": path.name}
+    finally:
+        conn.close()
+
+
+def _precheck_upload_artifact(controller, params: dict) -> dict | None:
+    """WS3-M7 pre-dispatch check (main thread, cheap READ): OAuth is
+    disable-on-launch, so a fresh session's Confirm would otherwise burn the
+    row on a doomed upload — instead the card stays open, the operator
+    reconnects Google, and clicks Confirm again."""
+    try:
+        from src.data.settings_manager import get_section
+        drive_cfg = (get_section("enablement", {}) or {}).get("drive") or {}
+        if drive_cfg.get("auth_type", "service_account") != "oauth_user":
+            return None
+        from src.data import google_oauth
+        if google_oauth.is_active():
+            return None
+    except Exception:  # noqa: BLE001 — a broken check never blocks
+        return None
+    try:
+        controller.start_google_connect()
+    except Exception:  # noqa: BLE001 — connect kick-off is best-effort
+        pass
+    return {"error": "needs_google_connect",
+            "message": "Google isn't connected this session — connect (or "
+                       "Reconnect in Settings), then click Confirm again."}
+
+
+WRITE_HANDLERS = {
+    "create_guru_folder": lambda p, ctx: _write_guru_folder(p, ctx, rename=False),
+    "rename_guru_folder": lambda p, ctx: _write_guru_folder(p, ctx, rename=True),
+    "create_asana_task": _write_create_asana_task,
+    "asana_task_update": _write_asana_task_update,
+    "upload_artifact_to_drive": _write_upload_artifact,
+}
+
+# op → main-thread pre-dispatch check (cheap read; dict result blocks WITHOUT
+# burning the confirm row — the card stays open for a retry).
+PRE_DISPATCH_CHECKS: dict = {
+    "upload_artifact_to_drive": _precheck_upload_artifact,
+}
+
+
 class WriteWorker(QThread):
     """Off-thread executor for a GATED, non-idempotent live write (M7b — the
     Confirm card's Confirm button). Mirrors ``AsanaListWorker``: the GuruClient /
     AsanaClient HTTP blocks, so it MUST run off the Qt thread, NEVER inside the
     QWebChannel slot.
 
-    It dispatches on ``op`` to the JUST-VERIFIED M7a write methods:
-      * create_guru_folder → GuruClient.create_folder(collection_id, title, …)
-      * rename_guru_folder → GuruClient.rename_folder(folder_id, new_title)
-      * create_asana_task  → AsanaClient.create_task(project_gid, name, …)
-    and emits ``finished(request_id, ok, result_json)`` or
+    Dispatches on ``op`` via the module-level ``WRITE_HANDLERS`` registry and
+    emits ``finished(request_id, ok, result_json)`` or
     ``failed(request_id, message)`` (queued → main thread). The single write runs
     EXACTLY ONCE per worker; the controller has already mark_resolved'd the row
     (single-winner) BEFORE spawning this, so one operator click = one live write.
@@ -169,11 +373,13 @@ class WriteWorker(QThread):
     finished = Signal(str, bool, str)   # (request_id, ok, result_json)
     failed = Signal(str, str)           # (request_id, message — short/no PHI)
 
-    def __init__(self, request_id: str, op: str, params: dict, parent=None):
+    def __init__(self, request_id: str, op: str, params: dict, parent=None,
+                 ctx: dict | None = None):
         super().__init__(parent)
         self._request_id = request_id or ""
         self._op = op or ""
         self._params = dict(params or {})
+        self._ctx = dict(ctx or {})
 
     def run(self):
         import json
@@ -185,27 +391,10 @@ class WriteWorker(QThread):
             self.failed.emit(self._request_id, str(exc)[:200])
 
     def _dispatch(self) -> dict:
-        p = self._params
-        if self._op in ("create_guru_folder", "rename_guru_folder"):
-            from src.data.guru_client import GuruClient
-            email, token = GuruClient.load_credentials()
-            if not (email and token):
-                return {"ok": False, "error": "guru_not_connected"}
-            client = GuruClient(email, token)
-            if self._op == "create_guru_folder":
-                return client.create_folder(
-                    p.get("collection_id"), p.get("title"),
-                    parent_folder_id=p.get("parent_folder_id") or None)
-            return client.rename_folder(p.get("folder_id"), p.get("new_title"))
-        if self._op == "create_asana_task":
-            from src.data.asana_client import AsanaClient
-            client = AsanaClient.from_store()
-            if not client.api_key:
-                return {"ok": False, "error": "asana_not_connected"}
-            return client.create_task(
-                p.get("project_gid"), p.get("name"),
-                notes=p.get("notes") or None, due_on=p.get("due_on") or None)
-        return {"ok": False, "error": f"unknown_op: {self._op}"}
+        handler = WRITE_HANDLERS.get(self._op)
+        if handler is None:
+            return {"ok": False, "error": f"unknown_op: {self._op}"}
+        return handler(self._params, self._ctx)
 
 
 class AgentChatController(QObject):
@@ -272,11 +461,12 @@ class AgentChatController(QObject):
         # list_guru_targets runs the Guru HTTP off-thread; the worker lives here
         # until its finished slot fires on the main thread.
         self._guru_list_worker = None
-        # M7b gated-write worker, stored on self for the same no-GC reason
-        # (inv. 6/9). execute_write spawns it AFTER mark_resolved (single-winner)
-        # so one operator Confirm click runs the live write EXACTLY ONCE; it lives
-        # here until its finished/failed slot fires on the main thread.
-        self._write_worker = None
+        # M7b gated-write workers, stored on self for the same no-GC reason
+        # (inv. 6/9). WS1-M6: a SET, not a single attribute — a second Confirm
+        # while a slow write runs must not drop the only reference to a running
+        # QThread (the documented mid-run-GC crash). execute_write spawns AFTER
+        # mark_resolved (single-winner) so one Confirm click = one live write.
+        self._write_workers = set()
         # M0 busy-queue: triggers that must run as a normal Renn turn but arrived
         # while the engine was mid-turn. ``enqueue_trigger`` sends immediately when
         # idle, else appends here; one is drained on each ``busy_changed(False)``.
@@ -891,6 +1081,27 @@ class AgentChatController(QObject):
                 return {"ok": False, "error": "unknown_request"}
             if row.get("session_id") != self._session_id:
                 return {"ok": False, "error": "session_mismatch"}
+            # (a2) read the payload BEFORE the claim so a per-op pre-dispatch
+            #      check can run (a cheap READ) without burning the row.
+            try:
+                payload = json.loads(row.get("payload_json") or "{}")
+            except (ValueError, TypeError):
+                payload = {}
+            op = payload.get("op") or ""
+            params = payload.get("params") or {}
+            # Pre-dispatch check (WS1-M6 hook): a dict result BLOCKS the write
+            # WITHOUT mark_resolved — the card stays open, the operator fixes
+            # the precondition (e.g. reconnect Google) and clicks Confirm again.
+            pre_check = PRE_DISPATCH_CHECKS.get(op)
+            if pre_check is not None:
+                try:
+                    blocked = pre_check(self, params)
+                except Exception as exc:  # noqa: BLE001 — a broken check never blocks
+                    logger.debug("pre-dispatch check failed for %s: %s", op, exc)
+                    blocked = None
+                if blocked:
+                    return {**blocked, "ok": False, "request_id": rid,
+                            "kept_open": True}
             # (b) CLAIM FIRST (single-winner) — BEFORE the non-idempotent write.
             #     A double-confirm loses here and never executes (one click = one
             #     write). This is the inverse of the pickers' persist-first order,
@@ -898,13 +1109,6 @@ class AgentChatController(QObject):
             #     fact, so the claim must gate it.
             if not mark_resolved(conn, rid):
                 return {"ok": False, "error": "already_resolved"}
-            # (c) read the op + params from the row payload (set by the propose tool).
-            try:
-                payload = json.loads(row.get("payload_json") or "{}")
-            except (ValueError, TypeError):
-                payload = {}
-            op = payload.get("op") or ""
-            params = payload.get("params") or {}
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": str(exc)}
         finally:
@@ -913,16 +1117,20 @@ class AgentChatController(QObject):
         #     QThread mid-run crashes). The finished/failed slot does the notify +
         #     actionResolved on the main thread.
         try:
-            worker = WriteWorker(rid, op, params, parent=self)
+            worker = WriteWorker(rid, op, params, parent=self,
+                                 ctx={"db_path": self._db_path()})
             worker.finished.connect(self._on_write_finished,
                                     Qt.ConnectionType.QueuedConnection)
             worker.failed.connect(self._on_write_failed,
                                   Qt.ConnectionType.QueuedConnection)
-            self._write_worker = worker
+            # Live-worker SET (WS1-M6 GC fix): a second Confirm while a slow
+            # write runs must not drop the only reference to a running QThread.
+            if not hasattr(self, "_write_workers"):
+                self._write_workers = set()
+            self._write_workers.add(worker)
             worker.start()
         except Exception as exc:  # noqa: BLE001 — never crash the chat on a wiring fault
             logger.warning("Write worker failed to start: %s", exc)
-            self._write_worker = None
             self._notify_renn(
                 f"[SYSTEM: the {op or 'write'} could not be started: {str(exc)[:120]}.]")
             self._emit_action_resolved_payload({"request_id": rid, "ok": False})
@@ -935,7 +1143,7 @@ class AgentChatController(QObject):
         result (new folder id / task permalink+name / 'renamed'), enqueue any
         follow-up trigger, and tell React to close the card."""
         import json
-        self._write_worker = None
+        self._prune_write_workers()
         try:
             result = json.loads(result_json or "{}")
         except (ValueError, TypeError):
@@ -953,9 +1161,15 @@ class AgentChatController(QObject):
     @Slot(str, str)
     def _on_write_failed(self, request_id, msg) -> None:
         """Main-thread: a gated write raised. Notify Renn the error + close the card."""
-        self._write_worker = None
+        self._prune_write_workers()
         self._notify_renn(f"[SYSTEM: the write failed: {msg or 'unknown error'}.]")
         self._emit_action_resolved_payload({"request_id": request_id or "", "ok": False})
+
+    def _prune_write_workers(self) -> None:
+        """Drop references to finished WriteWorkers (main thread only)."""
+        workers = getattr(self, "_write_workers", None)
+        if workers:
+            self._write_workers = {w for w in workers if w.isRunning()}
 
     def _notify_write_result(self, ok: bool, result: dict) -> str:
         """Inject a [SYSTEM] line describing the operational write result. Returns

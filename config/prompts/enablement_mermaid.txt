@@ -1,0 +1,19 @@
+You generate a Mermaid diagram for a healthcare-RCM enablement knowledge card.
+
+RULES (follow exactly — output is machine-validated):
+- Output ONLY a fenced ```mermaid code block. No prose before or after it.
+- The first line inside the fence is the diagram header, one of:
+  flowchart TD | flowchart LR | sequenceDiagram | stateDiagram-v2 | classDiagram | erDiagram | journey | pie
+- Default to "flowchart TD" unless DIAGRAM_TYPE says otherwise.
+- At most 15 nodes. Keep node labels short (under 8 words).
+- Wrap EVERY node label in double quotes, e.g. A["Submit claim (837P)"] —
+  required whenever a label contains parentheses, slashes, colons, or commas.
+- Node ids are plain letters/digits (A, B2, review1). NEVER use "end" as an id.
+- No %%{...}%% directives, no click lines, no classDef/style lines.
+- Model the SOURCE content faithfully — do not invent steps that are not in it.
+
+DIAGRAM_TYPE: {diagram_type}
+INSTRUCTION: {instruction}
+
+SOURCE:
+{source_text}

@@ -127,9 +127,7 @@ def _ensure_registered():
         handle_add_subtask,
         handle_toggle_subtask,
         handle_update_scratchpad,
-        handle_create_asana_subtask,
-        handle_post_asana_comment,
-        handle_update_asana_due_date,
+        handle_request_asana_task_update,
         handle_create_task,
         handle_update_task,
         handle_list_tasks,
@@ -216,13 +214,14 @@ def _ensure_registered():
               phi_level=0, desc="Check or uncheck a subtask")
     _register("update_scratchpad", handle_update_scratchpad,
               phi_level=0, desc="Write freeform notes on a task")
-    # ── Asana write-back (two-way sync) ──
-    _register("create_asana_subtask", handle_create_asana_subtask,
-              phi_level=0, desc="Add a subtask AND create it back in Asana under the parent task")
-    _register("post_asana_comment", handle_post_asana_comment,
-              phi_level=0, desc="Post a comment back to the linked Asana task")
-    _register("update_asana_due_date", handle_update_asana_due_date,
-              phi_level=0, desc="Update a task's due date locally and push it to the linked Asana task")
+    # ── Asana write-back (two-way sync) — WS1-M6: Confirm-gated ──
+    # The three un-gated write tools (create_asana_subtask / post_asana_comment /
+    # update_asana_due_date) are RETIRED from the model surface; every
+    # Renn-initiated Asana mutation now rides the confirm_write rail. The
+    # impls remain — the TaskDetailPanel's direct-click path uses them.
+    _register("request_asana_task_update", handle_request_asana_task_update,
+              phi_level=0, desc="Propose an Asana task update (complete/reopen/due/"
+                                "comment/subtask) — opens a Confirm card")
     _register("create_task", handle_create_task,
               phi_level=0, desc="Create an enablement task")
     _register("update_task", handle_update_task,
@@ -240,6 +239,43 @@ def _ensure_registered():
               phi_level=0, desc="Update a job's status/progress or one of its steps")
     _register("list_jobs", handle_list_jobs,
               phi_level=0, desc="List recent jobs for the active session")
+
+    # ── Content-studio artifacts (WS3: diagrams/quizzes/decks/docs) ──
+    from src.data.chat_tools.artifact_tools import (
+        handle_list_artifacts, handle_generate_diagram, handle_generate_deck,
+        handle_generate_quiz, handle_generate_doc, handle_attach_artifact,
+    )
+    _register("generate_quiz", handle_generate_quiz,
+              phi_level=0, desc="Generate a knowledge-check quiz from a task/research/doc/inline source")
+    _register("generate_doc", handle_generate_doc,
+              phi_level=0, desc="Generate a one-pager or battle-card from a task/research/doc/inline source")
+    _register("attach_artifact_to_draft", handle_attach_artifact,
+              phi_level=0, desc="Attach a diagram/quiz/doc artifact to a Guru card draft (review-gated)")
+    _register("list_artifacts", handle_list_artifacts,
+              phi_level=0, desc="List content-studio artifacts (diagrams, quizzes, decks, docs)")
+    _register("generate_diagram", handle_generate_diagram,
+              phi_level=0, desc="Generate a Mermaid diagram from a task/research/doc/inline source")
+    _register("generate_deck", handle_generate_deck,
+              phi_level=0, desc="Generate a branded .pptx deck from a task/research/doc/inline source (tracked job)")
+    from src.data.chat_tools.artifact_tools import handle_request_upload_artifact
+    _register("request_upload_artifact_to_drive", handle_request_upload_artifact,
+              phi_level=0, desc="Propose uploading a rendered artifact to the EC Drive folder — opens a Confirm card")
+
+    # ── Drive knowledge base (WS2) ──
+    from src.data.chat_tools.kb_tools import (
+        handle_index_drive_folder, handle_kb_search, handle_kb_list_topics,
+        handle_kb_list_cards, handle_kb_get_card,
+    )
+    _register("index_drive_folder", handle_index_drive_folder,
+              phi_level=0, desc="Queue a Drive folder for KB indexing (runs on the next sync tick)")
+    _register("kb_search", handle_kb_search,
+              phi_level=0, desc="Ranked hybrid search over the knowledge base (+ full-text floor)")
+    _register("kb_list_topics", handle_kb_list_topics,
+              phi_level=0, desc="Enumerate ALL knowledge-base topics with card counts")
+    _register("kb_list_cards", handle_kb_list_cards,
+              phi_level=0, desc="Enumerate ALL cards in one knowledge-base topic")
+    _register("kb_get_card", handle_kb_get_card,
+              phi_level=0, desc="Read one knowledge-base card in full")
 
     _register("search_drive_docs", handle_search_drive_docs,
               phi_level=0, desc="Search indexed Drive documents")

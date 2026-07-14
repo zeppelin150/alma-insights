@@ -66,6 +66,11 @@ _MAX_RECORD_CHARS = 1280  # WCM blob cap ~2.5 KB UTF-16
 # is the "disabled on launch" guarantee (no import/boot side effects).
 _active = None
 
+# WS2-M1: serializes creation/refresh of the module-global Credentials across
+# the KBWorker / DriveMonitor / exporter threads (see reconnect()).
+import threading as _threading  # noqa: E402 — placed with the state it guards
+_ACTIVE_LOCK = _threading.Lock()
+
 
 def scopes() -> list[str]:
     return list(_SCOPES)
@@ -283,24 +288,30 @@ def reconnect():
     """Activate the stored authorization for this session (the ONLY setter
     of the live credentials). Silent — refreshes the access token from the
     stored refresh token; opens NO browser. Returns Credentials or None.
+
+    WS2-M1: serialized by ``_ACTIVE_LOCK`` — the module-global Credentials is
+    exercised concurrently by the KBWorker, DriveMonitor, and main-thread
+    exporter threads, and google.oauth2's refresh is not internally locked
+    (concurrent expiry refreshes race into transient 401s).
     """
     _refuse_in_subprocess("reconnect")
     global _active
-    record = _stored_record()
-    if record is None:
-        return None
-    try:
-        from google.oauth2.credentials import Credentials
-        creds = Credentials.from_authorized_user_info(record, _SCOPES)
-        if not creds.valid:
-            from google.auth.transport.requests import Request
-            creds.refresh(Request())
-        _active = creds
-        return creds
-    except Exception as exc:  # noqa: BLE001 — revoked/expired refresh token
-        logger.warning("Google OAuth reconnect failed: %s", exc)
-        _active = None
-        return None
+    with _ACTIVE_LOCK:
+        record = _stored_record()
+        if record is None:
+            return None
+        try:
+            from google.oauth2.credentials import Credentials
+            creds = Credentials.from_authorized_user_info(record, _SCOPES)
+            if not creds.valid:
+                from google.auth.transport.requests import Request
+                creds.refresh(Request())
+            _active = creds
+            return creds
+        except Exception as exc:  # noqa: BLE001 — revoked/expired refresh token
+            logger.warning("Google OAuth reconnect failed: %s", exc)
+            _active = None
+            return None
 
 
 def disconnect() -> None:

@@ -19,13 +19,23 @@ from src.data.connection_factory import atomic
 _PROMPTS = Path(__file__).resolve().parent.parent.parent / "config" / "prompts"
 _DECK_PROMPT = _PROMPTS / "enablement_pptx_from_doc.txt"
 
+# WS3-M6: the committed brand template. Layout contract (documented here, not
+# in code that switches on it): layout[0]=cover, layout[1]=title+bullets,
+# layout[2]=section divider. Swapping in the real Alma-branded binary later is
+# a file replacement with zero code change; a missing/broken template degrades
+# to python-pptx's built-in default (the voice-model graceful-degrade precedent).
+_DECK_TEMPLATE = (Path(__file__).resolve().parent.parent.parent
+                  / "assets" / "templates" / "renn_deck.pptx")
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
 def _normalize_outline(outline) -> dict:
-    """Coerce a parsed outline into {title, slides:[{title, bullets[]}]}."""
+    """Coerce a parsed outline into {title, slides:[{title, bullets[], notes?}]}.
+    ``notes`` (speaker notes, WS3-M6) is optional and tolerated absent, so
+    pre-existing saved outlines are unchanged."""
     if not isinstance(outline, dict):
         outline = {}
     title = str(outline.get("title") or "Untitled deck")
@@ -35,7 +45,11 @@ def _normalize_outline(outline) -> dict:
         if not isinstance(s, dict):
             continue
         bullets = [str(b) for b in (s.get("bullets") or []) if str(b).strip()]
-        slides.append({"title": str(s.get("title") or "Slide"), "bullets": bullets})
+        slide = {"title": str(s.get("title") or "Slide"), "bullets": bullets}
+        notes = str(s.get("notes") or "").strip()
+        if notes:
+            slide["notes"] = notes
+        slides.append(slide)
     return {"title": title, "slides": slides}
 
 
@@ -191,8 +205,15 @@ def generate_deck_from_topic(conn: sqlite3.Connection, topic: str, llm_client) -
 
 # ── export ───────────────────────────────────────────────────────────
 
-def export_pptx(conn: sqlite3.Connection, deck_id: int, out_path: str) -> dict:
-    """Build a real .pptx from the deck outline and mark it exported."""
+def export_pptx(conn: sqlite3.Connection, deck_id: int, out_path: str, *,
+                template_path: str | None = None) -> dict:
+    """Build a real .pptx from the deck outline and mark it exported.
+
+    WS3-M6: uses the committed brand template by default (graceful degrade to
+    the python-pptx built-in when missing/unreadable), defensive layout lookup
+    (authoring tools vary layout counts — never KeyError on a swapped
+    template), and optional per-slide speaker ``notes``.
+    """
     deck = get_deck(conn, deck_id)
     if not deck:
         return {"ok": False, "error": "deck_not_found"}
@@ -202,22 +223,49 @@ def export_pptx(conn: sqlite3.Connection, deck_id: int, out_path: str) -> dict:
         return {"ok": False, "error": "python-pptx not installed"}
 
     outline = deck["outline"]
-    prs = Presentation()
-    title_layout = prs.slide_layouts[0]
-    content_layout = prs.slide_layouts[1]
+    tpl = Path(template_path) if template_path else _DECK_TEMPLATE
+    prs = None
+    if tpl.exists():
+        try:
+            prs = Presentation(str(tpl))
+        except Exception:  # noqa: BLE001 — a corrupt template must not block export
+            prs = None
+    if prs is None:
+        prs = Presentation()
+
+    def _layout(index: int):
+        try:
+            return prs.slide_layouts[index]
+        except (IndexError, KeyError):
+            return prs.slide_layouts[1 if len(prs.slide_layouts) > 1 else 0]
+
+    title_layout = _layout(0)
+    content_layout = _layout(1)
 
     cover = prs.slides.add_slide(title_layout)
-    cover.shapes.title.text = outline["title"]
+    if cover.shapes.title is not None:
+        cover.shapes.title.text = outline["title"]
 
     for s in outline["slides"]:
         slide = prs.slides.add_slide(content_layout)
-        slide.shapes.title.text = s["title"]
-        body = slide.placeholders[1].text_frame
-        body.clear()
-        bullets = s.get("bullets") or [""]
-        for i, bullet in enumerate(bullets):
-            para = body.paragraphs[0] if i == 0 else body.add_paragraph()
-            para.text = bullet
+        if slide.shapes.title is not None:
+            slide.shapes.title.text = s["title"]
+        try:
+            body = slide.placeholders[1].text_frame
+        except (KeyError, IndexError):
+            body = None
+        if body is not None:
+            body.clear()
+            bullets = s.get("bullets") or [""]
+            for i, bullet in enumerate(bullets):
+                para = body.paragraphs[0] if i == 0 else body.add_paragraph()
+                para.text = bullet
+        notes = (s.get("notes") or "").strip()
+        if notes:
+            try:
+                slide.notes_slide.notes_text_frame.text = notes
+            except Exception:  # noqa: BLE001 — notes are enrichment
+                pass
 
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     prs.save(out_path)
