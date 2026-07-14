@@ -25,6 +25,16 @@ def qapp():
     yield app
 
 
+@pytest.fixture(autouse=True)
+def _no_operator_identity(monkeypatch):
+    """Isolate from the dev machine's real settings.yaml: with an onboarded
+    operator identity configured, the default 'mine' task scope correctly
+    filters the sim's demo tasks (assigned to demo names) down to [] — these
+    tests assert the un-onboarded show-all behavior, so pin identity empty."""
+    from src.data import enablement_identity as ident
+    monkeypatch.setattr(ident, "operator_identity", lambda: {})
+
+
 def _seed(db):
     """Populate the enablement tables the way a real scan would."""
     SIM.run_simulation(db.conn, publish=False)

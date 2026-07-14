@@ -51,7 +51,15 @@ def test_fetch_existing_cards_populates_menu(qapp, empty_db, mock_guru_client):
     mock_guru_client.search_cards.assert_called_once()
 
 
-def test_connection_check_worker_emits_per_source(qapp, empty_db):
+def test_connection_check_worker_emits_per_source(qapp, empty_db, monkeypatch):
+    # Isolate from the dev machine's real keyring: with live Asana/Guru PATs
+    # stored, the worker CORRECTLY reports connected — this test asserts the
+    # no-credentials shape, so pin the credential reads empty.
+    from src.data import asana_setup
+    from src.data.guru_client import GuruClient
+    monkeypatch.setattr(asana_setup, "is_asana_connected", lambda: False)
+    monkeypatch.setattr(GuruClient, "load_credentials",
+                        classmethod(lambda cls: ("", "")))
     page = _page(empty_db)
     got: dict[str, bool] = {}
     page.connection_status_ready.connect(lambda k, ok, d: got.__setitem__(k, ok))
