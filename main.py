@@ -103,8 +103,20 @@ def main():
     # Apply any staged update (before importing src modules that hold file locks)
     from src.updater.updater import apply_staged_update
     if apply_staged_update():
-        # Re-import after file swap to pick up new code
+        # Re-import after file swap to pick up new code.
+        #
+        # invalidate_caches() only affects FUTURE imports — the `from src.updater
+        # .updater import ...` line above already imported the `src` package, so
+        # its VERSION still holds the PRE-update value. Without reloading it the
+        # app reports the old version for the whole session and the update check
+        # re-offers the release it just installed, i.e. an install loop that only
+        # clears on the next manual restart. Reload so VERSION reflects reality.
         importlib.invalidate_caches()
+        try:
+            import src as _src_pkg
+            importlib.reload(_src_pkg)
+        except Exception:  # noqa: BLE001 — never block startup on this
+            pass
 
     # Rollback guard: if the newly applied update crash-looped (≥3 crashes
     # within its grace window) the previous version is restored here.

@@ -250,7 +250,7 @@ class MainWindow(QMainWindow):
 
         # Footer
         from src import VERSION
-        self._sidebar_footer = QLabel(f"v{VERSION} — RCM Operations · Drive search")
+        self._sidebar_footer = QLabel(f"v{VERSION} — RCM Operations · Drive + local search")
         self._sidebar_footer.setObjectName("SidebarFooter")
         layout.addWidget(self._sidebar_footer)
         self._sidebar_text_widgets.append(self._sidebar_footer)
