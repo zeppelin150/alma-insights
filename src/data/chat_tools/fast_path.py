@@ -64,8 +64,35 @@ def handle_query_classifications(conn, args: dict, session_filters: dict) -> dic
     }
 
 
+def _coerce_date_filters(filters: dict, args: dict) -> None:
+    """Normalize date inputs into the date_start/date_end keys build_filter_query
+    understands.
+
+    Accepts a 'YYYY-MM-DD/YYYY-MM-DD' date_range string (either side optional),
+    a single date, or explicit date_start/date_end — from either the filters dict
+    or top-level args. Mutates ``filters`` in place; tolerant of malformed input
+    (bad values are ignored rather than raised). Fixes the bug where date-scoped
+    list_tickets queries silently returned all rows because date_range (the key
+    the model is taught for query_issues) is not understood by the filter engine.
+    """
+    for key in ("date_start", "date_end", "date_range", "date"):
+        if args.get(key) and key not in filters:
+            filters[key] = args[key]
+    rng = filters.pop("date_range", None) or filters.pop("date", None)
+    if isinstance(rng, str) and rng.strip():
+        start, _, end = rng.partition("/") if "/" in rng else (rng, "", rng)
+        if start.strip():
+            filters.setdefault("date_start", start.strip())
+        if end.strip():
+            filters.setdefault("date_end", end.strip())
+
+
 def handle_list_tickets(conn, args: dict, session_filters: dict) -> dict:
-    """List individual tickets matching filters with summaries."""
+    """List individual tickets matching filters with summaries.
+
+    Date-scoped queries: accepts date_start/date_end (YYYY-MM-DD) or a
+    date_range 'START/END' string, in either ``args`` or ``args['filters']``.
+    """
     limit = min(args.get("limit", 20), 50)
     sort_map = {
         "date": "ti.ticket_created_date DESC",
@@ -74,8 +101,16 @@ def handle_list_tickets(conn, args: dict, session_filters: dict) -> dict:
     }
     sort = sort_map.get(args.get("sort", "date"), "ti.ticket_created_date DESC")
 
+    # session_filters already includes args['filters'] when called via
+    # dispatch_tool; re-merge defensively for direct callers, then normalize any
+    # date inputs into the date_start/date_end keys the filter engine knows.
+    filters = dict(session_filters or {})
+    if isinstance(args.get("filters"), dict):
+        filters.update(args["filters"])
+    _coerce_date_filters(filters, args)
+
     sql, params = build_filter_query(
-        filters=session_filters,
+        filters=filters,
         select_columns=[
             "ti.ticket_id", "ti.trc_code", "ti.friction_type",
             "ti.sub_pattern", "ti.sentiment_polarity",

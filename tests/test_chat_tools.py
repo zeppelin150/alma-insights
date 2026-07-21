@@ -256,6 +256,39 @@ class TestFastPath:
         assert result["count"] == 2
         assert all("Claims" in str(t) for t in result["tickets"])
 
+    # ── date filtering (regression: list_tickets used to ignore dates) ──
+    # Seed dates: T-1..T-5 = 2026-01-10 .. 2026-01-14.
+
+    def test_list_tickets_date_range_string(self, db):
+        """A 'START/END' date_range string must filter (query_issues convention)."""
+        from src.data.chat_tools.fast_path import handle_list_tickets
+        result = handle_list_tickets(
+            db, {"filters": {"date_range": "2026-01-11/2026-01-13"}}, {},
+        )
+        ids = sorted(t["ticket_id"] for t in result["tickets"])
+        assert result["count"] == 3, ids
+        assert ids == ["T-2", "T-3", "T-4"]
+
+    def test_list_tickets_top_level_date_start_end(self, db):
+        """Top-level date_start/date_end args must filter list_tickets."""
+        from src.data.chat_tools.fast_path import handle_list_tickets
+        result = handle_list_tickets(
+            db, {"date_start": "2026-01-12", "date_end": "2026-01-14"}, {},
+        )
+        ids = sorted(t["ticket_id"] for t in result["tickets"])
+        assert result["count"] == 3, ids
+        assert ids == ["T-3", "T-4", "T-5"]
+
+    def test_list_tickets_filters_date_start_end(self, db):
+        """date_start/date_end inside the filters dict must filter list_tickets."""
+        from src.data.chat_tools.fast_path import handle_list_tickets
+        result = handle_list_tickets(
+            db, {"filters": {"date_start": "2026-01-10", "date_end": "2026-01-11"}}, {},
+        )
+        ids = sorted(t["ticket_id"] for t in result["tickets"])
+        assert result["count"] == 2, ids
+        assert ids == ["T-1", "T-2"]
+
     def test_query_findings_default(self, db):
         from src.data.chat_tools.fast_path import handle_query_findings
         result = handle_query_findings(db, {}, {})

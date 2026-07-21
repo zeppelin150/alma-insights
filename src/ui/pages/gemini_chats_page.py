@@ -151,7 +151,15 @@ class GeminiChatsPage(QWidget):
             task_type="report_generation",
             context_provider=self._provide_context,
             tools_enabled=True,
-            use_mcp_tools=True,
+            # Use the in-process text TOOL_CALL loop, NOT native MCP. The ACP-MCP
+            # tool path is architecturally broken (commit 68e743d; the scan
+            # pipeline abandoned it for the same reason) and the Claude CLI bridge
+            # never wires MCP at all — so use_mcp_tools=True left the model with no
+            # working tools and no anti-fabrication guardrail, causing it to invent
+            # ticket IDs. False re-arms TOOL_PROMPT_ADDENDUM (the guardrail) and the
+            # regex dispatch loop, which works for every provider (Gemini + Claude
+            # CLI). See chat_engine.py:298,345.
+            use_mcp_tools=False,
             db_path=str(self.db.db_path) if hasattr(self.db, "db_path") else None,
         )
         self._engine.response_ready.connect(self._on_response)
@@ -514,9 +522,14 @@ class GeminiChatsPage(QWidget):
                 logger.info("rewriting %s -> gemini-2.5-flash (lite is broken)", model)
                 model = "gemini-2.5-flash"
             self._warm_bridge = ReportBridgeClient(model=model)
-            self._warm_bridge.set_mcp_config(self._build_mcp_config())
+            # No MCP: the native ACP-MCP tool path is broken (tool_call events
+            # never surface over the bridge). Tools run in-process via the engine's
+            # text TOOL_CALL loop + dispatch_tool, which also tags session_id for
+            # Drill Down telemetry — so the MCP session-pointer file is unneeded.
+            # Mirrors scan_orchestrator.py:2525 (set_mcp_config([])).
+            self._warm_bridge.set_mcp_config([])
             self._engine.set_client(self._warm_bridge)
-            logger.info("Warm bridge booted for chat with MCP (model=%s)", model)
+            logger.info("Warm bridge booted for chat (text-tool loop, model=%s)", model)
         except Exception as e:
             logger.warning("Warm bridge boot failed, using build-per-message: %s", e)
             self._warm_bridge = None

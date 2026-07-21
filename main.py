@@ -34,6 +34,17 @@ from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QIcon
 
+# ── QtWebEngine init order (must precede QApplication) ──
+# Chromium requires AA_ShareOpenGLContexts before the app object exists, and
+# PySide6 warns (and on some platforms misrenders) when QtWebEngineWidgets is
+# first imported after QApplication. The web surfaces (Agent chat, enablement
+# web tabs) import lazily later; this eager import + attribute make that safe.
+QApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
+try:
+    from PySide6 import QtWebEngineWidgets as _qtwebengine  # noqa: F401
+except ImportError:  # WebEngine not installed (Essentials-only env) — the
+    pass             # Agent page already degrades to its placeholder.
+
 from src.ui.theme import get_stylesheet
 from src.ui.main_window import MainWindow
 

@@ -5,22 +5,18 @@ In-process only — the UI loads from disk via ``file://`` (the built React bund
 ``dist/index.html`` when present, else the minimal spike ``static/index.html``);
 the JS<->Python transport is QWebChannel over the Qt event loop. **No web server,
 no localhost.** ``qwebchannel.js`` rides alongside as a classic script.
+
+The view/diagnostics/channel plumbing lives in the shared
+:class:`~src.ui.web.web_host.WebHost` (also used by the enablement web tabs);
+this module owns only the Agent-specific ``ChatBridge`` wiring.
 """
 
 from __future__ import annotations
 
-import os
-
-from PySide6.QtCore import QUrl
-from PySide6.QtWebChannel import QWebChannel
-from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
 from .chat_bridge import ChatBridge
-
-_HERE = os.path.dirname(__file__)
-_DIST = os.path.join(_HERE, "dist", "index.html")        # built React bundle
-_SPIKE = os.path.join(_HERE, "static", "index.html")     # fallback (no build)
+from .web_host import _DIST, _SPIKE, WebHost  # noqa: F401 — path constants re-exported for tests
 
 
 class AgentPage(QWidget):
@@ -53,23 +49,17 @@ class AgentPage(QWidget):
                                  guru_targets_signal=guru_targets_signal,
                                  confirm_fn=confirm_fn, cancel_fn=cancel_fn,
                                  parent=self)
-        self.view = QWebEngineView(self)
-        # Let the file:// page load its sibling qwebchannel.js (classic script).
-        try:
-            from PySide6.QtWebEngineCore import QWebEngineSettings
-            self.view.settings().setAttribute(
-                QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
-        except Exception:  # noqa: BLE001 — default already permits sibling files
-            pass
-        self._channel = QWebChannel(self)
-        self._channel.registerObject("almaBridge", self.bridge)
-        self.view.page().setWebChannel(self._channel)
+        # The chat is the SPA's default route — no fragment, so pre-router
+        # bundles keep working unchanged.
+        self.host = WebHost(bridge=self.bridge, channel_name="almaBridge",
+                            route="", log_name="alma.agent.web", parent=self)
+        # Back-compat surface: tests and callers reach the view directly.
+        self.view = self.host.view
+        self._page = self.host._page
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.addWidget(self.view)
-        self.load()
+        lay.addWidget(self.host)
 
     def load(self):
-        path = _DIST if os.path.exists(_DIST) else _SPIKE
-        self.view.setUrl(QUrl.fromLocalFile(path))
+        self.host.load()

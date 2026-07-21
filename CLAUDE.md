@@ -99,6 +99,79 @@ extends `analysis_reports` with `findings_json`, `pipeline_kind`,
 Full architecture: [`docs/AI_REPORTS.md`](docs/AI_REPORTS.md). Drift
 audit checklist: `~/.claude/projects/C--alma-insights/memory/reports_drift_audit.md`.
 
+## Enablement Web Pivot — React/QtWebEngine tabs (M0–M6, 2026-07-14)
+
+The Calendar and Workbench enablement tabs have React/QtWebEngine
+implementations behind the `enablement.web_tabs` setting
+(`off` default | `calendar` | `all`); the native Qt tabs stay intact and
+render when the flag is off. Same in-process QWebChannel architecture as the
+Agent chat — **no web server, no localhost**, one `file://` bundle.
+
+**Home page (`ui.web_home`, 2026-07-20).** The app-level Home page
+([`src/ui/pages/home_page.py`](src/ui/pages/home_page.py)) also has a web
+implementation on the SPA route `#/home`:
+[`src/services/home_web.py`](src/services/home_web.py) (controller, owns the
+SQL + all display formatting), [`src/ui/web/home_bridge.py`](src/ui/web/home_bridge.py)
+(pure relay), and `web/src/home/`. Wired in `MainWindow._create_home_page`.
+
+Home is deliberately on its **own flag**, not the `web_tabs` enum, because it
+is the **boot page in both modes** (`app_modes._FIRST_PAGE`): turning it on
+starts Chromium at launch, and a blank render is the first thing the user
+sees rather than one broken tab. Consequences, all load-bearing:
+- `ui.web_home` defaults **off** and fails closed on any settings error.
+- The native `HomePage` stays permanently as the fallback — construction
+  failure falls through to it, and `_arm_home_watchdog` swaps back at runtime
+  if the page fails to load or never sets `window.__almaHomeMounted`.
+- `requestModeSwitch` is the one authority-bearing slot on Home (it persists
+  `app.last_mode` and rebuilds the sidebar + page mounts). It runs the full
+  gate and dispatches **deferred** via `QTimer.singleShot(0, …)` — undeferred,
+  `switch_mode` would tear down the widget hosting the caller while the
+  QWebChannel is still walking the slot.
+- The SQL and presentation constants are duplicated between `home_page.py`
+  and `home_web.py` on purpose (`src/services` must not import `src/ui`);
+  the anti-drift guard is the parity test in `tests/test_home_web_controller.py`.
+
+**Architecture rules (do not break):**
+- The web layer is a **pure renderer**. All HTTP/DB/LLM/redaction/business
+  logic stays in Python; the page gets pre-shaped JSON viewmodels and holds no
+  secrets and no network access.
+- **QWebChannel is the trust boundary** — any page script can call any slot, so
+  no slot carries authority. Reads return viewmodels; side-effectful actions
+  validate against Python-held state + a single-winner claim + a **native**
+  confirm (`QMessageBox`, unreachable from Chromium). Pattern lives in
+  [`src/services/enablement_web.py`](src/services/enablement_web.py)
+  (`request_reschedule`, `js_request_publish`).
+- **Untrusted HTML only via `sanitize_html` → `sandbox=""` iframe.** Every
+  card preview passes [`src/data/html_sanitize.py`](src/data/html_sanitize.py)
+  and renders in a fully-sandboxed (no-scripts) iframe. Never
+  `dangerouslySetInnerHTML`/`innerHTML` in `web/src/` — CI enforces this
+  (`tests/test_web_guardrails.py`).
+- **QWebChannel does NOT own registered objects.** A parentless bridge passed
+  as a temporary is GC'd and the channel then dereferences freed memory (native
+  access violation). `WebHost` parents orphan bridges; keep it that way.
+
+**Key files:** [`src/ui/web/web_host.py`](src/ui/web/web_host.py) (shared view
+host + `extra_bridges` for multi-object channels),
+`calendar_bridge.py` / `workbench_bridge.py` / `chat_bridge.py` (pure relays),
+[`src/services/enablement_web.py`](src/services/enablement_web.py) (the
+controllers that mirror the Qt pages' surfaces), and the React SPA in
+`web/src/` (`calendar/`, `workbench/`, `chat/`, `lib/`). page.py wires it via
+`_make_calendar` / `_make_workbench` / `_get_web_chat_bridge`.
+
+**Diagnostics (OS-aware):** run `python scripts/web_diag.py` first on any
+"web page is blank" report — a cross-compiling fact sheet (Rosetta / Mach-O
+arch / framework corruption on macOS; helper exe on Windows; bundle/env/Qt
+everywhere). It dumps automatically when a renderer dies and at startup under
+`ALMA_WEB_DIAG=1`. Mac checklist: `scripts/verify_web_pivot_mac.sh`.
+
+**Testing:** committed contract/gate/sanitizer tests run headless anywhere.
+WebEngine round-trips live in gitignored `tests/test_*_web_local.py` +
+`test_web_chat_drawer.py` and **MUST run singly** — offscreen Chromium
+teardown stacks to exit 255 across files, and offscreen grabs are always
+blank, so assert via `runJavaScript`, never screenshots. JS: `npm --prefix web
+run test` (vitest). Full plan + per-milestone build log:
+`~/.claude/plans/enablement-web-pivot.md`.
+
 ## Bug Bash Protocol (MANDATORY)
 
 When the user reports a bug, or asks you to fix/diagnose/investigate a defect, you MUST follow these four gates **in order**. Do not skip. Do not combine. Do not propose a fix before Gate 2 is complete.

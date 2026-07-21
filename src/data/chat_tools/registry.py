@@ -277,6 +277,13 @@ def _ensure_registered():
     _register("kb_get_card", handle_kb_get_card,
               phi_level=0, desc="Read one knowledge-base card in full")
 
+    # ── In-app Help Center ──
+    from src.data.chat_tools.help_tools import handle_help_search
+    _register("help_search", handle_help_search,
+              phi_level=0, desc="Search the in-app Help Center — how the app's "
+                                "own features work, and whether each is actually "
+                                "available (every result carries a status)")
+
     _register("search_drive_docs", handle_search_drive_docs,
               phi_level=0, desc="Search indexed Drive documents")
     _register("list_style_guides", handle_list_style_guides,

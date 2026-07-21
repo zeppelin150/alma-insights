@@ -238,6 +238,11 @@ class TestGetConversationsPaged:
 class TestGetTrcHistory:
     """Tests for WarehouseQuery.get_trc_history()."""
 
+    # The fixture seeds fixed 2026-03 dates, but get_trc_history's default
+    # 90-day window is anchored to wall-clock 'now' and ages them out.
+    # Pin a window wide enough to always cover the seeded range.
+    DAYS_COVERING_SEEDED_DATA = 100_000
+
     def test_returns_dict(self, wq):
         result = wq.get_trc_history("TRC-001")
         assert isinstance(result, dict)
@@ -248,7 +253,7 @@ class TestGetTrcHistory:
         assert "related_trcs" in result
 
     def test_volume_by_day(self, wq):
-        result = wq.get_trc_history("TRC-001")
+        result = wq.get_trc_history("TRC-001", days=self.DAYS_COVERING_SEEDED_DATA)
         assert len(result["volume_by_day"]) > 0
         # Each entry is (date_str, count)
         for d, c in result["volume_by_day"]:
@@ -257,16 +262,16 @@ class TestGetTrcHistory:
             assert c > 0
 
     def test_total_count(self, wq):
-        result = wq.get_trc_history("TRC-001")
+        result = wq.get_trc_history("TRC-001", days=self.DAYS_COVERING_SEEDED_DATA)
         assert result["total"] == 50  # 250/5 TRC codes
 
     def test_avg_csat(self, wq):
-        result = wq.get_trc_history("TRC-001")
+        result = wq.get_trc_history("TRC-001", days=self.DAYS_COVERING_SEEDED_DATA)
         assert result["avg_csat"] is not None
         assert 0 < result["avg_csat"] < 10
 
     def test_top_issues(self, wq):
-        result = wq.get_trc_history("TRC-001")
+        result = wq.get_trc_history("TRC-001", days=self.DAYS_COVERING_SEEDED_DATA)
         # All 50 tickets for TRC-001 have the same trc_label
         assert len(result["top_issues"]) >= 1
 

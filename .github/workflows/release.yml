@@ -54,6 +54,8 @@ jobs:
           node-version: '20'
       - name: Build Agent web UI
         run: npm --prefix web ci && npm --prefix web run build
+      - name: Test web UI (vitest)
+        run: npm --prefix web run test
 
       # Cache the downloads that build_release.py pulls every run —
       # Python embeddable, Node.js tarball, the HuggingFace model snapshot.

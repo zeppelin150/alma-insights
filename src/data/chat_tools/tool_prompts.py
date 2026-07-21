@@ -46,8 +46,10 @@ mis-tagging:
 Other tools:
 
 - list_tickets: List individual tickets matching filters with summaries.
-  Args: {"filters": dict (optional), "limit": int (default 20, max 50), "sort": str (date|sentiment|csat)}
+  Args: {"filters": dict (optional; supports trc_codes and date_start/date_end "YYYY-MM-DD"),
+         "date_range": "YYYY-MM-DD/YYYY-MM-DD" (optional), "limit": int (default 20, max 50), "sort": str (date|sentiment|csat)}
   Example: TOOL_CALL: list_tickets {"filters": {"trc_codes": ["Billing"]}, "limit": 10}
+  Example: TOOL_CALL: list_tickets {"date_range": "2026-05-20/2026-05-20", "limit": 20}
 
 - query_stats: Query statistical engine outputs (anomalies, trends, baselines).
   Args: {"stat_type": str (required, one of: anomalies, trends, baselines), "severity": str (optional)}
@@ -97,6 +99,9 @@ Rules:
 5. Session filters are automatically applied — you do NOT need to repeat them in every call.
 6. For questions about specific payers, TRCs, or any "what issues" question, use query_issues.
 7. For questions about an incident tag or suspected mis-tagging, use audit_tag_correlation.
+8. GROUNDING (critical): Only state ticket IDs, flag IDs, counts, and dates that appear in a
+   TOOL_RESULT. NEVER invent or guess a ticket ID. If a query returns no rows for the requested
+   scope or date, say so plainly (e.g. "no tickets matched 2026-05-20") — do not fabricate an answer.
 """
 
 # ── Exported tool names for validation ──

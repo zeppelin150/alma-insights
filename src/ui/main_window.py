@@ -8,7 +8,7 @@ Build 10.0: T10 (collapsible sidebar), T16 (page transitions), T17 (toast wiring
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QFrame, QStackedWidget, QStatusBar, QSizePolicy,
-    QSpacerItem, QApplication, QGraphicsOpacityEffect,
+    QSpacerItem, QApplication, QGraphicsOpacityEffect, QScrollArea,
 )
 from PySide6.QtCore import (
     Qt, QSize, QTimer, QPropertyAnimation, QEasingCurve,
@@ -214,12 +214,27 @@ class MainWindow(QMainWindow):
         # Nav entries live in a sub-layout so a mode switch can rebuild
         # them without touching the collapse button / footer chrome.
         # Populated per mode by `_populate_sidebar`.
-        self._sidebar_nav = QVBoxLayout()
+        #
+        # The sub-layout sits in a QScrollArea: the nav list keeps growing
+        # (eleven entries in enablement as of the Help Center), and without a
+        # scroll area the only way to fit a long list into a short window is
+        # to squeeze or clip the entries — which is exactly what truncated the
+        # labels. Overflow now scrolls and every entry keeps its full height.
+        nav_host = QWidget()
+        nav_host.setObjectName("SidebarNavHost")
+        self._sidebar_nav = QVBoxLayout(nav_host)
         self._sidebar_nav.setContentsMargins(0, 0, 0, 0)
         self._sidebar_nav.setSpacing(0)
-        layout.addLayout(self._sidebar_nav)
 
-        layout.addStretch()
+        self._sidebar_scroll = QScrollArea()
+        self._sidebar_scroll.setObjectName("SidebarScroll")
+        self._sidebar_scroll.setWidget(nav_host)
+        self._sidebar_scroll.setWidgetResizable(True)
+        self._sidebar_scroll.setFrameShape(QFrame.NoFrame)
+        self._sidebar_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarAlwaysOff)
+        self._sidebar_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        layout.addWidget(self._sidebar_scroll, 1)
 
         # ── Collapse toggle (Build 10.0: T10) ──
         from src.ui.design.icons import icon as design_icon
@@ -277,6 +292,11 @@ class MainWindow(QMainWindow):
                 btn.setVisible(False)
             nav.addWidget(btn)
 
+        # Trailing stretch keeps the entries top-aligned inside the scroll
+        # area's resizable host (added here, not at construction, because the
+        # clear loop above drops it on every rebuild).
+        nav.addStretch()
+
         # Re-apply collapsed presentation to freshly built entries
         if self._sidebar_collapsed:
             for btn, _pid in self._sidebar_buttons:
@@ -327,6 +347,25 @@ class MainWindow(QMainWindow):
 
         self._active_page = page_id
         self.content_stack.setCurrentWidget(widget)
+        # The native HomePage re-queries on showEvent; a WebHost has no such
+        # hook, so returning to Home must re-push or stats/activity go stale.
+        if page_id == "home" and getattr(self, "_home_web", None) is not None:
+            try:
+                self._home_web[0].refresh()
+            except Exception:
+                pass
+        # Pages are built once into the stack, so returning to one shows a
+        # possibly-stale surface. Give each page an opt-in refresh hook that
+        # fires when it becomes active — pages with live data (the enablement
+        # page) re-read on return instead of sitting stale. Skipped when the
+        # same widget was already showing (a tab-select within it).
+        if not same_widget:
+            hook = getattr(widget, "on_page_shown", None)
+            if callable(hook):
+                try:
+                    hook()
+                except Exception:  # noqa: BLE001 — a refresh must never break nav
+                    pass
         if spec is not None and spec.tab_key:
             try:
                 widget.select_tab(spec.tab_key)
@@ -575,12 +614,142 @@ class MainWindow(QMainWindow):
     # mode's page modules.
 
     def _create_home_page(self):
+        """Home: the React/WebHost build behind ``ui.web_home``, else the
+        native Qt HomePage.
+
+        The controller mirrors HomePage's surface (``set_mode`` + the same
+        three signals), so every connect below and every route in
+        ``_on_home_quick_action`` / ``_on_home_activity`` works identically
+        against either. Home is the BOOT page in both modes, so the web branch
+        is belt-and-braces: any construction failure falls through to native,
+        and a load failure or a page that never mounts swaps back at runtime —
+        a broken tab is a nuisance, a broken Home looks like a dead app.
+        """
+        self._home_web = None
+        if self._web_home_wanted():
+            host = self._build_web_home()
+            if host is not None:
+                return host
+        return self._build_native_home()
+
+    def _web_home_wanted(self) -> bool:
+        # Imported lazily: a settings/WebEngine problem must never break launch.
+        try:
+            from src.ui.web.web_flags import web_home_enabled
+            return web_home_enabled()
+        except Exception:
+            return False
+
+    def _build_native_home(self):
         from src.ui.pages.home_page import HomePage
         self.home_page = HomePage(self.db, current_mode=self._mode)
         self.home_page.mode_selected.connect(self.switch_mode)
         self.home_page.quick_action.connect(self._on_home_quick_action)
         self.home_page.activity_activated.connect(self._on_home_activity)
         return self.home_page
+
+    def _build_web_home(self):
+        """Construct the WebHost Home, or return None to fall back to native."""
+        try:
+            from src.services.home_web import HomeWebController
+            from src.ui.web.home_bridge import HomeBridge
+            from src.ui.web.web_host import WebHost
+        except Exception:            # WebEngine absent → native page
+            return None
+        try:
+            ctrl = HomeWebController(
+                self.db, current_mode=self._mode,
+                # The NATIVE human gate for the one authority-bearing slot.
+                confirm_fn=self._web_home_mode_confirm,
+            )
+            ctrl.mode_selected.connect(self.switch_mode)
+            ctrl.quick_action.connect(self._on_home_quick_action)
+            ctrl.activity_activated.connect(self._on_home_activity)
+            bridge = HomeBridge(
+                data_signal=ctrl.home_data,
+                refresh_fn=ctrl.request_refresh,
+                quick_action_fn=ctrl.js_quick_action,
+                activity_fn=ctrl.js_activity_activated,
+                mode_switch_fn=ctrl.js_request_mode_switch,
+            )
+            host = WebHost(bridge=bridge, channel_name="homeBridge",
+                           route="/home", log_name="alma.home.web")
+        except Exception as exc:
+            import logging
+            logging.getLogger("alma.home.web").warning(
+                "web Home construction failed (%s) — using the native page", exc)
+            return None
+        # Held so neither is garbage-collected; the bridge is additionally
+        # parented by WebHost (QWebChannel does not take ownership).
+        self.home_page = ctrl
+        self._home_web = (ctrl, bridge, host)
+        self._arm_home_watchdog(host)
+        return host
+
+    def _web_home_mode_confirm(self, mode: str) -> bool:
+        """The human gate for a web-Home mode switch: a NATIVE QMessageBox no
+        page script can reach or click. Defaults to No."""
+        from PySide6.QtWidgets import QMessageBox
+        label = "Enablement" if mode == app_modes.MODE_ENABLEMENT else "Product"
+        return QMessageBox.question(
+            self, "Switch mode",
+            f"Switch to {label} mode?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        ) == QMessageBox.Yes
+
+    def _arm_home_watchdog(self, host, timeout_ms: int = 8000):
+        """Fall back to the native Home if the web one never renders.
+
+        Two triggers: an outright load failure, and a page that loads but never
+        sets ``window.__almaHomeMounted`` (the macOS blank-render class — the
+        renderer dies with the load already reported ok).
+        """
+        from PySide6.QtCore import QTimer
+
+        def on_load(ok: bool):
+            if not ok:
+                self._fallback_to_native_home("load failed")
+
+        try:
+            host.view.loadFinished.connect(on_load)
+        except Exception:
+            pass
+
+        def check_mounted():
+            if self._home_web is None:
+                return
+            try:
+                host.view.page().runJavaScript(
+                    "!!window.__almaHomeMounted",
+                    lambda mounted: (None if mounted
+                                     else self._fallback_to_native_home(
+                                         "page never mounted")))
+            except Exception:
+                self._fallback_to_native_home("mount probe failed")
+
+        QTimer.singleShot(timeout_ms, check_mounted)
+
+    def _fallback_to_native_home(self, reason: str):
+        """Swap a dead web Home for the native widget, in place."""
+        if self._home_web is None:
+            return
+        import logging
+        logging.getLogger("alma.home.web").error(
+            "web Home unusable (%s) — falling back to the native page", reason)
+        _ctrl, _bridge, host = self._home_web
+        self._home_web = None
+        was_current = self.content_stack.currentWidget() is host
+        native = self._build_native_home()
+        self.content_stack.addWidget(native)
+        self._page_widgets["home"] = native
+        self._factory_widgets["_create_home_page"] = native
+        if was_current:
+            self.content_stack.setCurrentWidget(native)
+        try:
+            self.content_stack.removeWidget(host)
+            host.deleteLater()
+        except Exception:
+            pass
 
     def _on_home_quick_action(self, action: str):
         """Route a Home quick-action chip to its page (+ optional call)."""
@@ -661,14 +830,51 @@ class MainWindow(QMainWindow):
                                         confirm_fn=self._agent_controller.execute_write,
                                         cancel_fn=self._agent_controller.cancel_write)
             return self.agent_page
-        except Exception as exc:  # noqa: BLE001 — graceful placeholder, never break the mode
+        except Exception as exc:  # noqa: BLE001 — never break the mode
             import logging
             logging.getLogger("alma.main").warning("Agent page unavailable: %s", exc)
-            ph = QLabel("The Agent chat needs QtWebEngine, which isn't installed "
-                        "in this build yet.")
+            return self._native_agent_fallback()
+
+    def _native_agent_fallback(self):
+        """Fallback when the embedded Agent web view can't be built.
+
+        When only QtWebEngine is missing, the chat ENGINE is still fine, so we
+        hand back a real native chat panel wired to the same controller — a
+        usable page, matching how Calendar/Workbench fall back to native tabs —
+        rather than a dead label. Only when the engine itself is unavailable do
+        we show an explanatory message."""
+        controller = getattr(self, "_agent_controller", None)
+        engine = getattr(controller, "engine", None) if controller else None
+        if controller is None or engine is None:
+            ph = QLabel("The Agent chat is unavailable in this build. The rest "
+                        "of the app works normally; reinstalling restores it.")
             ph.setWordWrap(True)
             ph.setAlignment(Qt.AlignCenter)
             return ph
+
+        from src.ui.pages.enablement.chat_panel import ChatPanel
+        panel = ChatPanel()
+        panel.set_chat([("a", "Hi, I'm Renn. The rich chat view isn't available "
+                              "in this build, so this is a plain fallback — it "
+                              "works, just without streaming or the side "
+                              "panels.")])
+
+        def _on_submit(text: str):
+            panel.add_message("u", text)
+            try:
+                controller.send(text)
+            except Exception as exc:  # noqa: BLE001
+                panel.add_message("a", f"Something went wrong: {exc}")
+
+        panel.chat_submitted.connect(_on_submit)
+        try:
+            engine.response_ready.connect(lambda t: panel.add_message("a", t))
+            engine.error_occurred.connect(
+                lambda e: panel.add_message("a", f"Error: {e}"))
+        except Exception:  # noqa: BLE001 — engine wiring is best-effort
+            pass
+        self.agent_page = panel
+        return panel
 
     def _create_dashboard_page(self):
         from src.ui.pages.trc_analytics import TRCAnalyticsPage
@@ -1629,13 +1835,26 @@ class MainWindow(QMainWindow):
     # ═══════════════════════════════════════════
 
     def _show_help(self):
+        """Enablement mode has a real Help Center; product mode keeps the
+        dialog. Both buttons render in both modes, and in enablement they
+        previously opened product-only content with placeholder URLs."""
+        if self._mode == app_modes.MODE_ENABLEMENT:
+            self._set_active_page("en_help")
+            return
         dlg = HelpDialog(self)
         dlg.exec()
 
     def _show_feedback(self):
+        """In enablement, route to the configured bug-report form (the same
+        one the Help Center's 'Flag a bug' uses)."""
+        if self._mode == app_modes.MODE_ENABLEMENT:
+            page = self._page_widgets.get("en_help")
+            opener = getattr(page, "_open_bug_form", None)
+            if callable(opener):
+                self._set_active_page("en_help")
+                opener("")
+                return
         dlg = HelpDialog(self)
-        # Switch to feedback tab
-        tabs = dlg.findChild(type(dlg.findChildren(type(None))[0]).__class__) if False else None
         from PySide6.QtWidgets import QTabWidget
         for child in dlg.findChildren(QTabWidget):
             child.setCurrentIndex(2)  # Feedback tab

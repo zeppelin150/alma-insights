@@ -93,8 +93,18 @@ PAGES: tuple[PageSpec, ...] = (
     PageSpec("en_zendesk", "Zendesk", "headset", "CREATE",
              _ENABLEMENT, "_create_enablement_page", tab_key="zendesk",
              wants_drilldown=True),
+    # The attention queue is the enablement page's DEFAULT landing tab, but it
+    # had no sidebar entry — and main_window hides the internal tab bar when
+    # the sidebar owns navigation, so a fully-built tab was unreachable once
+    # the user navigated away from it. This spec is the way back.
+    PageSpec("en_attention", "Attention Queue", "tasks", "INSIGHTS",
+             _ENABLEMENT, "_create_enablement_page", tab_key="home",
+             wants_drilldown=True),
     PageSpec("en_analytics", "Guru Analytics", "pie", "INSIGHTS",
              _ENABLEMENT, "_create_enablement_page", tab_key="analytics",
+             wants_drilldown=True),
+    PageSpec("en_help", "Help", "book", "SYSTEM",
+             _ENABLEMENT, "_create_enablement_page", tab_key="help",
              wants_drilldown=True),
     PageSpec("en_settings", "Settings", "sliders", "SYSTEM",
              _ENABLEMENT, "_create_enablement_page", tab_key="settings",

@@ -88,6 +88,15 @@ RENN_SYSTEM_PROMPT = (
     "- Choose where to publish: list_guru_collections, then list_guru_folders (pass a "
     "collection id or name) to find the sub-folder; pass collection_id + folder_id to "
     "push_guru_draft to publish a card straight into that folder.\n"
+    "- Help Center (how THIS app works): help_search answers questions ABOUT "
+    "THE APP — how a feature works and whether it's actually available. Use it "
+    "when the operator asks 'how do I …', 'why can't I …', or 'is X working' "
+    "about the app itself (Calendar, Workbench, pickers, publishing, the KB, "
+    "Settings). Every result carries a status; when it is 'partial', "
+    "'flag-gated', or 'not-available', STATE THAT LIMITATION before describing "
+    "the feature — never present a gated-off feature as if it works. This is "
+    "for the APP's own docs; for the operator's content use search_content / "
+    "kb_search instead.\n"
     "- Style guides: list_style_guides (find them), get_style_guide (read the active "
     "one to follow it), set_active_style_guide (switch which one card generation uses).\n"
     "- Manage work: list_tasks, create_task, update_task, draft_subtasks, add_subtask, "
@@ -212,8 +221,14 @@ class EnablementPage(QWidget):
         self._greeting_sent = False       # one-shot "here's your day" greeting (M5)
         self._greeting_block = None
         self.setStyleSheet(f"background:{ALMA_CREAM};")
-        self._build()
+        # Engine BEFORE the UI: _build() constructs the web tabs, which register
+        # the shared chat bridge (_get_web_chat_bridge) on their channels — that
+        # bridge needs the engine to exist NOW, or the M5.5 Renn drawer is dead
+        # for the page's lifetime (WebHost registers channel objects exactly
+        # once). _chat_context is a callback (invoked at chat time, not here), so
+        # it may reference self.workbench, which _build() creates next.
         self._setup_engine()
+        self._build()
         # Proactive "here's your day" greeting — deferred so the UI finishes
         # building first; no-ops when there's no engine / identity / dated tasks.
         from PySide6.QtCore import QTimer
@@ -231,9 +246,9 @@ class EnablementPage(QWidget):
         self.tabs = QTabWidget()
         self.tabs.setObjectName("AnalysisTab")
         self.tabs.setUsesScrollButtons(False)
-        self.calendar = CalendarPage()
+        self.calendar, self._calendar_tab = self._make_calendar()
         self.tasks = TasksPage()
-        self.workbench = WorkbenchPage()
+        self.workbench, self._workbench_tab = self._make_workbench()
         self.settings = SettingsPage()
         # KB card (WS2-M7): give Settings a connection factory so it can show
         # card counts and run the EC bootstrap off-thread.
@@ -249,7 +264,7 @@ class EnablementPage(QWidget):
         self.pptx = PptxPage()
         self.zendesk = ZendeskPage()
         home_tab = self._scroll(self.attention)
-        cal_tab = self._scroll(self.calendar)
+        cal_tab = self._calendar_tab
         tasks_tab = self._scroll(self.tasks)
         analytics_tab = self._scroll(self.analytics)
         pptx_tab = self._scroll(self.pptx)
@@ -258,19 +273,22 @@ class EnablementPage(QWidget):
         self.tabs.addTab(home_tab, "Home")
         self.tabs.addTab(cal_tab, "Calendar")
         self.tabs.addTab(tasks_tab, "Tasks")
-        self.tabs.addTab(self.workbench, "Workbench")
+        self.tabs.addTab(self._workbench_tab, "Workbench")
         self.tabs.addTab(analytics_tab, "Analytics")
         self.tabs.addTab(pptx_tab, "PowerPoint")
         self.tabs.addTab(zendesk_tab, "Zendesk")
+        help_tab = self._make_help()
+        self.tabs.addTab(help_tab, "Help")
         self.tabs.addTab(settings_tab, "Settings")
         self._tab_widgets = {
             "home": home_tab,
             "calendar": cal_tab,
             "tasks": tasks_tab,
-            "workbench": self.workbench,
+            "workbench": self._workbench_tab,
             "analytics": analytics_tab,
             "powerpoint": pptx_tab,
             "zendesk": zendesk_tab,
+            "help": help_tab,
             "settings": settings_tab,
         }
         # Land on the attention queue; Workbench stays reachable via its tab.
@@ -487,6 +505,311 @@ class EnablementPage(QWidget):
             })
         return rows
 
+    def _make_help(self):
+        """The Help Center tab. Content is bundled under assets/help/ and
+        loaded into help_articles on first open, so a content correction is a
+        file replacement rather than a code change."""
+        from src.ui.pages.enablement.help_tab import HelpTab
+        tab = HelpTab(self._conn)
+        tab.flag_bug_requested.connect(self._open_bug_form)
+        self._help_tab = tab
+        return tab
+
+    def _open_bug_form(self, article_id: str = ""):
+        """Open the configured Asana bug-report form in the SYSTEM browser.
+
+        Deliberately external: the form is filled by the operator in their own
+        browser, so the app never captures or transmits logs, screenshots or
+        document text — which keeps a bug report clear of the PHI/redaction
+        surface entirely. Never opened inside the embedded QtWebEngine view.
+
+        Unset URL → a plain explanation rather than a dead link.
+        """
+        from PySide6.QtWidgets import QMessageBox
+        url = ""
+        try:
+            from src.data.settings_manager import get_section
+            url = str((get_section("enablement", {}) or {})
+                      .get("help", {}).get("bug_form_url", "") or "").strip()
+        except Exception:  # noqa: BLE001 — a settings failure must not block help
+            url = ""
+        if not url:
+            QMessageBox.information(
+                self, "Flag a bug",
+                "No bug-report form has been configured yet.\n\n"
+                "An administrator can set enablement.help.bug_form_url in "
+                "settings to point this button at your team's Asana form.")
+            return
+        if not url.lower().startswith(("http://", "https://")):
+            QMessageBox.warning(
+                self, "Flag a bug",
+                "The configured bug-report form URL is not a web address, so "
+                "it was not opened.")
+            return
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        QDesktopServices.openUrl(QUrl(url))
+
+    def _make_calendar(self):
+        """The Calendar tab: the React/WebHost build behind
+        ``enablement.web_tabs`` (values ``calendar``/``all``), else the native
+        Qt CalendarPage. The controller mirrors CalendarPage's surface
+        (set_tasks/set_scope + signals), so every feed and connect in this
+        file works identically against either. Returns (calendar, tab_widget)."""
+        from src.ui.web.web_flags import web_tabs_mode
+        if web_tabs_mode() in ("calendar", "all"):
+            try:
+                from src.services.enablement_web import CalendarWebController
+                from src.ui.web.calendar_bridge import CalendarBridge
+                from src.ui.web.web_host import WebHost
+            except Exception:  # noqa: BLE001 — WebEngine absent → native tab
+                pass
+            else:
+                ctrl = CalendarWebController(
+                    brief_lookup=self._web_brief_lookup,
+                    # M2 gated drag-reschedule: the confirm is a NATIVE dialog
+                    # (unreachable from page scripts); the write rides the same
+                    # CAS-guarded off-thread path as the detail panel's due
+                    # field, whose completion already reloads every view.
+                    confirm_fn=self._web_reschedule_confirm,
+                    write_fn=lambda tid, due: self._run_task_writeback(
+                        "update_due_in_asana", tid, due),
+                )
+                self._web_cal_bridge = CalendarBridge(
+                    data_signal=ctrl.calendar_data,
+                    brief_signal=ctrl.brief_ready,
+                    refresh_fn=ctrl.request_refresh,
+                    scope_fn=ctrl.request_scope,
+                    open_fn=ctrl.open_task,
+                    brief_fn=ctrl.request_brief,
+                    reschedule_fn=ctrl.request_reschedule,
+                    resolved_signal=ctrl.reschedule_resolved,
+                )
+                host = WebHost(bridge=self._web_cal_bridge,
+                               channel_name="calendarBridge", route="/calendar",
+                               log_name="alma.enablement.web.calendar",
+                               extra_bridges={
+                                   "almaBridge": self._get_web_chat_bridge()})
+                return ctrl, host
+        page = CalendarPage()
+        return page, self._scroll(page)
+
+    def _web_reschedule_confirm(self, task, new_date) -> bool:
+        """The layer-4 human gate for a web-calendar drag: a NATIVE QMessageBox
+        no page script can click. Defaults to No."""
+        from PySide6.QtWidgets import QMessageBox
+        title = str(task.get("title") or "Task")
+        if len(title) > 78:
+            title = title[:77] + "…"
+        return QMessageBox.question(
+            self, "Move task",
+            f"Move “{title}” to {self._fmt_due(new_date)} ({new_date})?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        ) == QMessageBox.Yes
+
+    def _get_web_chat_bridge(self):
+        """One ChatBridge over THIS page's enablement ChatEngine, published as
+        ``almaBridge`` on every web tab's channel (M5.5) — so the in-page Renn
+        drawer is the SAME assistant, session, and canvas coupling as the Qt
+        ChatPanel, just rendered by the updated web chat. Built once; None when
+        the engine is unavailable (the drawer shows its unavailable state and
+        the web button falls back to the Qt drilldown)."""
+        if getattr(self, "_web_chat_bridge", None) is not None:
+            return self._web_chat_bridge
+        if self._engine is None:
+            return None
+        try:
+            from src.ui.web.chat_bridge import ChatBridge
+            self._web_chat_bridge = ChatBridge(
+                self._engine, send_fn=self._web_chat_send,
+                tool_poll=self._web_chat_tool_poll, parent=self)
+        except Exception:  # noqa: BLE001 — chat degrades, the tabs still work
+            self._web_chat_bridge = None
+        return self._web_chat_bridge
+
+    def _web_chat_send(self, text):
+        """A web-drawer send: mirror the user turn into the Qt ChatPanel (the
+        canonical transcript) AND to every open drawer, then dispatch to the
+        shared engine. The originating drawer already rendered its own bubble
+        and dedupes this echo (by text); a second drawer (flag=all) renders it,
+        so the transcript stays coherent across surfaces."""
+        # Refuse a send while a publish confirm modal is open: the modal blocks
+        # human input, so any send arriving now is a page script — and a chat
+        # revise_draft during the publish would write the DB out from under the
+        # confirmed content. (Zero legit-UX cost: a human can't send then.)
+        if getattr(getattr(self, "workbench", None), "is_publish_inflight", False):
+            return
+        try:
+            self.chat.add_message("u", text)
+        except Exception:  # noqa: BLE001
+            pass
+        self._mirror_user_turn(text)
+        self._dispatch_chat(text)
+
+    def _mirror_user_turn(self, text):
+        """Broadcast a user turn to the web drawers (they dedupe their own)."""
+        bridge = getattr(self, "_web_chat_bridge", None)
+        if bridge is not None:
+            bridge.push_notice("u", text)
+
+    def _web_chat_tool_poll(self, since_id: int = 0) -> list[dict]:
+        """Newly-finished tool executions for this page's chat session — the
+        drawer's live tool rows (same query as the Agent's timeline)."""
+        session_id = getattr(self, "_chat_session_id", None)
+        db_path = self._engine_db_path()
+        if not session_id or not db_path:
+            return []
+        try:
+            from src.data.connection_factory import get_connection
+            conn = get_connection(db_path, readonly=True)
+            try:
+                rows = conn.execute(
+                    "SELECT rowid, tool_name, result_rows, elapsed_ms, error "
+                    "FROM chat_tool_executions WHERE session_id=? AND rowid>? "
+                    "ORDER BY rowid", (session_id, int(since_id))).fetchall()
+            finally:
+                conn.close()
+            return [{"id": r[0], "name": r[1], "rows": r[2],
+                     "ms": round(r[3] or 0), "ok": not r[4], "error": r[4]}
+                    for r in rows]
+        except Exception:  # noqa: BLE001 — the timeline is best-effort
+            return []
+
+    def _chat_say(self, role, text):
+        """Say something in Renn's transcript everywhere it renders: the Qt
+        ChatPanel (canonical) AND any open web drawer (bridge notice). Engine
+        turns do NOT come through here — the bridge already relays those."""
+        try:
+            self.chat.add_message(role, text)
+        except Exception:  # noqa: BLE001
+            pass
+        bridge = getattr(self, "_web_chat_bridge", None)
+        if bridge is not None:
+            bridge.push_notice(role, text)
+
+    def _make_workbench(self):
+        """The Workbench tab: the React/WebHost build behind
+        ``enablement.web_tabs: all``, else the native Qt WorkbenchPage. The
+        controller mirrors WorkbenchPage's surface (data setters, signals, and
+        the ``_current_drafts`` attribute this file reads), so every feed and
+        connect works identically. Returns (workbench, tab_widget)."""
+        from src.ui.web.web_flags import web_tabs_mode
+        if web_tabs_mode() == "all":
+            try:
+                from src.services.enablement_web import WorkbenchWebController
+                from src.ui.web.web_host import WebHost
+                from src.ui.web.workbench_bridge import WorkbenchBridge
+            except Exception:  # noqa: BLE001 — WebEngine absent → native tab
+                pass
+            else:
+                from src.data.enablement_checks import run_checks
+                ctrl = WorkbenchWebController(
+                    checks_fn=lambda md: run_checks(md),
+                    # M4: publishing from the web menu confirms via a NATIVE
+                    # dialog (unreachable from page scripts) before page.py's
+                    # existing _on_publish path runs.
+                    publish_confirm_fn=self._web_workbench_publish_confirm,
+                    # M6 fix: the publish belt compares the DB body publish_draft
+                    # will actually read (guards a cache/DB divergence from a
+                    # de-focused revise).
+                    content_lookup=self._web_publish_content_lookup,
+                    # M6 fix: refuse publish while a chat turn (which may run a
+                    # revise_draft tool that writes the DB) is in flight.
+                    busy_lookup=lambda: bool(
+                        getattr(self, "_engine", None) is not None
+                        and self._engine.is_busy))
+                self._web_wb_bridge = WorkbenchBridge(
+                    data_signal=ctrl.workbench_data,
+                    draft_signal=ctrl.draft_loaded,
+                    diff_signal=ctrl.diff_ready,
+                    preview_signal=ctrl.preview_updated,
+                    cards_signal=ctrl.existing_cards_data,
+                    publish_signal=ctrl.publish_resolved,
+                    ai_resolved_signal=ctrl.ai_edit_resolved,
+                    refresh_fn=ctrl.request_refresh,
+                    switch_fn=ctrl.js_switch_workspace,
+                    close_fn=ctrl.js_close_workspace,
+                    diff_fn=ctrl.js_request_diff,
+                    upload_fn=ctrl.js_upload,
+                    find_task_fn=ctrl.js_find_task,
+                    open_chat_fn=ctrl.js_open_chat,
+                    edit_fn=ctrl.js_content_edited,
+                    ai_edit_fn=ctrl.js_ai_edit,
+                    publish_fn=ctrl.js_request_publish,
+                    import_fn=ctrl.js_request_import,
+                    cards_fn=ctrl.js_existing_cards,
+                )
+                # accept_drops: a file dropped anywhere on the tab lands on the
+                # Qt host (web File objects carry no paths) and rides the same
+                # load_file_requested path as the Qt drop zone.
+                host = WebHost(bridge=self._web_wb_bridge,
+                               channel_name="workbenchBridge",
+                               route="/workbench", accept_drops=True,
+                               log_name="alma.enablement.web.workbench",
+                               extra_bridges={
+                                   "almaBridge": self._get_web_chat_bridge()})
+                host.dropped.connect(ctrl.load_file_requested)
+                ctrl.upload_requested.connect(self._web_workbench_upload)
+                return ctrl, host
+        page = WorkbenchPage()
+        return page, page
+
+    def _web_workbench_publish_confirm(self, dest_key: str, title: str) -> bool:
+        """The layer-4 human gate for a web-workbench publish: a NATIVE
+        QMessageBox no page script can click. Defaults to No."""
+        from PySide6.QtWidgets import QMessageBox
+        what = {
+            "guru_new": "publish this draft as a NEW Guru card",
+            "drive_new": "save this draft as a new Google Doc",
+            "drive_update": "update the selected Google Doc from this draft",
+        }.get(dest_key)
+        if what is None and dest_key.startswith("guru_existing:"):
+            what = f"update Guru card “{dest_key.split(':', 1)[1]}” from this draft"
+        if len(title) > 60:
+            title = title[:59] + "…"
+        return QMessageBox.question(
+            self, "Confirm publish",
+            f"“{title}” — {what}?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        ) == QMessageBox.Yes
+
+    def _web_publish_content_lookup(self, draft_id):
+        """The draft's current stored body — the exact bytes store.publish_draft
+        will read. The web publish belt snapshots this at confirm-open and
+        re-checks it at approve, so a body the operator didn't see can't ship."""
+        from src.data import enablement_store as store
+        draft = store.get_draft(self._conn(), int(draft_id))
+        return (draft or {}).get("content")
+
+    def _web_workbench_upload(self):
+        """The web Upload button → the NATIVE file dialog (the page never sees
+        the filesystem); the chosen path rides the normal load flow."""
+        from PySide6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Upload a document", "",
+            "Documents (*.docx *.md *.markdown *.txt *.csv);;All files (*)")
+        if path:
+            self._on_load_file(path)
+
+    def _web_brief_lookup(self, task_id):
+        """The web calendar's on-hover brief join — the same lazy contract as
+        the detail panel (_show_task_detail): the feed stays lean, the stored
+        Haiku brief loads per-task on demand. None when absent/unparseable."""
+        import json as _json
+        from src.data import enablement_tasks
+        from src.data.connection_factory import get_connection
+        conn = get_connection(self._engine_db_path())
+        try:
+            fresh = enablement_tasks.get_task(conn, task_id) or {}
+        finally:
+            conn.close()
+        if fresh.get("brief_status") == "ok" and fresh.get("brief_json"):
+            try:
+                return _json.loads(fresh["brief_json"])
+            except (ValueError, TypeError):
+                return None
+        return None
+
     def _on_scan(self):
         if not self.demo:
             return
@@ -516,15 +839,27 @@ class EnablementPage(QWidget):
                 f"Indexed {len(summary['documents'])} docs → {len(drafts)} drafts, "
                 f"{len(all_tasks)} tasks. Review in the Workbench."
             )
-            self.chat.add_message(
+            self._chat_say(
                 "a",
                 f"Scan complete — pulled {len(summary['documents'])} docs from the Drive and "
                 f"drafted {len(drafts)} Guru cards. Pick one above to review, then say “push to Guru”."
             )
-            self.tabs.setCurrentWidget(self.workbench)
+            self.tabs.setCurrentWidget(self._workbench_tab)
             self._open_chat()
         except Exception as exc:  # noqa: BLE001 — surface in the status line
             self._set_status(f"Demo scan error: {exc}")
+
+    def on_page_shown(self):
+        """Refresh hook fired by MainWindow when this page becomes active again.
+
+        Pages are built once, so returning here would otherwise show whatever
+        was loaded on first mount. This re-reads the local DB (cheap — no
+        network; a scan/monitor tick is still what pulls fresh remote data), so
+        a surface the operator left is current when they come back."""
+        try:
+            self._load_live()
+        except Exception:  # noqa: BLE001 — a refresh must never break navigation
+            pass
 
     def _load_live(self, prefer_draft_id=None):
         """Reload the four pages from the active DB (warehouse, or the demo DB in
@@ -643,7 +978,7 @@ class EnablementPage(QWidget):
                 "source": "drive"}
         self.workbench.open_workspace(chip)
         self.workbench.show_draft(self._card_from_draft(conn, d))
-        self.tabs.setCurrentWidget(self.workbench)
+        self.tabs.setCurrentWidget(self._workbench_tab)
 
     def _on_workspace_closed(self, draft_id):
         """Close a workspace chip; activate the next open one (if any)."""
@@ -655,20 +990,22 @@ class EnablementPage(QWidget):
                 self._card_from_draft(self._conn(), self._drafts[new_active]))
 
     def _on_chat(self, text: str):
-        # ChatPanel already appended the user's bubble; just dispatch to the engine.
+        # ChatPanel already appended the user's bubble; mirror it to any open
+        # web drawer (none originated it → all render it), then dispatch.
+        self._mirror_user_turn(text)
         self._dispatch_chat(text)
 
     def _send_quick(self, prompt: str):
         """A quick-action button sends a canned instruction to Renn."""
-        self.chat.add_message("u", prompt)
+        self._chat_say("u", prompt)
         self._dispatch_chat(prompt)
 
     def _dispatch_chat(self, text: str):
         if self._engine is None:
-            self.chat.add_message("a", "The assistant isn't available in this build.")
+            self._chat_say("a", "The assistant isn't available in this build.")
             return
         if self._engine.is_busy:
-            self.chat.add_message("a", "One moment — I'm still working on the last request.")
+            self._chat_say("a", "One moment — I'm still working on the last request.")
             return
         if self.demo:
             self._ensure_demo_db()          # the tools' DB must exist before they run
@@ -696,6 +1033,9 @@ class EnablementPage(QWidget):
                 tools_enabled=True,
                 use_mcp_tools=True,
                 db_path=self._engine_db_path(),
+                # M5.5: the web Renn drawer streams; response_ready still
+                # finalizes whole turns, so the Qt ChatPanel is unaffected.
+                stream=True,
             )
             self._engine.response_ready.connect(self._on_engine_response)
             self._engine.error_occurred.connect(self._on_engine_error)
@@ -803,14 +1143,14 @@ class EnablementPage(QWidget):
             return
         try:
             from pathlib import Path
-            from src.services.chat_session import create_session
-            self._chat_session_id = create_session("enablement", conn=self._conn())
-            self._engine.set_session_id(self._chat_session_id)
-            # tell the MCP tool server which session to tag its tool calls with
+            from src.services.chat_session import resolve_or_create_session
             db_path = self._engine_db_path()
-            if db_path:
-                Path(db_path).parent.joinpath(".current_chat_session").write_text(
-                    self._chat_session_id, encoding="utf-8")
+            pointer_dir = Path(db_path).parent if db_path else None
+            # Share ONE session with the Agent page via the pointer file, so the
+            # two surfaces are the same conversation (finding 5).
+            self._chat_session_id = resolve_or_create_session(
+                "enablement", self._conn(), pointer_dir=pointer_dir)
+            self._engine.set_session_id(self._chat_session_id)
         except Exception as exc:  # noqa: BLE001 — telemetry only; tools still work
             logger.debug("enablement session create failed: %s", exc)
 
@@ -918,19 +1258,30 @@ class EnablementPage(QWidget):
 
     # ── live connections + existing Guru cards (Phase 7) ──────────
     def _fetch_existing_cards(self):
-        """Populate the Workbench 'Existing Guru card' submenu with real cards."""
-        if self.demo or self._guru_client is None or self._existing_cards_loaded:
+        """Populate the Workbench 'Existing Guru card' submenu with real cards.
+
+        Always feeds set_existing_cards a definite result (even []), so the web
+        submenu — which resets to a spinner on every open and waits for a push —
+        shows 'No cards found' instead of hanging. The one-shot flag only guards
+        the (network) Guru fetch; the web controller re-serves its cache on
+        repeat opens, so this fetching once is enough."""
+        if self._existing_cards_loaded:
+            return
+        if self.demo or self._guru_client is None:
+            # No live source to query — hand the submenu an empty result so it
+            # resolves. Not flagged loaded, so a later live connect can refetch.
+            self.workbench.set_existing_cards([])
             return
         try:
             cards = self._guru_client.search_cards("") or []
             rows = [{"id": c.get("id"),
                      "title": c.get("preferredPhrase") or c.get("title") or c.get("id")}
                     for c in cards[:25] if c.get("id")]
-            if rows:
-                self.workbench.set_existing_cards(rows)
+            self.workbench.set_existing_cards(rows)   # always, even when empty
             self._existing_cards_loaded = True
         except Exception as exc:  # noqa: BLE001
-            self.chat.add_message("a", f"Couldn't load Guru cards: {exc}")
+            self.workbench.set_existing_cards([])     # unwedge the spinner
+            self._chat_say("a", f"Couldn't load Guru cards: {exc}")
 
     def check_connections(self):
         """Live-mode only: verify each source connection off the UI thread."""
@@ -1069,7 +1420,7 @@ class EnablementPage(QWidget):
         try:
             did = int(draft_id)
         except (TypeError, ValueError):
-            self.chat.add_message("a", "No draft selected to push.")
+            self._chat_say("a", "No draft selected to push.")
             return
         from src.data import enablement_store as store
         try:
@@ -1079,16 +1430,16 @@ class EnablementPage(QWidget):
                 collection_id=self._publish_collection_id(),
             )
         except Exception as exc:  # noqa: BLE001 — surface in chat
-            self.chat.add_message("a", f"Publish failed: {exc}")
+            self._chat_say("a", f"Publish failed: {exc}")
             return
         if res.get("ok"):
             where = "Provider Enablement" if self.demo else "Guru"
-            self.chat.add_message("a", f"Published the draft to {where} and re-rendered the live card.")
+            self._chat_say("a", f"Published the draft to {where} and re-rendered the live card.")
             self._set_status(f"Draft {did} published{' (demo)' if self.demo else ''}.")
             if not self.demo:
                 self._load_live()
         else:
-            self.chat.add_message("a", f"Publish failed: {res.get('error')}")
+            self._chat_say("a", f"Publish failed: {res.get('error')}")
 
     def _on_publish(self, dest: str):
         if dest == "guru_new":
@@ -1109,7 +1460,7 @@ class EnablementPage(QWidget):
                 from src.data import enablement_store as store
                 store.set_draft_card_id(self._conn(), int(did), key)
             except Exception as exc:  # noqa: BLE001
-                self.chat.add_message("a", f"Couldn't target card {key}: {exc}")
+                self._chat_say("a", f"Couldn't target card {key}: {exc}")
                 return
             self._set_status(f"Updating Guru card {key} from the active draft…")
             self._on_push(did)
@@ -1119,7 +1470,7 @@ class EnablementPage(QWidget):
             "drive_update": "AI is updating the selected Google Doc via the Drive API (demo).",
         }.get(dest, "Done.")
         self._set_status(msg)
-        self.chat.add_message("a", msg)
+        self._chat_say("a", msg)
 
     def _on_load_file(self, path: str):
         """A dropped / uploaded local file → ingest its text and draft a card
@@ -1175,7 +1526,13 @@ class EnablementPage(QWidget):
         from src.data import enablement_store as store
         name = os.path.basename(path)
         text = EnablementPage._read_local_text(path)
-        doc_id = store.save_document(conn, source="upload", name=name, full_text=text)
+        # Stable source_ref from the file path so re-importing the same file
+        # (including after an edit in place) resolves to the SAME document and
+        # refreshes its one draft, instead of minting a fresh uuid each time and
+        # spawning duplicates (finding 19).
+        source_ref = "upload:" + os.path.abspath(path)
+        doc_id = store.save_document(conn, source="upload", name=name,
+                                     source_ref=source_ref, full_text=text)
         draft = store.draft_card_from_document(conn, doc_id)   # deterministic
         return {"ok": True, "kind": "upload", "name": name,
                 "chars": len(text), "draft_id": draft.get("id")}
@@ -1265,7 +1622,7 @@ class EnablementPage(QWidget):
     def _on_import_finished(self, res: dict):
         if not res.get("ok"):
             self._set_status(f"Import failed: {res.get('error')}")
-            self.chat.add_message("a", f"Import failed: {res.get('error')}")
+            self._chat_say("a", f"Import failed: {res.get('error')}")
             return
         kind = res.get("kind")
         if kind == "style":
@@ -1329,6 +1686,14 @@ class EnablementPage(QWidget):
             if draft and draft.get("status") != "pushed":
                 html = self.workbench.current_html()
                 store.update_draft_content(self._conn(), did, content=md, content_html=html)
+                # Keep the in-memory _drafts cache in step with the store, or a
+                # chip switch-back rebuilds the card from stale pre-edit content
+                # (_on_draft_selected reads _card_from_draft(self._drafts[did]))
+                # and the committed edit visibly reverts.
+                cached = self._drafts.get(did)
+                if cached is not None:
+                    cached["content"] = md
+                    cached["content_html"] = html
                 self._set_status(f"Draft {did} updated from the editor.")
         except Exception as exc:  # noqa: BLE001
             self._set_status(f"Edit save failed: {exc}")
@@ -1345,6 +1710,14 @@ class EnablementPage(QWidget):
         return (f"{instruction}\n\nApply this to the following selected passage "
                 f"only, returning the full revised card:\n\"\"\"\n{sel}\n\"\"\"")
 
+    def _clear_web_ai_inflight(self):
+        """Release the web publish block if a revise never actually dispatched
+        (an _on_ai_edit early-return) — belt-and-suspenders so the block can
+        never strand. No-op on the native Qt path."""
+        notify = getattr(self.workbench, "notify_ai_edit_done", None)
+        if callable(notify):
+            notify(False)
+
     def _on_ai_edit(self, instruction: str, selection: str):
         """Run the rich editor's inline AI edit against the active draft.
 
@@ -1354,8 +1727,10 @@ class EnablementPage(QWidget):
         draft_id = self.workbench.active_draft_id
         if not draft_id:
             self._set_status("Open a draft before asking for an AI edit.")
+            self._clear_web_ai_inflight()   # never strand the publish block
             return
         if not (instruction or "").strip():
+            self._clear_web_ai_inflight()
             return
         import threading
         self._set_status("Renn is revising the draft…")
@@ -1387,26 +1762,44 @@ class EnablementPage(QWidget):
 
     def _on_ai_edit_done(self, res: dict):
         """AI-edit finished off-thread → reload the canvas in place (main thread)."""
-        if not res.get("ok"):
+        ok = bool(res.get("ok"))
+        # Always un-busy the web AI-edit bar, success or failure — otherwise a
+        # failed revise (offline CLI, etc.) leaves it stuck on "Renn is
+        # revising…" until an unrelated draftLoaded happens to arrive.
+        notify = getattr(self.workbench, "notify_ai_edit_done", None)
+        if callable(notify):
+            notify(ok)
+        if not ok:
             self._set_status(f"AI edit failed: {res.get('error', 'unknown')}")
             return
         self._set_status(f"Draft {res.get('draft_id')} revised — reloaded the card.")
-        self._reload_active_draft_canvas()
+        # Refresh the draft the WORKER captured, NOT whatever is active now: a
+        # revise dispatched for D1 then de-focused to D2 wrote DB[D1], and
+        # refreshing "active" (D2) would leave _drafts[D1]/_cards[D1] stale —
+        # so a switch-back (and any publish, which reads the DB) would show/ship
+        # divergent content (the operator approves stale, publishes fresh).
+        self._reload_active_draft_canvas(res.get("draft_id"))
 
-    def _reload_active_draft_canvas(self):
-        """Re-render the active draft's canvas from freshly-stored content so a
-        revise (inline AI edit OR a chat turn) shows up without a manual refresh."""
+    def _reload_active_draft_canvas(self, draft_id=None):
+        """Re-render a draft's canvas from freshly-stored content so a revise
+        (inline AI edit OR a chat turn) shows up without a manual refresh.
+
+        ``draft_id`` defaults to the active draft; pass the revise's captured id
+        for a possibly-de-focused revise. The _drafts cache is refreshed for
+        that draft either way (so switch-back and publish see the truth); the
+        VISIBLE canvas reloads only when that draft is the active one."""
         from src.data import enablement_store as store
-        draft_id = self.workbench.active_draft_id
-        if not draft_id:
+        did = draft_id if draft_id is not None else self.workbench.active_draft_id
+        if not did:
             return
         try:
             conn = self._conn()
-            draft = store.get_draft(conn, int(draft_id))
+            draft = store.get_draft(conn, int(did))
             if not draft:
                 return
-            self._drafts[int(draft_id)] = draft
-            self.workbench.reload_active_canvas(self._card_from_draft(conn, draft))
+            self._drafts[int(did)] = draft
+            if int(did) == self.workbench.active_draft_id:
+                self.workbench.reload_active_canvas(self._card_from_draft(conn, draft))
         except Exception as exc:  # noqa: BLE001
             self._set_status(f"Canvas reload error: {exc}")
 
@@ -1477,6 +1870,10 @@ class EnablementPage(QWidget):
         threading.Thread(target=worker, daemon=True).start()
 
     def _on_analytics_synced(self, res: dict):
+        # Reload FIRST — its last act sets the "N tasks · M drafts" status —
+        # then write the sync outcome, so the outcome is what the operator sees
+        # rather than being clobbered by the reload (finding 21).
+        self._load_live(prefer_draft_id=self.workbench.active_draft_id)
         if res.get("ok"):
             self._set_status("Guru analytics synced.")
         else:
@@ -1488,7 +1885,6 @@ class EnablementPage(QWidget):
             self._set_status(
                 f"Analytics sync issue: {res.get('error') or errors}"
             )
-        self._load_live(prefer_draft_id=self.workbench.active_draft_id)
 
     def _on_comment_task(self, comment_id: str):
         try:
@@ -1570,7 +1966,7 @@ class EnablementPage(QWidget):
         """Home → 'Open targeted update': land in the Workbench and route the
         card. A staged-draft pseudo id ('draft:<n>') opens that draft directly;
         a real card id flows through the targeted-update import."""
-        self.tabs.setCurrentWidget(self.workbench)
+        self.tabs.setCurrentWidget(self._workbench_tab)
         if not card_id:
             return
         if card_id.startswith("draft:"):
@@ -1683,7 +2079,9 @@ class EnablementPage(QWidget):
             from src.data import pptx_store
             from src.data.doc_reader import read_document
             name = os.path.basename(path)
-            md = read_document(path)
+            # strict: an unreadable format raises rather than decoding garbage
+            # into slides — the except below surfaces "couldn't model a deck".
+            md = read_document(path, strict=True)
             outline = pptx_store.outline_from_markdown(name, md)
             deck_id = pptx_store.save_deck(
                 self._conn(), title=outline["title"], outline=outline,
@@ -2075,6 +2473,18 @@ class EnablementPage(QWidget):
         """Setup mode: Renn discovers Asana GIDs and writes the (scoped) board config."""
         from src.data import asana_setup
         disc = asana_setup.discover()
+        # Refuse to persist a config built from mock GIDs into a real source.
+        # The mock is fine to SHOW in demo mode, but saving it outside demo
+        # would write fabricated project/field ids into monitor_sources.
+        if disc.get("mock") and not self.demo:
+            self.chat.set_chat([
+                ("a", "I can't set up your Asana board yet — no Asana API key "
+                      "is connected, so I'd only have sample projects to work "
+                      "from, not your real ones. Ask an administrator to "
+                      "connect Asana, then run setup again.")])
+            self._set_status("Asana setup skipped — not connected")
+            self._open_chat()
+            return
         projects = disc.get("projects", [])
         proj = projects[0] if projects else None
         fields = disc.get("custom_fields", {}).get(proj["gid"], []) if proj else []
@@ -2112,12 +2522,12 @@ class EnablementPage(QWidget):
                     indicator_value_gid=enab["gid"], indicator_value_name=enab["name"],
                     priority_field_gid=(urg["gid"] if urg else None),
                     assignee_field_gid=(ppl["gid"] if ppl else None))
-                self.chat.add_message("a",
+                self._chat_say("a",
                     f"Done — saved “{proj['name']}” to your Enablement settings (source {res['source_id']}). "
                     f"I only touched the Asana source config; nothing else.")
                 self._set_status(f"Asana board configured by Renn: {proj['name']}")
         except Exception as exc:  # noqa: BLE001 — surface in chat
-            self.chat.add_message("a", f"Setup hit an error: {exc}")
+            self._chat_say("a", f"Setup hit an error: {exc}")
         self._open_chat()
 
     def _on_calendar_event(self, label):
@@ -2162,7 +2572,7 @@ class EnablementPage(QWidget):
             except Exception:  # noqa: BLE001 — extras/brief are enrichment only
                 pass
         panel = TaskDetailPanel(task)
-        panel.open_in_workbench.connect(lambda: self.tabs.setCurrentWidget(self.workbench))
+        panel.open_in_workbench.connect(lambda: self.tabs.setCurrentWidget(self._workbench_tab))
         panel.open_source.connect(self._open_source_url)
         tid = task.get("task_id")
         if tid:

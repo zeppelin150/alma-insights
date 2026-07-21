@@ -59,10 +59,29 @@ def _legacy_sections():
         color: rgba(243,241,236,0.4); font-size: 10px; font-weight: 700;
         letter-spacing: 1.2px; padding: 20px 20px 8px 20px;
     }}
+    /* The nav scroll area is pure plumbing — it must not paint anything or
+       it draws a light rectangle over the dark sidebar. */
+    #SidebarScroll, #SidebarNavHost, #SidebarScroll > QWidget > QWidget {{
+        background: transparent; border: none;
+    }}
+    #SidebarScroll QScrollBar:vertical {{
+        background: transparent; width: 6px; margin: 0px;
+    }}
+    #SidebarScroll QScrollBar::handle:vertical {{
+        background: rgba(243,241,236,0.18); border-radius: 3px; min-height: 24px;
+    }}
+    #SidebarScroll QScrollBar::add-line:vertical,
+    #SidebarScroll QScrollBar::sub-line:vertical {{
+        height: 0px;
+    }}
     #SidebarButton {{
         background: transparent; color: rgba(243,241,236,0.72);
         border: none; border-radius: 8px; padding: 10px 20px;
         text-align: left; font-size: 13px; font-weight: 500; margin: 2px 12px;
+        /* min-height guarantees room for descenders (g, y, p, Q). Without it
+           the content box can land a pixel short of what the font needs and
+           every label with a descender renders clipped. */
+        min-height: 20px;
     }}
     #SidebarButton:hover {{
         background: {ALMA_GREEN_MID}; color: {ALMA_TEXT_ON_DARK};
@@ -89,11 +108,13 @@ def _legacy_sections():
     }}
     #SidebarFooter {{
         color: rgba(243,241,236,0.3); font-size: 10px; padding: 12px 20px;
+        min-height: 14px;
     }}
     #SidebarCollapseBtn {{
         background: transparent; color: rgba(243,241,236,0.4);
         border: none; border-radius: 6px; padding: 8px 20px;
         font-size: 16px; font-weight: 400; margin: 0px 12px;
+        min-height: 22px;
     }}
     #SidebarCollapseBtn[collapsed="true"] {{
         padding: 8px 0px; margin: 0px 4px; text-align: center;

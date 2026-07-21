@@ -42,6 +42,9 @@ class ChatBridge(QObject):
     guruTargetsListed = Signal(str)  # JSON: {request_id, level:'collections'|'folders', collection_id?, items:[{id,name}]} | {request_id, guru_not_connected} (M5)
     voiceTranscript = Signal(str)  # a recognized on-device dictation utterance
     voiceState = Signal(str)       # 'listening' | 'transcribing' | 'idle' | 'error' | 'unavailable'
+    chatNotice = Signal(str)       # JSON {role, text} — host-pushed notices (scan
+                                   # results, publish outcomes) for embedded drawers
+                                   # (M5.5); NOT an engine turn, NOT JS-invokable
 
     def __init__(self, engine, send_fn=None, tool_poll=None, session_api=None,
                  job_poll=None, draft_api=None, voice=None, action_poll=None,
@@ -190,6 +193,18 @@ class ChatBridge(QObject):
             # call it first, then add the live meter on top.
             self._prior_telemetry = getattr(engine, "_telemetry_callback", None)
             engine.set_telemetry_callback(self._on_telemetry)
+
+    # ── host-pushed notices (Python -> JS only; M5.5) ────────────────
+
+    def push_notice(self, role, text):
+        """Relay a host-side chat message (page.py's add_message flow) into any
+        embedded web drawer. Plain method, deliberately NOT a Slot — page
+        scripts must not be able to forge notices."""
+        try:
+            self.chatNotice.emit(json.dumps(
+                {"role": "u" if role == "u" else "a", "text": str(text or "")}))
+        except Exception:  # noqa: BLE001 — notices are best-effort
+            pass
 
     # ── inbound (JS -> Python) ──────────────────────────────────────
 

@@ -429,6 +429,71 @@ class TestToolLoop:
         assert mock_client.generate.call_count == _MAX_TOOL_ROUNDS + 1
 
 
+class TestUseMcpToolsBoundary:
+    """Guards the gemini_chats_page fix: tools must dispatch via the in-process
+    text loop (use_mcp_tools=False) for ANY plain-text client (incl. the Claude
+    CLI). use_mcp_tools=True skips text dispatch entirely — the state that left
+    the model tool-less and fabricating ticket IDs.
+    """
+
+    @staticmethod
+    def _tool_emitting_client():
+        call_count = [0]
+
+        def gen(prompt, system_prompt="", *args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return 'Let me check.\nTOOL_CALL: list_tickets {"limit": 5}'
+            return "Here are the tickets."
+
+        client = MagicMock()
+        client.generate.side_effect = gen
+        client.model = "claude-cli"  # plain-text, CLI-like
+        return client, call_count
+
+    @staticmethod
+    def _pump(engine, results, timeout=10.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline and not results:
+            if engine._worker:
+                engine._worker.wait(100)
+            _app.processEvents()
+            time.sleep(0.05)
+
+    def test_text_loop_dispatches_for_plaintext_client(self, db_path):
+        from src.services.chat_engine import ChatEngine
+        client, call_count = self._tool_emitting_client()
+        engine = ChatEngine(
+            system_prompt="t", tools_enabled=True, use_mcp_tools=False, db_path=db_path,
+        )
+        engine.set_client(client)
+        results = []
+        engine.response_ready.connect(lambda r: results.append(r))
+        engine.send("list tickets")
+        self._pump(engine, results)
+        # initial call + resubmit after the tool actually executed
+        assert call_count[0] == 2, f"expected dispatch (2 calls), got {call_count[0]}"
+        if results:
+            assert "TOOL_CALL" not in results[-1]
+
+    def test_mcp_mode_skips_text_dispatch(self, db_path):
+        """Documents the broken state: with use_mcp_tools=True the engine never
+        parses/executes the text TOOL_CALL, so the raw directive leaks through."""
+        from src.services.chat_engine import ChatEngine
+        client, call_count = self._tool_emitting_client()
+        engine = ChatEngine(
+            system_prompt="t", tools_enabled=True, use_mcp_tools=True, db_path=db_path,
+        )
+        engine.set_client(client)
+        results = []
+        engine.response_ready.connect(lambda r: results.append(r))
+        engine.send("list tickets")
+        self._pump(engine, results)
+        assert call_count[0] == 1, f"expected no dispatch (1 call), got {call_count[0]}"
+        if results:
+            assert "TOOL_CALL: list_tickets" in results[-1]
+
+
 class TestStatusUpdates:
 
     def test_status_signals_during_send(self, mock_client):

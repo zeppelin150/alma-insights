@@ -118,7 +118,79 @@ platforms.
 
 ---
 
-## Built — Connect & Configure: in-chat Google OAuth + Drive/Asana pickers + conversational routing + gated writes *(M0–M9 built + GUI-tested 2026-06-30; uncommitted on `enablement-content-tabs`)*
+## Built — Enablement Web Pivot: Calendar + Workbench as React/QtWebEngine *(M0–M6 built 2026-07-14; uncommitted on `enablement-content-tabs`)*
+
+> **Status: built and demo-verified; default OFF pending the owner's flag-flip call.**
+> The two hero enablement tabs (Calendar, Workbench) now have full React/QtWebEngine
+> implementations behind `enablement.web_tabs` (`off` default | `calendar` | `all`), on the
+> same in-process QWebChannel architecture as the Agent — no server, no second app. The
+> native Qt tabs stay intact and routed when the flag is off, so this ships dark and flips
+> per-surface when ready. Plan: `~/.claude/plans/enablement-web-pivot.md`.
+
+**Why:** the enablement product's *outputs are HTML* (Guru cards, Zendesk articles,
+style-guide renders, Mermaid). The native `QTextBrowser` preview was a ~2005-era HTML
+approximation of what actually publishes; Chromium renders it pixel-truthfully. The pivot
+also retires a class of recurring Qt layout defects and gives the card editor a real web
+surface — at the cost of a disciplined bridge-security posture (below).
+
+**Highlights**
+- **Shared web infra (M0):** one decomposed SPA with hash routes (`#/chat`, `#/calendar`,
+  `#/workbench`), a shared `WebHost` (diagnostics + channel + drop-forwarding), an
+  allowlist HTML sanitizer (`src/data/html_sanitize.py`), CI guardrail tests (ban
+  `innerHTML`/network/storage; enforce `<iframe sandbox>`), a vitest rig, and the macOS
+  blank-render wrapper fix baked into `installer/install.py` (LSRequiresNativeExecution +
+  `arch -arm64`).
+- **Web Calendar (M1–M2):** month / week / **agenda** with real navigation, full-title
+  chips, hover cards with the Haiku task brief, keyboard nav, Mine/All, and
+  **drag-to-reschedule** gated behind a native confirm + the existing CAS'd Asana
+  write-back.
+- **Web Workbench (M3–M4):** **true-fidelity Guru preview** in a fully-sandboxed
+  (`sandbox=""`, no scripts) iframe fed by the Python sanitizer; **word-level** review
+  diff; check badges; workspaces with Qt-parity commit-on-leave editing; the AI-edit ask
+  (canned + free + selection); and **publish** behind a destination allowlist + native
+  confirm into the unchanged publish path.
+- **Renn as an in-page drawer (M5.5):** "Open Assistant" (Workbench) and "Renn ›"
+  (Calendar) raise the updated React chat — streaming, markdown, live tool rows, host
+  notices — over the *same* `ChatEngine` and session as the Qt panel (a second `almaBridge`
+  object on the tab's channel), with a graceful fallback to the Qt drilldown.
+- **OS-aware diagnostics (M6):** `src/ui/web/web_diag.py` + `python scripts/web_diag.py` —
+  a modular, cross-compiling fact sheet (shared checks + a macOS branch for Rosetta / Mach-O
+  arch mismatch / framework re-sign leftovers / quarantine, and a Windows branch) that dumps
+  automatically when a renderer dies and at startup under `ALMA_WEB_DIAG=1`. `scripts/
+  verify_web_pivot_mac.sh` is the Mac checklist harness.
+
+**Security model (load-bearing):** QWebChannel exposes every bridge slot to any script in
+the page, so no slot carries authority — reads return pre-shaped viewmodels, side-effectful
+actions validate against Python-held state + single-winner claims + **native** confirms
+(unreachable from Chromium), and untrusted HTML only ever reaches a sandboxed, script-less
+iframe. TipTap (rich-text editor v2) was supply-chain-vetted and **approved with conditions
+but deferred** to its own milestone.
+
+**M5 decision — editor v2:** TipTap is healthy and low-risk under conditions (exact pins,
+official `@tiptap/*` only, sanitizer stays authoritative), but v1's markdown editor covers
+the core loop and unedited publishes already preserve stored rich HTML, so adoption waits
+one cycle (v3's native markdown API strengthens the case). The flag-flip default is the
+owner's call, with the rich-edit gap documented.
+
+**Cost measured (M6):** on the Windows dev box, the three web surfaces together add ~273 MB
+RSS over a ~53 MB Qt baseline (~147 MB Agent + ~63 MB each tab, one Chromium child per
+surface). M1/16 GB measurement stays on the Mac verification checklist. Bundle: one ~232 KB
+`dist/index.html`.
+
+**Testing:** ~145 committed tests (bridge contracts + gate invariants + sanitizer XSS corpus
++ word-diff + flag/guardrail/diag) run headless anywhere; WebEngine round-trips live in
+gitignored `tests/test_*_web_local.py` / `test_web_chat_drawer.py` and **must run singly**
+(offscreen Chromium teardown stacks to exit 255; grabs are always blank — assert via
+`runJavaScript`, never screenshots). The pivot was put through a 4-dimension adversarial
+review workflow.
+
+---
+
+## Built — Enablement web pivot: Calendar + Workbench + Renn drawer in React/QtWebEngine *(M0–M6 built 2026-07-14; uncommitted on `enablement-content-tabs`)*
+
+> **Status: built, tested, behind `enablement.web_tabs` in `data/settings.yaml`**
+> (`off` default | `calendar` | `all`). The native Qt tabs remain the fallback at
+> every level — flag off, W
 
 > **Status: built and live-tested in the app** (enablement → ASSISTANT → Agent).
 > Real-data GUI test confirmed the Asana board picker (your live projects), the

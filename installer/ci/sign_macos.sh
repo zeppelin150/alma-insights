@@ -88,23 +88,54 @@ WORK="$(mktemp -d)"
 echo "[sign_macos] Unpacking for deep signing → ${WORK}"
 ditto -x -k "${ARTIFACT_ABS}" "${WORK}"
 
-sign_one() {
+sign_one() {  # plain hardened-runtime sign (dylibs, frameworks, node)
   codesign --force --options runtime --timestamp \
            --keychain "${KEYCHAIN}" --sign "${APPLE_SIGNING_IDENTITY}" "$1"
 }
+sign_jit() {  # hardened runtime + JIT entitlements (QtWebEngine helper + Python)
+  codesign --force --options runtime --timestamp --entitlements "${HELPER_ENT}" \
+           --keychain "${KEYCHAIN}" --sign "${APPLE_SIGNING_IDENTITY}" "$1"
+}
 
-# 1) The QtWebEngine helper(s) — the exact binary Gatekeeper blocks when unsigned.
-while IFS= read -r -d '' f; do echo "[sign_macos]  helper: $f"; sign_one "$f"; done \
+# QtWebEngine's helper hosts Chromium/V8, which JIT-compiles JS. Under the
+# hardened runtime it MUST carry com.apple.security.cs.allow-jit or the renderer
+# can't allocate executable memory → it exits → the QWebEngineView renders BLANK.
+# Qt ships the authoritative entitlements file INSIDE the framework — prefer it;
+# fall back to writing the same three it requests. (Qt docs: sign the WebEngine
+# process "with an entitlements file that at least contains" these.)
+HELPER_ENT="$(find "${WORK}" -path '*QtWebEngineProcess.app/Contents/Resources/QtWebEngineProcess.entitlements' | head -1)"
+if [ -z "${HELPER_ENT}" ]; then
+  HELPER_ENT="$(mktemp -t webengine_ent).plist"
+  cat > "${HELPER_ENT}" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>com.apple.security.cs.allow-jit</key><true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
+  <key>com.apple.security.cs.disable-library-validation</key><true/>
+</dict></plist>
+PLIST
+fi
+echo "[sign_macos] helper entitlements: ${HELPER_ENT}"
+
+# 1) The QtWebEngine helper — inner Mach-O first, THEN its .app bundle, BOTH with
+#    the JIT entitlements. This is the fix for the blank render on Apple Silicon.
+while IFS= read -r -d '' f; do echo "[sign_macos]  helper bin: $f"; sign_jit "$f"; done \
   < <(find "${WORK}" -name 'QtWebEngineProcess' -type f -print0)
+while IFS= read -r -d '' a; do echo "[sign_macos]  helper app: $a"; sign_jit "$a"; done \
+  < <(find "${WORK}" -name 'QtWebEngineProcess.app' -type d -print0)
 # 2) Mach-O leaves: Python extension modules + shared libs.
 while IFS= read -r -d '' f; do sign_one "$f"; done \
   < <(find "${WORK}" \( -name '*.so' -o -name '*.dylib' \) -type f -print0)
 # 3) Frameworks (sign the bundle dir after its internals are signed).
 while IFS= read -r -d '' fw; do sign_one "$fw"; done \
   < <(find "${WORK}" -name '*.framework' -type d -print0)
-# 4) The bundled interpreters.
+# 4) The bundled interpreters. Python also hosts V8 on the in-process-gpu /
+#    single-process paths, so it gets the JIT entitlements too; node does not.
+while IFS= read -r -d '' exe; do sign_jit "$exe"; done \
+  < <(find "${WORK}" -path '*/python/bin/*' -type f -perm +111 -print0)
 while IFS= read -r -d '' exe; do sign_one "$exe"; done \
-  < <(find "${WORK}" \( -path '*/python/bin/*' -o -path '*/node/bin/*' \) -type f -perm +111 -print0)
+  < <(find "${WORK}" -path '*/node/bin/*' -type f -perm +111 -print0)
 
 # Sanity-check that the helper Gatekeeper cares about is actually signed.
 HELPER="$(find "${WORK}" -name 'QtWebEngineProcess' -type f | head -1)"
@@ -123,10 +154,20 @@ xcrun notarytool submit "${ARTIFACT}" \
   --password "${APPLE_APP_PASSWORD}" \
   --wait
 
-# Stapling attaches the notarization ticket so Gatekeeper accepts the bundle
-# offline. Zip bundles get stapled best-effort (notarytool staples the zip
-# contents but stapler expects an app or dmg — non-fatal).
+# Stapling attaches the notarization ticket so Gatekeeper validates the app
+# OFFLINE — critical for airgapped installs (it reads the embedded ticket instead
+# of phoning Apple). IMPORTANT: stapler only works on a .app / .dmg / .pkg, NOT a
+# .zip. A .zip notarizes but CANNOT be stapled, so a quarantined copy on an
+# airgapped Mac has no ticket to read and Gatekeeper blocks launch. For the
+# offline story to actually hold, build_release.py must emit a .dmg or .pkg
+# (wrapping the .app) and pass THAT here.
 echo "[sign_macos] Stapling"
-xcrun stapler staple "${ARTIFACT}" || echo "[sign_macos] Staple skipped (zip format)"
+if xcrun stapler staple "${ARTIFACT}"; then
+  echo "[sign_macos] Stapled — validates offline on airgapped Macs."
+else
+  echo "[sign_macos] WARNING: could not staple a .${ARTIFACT##*.} artifact." >&2
+  echo "[sign_macos]          Notarized but UNSTAPLED → a quarantined copy will NOT" >&2
+  echo "[sign_macos]          launch offline. Package as .dmg/.pkg and staple that." >&2
+fi
 
 echo "[sign_macos] Done — ${ARTIFACT} is signed + notarized"

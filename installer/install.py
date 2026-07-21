@@ -596,18 +596,34 @@ def create_macos_app_bundle(install_dir, version=None):
     <string>12.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>LSRequiresNativeExecution</key>
+    <true/>
+    <key>LSArchitecturePriority</key>
+    <array>
+        <string>arm64</string>
+    </array>
 </dict>
 </plist>
 """)
 
-    # Launch script (includes bundled Node.js on PATH for Gemini bridge)
+    # Launch script (includes bundled Node.js on PATH for Gemini bridge).
+    # A script-only .app runs under Rosetta via LaunchServices, and the x86_64
+    # preference reaches the UNIVERSAL2 QtWebEngineProcess grandchild even
+    # through a thin-arm64 python (mach page-size mismatch -> renderer killed
+    # -> blank web UI; QTBUG-98487 class). LSRequiresNativeExecution in the
+    # plist is the primary fix; `arch -arm64` here is belt-and-braces. The
+    # launchd PATH is stripped, so ~/.local/bin (the `claude` CLI) must be
+    # added explicitly or the enablement lane only works from Terminal.
     launcher = macos_dir / "launch"
     launcher.write_text(
         f'#!/bin/bash\n'
-        f'export PATH="{node_bin}:$PATH"\n'
+        f'export PATH="{node_bin}:$HOME/.local/bin:$PATH"\n'
         f'xattr -rd com.apple.quarantine "{install_dir / "python"}" 2>/dev/null\n'
         f'xattr -rd com.apple.quarantine "{install_dir / "node"}" 2>/dev/null\n'
         f'cd "{install_dir / "app"}"\n'
+        f'if [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = "1" ]; then\n'
+        f'    exec arch -arm64 "{python_exe}" "{main_py}"\n'
+        f'fi\n'
         f'exec "{python_exe}" "{main_py}"\n'
     )
     os.chmod(launcher, 0o755)

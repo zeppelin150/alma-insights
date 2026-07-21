@@ -1395,6 +1395,30 @@ TOOL_SCHEMAS = [
         },
     },
     {
+        "name": "help_search",
+        "description": (
+            "SEARCH the in-app Help Center — how THIS app's own features work "
+            "(Calendar, Workbench, pickers, publishing, the KB, Settings) and, "
+            "importantly, whether each feature is actually AVAILABLE. Every "
+            "result carries a status: 'available', 'partial', 'flag-gated', or "
+            "'not-available'. When a result is not 'available', tell the "
+            "operator the limitation BEFORE describing the feature. Use this "
+            "for 'how do I …' / 'why can't I …' questions ABOUT THE APP — not "
+            "for the operator's own content (that is search_content / kb_search)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "section": {"type": "string",
+                            "description": "Optional section slug to scope to."},
+                "limit": {"type": "integer", "description": "Max results (default 5)."},
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "kb_list_topics",
         "description": "LIST every knowledge-base topic with its card count (complete enumeration).",
         "inputSchema": {"type": "object", "properties": {},
