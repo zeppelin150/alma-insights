@@ -365,6 +365,7 @@ def list_active_trcs(
     source: str,
     *,
     lookback_hours: int = 48,
+    now: datetime | None = None,
 ) -> list[str]:
     """Return TRC codes seen in the last ``lookback_hours`` for ``source``.
 
@@ -377,24 +378,49 @@ def list_active_trcs(
         lookback_hours: How far back to look. 48 picks up TRCs that
             appeared yesterday but not today, which the user likely
             wants to filter by.
+        now: Anchor time for the lookback window. ``None`` (the production
+            default) uses SQLite's ``datetime('now')`` (UTC) and leaves the
+            production query byte-identical. Tests pass a fixed ``now`` — the
+            same ``rate_baseline_now`` the rest of this module accepts — so the
+            window is deterministic against seeded data instead of the wall
+            clock (otherwise the query silently drifts out of range as the
+            fixed test anchor ages).
 
     Returns:
         TRC codes ordered most → least active. Empty list on error
         (logged at debug). Empty TRCs are filtered out.
     """
     try:
-        cur = conn.execute(
-            """
-            SELECT trc_code, SUM(count) AS total
-            FROM source_trc_hourly
-            WHERE source = ?
-              AND hour_bucket >= datetime('now', '-' || ? || ' hours')
-              AND trc_code != ''
-            GROUP BY trc_code
-            ORDER BY total DESC
-            """,
-            (source, lookback_hours),
-        )
+        if now is None:
+            cur = conn.execute(
+                """
+                SELECT trc_code, SUM(count) AS total
+                FROM source_trc_hourly
+                WHERE source = ?
+                  AND hour_bucket >= datetime('now', '-' || ? || ' hours')
+                  AND trc_code != ''
+                GROUP BY trc_code
+                ORDER BY total DESC
+                """,
+                (source, lookback_hours),
+            )
+        else:
+            # hour_bucket is stored as "%Y-%m-%dT%H:00:00"; format the cutoff to
+            # match so the string comparison is well-defined.
+            cutoff = (now - timedelta(hours=lookback_hours)).strftime(
+                "%Y-%m-%dT%H:%M:%S")
+            cur = conn.execute(
+                """
+                SELECT trc_code, SUM(count) AS total
+                FROM source_trc_hourly
+                WHERE source = ?
+                  AND hour_bucket >= ?
+                  AND trc_code != ''
+                GROUP BY trc_code
+                ORDER BY total DESC
+                """,
+                (source, cutoff),
+            )
         return [row[0] for row in cur.fetchall()]
     except Exception as exc:  # pragma: no cover - debug-logged fallback
         logger.debug("list_active_trcs failed: %s", exc)

@@ -551,9 +551,15 @@ class TestBucketAlignment:
 class TestListActiveTrcs:
     """The TRC dropdown source."""
 
-    def test_returns_active_trcs_ordered_by_volume(self, seeded_rate_conn):
-        """TRC-100 has the spike (30 extra tickets) → should rank first."""
-        trcs = list_active_trcs(seeded_rate_conn, "zendesk")
+    def test_returns_active_trcs_ordered_by_volume(self, seeded_rate_conn,
+                                                   rate_baseline_now):
+        """TRC-100 has the spike (30 extra tickets) → should rank first.
+
+        Anchored to ``rate_baseline_now`` so the lookback window covers the
+        seeded data regardless of when the suite runs (the seed is at a fixed
+        date; the default real-clock window would drift off it)."""
+        trcs = list_active_trcs(seeded_rate_conn, "zendesk",
+                                now=rate_baseline_now)
         assert "TRC-100" in trcs
         assert "TRC-200" in trcs
         assert trcs[0] == "TRC-100"  # higher total volume
@@ -583,7 +589,7 @@ class TestListActiveTrcs:
         )
         empty_db.conn.commit()
 
-        trcs = list_active_trcs(empty_db.conn, "zendesk")
+        trcs = list_active_trcs(empty_db.conn, "zendesk", now=rate_baseline_now)
         assert "" not in trcs
         assert "TRC-X" in trcs
 
