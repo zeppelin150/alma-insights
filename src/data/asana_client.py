@@ -33,6 +33,20 @@ _RETRY_AFTER_CAP_S = 30
 _5XX_BACKOFF_S = 2
 _RETRYABLE_5XX = frozenset({500, 501, 502, 503})
 
+# Pagination. Asana caps a page at 100 items and hands back a short-lived
+# ``next_page.offset`` cursor to continue. Those offset tokens EXPIRE (a few
+# minutes) and must never be persisted — presenting a stale offset returns an
+# HTTP 400. So the pager follows the cursor within a single call, treats an
+# expired/invalid offset mid-loop as "the rest is unreachable now" (returns what
+# it has, logs, does not crash), and bounds the walk with a per-call page cap.
+_PAGE_SIZE = 100
+_DEFAULT_MAX_PAGES = 50          # 5,000 items — safe for tasks/users/fields
+_PROJECTS_MAX_PAGES = 200        # 20,000 projects — orgs run into the thousands
+# HTTP codes Asana uses to reject a stale/invalid pagination offset. 400 is the
+# documented one; 401 is included defensively (a token that expires into an auth
+# error mid-walk must still degrade to partial rather than crash discovery).
+_OFFSET_REJECT_CODES = frozenset({400, 401})
+
 # Fields fetched per task when polling a board for enablement sync. Includes the
 # custom-field values (enum + people + raw number/text/date subtypes) the
 # indicator/mapping/brief logic reads, plus html_notes (rich body — stored raw,
@@ -117,6 +131,72 @@ class AsanaClient:
             "Accept": "application/json",
         })
         return self._open_get_with_retry(req)
+
+    @staticmethod
+    def _looks_like_offset_expiry(exc: urllib.error.HTTPError) -> bool:
+        """True when an HTTPError is Asana rejecting a stale pagination offset.
+
+        Asana returns 400 for an expired/invalid offset. We confirm from the
+        error body when it mentions the pagination token, and otherwise fall
+        back to treating any 400/401 raised *while following a cursor* as an
+        expiry — the caller only asks this on a continuation request, so a hard
+        failure there is far more likely a dead token than a fresh bad request.
+        """
+        if exc.code not in _OFFSET_REJECT_CODES:
+            return False
+        try:
+            body = exc.read().decode("utf-8", "replace").lower()
+        except Exception:  # noqa: BLE001 — body already consumed / unreadable
+            return True
+        if not body:
+            return True
+        return any(k in body for k in
+                   ("offset", "pagination", "token", "expire"))
+
+    def _paginate(self, path: str, params: dict, *,
+                  max_pages: int = _DEFAULT_MAX_PAGES) -> list[dict]:
+        """Follow ``next_page.offset`` and return the concatenated raw ``data``.
+
+        Offset-token health is the whole point: the cursor is short-lived, so a
+        long walk can outlive it. If a continuation request is rejected because
+        the offset died (see :meth:`_looks_like_offset_expiry`), we log and
+        return the items gathered so far rather than letting a mid-walk 400 take
+        down the entire discovery. Hitting ``max_pages`` is likewise logged, not
+        silently truncated — a caller that "only sees 100" should never again be
+        a silent cap. First-page errors are NOT swallowed (no offset in play,
+        so a 400 there is a real request problem) and re-raise.
+        """
+        out: list[dict] = []
+        walk = dict(params)
+        walk.setdefault("limit", _PAGE_SIZE)
+        offset: str | None = None
+        for page in range(max_pages):
+            if offset:
+                walk["offset"] = offset
+            try:
+                payload = self._get_raw(path, walk)
+            except urllib.error.HTTPError as exc:
+                # A first-page failure is a genuine error; only a failure while
+                # following a cursor is treated as offset expiry.
+                if offset and self._looks_like_offset_expiry(exc):
+                    logger.warning(
+                        "Asana pagination offset expired mid-walk on %s after "
+                        "%d page(s) / %d item(s) — returning partial results "
+                        "(HTTP %d). Offset tokens are short-lived; a full read "
+                        "of a very large collection may need a fresh call.",
+                        path, page, len(out), exc.code)
+                    return out
+                raise
+            out.extend(payload.get("data") or [])
+            nxt = payload.get("next_page")
+            offset = nxt.get("offset") if isinstance(nxt, dict) else None
+            if not offset:
+                return out
+        logger.warning(
+            "Asana pagination hit the %d-page cap on %s (%d items) — there may "
+            "be more; raise max_pages if this collection is legitimately larger.",
+            max_pages, path, len(out))
+        return out
 
     def _send(self, method: str, path: str, body: dict):
         """POST/PUT helper. Asana wraps request bodies in {"data": {...}}."""
@@ -230,22 +310,27 @@ class AsanaClient:
             return {}
 
     def list_workspaces(self) -> list[dict]:
-        data = self._get("/workspaces", {"opt_fields": "name", "limit": 100}) or []
+        data = self._paginate("/workspaces", {"opt_fields": "name"})
         return [{"gid": w["gid"], "name": w.get("name", "")} for w in data]
 
     def list_projects(self, workspace_gid: str) -> list[dict]:
-        data = self._get("/projects", {
+        """All active projects in a workspace, following pagination to the end.
+
+        Previously single-shot at ``limit: 100`` — orgs with thousands of
+        projects saw only the first hundred. Now walks ``next_page.offset`` up
+        to ``_PROJECTS_MAX_PAGES``."""
+        data = self._paginate("/projects", {
             "workspace": workspace_gid, "archived": "false",
-            "opt_fields": "name", "limit": 100,
-        }) or []
+            "opt_fields": "name",
+        }, max_pages=_PROJECTS_MAX_PAGES)
         return [{"gid": p["gid"], "name": p.get("name", "")} for p in data]
 
     def get_custom_fields(self, project_gid: str) -> list[dict]:
         """Custom fields for a project, with field GIDs + enum-option GIDs."""
         opt = ("custom_field.name,custom_field.resource_subtype,"
                "custom_field.enum_options.name,custom_field.enum_options.enabled")
-        data = self._get(f"/projects/{project_gid}/custom_field_settings",
-                         {"opt_fields": opt, "limit": 100}) or []
+        data = self._paginate(f"/projects/{project_gid}/custom_field_settings",
+                              {"opt_fields": opt})
         fields: list[dict] = []
         for setting in data:
             cf = setting.get("custom_field") or {}
@@ -286,24 +371,11 @@ class AsanaClient:
         "what tasks are on the board" tool needs — :meth:`list_tasks` returns only
         the first page.
         """
-        out: list[dict] = []
         params: dict = {"project": project_gid, "opt_fields": opt_fields,
                         "limit": page_size}
         if modified_since:
             params["modified_since"] = modified_since
-        offset: str | None = None
-        for _ in range(max_pages):
-            page_params = dict(params)
-            if offset:
-                page_params["offset"] = offset
-            payload = self._get_raw("/tasks", page_params)
-            data = payload.get("data") or []
-            out.extend(data)
-            nxt = payload.get("next_page") or {}
-            offset = nxt.get("offset") if isinstance(nxt, dict) else None
-            if not offset:
-                break
-        return out
+        return self._paginate("/tasks", params, max_pages=max_pages)
 
     def get_task(self, task_gid: str, *,
                  opt_fields: str = "name,due_on,completed,assignee.name,modified_at") -> dict:
@@ -356,43 +428,34 @@ class AsanaClient:
         "assigned to X" are noise for the extras panel). Pages via
         ``next_page.offset`` up to ``max_pages`` like :meth:`list_workspace_users`.
         """
-        out: list[dict] = []
         params: dict = {
             "opt_fields": "text,created_at,created_by.name,resource_subtype",
-            "limit": 100,
         }
-        for _ in range(max_pages):
-            payload = self._get_raw(f"/tasks/{task_gid}/stories", params)
-            for s in payload.get("data") or []:
-                if s.get("resource_subtype") != "comment_added":
-                    continue
-                out.append({
-                    "gid": s.get("gid", ""),
-                    "text": s.get("text", ""),
-                    "created_at": s.get("created_at", ""),
-                    "author": (s.get("created_by") or {}).get("name", ""),
-                })
-            offset = (payload.get("next_page") or {}).get("offset")
-            if not offset:
-                break
-            params["offset"] = offset
-        return out
+        stories = self._paginate(f"/tasks/{task_gid}/stories", params,
+                                 max_pages=max_pages)
+        return [
+            {"gid": s.get("gid", ""), "text": s.get("text", ""),
+             "created_at": s.get("created_at", ""),
+             "author": (s.get("created_by") or {}).get("name", "")}
+            for s in stories
+            if s.get("resource_subtype") == "comment_added"
+        ]
 
-    def list_subtasks(self, task_gid: str, *, limit: int = 100) -> list[dict]:
+    def list_subtasks(self, task_gid: str) -> list[dict]:
         """List an Asana task's subtasks (gid + name + completed) for read-back."""
-        data = self._get(f"/tasks/{task_gid}/subtasks",
-                         {"opt_fields": "name,completed", "limit": limit}) or []
+        data = self._paginate(f"/tasks/{task_gid}/subtasks",
+                              {"opt_fields": "name,completed"})
         return [{"gid": s["gid"], "name": s.get("name", ""),
                  "completed": bool(s.get("completed"))} for s in data]
 
-    def list_attachments(self, task_gid: str, *, limit: int = 100) -> list[dict]:
+    def list_attachments(self, task_gid: str) -> list[dict]:
         """List a task's attachments (gid + name + subtype).
 
         ``GET /tasks/{task_gid}/attachments``. Returns lightweight rows; call
         ``get_attachment`` for a single attachment's download URL + host.
         """
-        data = self._get(f"/tasks/{task_gid}/attachments",
-                         {"opt_fields": "name,resource_subtype", "limit": limit}) or []
+        data = self._paginate(f"/tasks/{task_gid}/attachments",
+                              {"opt_fields": "name,resource_subtype"})
         return [{"gid": a["gid"], "name": a.get("name", ""),
                  "subtype": a.get("resource_subtype", "")} for a in data]
 
@@ -419,18 +482,10 @@ class AsanaClient:
         """Workspace members (gid → name/email), following ``next_page`` so orgs
         with >100 members resolve fully (Asana caps a page at 100). ``max_pages``
         bounds a runaway cursor."""
-        out: list[dict] = []
-        params: dict = {"opt_fields": "name,email", "limit": 100}
-        for _ in range(max_pages):
-            payload = self._get_raw(f"/workspaces/{workspace_gid}/users", params)
-            for u in payload.get("data") or []:
-                out.append({"gid": u["gid"], "name": u.get("name", ""),
-                            "email": u.get("email", "")})
-            offset = (payload.get("next_page") or {}).get("offset")
-            if not offset:
-                break
-            params["offset"] = offset
-        return out
+        users = self._paginate(f"/workspaces/{workspace_gid}/users",
+                               {"opt_fields": "name,email"}, max_pages=max_pages)
+        return [{"gid": u["gid"], "name": u.get("name", ""),
+                 "email": u.get("email", "")} for u in users]
 
     def resolve_user_gid(self, workspace_gid: str, email: str) -> str | None:
         """GID of the workspace member whose email matches (case-insensitive).
