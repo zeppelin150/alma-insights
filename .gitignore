@@ -159,6 +159,10 @@ npm-debug.log
 yarn-debug.log
 yarn-error.log
 package-lock.json
+# …except the web UI's. The release workflow runs `npm ci` in web/, which
+# REQUIRES a committed lockfile — without it the build failed in ~12s and the
+# release job (needs: build) never ran, so NO release was ever published.
+!web/package-lock.json
 
 # ── HuggingFace cache (local dev downloads) ─────────────────────────
 .cache/huggingface/
