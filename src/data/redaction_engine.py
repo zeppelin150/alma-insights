@@ -18,8 +18,27 @@ from pathlib import Path
 logger = logging.getLogger("alma.redaction")
 
 _CONFIG_DIR = Path(__file__).resolve().parent.parent.parent / "config"
-_DEFAULT_ALLOWLIST = _CONFIG_DIR / "entities" / "phi_allowlist.json"
+_ENTITIES_DIR = _CONFIG_DIR / "entities"
+_DEFAULT_ALLOWLIST = _ENTITIES_DIR / "phi_allowlist.json"
 _DEFAULT_PATTERNS = _CONFIG_DIR / "redaction_patterns.json"
+_ENTITY_DICTS = (_ENTITIES_DIR / "payers.json", _ENTITIES_DIR / "product_areas.json")
+
+# Name CUE tokens — a Title-Case pair is only treated as a person name when
+# one of these immediately precedes it. Keeps clinical/billing Title-Case
+# phrases ("Session Note", "Direct Deposit") out of the [NAME] bucket.
+_NAME_CUE_WORDS = frozenset({
+    "patient", "member", "caller", "contact", "client", "subscriber",
+    "mr", "mrs", "ms", "miss", "dr", "per", "from", "for", "by",
+})
+# Multi-word / punctuation cues matched as a trailing suffix of the pre-context.
+_NAME_CUE_PHRASES = ("name:", "spoke with", "spoke to", "talked to", "attn:")
+# Titles strong enough to fire even when greedily paired as the FIRST token of
+# a Title-Case match ("Patient Jane", "Dr Lee"). Prepositions are excluded —
+# they only cue a name when they sit OUTSIDE the pair ("per Kevin Lee").
+_NAME_TITLE_WORDS = frozenset({
+    "patient", "member", "caller", "contact", "client", "subscriber",
+    "mr", "mrs", "ms", "miss", "dr",
+})
 
 
 class RedactionEngine:
@@ -31,6 +50,10 @@ class RedactionEngine:
 
         self._allowlist = self._load_json(allowlist_path)
         self._patterns_cfg = self._load_json(patterns_path)
+
+        # Surgical entity vocab: payer aliases + product/feature terms.
+        # Merged with phi_allowlist so classification signal is never scrubbed.
+        self._entity_terms = self._load_entity_dicts(_ENTITY_DICTS)
 
         # Compile PHI patterns
         self._phi_patterns = self._compile_patterns(self._patterns_cfg.get("patterns", []))
@@ -101,12 +124,15 @@ class RedactionEngine:
         return regions
 
     def _build_keep_regex(self) -> re.Pattern | None:
-        """Build a regex that matches all allowlisted terms."""
+        """Build a regex that matches all allowlisted + entity terms."""
         terms = []
         for name in self._allowlist.get("insurance_names", []):
             terms.append(re.escape(name))
         for acro in self._allowlist.get("business_acronyms", []):
             terms.append(r"\b" + re.escape(acro) + r"\b")
+        # Payer aliases + product/feature terms (already lowercased).
+        for term in self._entity_terms:
+            terms.append(r"\b" + re.escape(term) + r"\b")
 
         if not terms:
             return None
@@ -122,6 +148,28 @@ class RedactionEngine:
             terms.add(name.lower())
         for acro in self._allowlist.get("business_acronyms", []):
             terms.add(acro.lower())
+        terms |= self._entity_terms
+        return terms
+
+    @staticmethod
+    def _load_entity_dicts(paths) -> set[str]:
+        """Merge payer/product entity dicts into one lowercase keep-term set.
+
+        Each dict is ``{canonical: [aliases]}`` (e.g. payers.json,
+        product_areas.json). Canonical keys and aliases are both kept.
+        Fail-safe: a missing/invalid file contributes nothing.
+        """
+        terms: set[str] = set()
+        for path in paths:
+            data = RedactionEngine._load_json(path)
+            if not isinstance(data, dict):
+                continue
+            for canonical, aliases in data.items():
+                if isinstance(canonical, str) and canonical.strip():
+                    terms.add(canonical.lower())
+                for alias in aliases or []:
+                    if isinstance(alias, str) and alias.strip():
+                        terms.add(alias.lower())
         return terms
 
     # ── PHI Detection ─────────────────────────────────────
@@ -141,40 +189,92 @@ class RedactionEngine:
 
             for m in regex.finditer(text):
                 matched_text = m.group(0)
+                end = m.end()
 
                 # Conditional patterns (name_heuristic): extra checks
-                if conditional and not self._is_likely_name(matched_text, skip_terms):
-                    continue
+                if conditional:
+                    if not self._is_likely_name(
+                        matched_text, skip_terms, text, m.start()
+                    ):
+                        continue
+                    # The regex only pairs TWO tokens, but a cued/title-paired
+                    # name can be 3+ tokens ("Patient Robert Johnson", "member
+                    # Mary Jane Watson"). Swallow trailing Title-Case surname
+                    # tokens so the surname does not leak.
+                    end = self._extend_trailing_names(text, end, skip_terms)
 
                 matches.append({
                     "start": m.start(),
-                    "end": m.end(),
-                    "text": matched_text,
+                    "end": end,
+                    "text": text[m.start():end],
                     "replace": replace,
                     "pattern": name,
                 })
 
         return matches
 
-    def _is_likely_name(self, text: str, skip_terms: set[str]) -> bool:
-        """Check if a title-case pair is likely a person name, not a business term."""
-        lower = text.lower()
+    @staticmethod
+    def _extend_trailing_names(text: str, end: int, skip_terms: set[str]) -> int:
+        """Extend ``end`` over Title-Case surname tokens trailing a name match.
 
-        # Check against skip terms
+        Walks ` Surname` tokens after a title-paired [NAME] match and absorbs
+        them into the redaction span, stopping at the first non-name token,
+        a skip term, or end of text. Keeps clinical/billing words out by
+        honoring ``skip_terms``.
+        """
+        surname = re.compile(r"\s+([A-Z][a-z]+)\b")
+        while True:
+            m = surname.match(text, end)
+            if not m or m.group(1).lower() in skip_terms:
+                return end
+            end = m.end()
+
+    def _is_likely_name(self, matched: str, skip_terms: set[str],
+                        full_text: str = "", start: int = 0) -> bool:
+        """Decide whether a Title-Case pair is a person name to redact.
+
+        Surgical policy: a pair is only redacted when a name CUE precedes it
+        (member/patient/caller/Mr/Dr/"name:"/"spoke with"/"per "). Cue-less
+        Title-Case pairs are clinical/billing vocab and are kept — trading
+        recall on bare names for precision on classification signal.
+        """
+        lower = matched.lower()
         parts = lower.split()
-        for part in parts:
-            if part in skip_terms:
-                return False
 
-        # Check against allowlist
+        # Never redact known skip terms, allowlisted, or entity vocab.
+        if any(p in skip_terms for p in parts):
+            return False
         if lower in self._keep_terms:
             return False
-
-        # Very short words are likely not names (e.g. "St Louis" → address)
+        # Single-char tokens are addresses/initials, not names.
         if any(len(p) <= 1 for p in parts):
             return False
 
-        return True
+        # Context gate: redact when a cue precedes the pair, OR when the
+        # pair's own leading token is a title/cue ("Patient Jane", "Dr Lee")
+        # — the regex greedily pairs the cue with the first name token.
+        if parts and parts[0] in _NAME_TITLE_WORDS:
+            return True
+        return self._has_name_cue(full_text, start)
+
+    @staticmethod
+    def _has_name_cue(full_text: str, start: int) -> bool:
+        """True when a name cue token/phrase precedes ``start`` in the text.
+
+        A trailing ``:`` (header cues like ``From:`` / ``Name:`` / ``Attn:``)
+        is treated as transparent so the real cue word is the one tested —
+        otherwise the colon would be the last token and defeat the cue.
+        """
+        if not full_text:
+            return False
+        pre = full_text[:start].lower().rstrip()
+        if any(pre.endswith(phrase) for phrase in _NAME_CUE_PHRASES):
+            return True
+        # Treat a trailing ':' (header cues: 'From:', 'Name:') as transparent
+        # so the real cue word, not the colon, is the token under test.
+        unwrapped = pre.rstrip(":").rstrip()
+        prev_words = re.findall(r"[a-z']+", unwrapped)
+        return bool(prev_words) and prev_words[-1] in _NAME_CUE_WORDS
 
     # ── Overlap Filtering ─────────────────────────────────
 
