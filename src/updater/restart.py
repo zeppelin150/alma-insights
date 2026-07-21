@@ -41,6 +41,20 @@ logger = logging.getLogger("alma.updater")
 _WIN_DETACHED_PROCESS = 0x00000008
 _WIN_CREATE_NEW_PROCESS_GROUP = 0x00000200
 
+# Set once a replacement process has been spawned. main.py reads it via
+# restart_requested() to abort its own startup instead of racing the child.
+_restart_requested = False
+
+
+def restart_requested() -> bool:
+    """True once :func:`restart_app` has spawned a replacement process.
+
+    main.py checks this right after the splash closes: the splash's nested
+    exec() means QApplication.quit() cannot stop startup on its own, so without
+    this the old process would go on to open a second window.
+    """
+    return _restart_requested
+
 
 def restart_app() -> None:
     """Spawn a detached copy of the running app, then exit this one.
@@ -71,10 +85,22 @@ def restart_app() -> None:
         logger.exception("Failed to launch replacement process: %s", exc)
         raise
 
-    # Tell Qt to wind down. We do not call sys.exit() — that bypasses
-    # Qt's cleanup (causing zombie scan_server/Gemini subprocesses on
-    # Windows). Returning lets main.py's `sys.exit(app.exec())` drain
-    # event-loop tasks first.
+    # Record that a replacement is already starting. main.py checks this the
+    # moment the splash returns and aborts BEFORE building a MainWindow.
+    #
+    # Why the flag is needed: the splash restart happens inside
+    # SplashWindow.exec() — a NESTED dialog loop entered BEFORE main.py's
+    # `app.exec()`. QApplication.quit() only unwinds a RUNNING main loop, so
+    # from the splash it is a no-op: _run_splash() simply returned, main.py
+    # carried on, and the parent became a second live app alongside the child
+    # we just spawned (the "restart opens another window" symptom).
+    global _restart_requested
+    _restart_requested = True
+
+    # Still ask Qt to wind down — that IS the correct path when restart_app is
+    # called from Settings while the main loop is running. We deliberately do
+    # not sys.exit()/os._exit() here: that bypasses Qt cleanup and orphans the
+    # scan_server / Gemini bridge subprocesses on Windows.
     try:
         from PySide6.QtWidgets import QApplication
         app = QApplication.instance()

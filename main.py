@@ -159,6 +159,15 @@ def main():
         failed_check_ids: list[str] = []
     else:
         accepted, failed_check_ids = _run_splash(app)
+        # An "Install & Restart" on the splash already spawned a replacement
+        # process. The splash runs as a NESTED exec(), so QApplication.quit()
+        # cannot stop us here — without this check we would carry on and open a
+        # second window alongside the child (windows accumulating on every
+        # update). Exit before MainWindow so exactly one instance survives.
+        from src.updater.restart import restart_requested
+        if restart_requested():
+            print("[startup] Replacement process launched; exiting this one.")
+            sys.exit(0)
         if not accepted:
             # User closed splash without Continue, or a critical check blocked it
             sys.exit(1)
