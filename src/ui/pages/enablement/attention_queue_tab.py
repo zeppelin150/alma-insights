@@ -110,7 +110,14 @@ class AttentionQueueTab(QWidget):
 
     def reload(self):
         """Recompute health and re-render — off-thread unless a provider is
-        injected (tests). Always shows the cold-start message first."""
+        injected (tests). Always shows the cold-start message first.
+
+        A reload is a deliberate "show me the current state", so it clears
+        session dismissals: a row you dismissed comes back on an explicit
+        Refresh (the recovery path), and dismiss means "not now", not "hide
+        until I restart the app". Previously ``_dismissed`` survived reload but
+        not restart — a confusing halfway state that matched neither."""
+        self._dismissed.clear()
         self._show_message("Computing what needs attention…")
         if self._provider is not None:
             self.set_health(list(self._provider() or []))

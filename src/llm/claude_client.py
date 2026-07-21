@@ -44,11 +44,22 @@ class ClaudeRateLimitError(Exception):
 
 # ── PII redaction (shared with GeminiClient) ─────────────────────
 
+class RedactionError(RuntimeError):
+    """Raised when PII redaction cannot be applied, so the caller aborts the
+    model call rather than sending un-redacted text (fail closed)."""
+
+
 def _redact_text(text: str, aggressive: bool = True) -> str:
     """Apply the same PII redaction pipeline as GeminiClient.
 
     Imports redaction functions from gemini_client at call time to avoid
     circular imports and to guarantee single source of truth.
+
+    **Fails closed.** If the pipeline raises (e.g. the pattern config is
+    unreadable), this does NOT return the raw text — it raises
+    ``RedactionError`` so ``generate`` aborts before anything leaves the
+    machine. The old behaviour logged and sent un-redacted, which on a
+    PHI-adjacent path is a leak.
     """
     try:
         from src.gemini.gemini_client import _load_redaction_config
@@ -80,7 +91,10 @@ def _redact_text(text: str, aggressive: bool = True) -> str:
                 text,
             )
     except Exception as e:
-        logger.warning(f"PII redaction failed, sending un-redacted: {e}")
+        # Fail CLOSED: never fall through to returning raw text.
+        logger.error("PII redaction failed — aborting the model call rather "
+                     "than sending un-redacted text: %s", e)
+        raise RedactionError(f"PII redaction failed: {e}") from e
 
     return text
 

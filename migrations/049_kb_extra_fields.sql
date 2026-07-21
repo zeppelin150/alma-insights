@@ -1,0 +1,12 @@
+-- Migration 049 — preserve hand-added KB card frontmatter fields.
+--
+-- A KB card is a Markdown file with YAML frontmatter in the operator's EC
+-- Drive folder. serialize_card already round-trips unknown frontmatter keys at
+-- the FILE level, but the local mirror (kb_cards) had no column for them, so a
+-- field a human added to a card's header was parsed, dropped at upsert, and
+-- absent the next time the app rewrote that card to Drive (finding 17).
+--
+-- extra_json stores those unrecognised keys as a JSON object. NULL means "no
+-- extra fields". Nullable + no default so upsert_card can pass NULL to mean
+-- "preserve whatever is already stored" (regeneration paths must not wipe it).
+ALTER TABLE kb_cards ADD COLUMN extra_json TEXT;

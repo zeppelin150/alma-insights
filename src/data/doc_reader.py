@@ -26,6 +26,21 @@ import xml.etree.ElementTree as ET
 import zipfile
 
 _TEXT_EXT = {".txt", ".text", ".md", ".markdown", ".csv", ".json", ".rst", ".log", ""}
+
+# Known binary/rich formats we cannot read locally (no auth-free extractor).
+# Decoding these as text yields mojibake, which used to be modelled into a
+# nonsense deck; strict callers get an error instead (finding 20).
+_BINARY_EXT = {".pdf", ".doc", ".ppt", ".pptx", ".xls", ".xlsx", ".rtf",
+               ".odt", ".odp", ".ods", ".pages", ".key", ".numbers",
+               ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".webp",
+               ".zip", ".gz", ".tar", ".7z", ".rar", ".mp3", ".mp4", ".mov",
+               ".wav", ".bin", ".exe", ".dll", ".so", ".dylib"}
+
+
+class UnsupportedDocumentError(Exception):
+    """Raised by read_document(..., strict=True) when a file's format cannot be
+    read locally, so a caller (e.g. deck modelling) surfaces a clear error
+    instead of building output from decoded garbage."""
 _ORDERED_FMTS = {"decimal", "ordinal", "lowerletter", "upperletter",
                  "lowerroman", "upperroman", "ordinaltext", "decimalzero"}
 
@@ -82,9 +97,27 @@ def _shade_fill(props) -> str | None:
 
 # ── public ───────────────────────────────────────────────────────────
 
-def read_document(path: str) -> str:
-    """Read a local document into markdown, resolving formatting where we can."""
+def read_document(path: str, *, strict: bool = False) -> str:
+    """Read a local document into markdown, resolving formatting where we can.
+
+    ``strict=True`` raises :class:`UnsupportedDocumentError` for a format we
+    can't read locally (a binary type, or a file whose bytes look binary),
+    instead of returning a stub — so deck modelling reports "couldn't model a
+    deck" rather than turning decoded garbage into slides. ``strict=False``
+    (the default, used by Guru import) keeps the lenient stub so a draft still
+    forms."""
     ext = os.path.splitext(path)[1].lower()
+    # .docx is a zip (legitimately binary on disk) that we DO parse, so it is
+    # exempt from the content sniff; everything else is refused when its
+    # extension is a known binary type OR its bytes look binary (a NUL tell,
+    # which also catches a mislabeled file like a PDF named .txt).
+    if ext != ".docx" and (ext in _BINARY_EXT or _looks_binary(path)):
+        if strict:
+            raise UnsupportedDocumentError(
+                f"{os.path.basename(path)} is a {ext or 'binary'} file that "
+                "can't be read locally. Export it to text/markdown, or connect "
+                "Google Drive to extract it.")
+        return _unreadable(path)
     try:
         if ext == ".docx":
             return docx_to_markdown(path)
@@ -93,10 +126,24 @@ def read_document(path: str) -> str:
             return html_to_markdown(_read_text(path))
         if ext in _TEXT_EXT:
             return _read_text(path)
-        # Unknown: try as text, else a clear stub.
+        # Unknown but text-looking: try as text, else a clear stub.
         return _read_text(path)
     except Exception:
+        if strict:
+            raise UnsupportedDocumentError(
+                f"{os.path.basename(path)} could not be read.")
         return _unreadable(path)
+
+
+def _looks_binary(path: str) -> bool:
+    """Sniff whether a file's leading bytes are binary (a NUL byte is the
+    reliable tell), so a mislabeled file (a .pdf named .txt) is caught too."""
+    try:
+        with open(path, "rb") as fh:
+            chunk = fh.read(2048)
+    except Exception:  # noqa: BLE001 — unreadable → let the text path try/fail
+        return False
+    return b"\x00" in chunk
 
 
 def docx_to_markdown(path: str) -> str:

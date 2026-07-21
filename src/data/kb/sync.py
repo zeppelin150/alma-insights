@@ -90,9 +90,11 @@ def pull_folder(conn, folder_id: str, *, reader) -> int:
         meta["card_id"] = card_id
         meta.setdefault("title", name[:-3])
         status = "needs_repair" if issues else "ok"
+        # Capture the human's own frontmatter fields so they survive the DB
+        # round-trip and are written back on the next push (finding 17).
         store.upsert_card(conn, meta, body, drive_file_id=f.get("id"),
                           topic_folder_id=folder_id, drive_modified=modified,
-                          status=status)
+                          status=status, extra=card_format.extract_extra(meta))
         drive_kb._log(conn, "pull", card_id=card_id, drive_file_id=f.get("id"),
                       detail=("issues: " + ",".join(issues)) if issues else "")
         absorbed += 1
@@ -170,6 +172,11 @@ def _push_one(conn, card_id: str, *, exporter=None, reader=None) -> bool:
                                          "source_modified", "summary")}
     meta_out["topics"] = card.get("topics") or []
     meta_out["key_facts"] = card.get("key_facts") or []
+    # Merge back the human's own frontmatter fields so a Drive rewrite keeps
+    # them (finding 17). extra holds only non-schema keys, so it can't shadow
+    # the canonical fields above.
+    for k, v in (card.get("extra") or {}).items():
+        meta_out.setdefault(k, v)
     text = card_format.serialize_card(meta_out, card.get("body_md") or "")
     res = drive_kb.write_card_file(
         conn, folder_id, card_format.card_filename(card.get("title"), card_id),

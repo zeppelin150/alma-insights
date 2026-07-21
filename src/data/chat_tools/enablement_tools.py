@@ -1101,12 +1101,20 @@ def _push_guru_draft_impl(conn, draft_id, collection_id=None, folder_id=None) ->
     draft = store.get_draft(conn, did)
     if not draft:
         return {"ok": False, "error": "draft_not_found"}
-    guru_cfg = {}
+    en_cfg = {}
     try:
         from src.data.settings_manager import get_section
-        guru_cfg = (get_section("enablement", {}) or {}).get("guru") or {}
+        en_cfg = get_section("enablement", {}) or {}
     except Exception:
-        guru_cfg = {}
+        en_cfg = {}
+    guru_cfg = en_cfg.get("guru") or {}
+    # Demo mode must not reach live Guru. The Workbench button already
+    # suppresses its client here (page.py::_guru_for_push returns None in
+    # demo); this tool did not, so a draft published through CHAT while demo
+    # mode was on was handed a live client and hit production.
+    # Defaults to True — an absent key or an unreadable settings file must
+    # fail safe to demo, matching kb_tools._demo_guard.
+    demo_mode = bool(en_cfg.get("demo_mode", True))
     if not collection_id:
         # Renn rarely knows the Guru collection — fall back to the operator's
         # configured publish target so chat-initiated pushes land correctly.
@@ -1123,13 +1131,17 @@ def _push_guru_draft_impl(conn, draft_id, collection_id=None, folder_id=None) ->
                 "message": "This edit needs your sign-off before it publishes to "
                            "Guru — open the Review panel in the Agent to approve it."}
     client = None
-    try:
-        from src.data.guru_client import GuruClient
-        email, token = GuruClient.load_credentials()
-        if email and token:
-            client = GuruClient(email, token)
-    except Exception:  # noqa: BLE001 — no creds → local mark-pushed
-        client = None
+    if not demo_mode:
+        try:
+            from src.data.guru_client import GuruClient
+            email, token = GuruClient.load_credentials()
+            if email and token:
+                client = GuruClient(email, token)
+        except Exception:  # noqa: BLE001 — no creds → local mark-pushed
+            client = None
+    # In demo mode `client` stays None and publish_draft marks the draft
+    # pushed locally — the same outcome as the Workbench button, so the demo
+    # flow still completes end to end.
     result = store.publish_draft(conn, did, guru_client=client,
                                  collection_id=collection_id, folder_id=folder_id)
     if isinstance(result, dict) and result.get("ok"):

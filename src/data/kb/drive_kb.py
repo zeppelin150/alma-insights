@@ -112,6 +112,14 @@ def ensure_ec_root(conn, *, exporter=None) -> dict:
             return {"ok": True, "folder_id": existing}
         return verdict
 
+    # Before minting a NEW EC root, try to RE-ADOPT a previously quarantined
+    # one: if the operator restored a trashed folder or fixed its permissions,
+    # re-verify it and reset status='ok' rather than orphaning it and creating
+    # a duplicate (finding 18).
+    readopted = _readopt_quarantined_ec_root(conn, exporter)
+    if readopted is not None:
+        return readopted
+
     from src.data.settings_manager import get_section, set_section
     kb_cfg = (get_section("enablement", {}) or {}).get("kb") or {}
     parent = kb_cfg.get("ec_parent_id") or None
@@ -136,6 +144,37 @@ def ensure_ec_root(conn, *, exporter=None) -> dict:
     cfg["kb"] = kb
     set_section("enablement", cfg)
     _log(conn, "create", drive_file_id=folder_id, detail="EC root bootstrapped")
+    return {"ok": True, "folder_id": folder_id}
+
+
+def _readopt_quarantined_ec_root(conn, exporter):
+    """If a quarantined EC root exists and is now healthy again, re-adopt it.
+
+    Returns {"ok": True, "folder_id"} on a successful re-adoption, or None when
+    there is nothing to re-adopt (or it is still unhealthy) — in which case the
+    caller proceeds to create a fresh folder. This is what stops a restored
+    folder from being orphaned in favour of a brand-new EC root (finding 18)."""
+    row = conn.execute(
+        "SELECT folder_id FROM kb_folders WHERE role='ec_root' "
+        "AND status='quarantined' ORDER BY created_at DESC LIMIT 1").fetchone()
+    if not row:
+        return None
+    folder_id = row[0]
+    try:
+        meta = exporter.get_file_meta(folder_id)
+    except Exception:  # noqa: BLE001 — still unreachable → leave quarantined
+        return None
+    caps = meta.get("capabilities") or {}
+    if meta.get("trashed") or caps.get("canAddChildren") is False:
+        return None                    # still trashed/unwritable — stay quarantined
+    probe = _probe_writable(exporter, folder_id)
+    if not probe.get("ok"):
+        return None
+    conn.execute("UPDATE kb_folders SET status='ok' WHERE folder_id=?",
+                 (folder_id,))
+    conn.commit()
+    _log(conn, "readopt", drive_file_id=folder_id,
+         detail="restored EC root re-adopted")
     return {"ok": True, "folder_id": folder_id}
 
 

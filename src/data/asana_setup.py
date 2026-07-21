@@ -70,7 +70,11 @@ def discover(api_key: str | None = None, project_gid: str | None = None) -> dict
         except Exception:
             key = ""
 
+    # ``is_mock`` propagates to the caller so nothing persists a board config
+    # built from the mock's fabricated GIDs into a real source (finding 14).
+    # The mock is legitimate for demo mode; the setup writer gates on this flag.
     data = MOCK_DISCOVERY
+    is_mock = True
     if key:
         try:
             from src.data.asana_client import AsanaClient  # noqa: PLC0415
@@ -78,17 +82,21 @@ def discover(api_key: str | None = None, project_gid: str | None = None) -> dict
             data = client.discover()
             if project_gid and project_gid not in data.get("custom_fields", {}):
                 data.setdefault("custom_fields", {})[project_gid] = client.get_custom_fields(project_gid)
+            is_mock = False
         except Exception as exc:  # noqa: BLE001 — fall back to mock on any client error
             logger.warning("Asana discover failed, using mock: %s", exc)
             data = MOCK_DISCOVERY
+            is_mock = True
 
     if project_gid:
         return {
+            "mock": is_mock,
             "workspace": data.get("workspace"),
             "project": next((p for p in data.get("projects", []) if p["gid"] == project_gid), None),
             "custom_fields": data.get("custom_fields", {}).get(project_gid, []),
         }
-    return data
+    # Shallow copy + flag so the shared MOCK_DISCOVERY constant is never stamped.
+    return {**data, "mock": is_mock}
 
 
 def set_asana_board_config(

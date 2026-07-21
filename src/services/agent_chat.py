@@ -1707,8 +1707,14 @@ class AgentChatController(QObject):
         if conn is None:
             return
         try:
-            from src.services.chat_session import create_session
-            self._session_id = create_session("enablement", conn=conn)
+            from pathlib import Path
+            from src.services.chat_session import resolve_or_create_session
+            db_path = self._db_path()
+            pointer_dir = Path(db_path).parent if db_path else None
+            # Share ONE session with the Workbench panel via the pointer file,
+            # instead of each surface minting its own (finding 5).
+            self._session_id = resolve_or_create_session(
+                "enablement", conn, pointer_dir=pointer_dir)
             self._engine.set_session_id(self._session_id)
             self._write_session_pointer(self._session_id)
         except Exception as exc:  # noqa: BLE001 — telemetry only; tools still work

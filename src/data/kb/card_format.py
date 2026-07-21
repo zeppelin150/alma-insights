@@ -54,6 +54,14 @@ def card_id_from_filename(name: str) -> str | None:
     return m.group(1) if m else None
 
 
+def extract_extra(meta: dict) -> dict:
+    """The frontmatter keys that are NOT part of the v1 schema — a human's own
+    additions. These are stored separately (kb_cards.extra_json) so they
+    survive the DB round-trip and are merged back on the next Drive write."""
+    known = set(_V1_KEYS)
+    return {k: v for k, v in (meta or {}).items() if k not in known}
+
+
 def serialize_card(meta: dict, body: str) -> str:
     """Frontmatter + body → the canonical card text. Unknown meta keys are
     written after the v1 keys so a human's additions round-trip."""

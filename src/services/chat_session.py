@@ -47,6 +47,50 @@ def create_session(
     return session_id
 
 
+def _session_exists(session_id: str, conn) -> bool:
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM chat_sessions WHERE session_id = ?",
+            (session_id,)).fetchone()
+        return row is not None
+    except Exception:  # noqa: BLE001 — table missing / bad conn
+        return False
+
+
+def resolve_or_create_session(source_page: str, conn, *, pointer_dir=None) -> str:
+    """Return the CURRENT enablement session, creating one only if none exists.
+
+    The Agent page and the Workbench assistant panel are the same assistant and
+    must share one transcript. They each used to mint their own session via
+    ``create_session``, giving two divergent histories and a last-writer-wins
+    fight over the ``.current_chat_session`` pointer (finding 5). This resolves
+    a single shared session: the first surface to ask creates it and writes the
+    pointer; the other reads the pointer and REUSES it.
+
+    ``pointer_dir`` is the directory holding ``.current_chat_session`` (next to
+    the DB the engine/tools read). When omitted, no pointer is consulted and a
+    fresh session is created (legacy callers keep their behaviour).
+    """
+    from pathlib import Path
+    pointer = None
+    if pointer_dir is not None:
+        pointer = Path(pointer_dir) / ".current_chat_session"
+        try:
+            if pointer.exists():
+                existing = pointer.read_text(encoding="utf-8").strip()
+                if existing and _session_exists(existing, conn):
+                    return existing
+        except Exception:  # noqa: BLE001 — a bad pointer just means "create one"
+            pass
+    session_id = create_session(source_page, conn=conn)
+    if pointer is not None:
+        try:
+            pointer.write_text(session_id, encoding="utf-8")
+        except Exception:  # noqa: BLE001 — pointer is best-effort
+            pass
+    return session_id
+
+
 def append_message(
     session_id: str,
     role: str,
