@@ -83,10 +83,11 @@ ambiguous template gets followed loosely. Tighten it to a plain heading skeleton
 with bracketed slots. If a short, unambiguous template is still ignored, flag it
 with the template text.
 
-**You cannot find a stored guide by searching.** Searching stored documents
-matches the whole phrase as one string rather than the individual words, so a
-multi-word search often returns nothing even when a matching document exists.
-Search a single distinctive word instead. This is a known limitation.
+**A stored guide is hard to find by searching.** Searching stored documents now
+matches your individual words, not just the whole phrase, so a multi-word search
+finds a guide whose words are scattered through it. If a search still comes up
+empty, the words may simply not be in any stored document — confirm with a
+single distinctive term.
 
 **The status still reads as not set after you saved.** Reopen the settings tab
 to force a refresh. If it is still unset, flag it with how you supplied the text

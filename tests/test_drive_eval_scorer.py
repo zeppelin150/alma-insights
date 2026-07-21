@@ -79,6 +79,20 @@ def test_normalize_key_keeps_punctuation():
     assert SC.normalize_key("Runbook (2026)") != SC.normalize_key("Runbook 2026")
 
 
+def test_normalize_key_strips_trailing_document_extension():
+    """A Drive filename carries an extension but the gold set is authored
+    without one — the two must match. Only a TRAILING known doc extension is
+    dropped; internal dots / version tokens are preserved."""
+    assert SC.normalize_key("Insurance Eligibility Verification Workflow.md") == \
+        SC.normalize_key("Insurance Eligibility Verification Workflow")
+    assert SC.normalize_key("Payer's Guide to Clean Claims.docx") == \
+        SC.normalize_key("Payer's Guide to Clean Claims")
+    # a version-like trailing token is not an extension and stays put
+    assert SC.normalize_key("Runbook v2.3") == "runbook v2.3"
+    # internal punctuation still distinguishes near-duplicates
+    assert SC.normalize_key("COB (2026).pdf") != SC.normalize_key("COB 2026")
+
+
 # ── per-query metrics ──────────────────────────────────────────────────────
 
 def test_perfect_hit_at_rank_1():

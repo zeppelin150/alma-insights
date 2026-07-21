@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QComboBox, QFileDialog, QTextEdit, QTabWidget, QProgressBar,
 )
 from PySide6.QtCore import Qt, Signal, QThread
-from src.data.settings_manager import load_settings, save_settings, get_section, set_section
+from src.data.settings_manager import load_settings, save_settings, get_section, set_section, update_section
 from src.data.connection_factory import get_connection
 from src.ui.theme import *
 
@@ -1635,14 +1635,21 @@ class SettingsPage(QWidget):
             pass
 
     def _on_save_github_settings(self):
-        """Save GitHub repo URL and PAT."""
-        repo = self._github_repo_input.text().strip()
+        """Save GitHub repo (owner/repo) and PAT."""
+        from src.updater.update_checker import normalize_github_repo
+        repo = normalize_github_repo(self._github_repo_input.text())
         pat = self._github_pat_input.text().strip()
         try:
-            set_section("updates", {"github_repo": repo})
+            # MERGE, don't replace — a bare set_section here wipes last_checked,
+            # and _save_last_checked (also on the updates section) would then wipe
+            # github_repo on the very next check. That clobber was why the repo
+            # never persisted and every check fell back to the default repo.
+            update_section("updates", {"github_repo": repo})
             if pat:
                 from src.data.pat_store import save_setting
                 save_setting("github_pat", pat)
+            # Reflect the normalized value back so the user sees owner/repo.
+            self._github_repo_input.setText(repo)
             self._github_status.setText("✓ Saved")
         except Exception as e:
             self._github_status.setText(f"Error: {e}")
@@ -1854,7 +1861,8 @@ class SettingsPage(QWidget):
     def _save_last_checked(self):
         from datetime import datetime
         ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-        set_section("updates", {"last_checked": ts})
+        # MERGE — must not wipe github_repo (see _on_save_github_settings).
+        update_section("updates", {"last_checked": ts})
         self._last_checked_label.setText(f"Last checked: {ts}")
 
     def _load_last_checked(self):

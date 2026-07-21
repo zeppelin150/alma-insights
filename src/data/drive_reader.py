@@ -16,12 +16,36 @@ PDF/DOCX text). Degrades gracefully if absent (the gdrive_export precedent).
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 
 logger = logging.getLogger("alma.drive_reader")
 
 _READONLY_SCOPE = ["https://www.googleapis.com/auth/drive.readonly"]
 _GOOGLE_DOC = "application/vnd.google-apps.document"
+
+# Rate-limit / transient markers that warrant a retry (mirrors the write client's
+# gdrive_export._is_rate_limit_error). Matched against str(exc) so we do not need
+# googleapiclient's HttpError type imported here.
+_RETRYABLE = ("rateLimitExceeded", "userRateLimitExceeded", "429",
+              "500", "502", "503", "backendError", "internalError")
+
+
+def _read_with_retry(request, *, max_retries: int = 5, base_delay: float = 0.5):
+    """Execute a Drive READ request with exponential backoff on rate-limit / 5xx
+    errors — the read counterpart to gdrive_export._throttled_execute, minus the
+    write-pacing lock (reads are not the scarce quota, but a live search must not
+    surface a transient 429 to the user). Non-retryable errors propagate at once.
+    """
+    delay = base_delay
+    for attempt in range(max_retries):
+        try:
+            return request.execute()
+        except Exception as exc:  # noqa: BLE001 — retry only transient classes
+            if attempt == max_retries - 1 or not any(m in str(exc) for m in _RETRYABLE):
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, 16)
 
 
 def _q(value: str) -> str:
@@ -206,18 +230,49 @@ class DriveReader:
             return str(raw)
         return _extract_text(raw, mime_type)
 
-    def search_files(self, query: str, limit: int = 20) -> list[dict]:
-        """Satisfies drive_query.query_business_drive's live_client.search_files seam."""
+    def search_files(self, query: str, limit: int = 20, *,
+                     folder_id: str | None = None) -> list[dict]:
+        """Live full-text search across the account's Drive (Shared Drives too).
+
+        Backs drive_query.query_business_drive's live_client seam. Pages through
+        nextPageToken until `limit` results are collected — the sibling list_*
+        methods already loop; this one used to read a SINGLE page, so recall was
+        silently capped by the API page size rather than by the caller's limit.
+
+        `folder_id` optionally scopes the search to the DIRECT children of that
+        folder (Drive's `in parents` is not recursive — a nested search needs a
+        tree walk, which live search does not do). Returns lightweight file rows
+        (id, name, url, mime_type, modified) — no text export; call export_text
+        to pull a body.
+        """
         svc = self._build_service()
-        q = (f"fullText contains {_q(query)} and trashed = false"
-             if query else "trashed = false")
-        resp = svc.files().list(
-            q=q, corpora="allDrives", includeItemsFromAllDrives=True,
-            supportsAllDrives=True, pageSize=limit,
-            fields="files(id, name, mimeType, webViewLink)").execute()
-        return [{"name": f.get("name"), "id": f.get("id"),
-                 "url": f.get("webViewLink"), "mime_type": f.get("mimeType")}
-                for f in resp.get("files", [])]
+        clauses = []
+        if query:
+            clauses.append(f"fullText contains {_q(query)}")
+        if folder_id:
+            clauses.append(f"{_q(folder_id)} in parents")
+        clauses.append("trashed = false")
+        q = " and ".join(clauses)
+
+        limit = max(1, int(limit))
+        out: list[dict] = []
+        page_token = None
+        while True:
+            resp = _read_with_retry(svc.files().list(
+                q=q, corpora="allDrives", includeItemsFromAllDrives=True,
+                supportsAllDrives=True, pageSize=min(limit - len(out), 100),
+                pageToken=page_token,
+                fields="nextPageToken, files(id, name, mimeType, webViewLink, modifiedTime)"))
+            for f in resp.get("files", []):
+                out.append({"name": f.get("name"), "id": f.get("id"),
+                            "url": f.get("webViewLink"), "mime_type": f.get("mimeType"),
+                            "modified": f.get("modifiedTime")})
+                if len(out) >= limit:
+                    return out
+            page_token = resp.get("nextPageToken")
+            if not page_token:
+                break
+        return out
 
 
 def _extract_text(raw: bytes, mime_type: str) -> str:

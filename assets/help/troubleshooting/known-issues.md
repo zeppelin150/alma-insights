@@ -57,10 +57,12 @@ in the generic Office look. Apply your own template or branding after export.
 
 **Background research does not exist.** Renn will decline it.
 
-**Multi-word search misses in several places.** Several search paths match a
-whole phrase only when the words appear together, so "prior authorization
-escalation" can miss a document containing those words apart. Use fewer, more
-distinctive words. The Help Center's own search does not have this problem.
+**Draft search still matches a whole phrase.** Document and knowledge-base
+search now handle your words individually, but the Workbench draft search still
+matches a whole phrase only when the words appear together, so "prior
+authorization escalation" can miss a draft containing those words apart. Use
+fewer, more distinctive words there. The Help Center's own search does not have
+this problem.
 
 **The Drive folder picker has no search box.** You navigate the folder tree by
 expanding it, which is slow with many folders.

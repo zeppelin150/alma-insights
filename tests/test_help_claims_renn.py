@@ -248,28 +248,22 @@ def test_prompt_distinguishes_list_tools_from_search_tools(renn_prompt):
     assert "search may miss" in renn_prompt
 
 
-def test_multiword_query_misses_a_doc_whose_words_appear_apart(empty_db):
-    """asking-well: "Several search paths in the app match multi-word phrases
-    only when the words appear together, so 'prior authorization escalation'
-    can miss a document that contains those words apart."
-
-    Settles it against the real store: search_documents builds ONE contiguous
-    LIKE '%query%', so a doc containing every word separately does not match.
+def test_multiword_document_search_finds_words_apart(empty_db):
+    """asking-well: "Document and knowledge-base search now handle your words
+    individually" — a doc containing every query word separately now matches.
+    (The Workbench draft search stays phrase-only; see the troubleshooting
+    known-issues test.)
     """
     from src.data import enablement_store as store
-    empty_db.conn.execute(
-        """INSERT INTO enablement_documents
-           (doc_id, source, name, mime_type, full_text, indexed_at)
-           VALUES ('d1', 'drive', 'Payer Playbook', 'text/plain', ?, '2026-07-01')""",
-        ("We handle prior authorization requests. Escalation goes to the lead.",),
-    )
-    empty_db.conn.commit()
+    store.save_document(
+        empty_db.conn, source="drive", doc_id="d1", name="Payer Playbook",
+        mime_type="text/plain",
+        full_text="We handle prior authorization requests. Escalation goes to the lead.")
 
     together = store.search_documents(empty_db.conn, "prior authorization")
     apart = store.search_documents(empty_db.conn, "prior authorization escalation")
-    assert len(together) == 1, "contiguous phrase should match"
-    assert apart == [], ("documented limitation: the words must appear "
-                         "together for the LIKE to match")
+    assert len(together) == 1, "contiguous phrase should still match"
+    assert [d["doc_id"] for d in apart] == ["d1"], "scattered words now match too"
 
 
 # ═════════════════════════════════════════════════════════════════════

@@ -115,6 +115,9 @@ def _ensure_registered():
     from src.data.chat_tools.enablement_tools import (
         handle_search_local_documents,
         handle_query_business_drive,
+        handle_search_google_drive,
+        handle_import_drive_doc,
+        handle_search_everywhere,
         handle_asana_discover,
         handle_set_asana_board_config,
         handle_create_card_draft,
@@ -186,9 +189,15 @@ def _ensure_registered():
               phi_level=0, desc="PROPOSE creating an Asana task (project_gid + name; optional notes, due_on). Opens a Confirm/Cancel card in the app — it does NOT create the task. STOP and wait for a [SYSTEM: operator confirmed/cancelled …] message; you cannot run the write yourself.")
 
     _register("search_local_documents", handle_search_local_documents,
-              phi_level=0, desc="Find stored enablement documents + card drafts by name/topic")
+              phi_level=0, desc="Tokenized search of documents saved LOCALLY in Alma (incl. docs never uploaded to Drive) + card drafts")
     _register("query_business_drive", handle_query_business_drive,
-              phi_level=0, desc="Query the business Google Drive (live or local mirror) for documents")
+              phi_level=0, desc="Search the business Drive's LOCAL mirror (previously-pulled docs); for a live search use search_google_drive")
+    _register("search_google_drive", handle_search_google_drive,
+              phi_level=0, desc="LIVE Google Drive search via the API — find files in Drive (may not be in Alma yet; optional folder_id scope); returns names/links, no sync")
+    _register("import_drive_doc", handle_import_drive_doc,
+              phi_level=0, desc="Bridge: pull a Google Drive file (id or URL from search_google_drive) into the local library so it becomes tokenized-searchable")
+    _register("search_everywhere", handle_search_everywhere,
+              phi_level=0, desc="Search the local Alma library + live Google Drive together (docs/files), labeled by source — use when a doc could be saved in Alma OR sitting in Drive. (For Guru/Zendesk content, use search_content instead.)")
     _register("asana_discover", handle_asana_discover,
               phi_level=0, desc="Discover Asana projects + custom-field/enum-value GIDs")
     _register("set_asana_board_config", handle_set_asana_board_config,

@@ -110,10 +110,11 @@ check whether it was moved or trashed in Drive, because a trashed folder still
 accepts writes into the trash.
 
 **A search for a term returns nothing even though you know the content
-exists.** Several search paths match your whole phrase as a single string
-rather than as separate words, so a multi-word query can return nothing while
-each individual word returns results. Try one distinctive word instead. This
-is a known limitation, not a fault in your setup.
+exists.** Document and knowledge-base search now match your individual words,
+so a multi-word query finds content whose words are scattered through it — a
+genuinely empty result usually means the words are not in any document. One
+narrower path, the Workbench draft search, still matches a whole phrase only;
+search a single distinctive word there.
 
 **You see TRC or other ticket-analytics vocabulary in an enablement tab.**
 That would be unexpected — the two sides are separate. Flag it with a note of

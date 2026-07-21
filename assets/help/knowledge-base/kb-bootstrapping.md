@@ -48,11 +48,11 @@ Indexing is capped, and you should expect it to stop early on a large folder:
 
 | Limit | Value |
 |-------|-------|
-| Documents per indexing job | 50 |
-| Subfolder depth searched | 3 levels below the folder you pick |
+| Documents per indexing job | 500 |
+| Subfolder depth searched | 6 levels below the folder you pick |
 
 Hitting the document cap is reported as truncated, and the remainder is picked
-up on a later run rather than lost. Folders nested more than three levels deep
+up on a later run rather than lost. Folders nested more than six levels deep
 are not visited at all.
 
 ## How it should work

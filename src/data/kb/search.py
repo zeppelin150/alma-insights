@@ -141,30 +141,24 @@ def kb_search(conn, query: str, *, topics: list | None = None,
             "source_url": h.get("source_url") or "", "match": "card"}
            for s, h in ranked[:limit]]
 
-    # Full-text floor: when card hits are thin, LIKE over the stored full
-    # text with a WINDOWED snippet around the actual hit — never retire the
-    # recall net (cross-cutting acceptance gate: the slide-37 fact a summary
-    # omitted must still surface, quoted).
+    # Full-text floor: when card hits are thin, a TOKENIZED search over the
+    # stored full text with a WINDOWED snippet around the actual hit — never
+    # retire the recall net (cross-cutting acceptance gate: the slide-37 fact a
+    # summary omitted must still surface, quoted). The floor used to wrap the
+    # whole query in one LIKE, so a natural-language question found nothing
+    # (0.000 recall in the Drive eval); it now ranks over enablement_documents_fts
+    # via the shared enablement ranker, which also keeps empty-result queries
+    # empty (no OR-of-terms flood).
     if len(out) < limit:
         try:
-            needle = (query or "").strip()
-            like = f"%{needle}%"
-            rows = conn.execute(
-                """SELECT doc_id, name, web_url,
-                          substr(full_text,
-                                 max(1, instr(lower(full_text), lower(?)) - 80),
-                                 240) AS snippet
-                   FROM enablement_documents
-                   WHERE name LIKE ? OR full_text LIKE ?
-                   ORDER BY COALESCE(modified_time, indexed_at) DESC
-                   LIMIT ?""",
-                (needle, like, like, limit - len(out))).fetchall()
-            for d in rows:
-                out.append({"card_id": "", "title": d[1],
-                            "type": "fulltext_document",
-                            "topics": [], "summary": (d[3] or "").strip(),
-                            "score": 0.0, "doc_id": d[0],
-                            "source_url": d[2] or "",
+            from src.data.enablement_doc_search import (
+                search_documents_ranked, windowed_snippet)
+            for d in search_documents_ranked(conn, query, limit=limit - len(out)):
+                out.append({"card_id": "", "title": d.get("name"),
+                            "type": "fulltext_document", "topics": [],
+                            "summary": windowed_snippet(d.get("full_text") or "", query),
+                            "score": d.get("score", 0.0), "doc_id": d.get("doc_id"),
+                            "source_url": d.get("web_url") or "",
                             "match": "fulltext"})
         except Exception as exc:  # noqa: BLE001
             logger.debug("fulltext floor failed: %s", exc)

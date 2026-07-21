@@ -1038,33 +1038,31 @@ def test_known_issue_podcast_is_a_reserved_kind_with_nothing_behind_it(tool_regi
 
 
 def test_known_issue_multiword_search_misses_when_words_are_apart(empty_db):
-    """known-issues.md: "Multi-word search misses in several places. Several
-    search paths match a whole phrase only when the words appear together, so
-    'prior authorization escalation' can miss a document containing those words
-    apart."
+    """known-issues.md: "the Workbench draft search still matches a whole phrase
+    only when the words appear together, so 'prior authorization escalation' can
+    miss a draft containing those words apart." Document + KB search were fixed to
+    tokenize; draft search (search_drafts) still builds one contiguous LIKE.
     """
     from src.data import enablement_store as store
+    conn = empty_db.conn
 
-    store.save_document(
-        empty_db.conn, source="drive", doc_id="doc-apart", name="Payer runbook",
-        full_text=("Prior authorization requests are triaged first. "
-                   "Any escalation goes to the payer desk."))
-    store.save_document(
-        empty_db.conn, source="drive", doc_id="doc-together", name="Contiguous",
-        full_text="See the prior authorization escalation runbook.")
+    store.save_card_draft(conn, title="Payer runbook",
+                          content=("Prior authorization requests are triaged "
+                                   "first. Any escalation goes to the payer desk."))
+    store.save_card_draft(conn, title="Contiguous",
+                          content="See the prior authorization escalation runbook.")
 
-    phrase_hits = [d["doc_id"] for d in
-                   store.search_documents(empty_db.conn, "prior authorization escalation")]
+    phrase_hits = [d["title"] for d in
+                   store.search_drafts(conn, "prior authorization escalation")]
 
-    assert "doc-together" in phrase_hits, "the contiguous phrase should still match"
-    assert "doc-apart" not in phrase_hits, (
-        "search_documents now matches words apart — known-issues.md is stale")
+    assert "Contiguous" in phrase_hits, "the contiguous phrase should still match"
+    assert "Payer runbook" not in phrase_hits, (
+        "draft search now matches words apart — known-issues.md is stale")
 
-    # Control: the document IS findable with a single distinctive word, so the
-    # miss above is about phrasing and not about the document being absent.
-    single_hits = [d["doc_id"] for d in
-                   store.search_documents(empty_db.conn, "escalation")]
-    assert "doc-apart" in single_hits
+    # Control: the draft IS findable with a single distinctive word, so the miss
+    # above is about phrasing and not about the draft being absent.
+    single_hits = [d["title"] for d in store.search_drafts(conn, "escalation")]
+    assert "Payer runbook" in single_hits
 
 
 def test_known_issue_help_center_search_does_not_have_the_multiword_problem(help_conn):
@@ -1199,14 +1197,15 @@ def test_known_issue_kb_indexing_walks_subfolders_with_depth_and_doc_limits():
     assert isinstance(ingest.MAX_DOCS_PER_JOB, int) and ingest.MAX_DOCS_PER_JOB >= 1
 
     class FakeReader:
-        """A 5-deep folder chain with one file per level."""
+        """A folder chain one level deeper than MAX_DEPTH, one file per level,
+        so ``len(files) == MAX_DEPTH + 1`` holds whatever the cap is set to."""
 
         def list_changed_files(self, folder_id, **kwargs):
             return [{"id": f"file-{folder_id}", "name": f"doc {folder_id}"}]
 
         def list_folders(self, parent_id):
             depth = int(parent_id.split("-")[-1])
-            return [{"id": f"folder-{depth + 1}"}] if depth < 5 else []
+            return [{"id": f"folder-{depth + 1}"}] if depth < ingest.MAX_DEPTH + 1 else []
 
     files, truncated = ingest.enumerate_folder(FakeReader(), "folder-0")
 

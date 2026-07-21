@@ -1657,10 +1657,9 @@ class TestGuidesStorage:
         assert store.delete_style_guide(conn, "style-guide-alpha") is True
         assert store.list_style_guides(conn) == []
 
-    def test_document_search_matches_the_whole_phrase_as_one_run(self, settings, empty_db):
-        """settings-guides: 'Document search matches your whole phrase as a single
-        run of text, so a multi-word query often fails where a single distinctive
-        word succeeds.'"""
+    def test_document_search_matches_individual_words(self, settings, empty_db):
+        """settings-guides: 'Document search now matches your individual words ...
+        so a multi-word query finds a document whose words are scattered.'"""
         from src.data import enablement_store as store
         conn = empty_db.conn
         store.save_document(conn, source="manual", name="Onboarding notes",
@@ -1668,5 +1667,5 @@ class TestGuidesStorage:
                             full_text="alpha beta gamma delta")
         assert [d["doc_id"] for d in store.search_documents(conn, "gamma")] == ["doc-1"]
         assert [d["doc_id"] for d in store.search_documents(conn, "beta gamma")] == ["doc-1"]
-        assert store.search_documents(conn, "alpha gamma") == [], (
-            "search unexpectedly matched non-adjacent words")
+        assert [d["doc_id"] for d in store.search_documents(conn, "alpha gamma")] == \
+            ["doc-1"], "tokenized search now matches non-adjacent words"

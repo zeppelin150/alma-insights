@@ -103,8 +103,9 @@ completes. Leave the tab and come back; if the old text returns, the save failed
 and is worth flagging.
 
 **Asking Renn to find the document you imported returns nothing.** Document
-search matches your whole phrase as a single run of text, so a multi-word query
-often fails where a single distinctive word succeeds. Try one word. This is a
-known limitation, not a missing document.
+search now matches your individual words, not just the whole phrase, so a
+multi-word query finds a document whose words are scattered through it. A truly
+empty result usually means the document was not stored — confirm with a single
+distinctive word.
 
 **A stored document will not delete.** Flag it with the document name.

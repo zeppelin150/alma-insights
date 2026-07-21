@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import urllib.error
 import urllib.request
 from threading import Thread
@@ -63,6 +64,29 @@ def _parse_version(tag: str) -> tuple:
 def _is_newer(current: str, candidate: str) -> bool:
     """True iff candidate parses to a strictly newer version than current."""
     return _parse_version(candidate) > _parse_version(current)
+
+
+def normalize_github_repo(raw: str) -> str:
+    """Normalize a repo identifier to ``owner/repo``.
+
+    The Settings field is labelled "REPO URL", so users routinely paste a full
+    ``https://github.com/owner/repo`` URL (or an SSH ``git@github.com:owner/repo.git``
+    form, or a link with a trailing ``/tree/main`` path). Without this the API
+    URL becomes ``.../repos/https://github.com/owner/repo/releases/latest`` and
+    every check 404s ("Release repo not found"). Accepts a bare ``owner/repo``
+    unchanged. Returns ``""`` for empty input.
+    """
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    # strip an optional scheme + optional www + the github.com host and its
+    # separator ('/' for https, ':' for ssh).
+    s = re.sub(r"^(?:git@|https?://)?(?:www\.)?github\.com[:/]+", "", s, flags=re.IGNORECASE)
+    s = s.strip().strip("/")
+    if s.lower().endswith(".git"):
+        s = s[:-4]
+    parts = [p for p in s.split("/") if p]
+    return f"{parts[0]}/{parts[1]}" if len(parts) >= 2 else s
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -148,11 +172,42 @@ class UpdateChecker(QObject):
             with urllib.request.urlopen(req, timeout=_CHECK_TIMEOUT) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                # Ambiguous on its own — disambiguate before reporting.
+                raise _CheckerError(self._diagnose_404(headers)) from exc
             raise _CheckerError(_http_error_message(exc)) from exc
         except urllib.error.URLError as exc:
             raise _CheckerError(f"Network error: {exc.reason}") from exc
         except (ValueError, OSError) as exc:  # json decode / truncated read
             raise _CheckerError(f"Unexpected response: {exc}") from exc
+
+    def _diagnose_404(self, headers: dict) -> str:
+        """Explain WHICH 404 this is.
+
+        GitHub returns 404 from ``/releases/latest`` in two very different
+        situations: the repo has no published releases yet, OR the caller cannot
+        see the repo at all (private repos 404 rather than 403, so existence is
+        not leaked). The old message only ever blamed ``updates.github_repo``,
+        which sends users hunting a settings bug when the real answer is usually
+        "you haven't published a release yet". Probe the repo itself to tell them.
+        """
+        repo_url = self._url.split("/releases/")[0]
+        try:
+            req = urllib.request.Request(repo_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=_CHECK_TIMEOUT):
+                pass
+        except urllib.error.HTTPError as exc:
+            if exc.code in (401, 403):
+                return (f"GitHub rejected the update token (HTTP {exc.code}) — "
+                        "check the token's permissions.")
+            return ("Repo not found, or the token cannot see it. Check "
+                    "updates.github_repo — and note a fine-grained PAT must "
+                    "explicitly grant Contents: Read on THIS repository.")
+        except Exception:  # noqa: BLE001 — fall back to the generic message
+            return "Release repo not found — check updates.github_repo in settings"
+        return ("Repo reached, but it has no published Releases yet. The updater "
+                "only sees published Releases — push a v* tag to run the release "
+                "workflow, then check again.")
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -187,7 +242,9 @@ def _resolve_config_and_token() -> tuple[AuthMode, str, str]:
     mode_raw = str(cfg.get("auth_mode", "pat")).lower().strip()
     mode: AuthMode = mode_raw if mode_raw in ("disabled", "pat", "github_app") else "disabled"
 
-    repo = str(cfg.get("github_repo", "")).strip() or f"{DEFAULT_OWNER}/{DEFAULT_REPO}"
+    # Defence in depth: normalize here too, so a full-URL value already sitting
+    # in settings.yaml (saved before the input was normalized) still resolves.
+    repo = normalize_github_repo(cfg.get("github_repo", "")) or f"{DEFAULT_OWNER}/{DEFAULT_REPO}"
     releases_url = f"https://api.github.com/repos/{repo}/releases/latest"
 
     token = _load_token(mode, cfg)

@@ -506,3 +506,65 @@ class TestAutoImportSettings:
         assert "mode" in config
         assert "lookback_days" in config
         assert isinstance(config["lookback_days"], int)
+
+
+class TestNormalizeGithubRepo:
+    """The Settings 'REPO URL' field must accept a pasted URL, not just owner/repo."""
+
+    def test_bare_owner_repo_unchanged(self):
+        from src.updater.update_checker import normalize_github_repo as n
+        assert n("alma-health/alma-insights") == "alma-health/alma-insights"
+        assert n("  owner/repo  ") == "owner/repo"
+
+    def test_full_and_partial_urls(self):
+        from src.updater.update_checker import normalize_github_repo as n
+        assert n("https://github.com/owner/repo") == "owner/repo"
+        assert n("https://github.com/owner/repo.git") == "owner/repo"
+        assert n("https://github.com/owner/repo/") == "owner/repo"
+        assert n("http://github.com/owner/repo") == "owner/repo"
+        assert n("https://www.github.com/owner/repo") == "owner/repo"
+        assert n("github.com/owner/repo") == "owner/repo"
+        # a deep link (tree/branch) collapses to owner/repo
+        assert n("https://github.com/owner/repo/tree/main") == "owner/repo"
+
+    def test_ssh_url(self):
+        from src.updater.update_checker import normalize_github_repo as n
+        assert n("git@github.com:owner/repo.git") == "owner/repo"
+
+    def test_empty(self):
+        from src.updater.update_checker import normalize_github_repo as n
+        assert n("") == "" and n("   ") == "" and n(None) == ""
+
+
+class TestUpdatesSectionMerge:
+    """Regression: github_repo must survive a subsequent last_checked write.
+
+    The bug: both writers used set_section (whole-section REPLACE), so the
+    last_checked write after every update check wiped github_repo, and the next
+    check fell back to the default repo → 'Release repo not found'. The fix uses
+    update_section (merge). This pins the merge behaviour the fix relies on.
+    """
+
+    def test_last_checked_write_preserves_repo(self, tmp_path):
+        from src.data.settings_manager import update_section, get_section
+        settings_file = tmp_path / "settings.yaml"
+        with patch("src.data.settings_manager._DATA_DIR", tmp_path), \
+             patch("src.data.settings_manager._SETTINGS_FILE", "settings.yaml"), \
+             patch("src.data.settings_manager.get_settings_path", return_value=settings_file):
+            update_section("updates", {"github_repo": "acme/app"})     # Save Repository Settings
+            update_section("updates", {"last_checked": "2026-07-21 02:03"})  # after a check
+            loaded = get_section("updates")
+        assert loaded.get("github_repo") == "acme/app", "repo was clobbered by last_checked"
+        assert loaded.get("last_checked") == "2026-07-21 02:03"
+
+    def test_set_section_would_have_clobbered(self, tmp_path):
+        """Documents the old broken behaviour so no one 'simplifies' back to it."""
+        from src.data.settings_manager import set_section, get_section
+        settings_file = tmp_path / "settings.yaml"
+        with patch("src.data.settings_manager._DATA_DIR", tmp_path), \
+             patch("src.data.settings_manager._SETTINGS_FILE", "settings.yaml"), \
+             patch("src.data.settings_manager.get_settings_path", return_value=settings_file):
+            set_section("updates", {"github_repo": "acme/app"})
+            set_section("updates", {"last_checked": "t"})   # REPLACE → repo gone
+            loaded = get_section("updates")
+        assert "github_repo" not in loaded  # the bug, pinned for contrast

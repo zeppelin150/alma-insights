@@ -352,11 +352,10 @@ class TestGlossary:
         offenders = {k: v for k, v in offenders.items() if v}
         assert offenders == {}, f"TRC vocabulary in enablement UI: {offenders}"
 
-    def test_multi_word_search_is_matched_as_one_whole_phrase(self, conn):
-        """GLOSSARY (If it doesn't): "Several search paths match your whole
-        phrase as a single string rather than as separate words, so a
-        multi-word query can return nothing while each individual word
-        returns results."
+    def test_multi_word_search_matches_individual_words(self, conn):
+        """GLOSSARY (If it doesn't): "Document and knowledge-base search now match
+        your individual words ... a multi-word query finds content whose words are
+        scattered through it."
         """
         from src.data import enablement_store as store
 
@@ -367,8 +366,8 @@ class TestGlossary:
 
         assert len(store.search_documents(conn, "alpha")) == 1
         assert len(store.search_documents(conn, "beta")) == 1
-        assert store.search_documents(conn, "alpha beta") == [], (
-            "the multi-word query matched — this search path is now tokenised")
+        assert [d["name"] for d in store.search_documents(conn, "alpha beta")] == \
+            ["Payer packet"], "the tokenized search now matches non-adjacent words"
 
 
 # ══════════════════════════════════════════════════════════════════════

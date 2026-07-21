@@ -34,15 +34,22 @@ actually runs in production today.
 |---|-------|-------------|---------|
 | 1 | Find a folder | React `DriveFolderPicker`, [`web/src/chat/ChatApp.jsx:452-602`](../web/src/chat/ChatApp.jsx) | **No search/filter box.** Its sibling `AsanaBoardPicker` (~612-619) has one. The native Qt path is a raw folder-ID `QInputDialog`. |
 | 2 | Search Drive live | [`DriveReader.search_files`](../src/data/drive_reader.py) `:209-220` | **Unreachable.** See below. |
-| 3 | Search the ingested mirror | [`kb_search`](../src/data/kb/search.py) FTS5 + `enablement_documents` LIKE floor | The only stage that runs. |
+| 3 | Search the ingested mirror | [`kb_search`](../src/data/kb/search.py) FTS5 + tokenized `enablement_documents_fts` floor (was a whole-query LIKE — **D6**, now fixed) | The only stage that runs. |
 
-### Why stage 2 is unreachable
+### Stage 2 is now wired (live-search build)
 
-`query_business_drive` ([`src/data/drive_query.py:27-58`](../src/data/drive_query.py))
-branches on an injected `live_client`. **No production caller populates it:**
+`query_business_drive` ([`src/data/drive_query.py`](../src/data/drive_query.py))
+branches on an injected `live_client`. It is now populated by a dedicated tool:
+**`search_google_drive`** ([`enablement_tools.handle_search_google_drive`](../src/data/chat_tools/enablement_tools.py))
+builds the service-account client via `drive_query.build_live_drive_client()`
+and injects it, so Renn can search **live** Google Drive (find-without-sync).
+`search_everywhere` runs local + live together; `import_drive_doc` bridges a
+live find into the tokenized local library.
 
-* [`enablement_tools.handle_query_business_drive`](../src/data/chat_tools/enablement_tools.py) `:28-31`
-* [`claude_tools._query_business_drive`](../src/llm/claude_tools.py) `:1213-1216`
+`query_business_drive` itself stays injection-only (its handler still takes the
+`local_index` mirror branch — the `search_local_documents` / mirror path), so
+its unit tests remain hermetic. The historical note below described the
+pre-wiring state:
 
 Both call `query_business_drive(conn, query, limit=...)` and omit the seam, so
 the chat tool **always** takes the `local_index` branch — regardless of
@@ -64,11 +71,11 @@ test in this harness.
 | # | Defect | Location | Pinned by |
 |---|--------|----------|-----------|
 | D1 | `list_changed_files` accepts `recursive=` and **never reads it**. The `q` is always `<id> in parents` — direct children only. `drive_monitor.poll_once` passes `recursive=True` believing it recurses, so **subfolder files are silently never indexed by the monitor**. | [`drive_reader.py:159-183`](../src/data/drive_reader.py), caller [`drive_monitor.py:57-59`](../src/data/drive_monitor.py) | `test_drive_query.py::test_real_reader_ignores_recursive_parameter`, `::test_monitor_passes_recursive_true_and_still_misses_subfolders` |
-| D2 | `search_files` makes **exactly one** `execute()` call and discards `nextPageToken`, unlike every sibling `list_*` which loops. At `limit=40`, match 41 is invisible. | [`drive_reader.py:214-217`](../src/data/drive_reader.py) | `test_drive_reader_search.py::test_search_files_follows_nextpagetoken` (**xfail, strict**) |
-| D3 | **No rate limiting or backoff on any Drive READ path.** `gdrive_export._throttled_execute` (0.5s, 5 retries) guards *writes* only; all six `DriveReader` read methods call `.execute()` bare. A 100-doc index job can trip `userRateLimitExceeded` with no retry. | [`drive_reader.py`](../src/data/drive_reader.py) (all read methods) | `test_drive_reader_search.py::test_search_files_retries_on_rate_limit` (**xfail, strict**) |
+| D2 | ✅ **FIXED** (live-search build). `search_files` now pages through `nextPageToken` to the caller's `limit` and takes an optional `folder_id` scope. | [`drive_reader.py`](../src/data/drive_reader.py) `search_files` | `test_drive_reader_search.py::test_search_files_follows_nextpagetoken` |
+| D3 | ✅ **FIXED for `search_files`** (retries transient 429/5xx with exponential backoff via `_read_with_retry`). The bulk index read methods (`list_*`, `export_text`) still call `.execute()` bare — a follow-up if a 100-doc job trips limits. | [`drive_reader.py`](../src/data/drive_reader.py) | `test_drive_reader_search.py::test_search_files_retries_on_rate_limit` |
 | D4 | Recency is a **string compare**: `(source_modified or '') >= '2026'`, yielding a binary 1.0/0.5 rather than a decay. A Jan-2026 doc and a Dec-2026 doc score identically; a 2025 doc and a 1999 doc also score identically. | [`kb/search.py:133`](../src/data/kb/search.py) | documented here; measured by category in the report |
 | D5 | FTS `MATCH` is capped at **24 terms** (`safe[:24]`) *after* alias expansion. Entity aliases can consume the budget, silently truncating a long query. | [`kb/search.py:90-95`](../src/data/kb/search.py) | documented here |
-| D6 | **The LIKE floor substring-matches the entire raw query.** `search_documents` does `LIKE %<whole query>%` — it never splits into terms. `"aetna prior authorization"` misses a doc titled *Aetna Prior Authorization Runbook* whose body says exactly that, unless the phrase appears **contiguously**. This is the single biggest recall limiter on the only stage that runs. | [`enablement_store.py:94-103`](../src/data/enablement_store.py), same pattern at [`kb/search.py:148-161`](../src/data/kb/search.py) | `test_drive_query.py::test_local_branch_like_is_one_contiguous_substring` |
+| D6 | ✅ **FIXED** — migration `050_enablement_documents_fts.sql` + [`enablement_doc_search.py`](../src/data/enablement_doc_search.py). *Was:* the floor substring-matched the entire raw query (`LIKE %<whole query>%`), so `"aetna prior authorization"` missed a doc whose body said exactly that unless the phrase appeared **contiguously** — the single biggest recall limiter on the only stage that runs. Both `search_documents` and `kb/search`'s floor now tokenize and rank (IDF-weighted, with a relevance floor) over `enablement_documents_fts`. | [`enablement_store.py:88-107`](../src/data/enablement_store.py), [`kb/search.py:144-171`](../src/data/kb/search.py) | `test_drive_query.py::test_local_branch_tokenizes_multi_word_queries`, `test_enablement_doc_search.py` |
 | D7 | The `limit` is applied **before** the `source=='drive'` filter, so non-Drive documents consume the result budget. With 10 newer Guru docs, a `limit=10` Drive query returns **zero** Drive rows even though one matches. | [`drive_query.py:48-49`](../src/data/drive_query.py) | `test_drive_query.py::test_local_branch_limit_is_applied_before_the_drive_filter` |
 | D8 | Stage 1 has **no folder search box** — the picker is a manual tree walk. | [`ChatApp.jsx:452-602`](../web/src/chat/ChatApp.jsx) | not pinned (UI) |
 | D9 | `_q()` escaping is **duplicated inline** in `gdrive_export` (three copies at `:219-221`, another ~`:239`) rather than imported. Two implementations of a query-injection guard can drift. | [`gdrive_export.py:219-224`](../src/export/gdrive_export.py) | `test_drive_reader_search.py::test_q_escaping_is_duplicated_inline_in_gdrive_export` (asserts they still agree) |
@@ -148,9 +155,10 @@ documents**. Below ~100 everything ranks top-10 by accident.
 
 4. **Multi-word natural-language queries.** The most important case. Create a
    doc containing "Aetna requires prior authorization for advanced imaging"
-   and query `aetna prior authorization turnaround`. Under **D6** the LIKE
-   floor returns **nothing**, because those four words never appear
-   contiguously. Include several of these — this is the headline number.
+   and query `aetna prior authorization turnaround`. This used to return
+   **nothing** (**D6**: the LIKE floor required a contiguous phrase); with the
+   tokenized ranker it now hits. Include several of these — the before/after
+   here is the headline number and the whole point of the eval.
 
 5. **Unicode and apostrophe filenames.** `Résumé Screening.docx`,
    `O'Brien Clinic Onboarding.gdoc`, `Policy — Q3 (final) v2.pdf`, and one
@@ -305,7 +313,7 @@ From `scripts/drive_eval_preflight.py` on the dev box:
   standalone script cannot inherit an in-app session, so the **service-account**
   path is the only one available to the runner.
 * `enablement.kb` — **section absent entirely**. The KB was never bootstrapped,
-  so `kb_search` currently returns only the `enablement_documents` LIKE floor.
+  so `kb_search` currently returns only the tokenized `enablement_documents_fts` floor.
 * `active_folders` — **empty**. Pass `--folder-id` explicitly.
 * `demo_mode` — `false`. `web_tabs` — `off`. React bundle present.
 

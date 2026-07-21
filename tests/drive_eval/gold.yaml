@@ -1,0 +1,147 @@
+# Gold set for the almainsightstest RCM/EHR corpus (196 synthetic docs).
+#
+# Each query maps to the document(s) that SHOULD rank for it. Keys are the
+# document filename (without .md) as it appears in Drive — the scorer casefolds
+# and collapses whitespace but preserves punctuation, so near-duplicate titles
+# that differ only by year stay distinct on purpose.
+#
+# Categories exercise specific retrieval behaviors: natural-language recall,
+# near-duplicate disambiguation, a buried needle (a code deep in a body, not a
+# title), acronym/alias, deep folder nesting, and empty-result precision.
+#
+# The two empty-result queries have `relevant: []` — any document returned for
+# them is a false positive.
+
+queries:
+  - id: q01
+    query: "how do I verify a patient's insurance eligibility"
+    category: natural-language
+    relevant: "Insurance Eligibility Verification Workflow"
+    notes: "Canonical answer. 'Front Desk Daily Checklist' is a title-vs-body distractor whose body also covers eligibility."
+
+  - id: q02
+    query: "aetna prior authorization requirements for 2026"
+    category: near-duplicate-disambiguation
+    relevant: "Aetna Prior Authorization Requirements 2026"
+    notes: "Must pick the 2026 doc over the near-identical 2025 one."
+
+  - id: q03
+    query: "aetna prior auth 2025"
+    category: near-duplicate-disambiguation
+    relevant: "Aetna Prior Authorization Requirements 2025"
+
+  - id: q04
+    query: "what does denial code 197 mean"
+    category: buried-needle
+    relevant: "Denial Codes Reference - Authorization and Precertification"
+    notes: "CARC 197 is explained in the body among sibling codes, not in the title."
+
+  - id: q05
+    query: "difference between EOB and ERA"
+    category: acronym-alias
+    relevant: "EOB vs ERA - Explanation of Benefits and Electronic Remittance Advice"
+
+  - id: q06
+    query: "what is an ERA"
+    category: acronym-alias
+    relevant: "EOB vs ERA - Explanation of Benefits and Electronic Remittance Advice"
+
+  - id: q07
+    query: "how do I submit a clean claim"
+    category: natural-language
+    relevant: "Payer's Guide to Clean Claims"
+    notes: "Apostrophe in the filename."
+
+  - id: q08
+    query: "how do I appeal a medicare denial"
+    category: deep-nesting
+    relevant: "Medicare Denial Appeals Process"
+    notes: "Four folders deep under denials/by-payer/medicare/ — tests the indexer's depth reach."
+
+  - id: q09
+    query: "what is the 837 claim format"
+    category: definitional
+    relevant: "Understanding the 837 Professional Claim Format"
+
+  - id: q10
+    query: "how does a clearinghouse process claims"
+    category: natural-language
+    relevant: "Claim Submission and Clearinghouse Workflow"
+
+  - id: q11
+    query: "how do I post payments and reconcile deposits"
+    category: natural-language
+    relevant: "Payment Posting and Reconciliation Guide"
+
+  - id: q12
+    query: "how is days in AR calculated"
+    category: definitional
+    relevant: "Days in AR and Net Collection Rate - KPI Definitions"
+    notes: "Distractor exists: 'Days in AR and Collections KPIs'."
+
+  - id: q13
+    query: "net collection rate definition"
+    category: definitional
+    relevant: "Days in AR and Net Collection Rate - KPI Definitions"
+
+  - id: q14
+    query: "how does provider credentialing work"
+    category: natural-language
+    relevant: "Provider Credentialing and Payer Enrollment Overview"
+
+  - id: q15
+    query: "difference between CPT and ICD-10 codes"
+    category: definitional
+    relevant: "CPT, ICD-10, and HCPCS - Code Set Basics"
+
+  - id: q16
+    query: "how do I schedule a new patient appointment"
+    category: natural-language
+    relevant: "Patient Scheduling and Appointment Types"
+
+  - id: q17
+    query: "what is EPCS in eprescribing"
+    category: acronym-alias
+    relevant: "ePrescribing and EPCS Overview"
+
+  - id: q18
+    query: "what is FHIR"
+    category: definitional
+    relevant: "HL7 and FHIR Interoperability Primer"
+
+  - id: q19
+    query: "how do patients enroll in the portal"
+    category: natural-language
+    relevant: "Patient Portal Enrollment and Features"
+
+  - id: q20
+    query: "what is coordination of benefits"
+    category: definitional
+    relevant: "Coordination of Benefits (COB) Overview"
+    notes: "Parentheses in the filename. Distractors: 'Coordination of Benefits Denials', 'Secondary Claims and Coordination of Benefits'."
+
+  - id: q21
+    query: "icd-10 coding for beginners"
+    category: natural-language
+    relevant: "ICD-10 Coding — Naive Beginner's Guide"
+    notes: "Em-dash in the filename — a unicode round-trip check."
+
+  - id: q22
+    query: "verify insurance benefits at front desk check-in"
+    category: title-vs-body
+    relevant:
+      - "Insurance Eligibility Verification Workflow"
+      - "Front Desk Daily Checklist"
+    notes: "Both legitimately cover this — the checklist's BODY is mostly eligibility despite its generic title."
+
+  - id: q23
+    query: "orthodontics billing setup"
+    category: empty-result
+    relevant: []
+    notes: "No such doc exists — any result is a false positive (precision test)."
+
+  - id: q24
+    query: "veterinary claims processing"
+    category: empty-result
+    relevant: []
+    notes: "No such doc exists."

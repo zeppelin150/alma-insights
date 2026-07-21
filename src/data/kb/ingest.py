@@ -25,8 +25,8 @@ from src.data.kb import card_format, drive_kb, store
 
 logger = logging.getLogger("alma.kb.ingest")
 
-MAX_DOCS_PER_JOB = 50
-MAX_DEPTH = 3
+MAX_DOCS_PER_JOB = 500
+MAX_DEPTH = 6
 _SUMMARY_INPUT_CAP = 8000
 
 _CARD_PROMPT = """You index a product document for a healthcare-RCM enablement knowledge base.

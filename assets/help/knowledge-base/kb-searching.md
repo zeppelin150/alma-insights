@@ -56,23 +56,22 @@ cards should still surface a snippet from a document that contains the phrase.
 Results should quote something real from the card or document. Renn summarising
 a result it did not actually retrieve is a bug worth flagging.
 
-**Known limitation: multi-word queries are weak on the full-text fallback.**
-The fallback looks for your whole query as one continuous string, so
-"eligibility recheck timeline" only matches text where those three words appear
-together in exactly that order. The card layer does handle your terms
-separately, so the effect shows up as "the card search found nothing, and the
-fallback found nothing either" on phrasings that would obviously match if the
-words were searched individually.
+The full-text fallback handles your words individually. "eligibility recheck
+timeline" surfaces a document that contains those words even when they are
+scattered across the text — the fallback tokenizes and ranks your terms (with a
+relevance floor, so an off-topic query still returns nothing) rather than
+requiring the whole phrase to appear as one continuous string. The card layer
+already worked this way, so both layers now agree.
 
-The practical workaround is to search the most distinctive **single** word or
-two-word phrase, not a whole question.
+If a multi-word question still comes up empty, it is usually a genuine miss;
+search the most distinctive **single** word to confirm the content is there.
 
 ## If it doesn't
 
-**A long, natural-language question returns nothing.** Very likely the
-limitation above. Re-run with the two or three most distinctive words. If a
-short query works where the long one failed, that is the known issue, not a
-fault in your data.
+**A long, natural-language question returns nothing.** With both search layers
+tokenizing, this is usually a genuine miss rather than a phrasing problem. Re-run
+with the two or three most distinctive words; if a single word surfaces the
+content, the longer question was simply too specific, not blocked by the search.
 
 **Renn says the knowledge base is empty.** Nothing has been indexed yet, or the
 local copy has not synced. Ask Renn to list the topics — an empty list confirms

@@ -88,20 +88,24 @@ def get_document(conn: sqlite3.Connection, doc_id: str) -> dict | None:
 def search_documents(conn: sqlite3.Connection, query: str, *, limit: int = 20) -> list[dict]:
     """Find locally-stored documents by name or body. Powers the chat lookup.
 
-    Returns lightweight rows (no full_text) with a matching snippet, newest
-    document first.
+    Tokenized, relevance-ranked search over the ``enablement_documents_fts``
+    index (see :mod:`src.data.enablement_doc_search`), best match first. The old
+    whole-query ``LIKE`` matched only a verbatim contiguous phrase, so a
+    natural-language question scored 0 recall (the Drive search eval). Returns
+    lightweight rows (no full_text); the return shape is unchanged so every
+    caller keeps working.
     """
-    like = f"%{query.strip()}%"
-    rows = conn.execute(
-        """SELECT doc_id, source, name, mime_type, web_url, modified_time,
-                  text_excerpt, due_dates_json, card_draft_id, indexed_at
-           FROM enablement_documents
-           WHERE name LIKE ? OR full_text LIKE ?
-           ORDER BY COALESCE(modified_time, indexed_at) DESC
-           LIMIT ?""",
-        (like, like, limit),
-    ).fetchall()
-    return [dict(r) for r in rows]
+    from src.data.enablement_doc_search import search_documents_ranked
+
+    rows = search_documents_ranked(conn, query, limit=limit)
+    return [
+        {"doc_id": r["doc_id"], "source": r["source"], "name": r["name"],
+         "mime_type": r["mime_type"], "web_url": r["web_url"],
+         "modified_time": r["modified_time"], "text_excerpt": r["text_excerpt"],
+         "due_dates_json": r["due_dates_json"], "card_draft_id": r["card_draft_id"],
+         "indexed_at": r["indexed_at"]}
+        for r in rows
+    ]
 
 
 def list_documents(conn: sqlite3.Connection, *, limit: int = 100) -> list[dict]:

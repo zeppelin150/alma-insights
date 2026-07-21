@@ -49,7 +49,13 @@ from src.updater.release_manifest import lookup_artifact
 
 logger = logging.getLogger("alma.updater")
 
+# The CI (scripts/make_release_manifest.py + .github/workflows/release.yml)
+# uploads the checksum manifest as "release_manifest.json"; hand-cut / older
+# releases used "manifest.json". Accept BOTH so a release built by either path
+# installs — a mismatch here means the install refuses every CI-built release
+# with "missing manifest.json".
 _MANIFEST_ASSET_NAME = "manifest.json"
+_MANIFEST_ASSET_NAMES = ("manifest.json", "release_manifest.json")
 _FETCH_TIMEOUT_SECONDS = 30
 
 
@@ -170,7 +176,7 @@ def resolve_release_artifact(
 def _find_manifest_url(assets: list[dict]) -> str:
     """Walk ``assets[]`` and return the manifest's ``browser_download_url``."""
     for asset in assets:
-        if asset.get("name") == _MANIFEST_ASSET_NAME:
+        if asset.get("name") in _MANIFEST_ASSET_NAMES:
             url = asset.get("browser_download_url")
             if url:
                 return url

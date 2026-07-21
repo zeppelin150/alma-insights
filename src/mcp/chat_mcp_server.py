@@ -496,11 +496,11 @@ TOOL_SCHEMAS = [
     {
         "name": "search_local_documents",
         "description": (
-            "Search the enablement document library stored locally — source "
-            "documents pulled from Google Drive plus generated Guru card drafts. "
-            "Use whenever the user asks to find, look up, or recall a document, "
-            "draft, or past content by name or topic. Returns matching documents "
-            "and drafts with snippets."
+            "Tokenized relevance search of documents saved LOCALLY in Alma "
+            "(uploaded, imported, or previously pulled from Drive) plus Guru card "
+            "drafts. Use to find something saved in Alma by name or topic — "
+            "INCLUDING a doc never uploaded to Google Drive. For files that live "
+            "only in Google Drive, use search_google_drive instead."
         ),
         "inputSchema": {
             "type": "object",
@@ -512,17 +512,70 @@ TOOL_SCHEMAS = [
         },
     },
     {
-        "name": "query_business_drive",
+        "name": "search_google_drive",
         "description": (
-            "Query the connected business Google Drive for documents. Searches the "
-            "live Drive when read access is configured, otherwise the locally-"
-            "indexed mirror of that Drive. Use when the user asks what's in the "
-            "Drive or to find a Drive document. Returns file names, links, and snippets."
+            "Search the user's LIVE Google Drive via the API for files matching a "
+            "query. Finds documents in Drive that may not be in Alma yet (e.g. a "
+            "new folder Product just created). Does NOT sync — returns file names, "
+            "links, ids, and modified dates. Optional folder_id scopes to one "
+            "folder's direct children. Follow up with import_drive_doc to pull a "
+            "result into Alma. Use search_local_documents for docs already in Alma."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "What to look for in the Drive."},
+                "query": {"type": "string", "description": "What to look for in Google Drive."},
+                "limit": {"type": "integer", "description": "Max results (default 10)."},
+                "folder_id": {"type": "string", "description": "Optional Drive folder id to scope to its direct children."},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "search_everywhere",
+        "description": (
+            "Search BOTH the local Alma library AND live Google Drive in one call, "
+            "labeled by source — use when a document could be either saved in Alma "
+            "or sitting in Drive. Returns local matches plus Drive-only matches "
+            "(files in Drive not already in the local library). This covers Alma "
+            "docs + Google Drive ONLY; for Guru/Zendesk content use search_content."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "What to look for."},
+                "limit": {"type": "integer", "description": "Max results per source (default 10)."},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "import_drive_doc",
+        "description": (
+            "Pull a Google Drive file into Alma's local library so its full text is "
+            "stored and becomes tokenized-searchable via search_local_documents. "
+            "Accepts a Drive file id or URL — e.g. one returned by "
+            "search_google_drive. The bridge from a live Drive find to local search."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "drive_ref": {"type": "string", "description": "Google Drive file id or URL to import."},
+            },
+            "required": ["drive_ref"],
+        },
+    },
+    {
+        "name": "query_business_drive",
+        "description": (
+            "Search the business Drive's LOCALLY-INDEXED mirror (documents "
+            "previously pulled by the Drive monitor). For a LIVE search of Google "
+            "Drive, use search_google_drive. Returns file names, links, and snippets."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "What to look for in the mirrored Drive docs."},
                 "limit": {"type": "integer", "description": "Max results (default 10)."},
             },
             "required": ["query"],

@@ -192,14 +192,16 @@ def evaluate_stages(s: dict, creds: dict, oauth: dict, libs: dict) -> list[dict]
                               "folder. Confirm with: python scripts/run_drive_eval.py "
                               "--list-drives (read-only) and check the [proof] block."})
 
-    # Stage 2 has a second, permanent blocker that no amount of config fixes:
-    # NO production caller injects live_client into query_business_drive.
+    # Stage 2 is now reachable from chat: the search_google_drive tool injects a
+    # live service-account client into query_business_drive's live_client seam.
     stages.append({
-        "stage": "2b live-via-chat-tool", "verdict": "BLOCKED-BY-DESIGN",
-        "why": "query_business_drive's live_client seam is never populated "
-               "(enablement_tools.py:28-31, claude_tools.py:1213-1216) — the "
-               "chat tool ALWAYS takes the local_index branch. Measured by "
-               "tests/test_drive_query.py, not fixed here."})
+        "stage": "2b live-via-chat-tool", "verdict": "GO*",
+        "why": "wired — the search_google_drive tool "
+               "(enablement_tools.handle_search_google_drive) builds a live "
+               "service-account client via drive_query.build_live_drive_client() "
+               "and injects it. *Requires Drive read configured; falls back to a "
+               "not_configured message otherwise. query_business_drive itself "
+               "still takes the local mirror branch by design."})
 
     # Stage 3 — mirror search.
     if not s.get("ok"):
@@ -275,7 +277,10 @@ def render(rep: dict) -> str:
         ("enablement.demo_mode", str(s["demo_mode"]),
          "blocks KB indexing" if s["demo_mode"] else ""),
         ("enablement.drive.active_folders", str(len(s["active_folders"])),
-         ", ".join(_mask(str((f or {}).get("id", ""))) for f in s["active_folders"])
+         # active_folders is a list of folder-id STRINGS (as _set_drive_folder_impl
+         # stores them); tolerate the legacy dict shape too.
+         ", ".join(_mask(str(f.get("id", "")) if isinstance(f, dict) else str(f))
+                   for f in s["active_folders"])
          or "none configured"),
         ("enablement.web_tabs", s["web_tabs"], ""),
         ("src/ui/web/dist/index.html", "present" if bundle["exists"] else "ABSENT",

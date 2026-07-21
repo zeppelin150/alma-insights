@@ -62,16 +62,26 @@ PRECISION_K = 5
 
 _WS = re.compile(r"\s+")
 
+# A Drive filename carries an extension ("…Workflow.md"); the gold set is
+# authored WITHOUT one (see gold.yaml's header: "the document filename without
+# .md"). Strip only a TRAILING known document extension so the two match —
+# never an internal dot, so near-duplicate titles stay distinct.
+_DOC_EXT = re.compile(
+    r"\.(?:md|markdown|txt|rtf|pdf|docx?|pptx?|xlsx?|csv|html?|gdoc|gsheet|gslides)$")
+
 
 def normalize_key(value: str) -> str:
-    """Identity key for a document: casefolded, whitespace-collapsed.
+    """Identity key for a document: casefolded, whitespace-collapsed, with a
+    trailing document extension removed.
 
     Lets ``"Aetna Prior Auth Runbook 2026"`` in a hand-written gold.yaml match
-    ``"aetna prior auth  runbook 2026"`` coming back from Drive. Deliberately
-    does NOT strip punctuation — ``Runbook (2026)`` and ``Runbook 2026`` are
-    different documents in a corpus built around near-duplicate titles.
+    ``"aetna prior auth  runbook 2026.md"`` coming back from Drive. Deliberately
+    does NOT strip internal punctuation — ``Runbook (2026)`` and ``Runbook 2026``
+    are different documents in a corpus built around near-duplicate titles — nor
+    an internal dot; only a trailing file-type suffix is dropped.
     """
-    return _WS.sub(" ", str(value or "").strip()).casefold()
+    key = _WS.sub(" ", str(value or "").strip()).casefold()
+    return _DOC_EXT.sub("", key)
 
 
 @dataclass

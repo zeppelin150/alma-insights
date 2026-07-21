@@ -1100,11 +1100,10 @@ def test_there_are_no_embeddings_or_vector_search_in_the_kb_path():
     assert offenders == []
 
 
-def test_the_full_text_fallback_only_matches_the_whole_query_contiguously(
-        empty_db):
-    """kb-searching, known limitation: "The fallback looks for your whole query
-    as one continuous string, so 'eligibility recheck timeline' only matches
-    text where those three words appear together in exactly that order"."""
+def test_the_full_text_fallback_handles_scattered_words(empty_db):
+    """kb-searching: "The full-text fallback handles your words individually" —
+    a document whose query words are scattered across the text is surfaced (the
+    fallback tokenizes and ranks now, instead of one contiguous LIKE)."""
     from src.data import enablement_store
     conn = empty_db.conn
     enablement_store.save_document(
@@ -1115,7 +1114,8 @@ def test_the_full_text_fallback_only_matches_the_whole_query_contiguously(
     scattered = SEARCH.kb_search(conn, "eligibility recheck timeline", limit=5)
     contiguous = SEARCH.kb_search(conn, "recheck timeline", limit=5)
 
-    assert scattered == [], "words present but not contiguous → no hit"
+    assert [r["title"] for r in scattered] == ["Ops deck.pptx"], \
+        "scattered words now hit the tokenized fallback"
     assert [r["title"] for r in contiguous] == ["Ops deck.pptx"]
 
 
@@ -1210,31 +1210,33 @@ def test_an_index_request_is_queued_rather_than_run_immediately(kb, monkeypatch)
     assert job is not None, "a job row must exist for the sidebar"
 
 
-def test_documents_per_indexing_job_is_capped_at_fifty_and_reports_truncation(kb):
-    """kb-bootstrapping: "Documents per indexing job | 50" and "Hitting the
+def test_documents_per_indexing_job_is_capped_at_five_hundred_and_reports_truncation(kb):
+    """kb-bootstrapping: "Documents per indexing job | 500" and "Hitting the
     document cap is reported as truncated"."""
     ex, reader = kb["ex"], kb["reader"]
-    assert ING.MAX_DOCS_PER_JOB == 50
+    assert ING.MAX_DOCS_PER_JOB == 500
     product = ex.create_folder("Huge folder")["id"]
-    for i in range(60):
+    for i in range(ING.MAX_DOCS_PER_JOB + 10):
         ex.put_human_file(product, f"doc-{i}.gdoc", f"content {i}")
 
     files, truncated = ING.enumerate_folder(reader, product)
 
-    assert len(files) == ING.MAX_DOCS_PER_JOB == 50
+    assert len(files) == ING.MAX_DOCS_PER_JOB == 500
     assert truncated is True
 
 
-def test_subfolder_depth_searched_is_three_levels_below_the_picked_folder(kb):
-    """kb-bootstrapping: "Subfolder depth searched | 3 levels below the folder
-    you pick" and "Folders nested more than three levels deep are not visited
+def test_subfolder_depth_searched_is_capped_below_the_picked_folder(kb):
+    """kb-bootstrapping: "Subfolder depth searched | 6 levels below the folder
+    you pick" and "Folders nested more than six levels deep are not visited
     at all"."""
     ex, reader = kb["ex"], kb["reader"]
-    assert ING.MAX_DEPTH == 3
+    assert ING.MAX_DEPTH == 6
+    depth_cap = ING.MAX_DEPTH
     levels = []
     parent = ex.create_folder("L0")["id"]
     levels.append(parent)
-    for depth in range(1, 5):
+    # Build ONE level beyond the cap so the excluded level can be asserted.
+    for depth in range(1, depth_cap + 2):
         child = ex.create_folder(f"L{depth}")["id"]
         reader.subfolders.setdefault(levels[-1], []).append(child)
         levels.append(child)
@@ -1245,9 +1247,9 @@ def test_subfolder_depth_searched_is_three_levels_below_the_picked_folder(kb):
 
     names = {f["name"] for f in files}
     assert truncated is False
-    assert names == {f"doc-at-depth-{d}.gdoc" for d in range(4)}, \
-        "depths 0..3 inclusive — 3 levels below the picked folder"
-    assert "doc-at-depth-4.gdoc" not in names
+    assert names == {f"doc-at-depth-{d}.gdoc" for d in range(depth_cap + 1)}, \
+        f"depths 0..{depth_cap} inclusive — {depth_cap} levels below the picked folder"
+    assert f"doc-at-depth-{depth_cap + 1}.gdoc" not in names
 
 
 def test_indexing_falls_back_to_a_plain_excerpt_when_the_model_fails(kb):

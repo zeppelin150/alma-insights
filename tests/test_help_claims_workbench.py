@@ -1835,15 +1835,16 @@ class TestGuideInjection:
         assert store.get_card_template(empty_db.conn).strip() == text.strip()
 
 
-class TestGuideSearchLimitation:
-    def test_document_search_matches_the_whole_phrase(self, empty_db):
-        """style-guides.md: 'Searching stored documents matches the whole
-        phrase as one string rather than the individual words, so a multi-word
-        search often returns nothing even when a matching document exists.'"""
+class TestGuideSearch:
+    def test_document_search_matches_individual_words(self, empty_db):
+        """style-guides.md: 'Searching stored documents now matches your
+        individual words, not just the whole phrase, so a multi-word search finds
+        a guide whose words are scattered through it.'"""
         conn = empty_db.conn
         store.save_document(conn, source="manual", doc_id="d1",
                             name="[STYLE-GUIDE] Alma voice",
                             full_text="Confident plain language for providers.")
         assert len(store.search_documents(conn, "plain")) == 1
         assert len(store.search_documents(conn, "plain language")) == 1
-        assert store.search_documents(conn, "confident providers") == []
+        assert [d["doc_id"] for d in
+                store.search_documents(conn, "confident providers")] == ["d1"]

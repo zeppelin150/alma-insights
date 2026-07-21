@@ -370,8 +370,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--index-mode", choices=("none", "mirror", "kb"), default="mirror",
                     help="none | mirror (local full text, no LLM/no Drive writes) | "
                          "kb (full ingest: LLM + Drive writes)")
-    ap.add_argument("--max-docs", type=int, default=50,
-                    help="cap for mirror-mode enumeration (default 50, matching "
+    ap.add_argument("--max-docs", type=int, default=500,
+                    help="cap for mirror-mode enumeration (default 500, matching "
                          "kb.ingest.MAX_DOCS_PER_JOB)")
     ap.add_argument("--topic", default="", help="topic hint for --index-mode kb")
     ap.add_argument("--set-folder", action="store_true",

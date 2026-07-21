@@ -129,46 +129,51 @@ def test_local_branch_reports_mode_and_note(empty_db):
 
 
 def test_local_branch_limit_is_applied_before_the_drive_filter(empty_db):
-    """DEFECT (measure-only): the limit is passed to search_documents, then the
-    source filter is applied to what came back. Non-drive documents therefore
-    consume the budget — with 10 guru docs newer than the drive doc, a
-    limit=10 drive query returns ZERO drive rows even though one matches.
+    """DEFECT (measure-only, UNCHANGED by the search fix): the limit is passed to
+    search_documents, then the source filter is applied to what came back. Higher-
+    ranked non-drive documents therefore consume the budget. Here 10 guru docs
+    whose TITLES match the query outrank the single drive doc (title miss, body
+    hit), so a limit=10 drive query returns ZERO drive rows even though the drive
+    doc matches and clears the relevance floor. The fix landed in the ranker, not
+    in this filter/limit ordering — which is why this defect still stands.
     """
     conn = empty_db.conn
-    # The drive row is the OLDEST, so the DESC modified_time ordering in
-    # search_documents pushes it past the limit before the filter ever runs.
-    _seed_doc(conn, source="drive", name="Drive Needle", text="needle",
-              doc_id="drive-old", modified="2020-01-01T00:00:00Z")
+    # Drive doc matches in the BODY only (title miss) -> ranks below title matches.
+    _seed_doc(conn, source="drive", name="Reference Sheet",
+              text="provider onboarding overview for new hires", doc_id="drive-body")
     for i in range(10):
-        _seed_doc(conn, source="guru", name=f"Guru Noise {i}", text="needle",
-                  doc_id=f"guru-{i}", modified=f"2026-06-{i + 10:02d}T00:00:00Z")
+        _seed_doc(conn, source="guru", name=f"Provider Onboarding {i}",
+                  text="provider onboarding steps", doc_id=f"guru-{i}")
 
-    out = query_business_drive(conn, "needle", limit=10)
+    out = query_business_drive(conn, "provider onboarding", limit=10)
 
-    # The drive row exists and matches, but is crowded out of the pre-filter page.
-    assert S.search_documents(conn, "needle", limit=50), "sanity: rows exist"
+    # The drive row matches and is retrievable at a generous limit...
+    assert any(d["source"] == "drive"
+               for d in S.search_documents(conn, "provider onboarding", limit=50)), \
+        "sanity: the drive row is retrievable"
+    # ...but the 10 title-matching guru docs fill the limited page before the filter.
     assert out["count"] == 0, (
         "if this now returns the drive row, the limit/filter order was fixed — "
         "update docs/DRIVE_SEARCH_EVAL.md")
 
 
-def test_local_branch_like_is_one_contiguous_substring(empty_db):
-    """DEFECT (measure-only): enablement_store.search_documents
-    (enablement_store.py:94-103) does `LIKE %<whole query>%`. It never splits
-    the query into terms, so a multi-word question matches only if that exact
-    phrase appears contiguously. This is the single biggest recall limiter on
-    the local branch and the reason the eval exists.
+def test_local_branch_tokenizes_multi_word_queries(empty_db):
+    """FIXED (was the single biggest recall limiter and the reason the eval
+    exists): enablement_store.search_documents now tokenizes and ranks over
+    enablement_documents_fts (migration 050 + src/data/enablement_doc_search.py)
+    instead of wrapping the whole query in one `LIKE %<query>%`. A multi-word
+    question — words in any order, with natural-language filler — now matches.
     """
     conn = empty_db.conn
     _seed_doc(conn, source="drive", name="Prior Authorization Runbook",
               text="Aetna requires a prior authorization for imaging in 2026.")
 
-    # exact contiguous phrase -> hit
+    # exact contiguous phrase -> hit (unchanged)
     assert query_business_drive(conn, "prior authorization", limit=5)["count"] == 1
-    # same words, natural question phrasing -> MISS
-    assert query_business_drive(conn, "aetna prior authorization", limit=5)["count"] == 0
-    # reordered -> MISS
-    assert query_business_drive(conn, "authorization prior", limit=5)["count"] == 0
+    # same words, natural question phrasing -> now a HIT (was a MISS under LIKE)
+    assert query_business_drive(conn, "aetna prior authorization", limit=5)["count"] == 1
+    # reordered -> now a HIT
+    assert query_business_drive(conn, "authorization prior", limit=5)["count"] == 1
 
 
 # ── the seam is never populated in production ──────────────────────────────

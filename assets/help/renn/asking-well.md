@@ -65,8 +65,8 @@ flag it.
 **Results look stale.** Ask Renn to run the monitor, which pulls fresh items
 from your configured sources.
 
-**A multi-word question returns nothing** when you know the content exists. Try
-fewer, more distinctive words. Several search paths in the app match multi-word
-phrases only when the words appear together, so "prior authorization escalation"
-can miss a document that contains those words apart. This is a known limitation
-— see *Known issues and current limitations*.
+**A multi-word question returns nothing** when you know the content exists.
+Document and knowledge-base search now handle your words individually, so this
+is usually a genuine miss — try fewer, more distinctive words. One narrower path,
+the Workbench draft search, still matches a whole phrase only when the words
+appear together; see *Known issues and current limitations*.

@@ -26,9 +26,113 @@ def handle_search_local_documents(conn, args: dict, filters: dict) -> dict:
 
 
 def handle_query_business_drive(conn, args: dict, filters: dict) -> dict:
-    """Query the connected business Drive (live when configured, else local mirror)."""
+    """Search the business Drive's locally-indexed mirror (documents previously
+    pulled by the Drive monitor). For a LIVE Drive search, use
+    search_google_drive."""
     from src.data.drive_query import query_business_drive
     return query_business_drive(conn, args.get("query", ""), limit=int(args.get("limit", 10)))
+
+
+def handle_search_google_drive(conn, args: dict, filters: dict) -> dict:
+    """LIVE Google Drive search — find files in Drive, not the local mirror.
+
+    Builds the service-account read client and queries Drive directly, so it
+    surfaces documents that are in Drive but not yet stored in Alma (e.g. a new
+    product folder). Returns file names, links, ids, and modified dates; use
+    import_drive_doc to pull one into the local library.
+    """
+    from src.data.drive_query import build_live_drive_client, query_business_drive
+    client = build_live_drive_client()
+    if client is None:
+        return {"ok": False, "error": "drive_not_configured",
+                "message": ("Live Google Drive read isn't configured. Set a "
+                            "service-account credential and enable Drive read in "
+                            "Settings, or use search_local_documents for docs "
+                            "already saved in Alma.")}
+    out = query_business_drive(conn, args.get("query", ""),
+                               limit=int(args.get("limit", 10)),
+                               live_client=client,
+                               folder_id=(args.get("folder_id") or None))
+    return {"ok": "error" not in out, **out}
+
+
+def handle_import_drive_doc(conn, args: dict, filters: dict) -> dict:
+    """Pull a Google Drive file into Alma's local library (the bridge).
+
+    After importing, the document's full text is stored and becomes tokenized-
+    searchable via search_local_documents. Accepts a Drive file id or URL — e.g.
+    one returned by search_google_drive.
+    """
+    from src.data.drive_query import build_live_drive_client
+    from src.data.enablement_store import import_drive_doc
+    ref = (args.get("drive_ref") or args.get("ref") or args.get("doc_id")
+           or args.get("url") or "")
+    if not str(ref).strip():
+        return {"ok": False, "error": "drive_ref_required",
+                "message": "Provide a Drive file id or URL to import."}
+    client = build_live_drive_client()
+    if client is None:
+        return {"ok": False, "error": "drive_not_configured",
+                "message": "Live Google Drive read isn't configured."}
+    return import_drive_doc(conn, client, str(ref))
+
+
+def handle_search_everywhere(conn, args: dict, filters: dict) -> dict:
+    """Search BOTH the local Alma library AND live Google Drive; label by source.
+
+    The seamless default when it's unclear where a document lives. Returns local
+    matches (tokenized) plus Drive-ONLY matches (files in Drive not already in
+    the local library, deduplicated by Drive file id).
+    """
+    from src.data import enablement_store as store
+    from src.data.drive_query import build_live_drive_client, query_business_drive
+    query = args.get("query", "")
+    limit = int(args.get("limit", 10))
+
+    local = store.search_documents(conn, query, limit=limit)
+
+    drive, drive_available, drive_error = [], False, None
+    client = build_live_drive_client()
+    if client is not None:
+        drive_available = True
+        # A Drive failure must NOT discard the already-successful local results.
+        try:
+            # Over-fetch: the dedup below removes hits already mirrored locally,
+            # which are frequently the TOP live matches — fetching only `limit`
+            # would let them crowd out genuinely-new Drive files (the tool could
+            # report zero new docs when some exist past the cut). Pull a wider
+            # pool, dedup against the whole library, then trim to `limit`. Capped
+            # so the IN-clause stays well under SQLite's variable limit.
+            pool = min(max(limit * 4, limit + 20), 400)
+            res = query_business_drive(conn, query, limit=pool, live_client=client)
+            if res.get("error"):
+                drive_error = res["error"]
+            else:
+                hits = res.get("results", [])
+                # Drive-ONLY means "not in the local LIBRARY at all" — match each
+                # hit's id against enablement_documents by doc_id OR source_ref
+                # (a mirrored Drive file keys on its fileId), NOT merely against
+                # this query's top-N local results.
+                ids = [str(r.get("id")) for r in hits if r.get("id")]
+                mirrored: set[str] = set()
+                if ids:
+                    ph = ",".join("?" * len(ids))
+                    rows = conn.execute(
+                        f"SELECT doc_id, source_ref FROM enablement_documents "
+                        f"WHERE doc_id IN ({ph}) OR source_ref IN ({ph})",
+                        ids + ids).fetchall()
+                    for doc_id, source_ref in rows:
+                        mirrored.add(str(doc_id))
+                        if source_ref is not None:
+                            mirrored.add(str(source_ref))
+                drive = [r for r in hits if str(r.get("id")) not in mirrored][:limit]
+        except Exception as exc:  # noqa: BLE001 — degrade to local-only, keep results
+            drive_error = str(exc)[:160]
+            drive = []
+
+    return {"ok": True, "local": local, "local_count": len(local),
+            "google_drive": drive, "drive_count": len(drive),
+            "drive_available": drive_available, "drive_error": drive_error}
 
 
 def handle_asana_discover(conn, args: dict, filters: dict) -> dict:

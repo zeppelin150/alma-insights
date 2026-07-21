@@ -269,3 +269,31 @@ class TestFailureModes:
                     assets, token="",
                     artifact_name="AlmaInsights-win64.zip",
                 )
+
+
+# ── manifest asset name: CI ships release_manifest.json, older builds manifest.json ──
+
+class TestManifestAssetNaming:
+    """The release CI (make_release_manifest.py) uploads 'release_manifest.json',
+    but the fetcher historically only matched 'manifest.json'. Both must resolve,
+    or every CI-built release fails to install."""
+
+    def test_accepts_release_manifest_json(self):
+        from src.updater.manifest_fetcher import _find_manifest_url
+        assets = [
+            {"name": "AlmaInsights-win64.zip", "browser_download_url": "https://x/z.zip"},
+            {"name": "release_manifest.json",
+             "browser_download_url": "https://x/release_manifest.json"},
+        ]
+        assert _find_manifest_url(assets) == "https://x/release_manifest.json"
+
+    def test_still_accepts_manifest_json(self):
+        from src.updater.manifest_fetcher import _find_manifest_url
+        assets = [{"name": "manifest.json",
+                   "browser_download_url": "https://x/manifest.json"}]
+        assert _find_manifest_url(assets) == "https://x/manifest.json"
+
+    def test_missing_either_name_still_raises(self):
+        from src.updater.manifest_fetcher import _find_manifest_url, ManifestFetchError
+        with pytest.raises(ManifestFetchError, match="missing manifest"):
+            _find_manifest_url([{"name": "notes.txt", "browser_download_url": "https://x/n"}])

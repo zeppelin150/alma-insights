@@ -6,13 +6,14 @@ also effectively dead code in production: it is reached only through
 ``drive_query.query_business_drive``'s ``live_client`` seam, which no
 production caller populates (see tests/test_drive_query.py).
 
-This module pins its CONTRACT so a future fix is a deliberate, visible change:
+This module pins its CONTRACT:
 
 * the ``q`` string and its degradation when the query is empty
 * Shared-Drive support (corpora / includeItemsFromAllDrives / supportsAllDrives)
 * ``_q()`` escaping — quotes, backslashes, and a query-injection attempt
-* ``pageSize == limit``
-* the PAGINATION GAP, as a named xfail (not a silent pass)
+* optional folder scoping (``<id> in parents``)
+* pagination (nextPageToken is followed to the caller's limit)
+* retry/backoff on a transient 429
 
 Style follows tests/test_drive_monitor.py:112-124: patch the built service with
 a MagicMock and assert on the kwargs handed to ``files().list()``. No network,
@@ -21,9 +22,9 @@ no credentials, no Google libs required.
 Assertions parse the ``q`` into clauses (split on ' and ') rather than matching
 the whole string, so a benign reordering refactor does not break the suite.
 
-MEASURE-ONLY: these tests document current behaviour, including its defects.
-Do NOT "fix" drive_reader.py to make an xfail pass without the owner's say-so —
-the eval harness exists to size these gaps before anyone repairs them.
+NOTE: defects D2 (single-page) and D3 (no read retry) were repaired as part of
+wiring live Google Drive search into Renn (owner-approved). The two tests that
+were named xfails now assert the fixed behaviour.
 """
 
 from __future__ import annotations
@@ -130,15 +131,23 @@ def test_search_files_empty_query_degrades_to_trashed_only():
     assert "fullText" not in _list_kwargs(svc)["q"]
 
 
-def test_search_files_does_not_filter_to_a_folder():
-    """search_files has no folder scoping — it searches the whole corpus.
-
-    Contrast list_changed_files, which pins `<id> in parents`. An eval that
-    points at one folder cannot use search_files to scope to it.
-    """
+def test_search_files_no_folder_scope_by_default():
+    """Without a folder_id, search_files searches the whole corpus (no
+    `in parents` clause)."""
     reader, svc = _reader_with_mock_service()
     reader.search_files("anything")
     assert "in parents" not in _list_kwargs(svc)["q"]
+
+
+def test_search_files_optional_folder_scope():
+    """A folder_id adds a direct-children `<id> in parents` clause so a search
+    can be scoped to one Drive folder (e.g. a new product folder)."""
+    reader, svc = _reader_with_mock_service()
+    reader.search_files("anything", folder_id="FOLDER-42")
+    cl = _clauses(_list_kwargs(svc)["q"])
+    assert "'FOLDER-42' in parents" in cl
+    assert "fullText contains 'anything'" in cl
+    assert "trashed = false" in cl
 
 
 # ── Shared Drive support ───────────────────────────────────────────────────
@@ -165,37 +174,28 @@ def test_search_files_pagesize_tracks_limit():
 def test_search_files_maps_result_fields():
     reader, svc = _reader_with_mock_service({"files": [
         {"id": "f1", "name": "Doc One", "mimeType": "application/pdf",
-         "webViewLink": "https://drive/f1"},
+         "webViewLink": "https://drive/f1", "modifiedTime": "2026-07-01T00:00:00Z"},
     ]})
     out = reader.search_files("q")
     assert out == [{"name": "Doc One", "id": "f1",
-                    "url": "https://drive/f1", "mime_type": "application/pdf"}]
+                    "url": "https://drive/f1", "mime_type": "application/pdf",
+                    "modified": "2026-07-01T00:00:00Z"}]
 
 
-# ── the pagination gap (DEFECT — visible, not silent) ──────────────────────
+# ── pagination + retry (D2 / D3, now fixed) ────────────────────────────────
 
-def test_search_files_makes_exactly_one_execute_call():
-    """Documents the CURRENT single-shot behaviour.
-
-    list_drives / list_folders / list_changed_files all loop on nextPageToken;
-    search_files does not. This test passes today and will FAIL the moment
-    someone adds paging — which is the signal to update the xfail below.
-    """
+def test_search_files_stops_paging_at_limit():
+    """Respects the caller's limit — it does not fetch a further page once the
+    budget is met, even when nextPageToken is present."""
     reader, svc = _reader_with_mock_service(
         {"files": [{"id": "a"}], "nextPageToken": "PAGE2"})
-    reader.search_files("q", limit=1)
+    out = reader.search_files("q", limit=1)
+    assert [r["id"] for r in out] == ["a"]
     assert svc.files().list().execute.call_count == 1
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "DEFECT (measure-only, do not fix here): DriveReader.search_files "
-    "(drive_reader.py:214-217) makes ONE files().list().execute() call and "
-    "discards nextPageToken, unlike every sibling list_* method which loops. "
-    "At limit=40 the 41st match is invisible, so recall@k is silently capped "
-    "by the API page rather than by the ranking. Tracked by "
-    "docs/DRIVE_SEARCH_EVAL.md."))
 def test_search_files_follows_nextpagetoken():
-    """The behaviour we WANT: exhaust pages until the result budget is met."""
+    """Exhausts pages until the result budget is met (D2 fixed)."""
     reader = DriveReader("creds.json")
     svc = MagicMock()
     reader._service = svc
@@ -212,14 +212,8 @@ def test_search_files_follows_nextpagetoken():
         "second page dropped — nextPageToken is ignored")
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "DEFECT (measure-only, do not fix here): no Drive READ path has rate "
-    "limiting or 429/5xx backoff. gdrive_export._throttled_execute (0.5s "
-    "sleep, 5 retries) guards WRITES only; DriveReader calls .execute() bare "
-    "in all six read methods. A 100-doc index job can trip userRateLimitExceeded "
-    "with no retry. Tracked by docs/DRIVE_SEARCH_EVAL.md."))
 def test_search_files_retries_on_rate_limit():
-    """The behaviour we WANT: a 429 is retried, not propagated."""
+    """A transient 429 is retried, not propagated (D3 fixed)."""
     reader = DriveReader("creds.json")
     svc = MagicMock()
     reader._service = svc
@@ -229,6 +223,16 @@ def test_search_files_retries_on_rate_limit():
     ]
     out = reader.search_files("q")
     assert out and out[0]["id"] == "ok"
+
+
+def test_search_files_non_retryable_error_propagates():
+    """A non-transient error (e.g. 404) is not retried — it surfaces at once."""
+    reader = DriveReader("creds.json")
+    svc = MagicMock()
+    reader._service = svc
+    svc.files().list().execute.side_effect = RuntimeError("HttpError 404 notFound")
+    with pytest.raises(RuntimeError, match="404"):
+        reader.search_files("q")
 
 
 # ── _q() duplication ───────────────────────────────────────────────────────
