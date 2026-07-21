@@ -218,6 +218,19 @@ class UpdateActionWidget(QWidget):
             restart_app()
         except Exception as exc:  # noqa: BLE001
             self._show_error(f"Restart failed: {exc}. Please relaunch manually.")
+            return
+
+        # Close the splash so its nested exec() RETURNS.
+        #
+        # restart_app() calls QApplication.quit(), but quit() cannot unwind a
+        # QDialog.exec() — and the splash is exactly that, entered before
+        # main.py's app.exec(). Without this the splash sits on "Update staged.
+        # Restarting…" forever, _run_splash() never returns, main.py never
+        # reaches its restart_requested() guard, and this process stays alive
+        # beside the replacement we just spawned — the second window.
+        win = self.window()
+        if win is not None:
+            win.close()
 
     def _on_failed(self, msg: str) -> None:
         self._show_error(f"Update failed: {msg}")

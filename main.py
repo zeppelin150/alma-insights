@@ -81,6 +81,8 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("Alma Insights")
     app.setOrganizationName("Alma Health")
+    # Provisional — overwritten below from src.VERSION once any staged
+    # update has been applied, so the UI never shows a stale number.
     app.setApplicationVersion("1.0.0")
 
     # Apply theme
@@ -117,6 +119,16 @@ def main():
             importlib.reload(_src_pkg)
         except Exception:  # noqa: BLE001 — never block startup on this
             pass
+
+    # The splash header/footer render app.applicationVersion(), which was a
+    # hardcoded "1.0.0" — so every splash claimed 1.0.0 no matter what was
+    # actually installed. Set it from src.VERSION here, AFTER any staged update
+    # has been applied and src reloaded, so it reflects what is really running.
+    try:
+        from src import VERSION as _RUNNING_VERSION
+        app.setApplicationVersion(_RUNNING_VERSION)
+    except Exception:  # noqa: BLE001 — display only, never block startup
+        pass
 
     # Rollback guard: if the newly applied update crash-looped (≥3 crashes
     # within its grace window) the previous version is restored here.
