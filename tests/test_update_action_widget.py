@@ -97,8 +97,11 @@ class TestInstallFlow:
 
             widget._on_install_clicked()
 
+            # token MUST be forwarded — without it a private-repo asset 404s
+            # after the manifest resolve has already succeeded.
             fake_inst.stage.assert_called_once_with(
                 fake_url, expected_sha256=fake_sha, new_version="9.9.9",
+                token=widget._payload.get("token", ""),
             )
             assert widget.is_busy() is True
             assert not widget._action_btn.isEnabled()

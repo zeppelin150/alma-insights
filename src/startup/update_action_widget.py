@@ -170,7 +170,11 @@ class UpdateActionWidget(QWidget):
         self._updater.failed.connect(self._on_failed)
         self._status.setText("Starting download…")
         new_ver = self._payload.get("new_version", "")
-        self._updater.stage(url, expected_sha256=sha, new_version=new_ver)
+        # The token is REQUIRED for a private repo — the asset 404s without it.
+        # (The manifest resolve above already uses it; omitting it here made the
+        # download fail with a bare 404 *after* a successful manifest fetch.)
+        self._updater.stage(url, expected_sha256=sha, new_version=new_ver,
+                            token=self._payload.get("token", ""))
 
     # ── updater signal handlers ───────────────────────────────────
 
