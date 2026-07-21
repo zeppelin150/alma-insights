@@ -177,7 +177,11 @@ def _find_manifest_url(assets: list[dict]) -> str:
     """Walk ``assets[]`` and return the manifest's ``browser_download_url``."""
     for asset in assets:
         if asset.get("name") in _MANIFEST_ASSET_NAMES:
-            url = asset.get("browser_download_url")
+            # Prefer the API asset url ("…/releases/assets/<id>"): it accepts a
+            # Bearer token, which is the ONLY way to read an asset from a
+            # PRIVATE repo (browser_download_url 404s). Fall back to the browser
+            # URL for public repos / older payloads.
+            url = asset.get("url") or asset.get("browser_download_url")
             if url:
                 return url
             raise ManifestFetchError(
@@ -191,17 +195,25 @@ def _find_manifest_url(assets: list[dict]) -> str:
 
 
 def _find_artifact_url(assets: list[dict], name: str) -> str | None:
-    """Return the ``browser_download_url`` for an asset by name, or None."""
+    """Return the download URL for an asset by name, or None.
+
+    Prefers the API asset url (Bearer-authenticable → works on PRIVATE repos);
+    falls back to ``browser_download_url``.
+    """
     for asset in assets:
         if asset.get("name") == name:
-            return asset.get("browser_download_url")
+            return asset.get("url") or asset.get("browser_download_url")
     return None
 
 
 def _fetch_manifest_json(url: str, token: str) -> dict:
     """GET the manifest URL, parse JSON. Single failure mode (raises)."""
+    # An API asset URL must be asked for octet-stream, or GitHub returns the
+    # asset's JSON *metadata* instead of the manifest file itself.
+    is_api_asset = "api.github.com" in url and "/releases/assets/" in url
     headers = {
-        "Accept": "application/vnd.github+json, application/json",
+        "Accept": ("application/octet-stream" if is_api_asset
+                   else "application/vnd.github+json, application/json"),
         "User-Agent": "AlmaInsights/manifest-fetcher",
     }
     if token:

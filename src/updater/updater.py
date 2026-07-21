@@ -29,6 +29,7 @@ import urllib.error
 import zipfile
 from pathlib import Path
 from threading import Thread
+from urllib.parse import urlparse
 
 from PySide6.QtCore import QObject, Signal
 
@@ -47,6 +48,26 @@ _REPLACEABLE_DIRS = ("src", "config", "migrations")
 _PROTECTED = {"data", "_update_staging", ".git", ".venv", "venv",
               "node_modules", "scan_server", "assets", "debug", "ocr_debug",
               "docs", "installer", "tests"}
+
+
+class _StripAuthOnRedirect(urllib.request.HTTPRedirectHandler):
+    """Drop ``Authorization`` when a redirect crosses to a different host.
+
+    GitHub's release-asset API answers with a 302 to a signed storage URL that
+    REJECTS a forwarded Authorization header ("Only one auth mechanism
+    allowed"). Without this, an authenticated private-repo download fails on the
+    redirect hop rather than on the initial request — a confusing 400.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and urlparse(newurl).netloc != urlparse(req.full_url).netloc:
+            for store in (getattr(new, "headers", None),
+                          getattr(new, "unredirected_hdrs", None)):
+                if isinstance(store, dict):
+                    for key in ("Authorization", "authorization"):
+                        store.pop(key, None)
+        return new
 
 
 def has_staged_update() -> bool:
@@ -143,7 +164,8 @@ class Updater(QObject):
     # ── public ──────────────────────────────────────────────
 
     def stage(self, download_url: str, expected_sha256: str = "",
-              new_version: str = "", *, require_checksum: bool = True) -> None:
+              new_version: str = "", *, require_checksum: bool = True,
+              token: str = "") -> None:
         """Download and stage an update (runs in background thread).
 
         Parameters
@@ -158,6 +180,10 @@ class Updater(QObject):
         require_checksum
             Default True. Set to False only for development tooling
             that knowingly bypasses verification.
+        token
+            GitHub token. REQUIRED for a private repo — release assets 404
+            without it. Sent as a Bearer header (and dropped on the storage
+            redirect, see :class:`_StripAuthOnRedirect`).
         """
         self._cancel_requested = False
 
@@ -172,7 +198,8 @@ class Updater(QObject):
 
         t = Thread(
             target=self._do_stage,
-            args=(download_url, expected_sha256, new_version, require_checksum),
+            args=(download_url, expected_sha256, new_version, require_checksum,
+                  token),
             daemon=True,
         )
         t.start()
@@ -184,12 +211,13 @@ class Updater(QObject):
     # ── internal ────────────────────────────────────────────
 
     def _do_stage(self, download_url: str, expected_sha256: str,
-                  new_version: str, require_checksum: bool = True):
+                  new_version: str, require_checksum: bool = True,
+                  token: str = ""):
         tmp_path = None
         try:
             # Step 1: Download to temp file
             self.progress.emit(5, "Downloading update…")
-            tmp_path = self._download(download_url)
+            tmp_path = self._download(download_url, token)
             if self._cancel_requested:
                 return
 
@@ -248,16 +276,30 @@ class Updater(QObject):
                 except OSError:
                     pass
 
-    def _download(self, url: str) -> str:
-        """Download url to a temp file, returning the path."""
-        req = urllib.request.Request(
-            url,
-            headers={"User-Agent": f"AlmaInsights/{VERSION}"},
-        )
+    def _download(self, url: str, token: str = "") -> str:
+        """Download url to a temp file, returning the path.
+
+        ``Accept: application/octet-stream`` makes GitHub's asset API return the
+        FILE rather than the asset's JSON metadata; the Bearer token is what
+        makes a PRIVATE repo's asset reachable at all (it 404s otherwise).
+        """
+        headers = {
+            "User-Agent": f"AlmaInsights/{VERSION}",
+            "Accept": "application/octet-stream",
+        }
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        req = urllib.request.Request(url, headers=headers)
+        # Only take the custom-opener path when we actually send a token: that is
+        # the sole case needing the strip-Authorization-on-redirect handler, and
+        # it keeps the plain urlopen seam (which the e2e tests patch) intact.
+        _open = ((lambda r, timeout: urllib.request
+                  .build_opener(_StripAuthOnRedirect).open(r, timeout=timeout))
+                 if token else urllib.request.urlopen)
         suffix = ".zip" if url.endswith(".zip") else ""
         fd, tmp_path = tempfile.mkstemp(suffix=suffix, prefix="alma_update_")
         try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
+            with _open(req, timeout=120) as resp:
                 total = int(resp.headers.get("Content-Length", 0))
                 downloaded = 0
                 with os.fdopen(fd, "wb") as f:

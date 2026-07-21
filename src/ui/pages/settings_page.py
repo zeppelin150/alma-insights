@@ -1784,7 +1784,11 @@ class SettingsPage(QWidget):
         self._updater.complete.connect(self._on_update_complete)
         self._updater.failed.connect(self._on_update_failed)
         self._progress_label.setText("Starting download...")
-        self._updater.stage(url, expected_sha256=sha, new_version=new_ver)
+        # The token is REQUIRED for a private repo — the asset 404s without it.
+        checker = getattr(self, "_update_checker", None)
+        token = getattr(checker, "last_token", "") if checker else ""
+        self._updater.stage(url, expected_sha256=sha, new_version=new_ver,
+                            token=token)
 
     def _resolve_install_artifact(self):
         """Look up download URL + SHA-256 for the running platform.
