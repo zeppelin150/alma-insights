@@ -40,8 +40,13 @@ def test_mcp_config_written_with_stdio_schema():
     assert srv["type"] == "stdio"
     assert srv["command"] == "/usr/bin/python3"
     assert srv["args"] == ["-m", "src.mcp.chat_mcp_server"]
+    # PYTHONPATH anchor added 2026-07-21: the CLI (and the MCP servers it
+    # spawns) now runs from a neutral cwd so CLAUDE.md is never injected into
+    # persona sessions — `-m src.mcp...` needs the app root anchored explicitly.
+    from src.agents.claude_cli_bridge import _APP_ROOT
     assert srv["env"] == {"ALMA_DB_PATH": "/tmp/alma.db",
-                          "ALMA_CHAT_SESSION_FILE": "/tmp/.session"}
+                          "ALMA_CHAT_SESSION_FILE": "/tmp/.session",
+                          "PYTHONPATH": str(_APP_ROOT)}
 
 
 def test_build_cmd_adds_mcp_flags_and_keeps_builtins_off():

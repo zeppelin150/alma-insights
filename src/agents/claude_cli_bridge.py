@@ -36,6 +36,10 @@ from src.agents.claude_cli_subprocess import CliSubprocess
 
 logger = logging.getLogger("alma.claude_cli_bridge")
 
+# App root (the directory holding src/) — anchors PYTHONPATH for MCP servers
+# once the CLI runs from a neutral cwd. Path(__file__)-based, never cwd-based.
+_APP_ROOT = Path(__file__).resolve().parents[2]
+
 
 class ClaudeCliBridge:
     """Subprocess-per-call bridge wrapping the local ``claude`` CLI."""
@@ -83,6 +87,12 @@ class ClaudeCliBridge:
         self._mcp_servers: list[dict] = []
         self._mcp_config_path: str | None = None
         self._mcp_allowed: str = ""
+
+        # Persona for --system-prompt-file (set_system_prompt). File-backed:
+        # the Renn persona is >10 KB and Windows caps a command line at 32,767
+        # chars, so the TEXT never rides in argv.
+        self._system_prompt_text: str = ""
+        self._system_prompt_path: str | None = None
 
         # Compatibility surface mirroring ACPBridge — death callbacks
         # in scan_orchestrator read these by name.
@@ -171,6 +181,12 @@ class ClaudeCliBridge:
         for s in self._mcp_servers:
             name = s["name"]
             env = {e["name"]: e["value"] for e in s.get("env", []) if e.get("name")}
+            # The CLI (and therefore the MCP servers it spawns) runs from a
+            # NEUTRAL cwd (see _neutral_cwd), so a "-m src.mcp...." server can
+            # no longer resolve modules via cwd — anchor module resolution to
+            # the app root explicitly. setdefault: an explicit PYTHONPATH in
+            # the server spec wins.
+            env.setdefault("PYTHONPATH", str(_APP_ROOT))
             servers[name] = {
                 "type": "stdio",
                 "command": s["command"],
@@ -187,6 +203,59 @@ class ClaudeCliBridge:
         self._mcp_allowed = ",".join(allowed)
         logger.info("ClaudeCliBridge: MCP wired (%d server(s); allow=%s)",
                     len(servers), self._mcp_allowed)
+
+    def set_system_prompt(self, text: str) -> None:
+        """Deliver ``text`` as the subprocess's REAL system prompt.
+
+        Without this, ``claude -p`` runs under its default "you are Claude
+        Code" identity and the caller's persona arrives as user content — a
+        user message claiming system authority plus a replayed transcript,
+        which is structurally a prompt injection. Haiku tolerated that frame
+        (with a measured ~25% tool-skip); Sonnet correctly refused it
+        (2026-07-21: narrated tool calls as text instead of invoking the
+        natively-bound MCP tools, then answered as Claude Code). A real
+        ``--system-prompt`` REPLACES the default Claude Code preamble, so the
+        persona is the model's own frame and the transcript is its own
+        conversation. It does NOT stop everything else (live-verified on
+        2.1.216): CLAUDE.md ingestion is cwd-driven and survives a custom
+        system prompt — that leak is closed by running the subprocess from a
+        neutral cwd (see ``_neutral_cwd``) — and the CLI still injects the
+        logged-in account's email + today's date on its own.
+
+        File-backed (``--system-prompt-file``), mirroring set_mcp_config:
+        argv must never carry the >10 KB persona (Windows 32,767-char cap).
+        The persona is constant per session but re-set on every call, so the
+        one temp file is REUSED — same text with the file intact is a no-op,
+        new text (or a purged file: %TEMP% cleaners run mid-session) rewrites
+        it, empty text unlinks it and clears the flag entirely (the CLI then
+        keeps its default identity — the Gemini/text-loop path and
+        pre-stitched-prompt callers like the report bridge stay byte-identical).
+        ``_system_prompt_text`` is recorded only AFTER a durable write: a
+        failed write must leave the cache stale so the next call retries
+        instead of no-op'ing forever on poisoned on-disk state.
+        """
+        import tempfile
+
+        text = text or ""
+        if not text:
+            self._system_prompt_text = ""
+            path, self._system_prompt_path = self._system_prompt_path, None
+            if path:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+            return
+        if (text == self._system_prompt_text and self._system_prompt_path
+                and os.path.isfile(self._system_prompt_path)):
+            return  # steady state: file present AND known to hold this text
+        if not (self._system_prompt_path
+                and os.path.isfile(self._system_prompt_path)):
+            fd, path = tempfile.mkstemp(prefix="alma_sysprompt_", suffix=".txt")
+            os.close(fd)
+            self._system_prompt_path = path
+        Path(self._system_prompt_path).write_text(text, encoding="utf-8")
+        self._system_prompt_text = text
 
     def new_session(self, mcp_env: dict | None = None) -> str:
         """Compatibility shim. CLI -p mode has no persistent session;
@@ -267,6 +336,10 @@ class ClaudeCliBridge:
             "--tools", "",  # disable built-in tools (Bash/Edit/Read/etc)
             "--no-session-persistence",
         ]
+        if self._system_prompt_path:
+            # The caller's persona as the REAL system prompt (replaces the
+            # default Claude Code identity — see set_system_prompt).
+            cmd += ["--system-prompt-file", self._system_prompt_path]
         if self._mcp_config_path:
             cmd += [
                 "--strict-mcp-config",            # ignore user/global MCP config
@@ -332,11 +405,35 @@ class ClaudeCliBridge:
 
     # ─── call_streaming helpers ─────────────────────────────────
 
+    @staticmethod
+    def _neutral_cwd() -> str | None:
+        """A stable empty directory to run the CLI from.
+
+        The claude CLI walks UP from its cwd collecting CLAUDE.md files and
+        injects them into the model context EVEN under a custom
+        --system-prompt-file (live-verified on 2.1.216: launched from the app
+        tree, every turn shipped ~14.6K tokens of this repo's internal
+        engineering instructions into the Renn persona's context — the exact
+        identity-bleed the system-prompt fix exists to eliminate, plus cost).
+        An empty dir under %TEMP% has no CLAUDE.md anywhere above it. The MCP
+        servers the CLI spawns inherit this cwd too — which is why
+        set_mcp_config anchors them with an explicit PYTHONPATH (settings/DB
+        paths are already absolute). Returns None (inherit, legacy behavior)
+        only if the dir can't be created.
+        """
+        import tempfile
+        try:
+            path = Path(tempfile.gettempdir()) / "alma_cli_neutral"
+            path.mkdir(parents=True, exist_ok=True)
+            return str(path)
+        except OSError:
+            return None
+
     def _spawn_subprocess(self, prompt: str) -> CliSubprocess:
         """Build cmd + env, start subprocess, register for atexit cleanup."""
         cmd = self._build_cmd()
         env = self._build_subprocess_env()
-        sub = CliSubprocess(cmd, env, prompt).start()
+        sub = CliSubprocess(cmd, env, prompt, cwd=self._neutral_cwd()).start()
         ClaudeCliBridge._all_processes.append(sub.proc)
         return sub
 
@@ -556,6 +653,15 @@ class ClaudeCliBridge:
                 self._kill_proc(self._active_proc)
                 self._active_proc = None
                 self._active_request_id = None
+        # The persona temp file must not outlive the bridge — it holds the
+        # (redacted) system-prompt text at rest in %TEMP%.
+        path, self._system_prompt_path = self._system_prompt_path, None
+        self._system_prompt_text = ""
+        if path:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
 
     def restart(self) -> None:
         # No persistent process; reset healthy flag and re-resolve cli_path

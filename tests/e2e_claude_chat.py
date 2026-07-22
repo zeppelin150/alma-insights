@@ -40,11 +40,15 @@ CSAT for refund TRC: 2.1/5 (org avg 3.8/5)."""
 USER_TURN_1 = "Which TRC saw the biggest week-over-week increase, and what's driving it?"
 
 
-def _format_chat_prompt(system: str, context: str, user: str) -> str:
-    """Mirror the convention used by ChatEngine + GeminiClient/ClaudeClient
-    when stitching system prompt + context + user message."""
+def _format_chat_prompt(context: str, user: str) -> str:
+    """Mirror ChatEngine's USER-side stitching (context + packed turn).
+
+    The system prompt is deliberately NOT embedded here: since the 2026-07-21
+    fix, ChatEngine hands it to client.generate(system_prompt=...) and the CLI
+    path delivers it via --system-prompt-file. Embedding it as an
+    [SYSTEM INSTRUCTIONS] block in user content reproduces the retired
+    injection-shaped packaging that made Sonnet refuse the persona."""
     return (
-        f"[SYSTEM INSTRUCTIONS]\n{system}\n[END SYSTEM INSTRUCTIONS]\n\n"
         f"[CONTEXT]\n{context}\n[END CONTEXT]\n\n"
         f"User: {user}"
     )
@@ -76,15 +80,15 @@ def main():
             "Is override_all=claude set?"
         )
 
-    print("[step 2] formatting chat prompt")
-    prompt = _format_chat_prompt(SYSTEM_PROMPT, CONTEXT_BLOCK, USER_TURN_1)
+    print("[step 2] formatting chat prompt (system prompt travels separately)")
+    prompt = _format_chat_prompt(CONTEXT_BLOCK, USER_TURN_1)
     print(f"  prompt length: {len(prompt)} chars")
     print(f"  user message: {USER_TURN_1!r}")
 
     print("[step 3] invoking client.generate() — 1st turn")
     t0 = time.time()
     try:
-        response = client.generate(prompt, timeout=90)
+        response = client.generate(prompt, system_prompt=SYSTEM_PROMPT, timeout=90)
     except Exception as e:
         raise SystemExit(f"FAIL: client.generate raised: {e}")
     elapsed = time.time() - t0

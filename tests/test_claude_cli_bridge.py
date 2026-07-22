@@ -161,27 +161,35 @@ class TestClaudeCliClientRedaction:
     def test_prepare_prompt_redacts_emails(self):
         from src.llm.claude_cli_client import ClaudeCliClient
         c = ClaudeCliClient(model="sonnet", pii_redaction=True)
-        prepared = c._prepare_prompt(
+        prepared, _sys = c._prepare_prompt(
             "Contact patient at john.doe@example.com about the claim.",
             system_prompt="",
         )
         # Email should be redacted to a placeholder, not appear verbatim
         assert "john.doe@example.com" not in prepared
 
-    def test_prepare_prompt_includes_system_block_when_present(self):
+    def test_prepare_prompt_returns_system_separately_never_embedded(self):
+        """Contract flipped 2026-07-21 (Renn-on-Sonnet incident): embedding the
+        persona as an [SYSTEM INSTRUCTIONS] block in USER content made the CLI
+        subprocess (which keeps its own Claude Code identity) read its own
+        prompt as an injection — Sonnet narrated tool calls instead of invoking
+        native MCP, then refused the persona. The system prompt now travels
+        separately to the bridge's --system-prompt-file. Full cover:
+        tests/test_claude_cli_system_prompt.py."""
         from src.llm.claude_cli_client import ClaudeCliClient
         c = ClaudeCliClient(model="sonnet", pii_redaction=True)
-        prepared = c._prepare_prompt(
+        prepared, sys_prompt = c._prepare_prompt(
             "user prompt here", system_prompt="be concise",
         )
-        assert "[SYSTEM INSTRUCTIONS]" in prepared
-        assert "[END SYSTEM INSTRUCTIONS]" in prepared
-        assert "be concise" in prepared
-        assert "user prompt here" in prepared
+        assert "[SYSTEM INSTRUCTIONS]" not in prepared
+        assert "be concise" not in prepared
+        assert prepared.strip() == "user prompt here"
+        assert sys_prompt == "be concise"
 
     def test_prepare_prompt_no_system_block_when_empty(self):
         from src.llm.claude_cli_client import ClaudeCliClient
         c = ClaudeCliClient(model="sonnet", pii_redaction=True)
-        prepared = c._prepare_prompt("just a prompt", system_prompt="")
+        prepared, sys_prompt = c._prepare_prompt("just a prompt", system_prompt="")
         assert "[SYSTEM INSTRUCTIONS]" not in prepared
         assert prepared.strip() == "just a prompt"
+        assert sys_prompt == ""

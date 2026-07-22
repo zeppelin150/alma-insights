@@ -62,12 +62,15 @@ class ClaudeCliClient:
         """Synchronous .generate() — returns full response text.
 
         Applies PII redaction (base always; aggressive if pii_redaction=True)
-        then delegates to the CLI bridge. When ``on_token`` is given, streams via
-        the bridge and forwards each text delta in real time (the call still
+        then delegates to the CLI bridge. The (redacted) system prompt travels
+        separately as the subprocess's REAL system prompt — never embedded in
+        user content (see _prepare_prompt). When ``on_token`` is given, streams
+        via the bridge and forwards each text delta in real time (the call still
         returns the full accumulated text, so callers are unchanged otherwise).
         """
-        full_prompt = self._prepare_prompt(prompt, system_prompt)
+        full_prompt, sys_prompt = self._prepare_prompt(prompt, system_prompt)
         bridge = self._ensure_bridge()
+        bridge.set_system_prompt(sys_prompt)
         self._call_counter += 1
         if on_token is None:
             request_id = f"cli_client_{self._call_counter}_{int(time.time())}"
@@ -109,8 +112,9 @@ class ClaudeCliClient:
         only need iterator-shaped semantics; real interleaved streaming would
         require running the call in a thread + queue.
         """
-        full_prompt = self._prepare_prompt(prompt, system_prompt)
+        full_prompt, sys_prompt = self._prepare_prompt(prompt, system_prompt)
         bridge = self._ensure_bridge()
+        bridge.set_system_prompt(sys_prompt)
         self._call_counter += 1
         request_id = f"cli_client_stream_{self._call_counter}_{int(time.time())}"
 
@@ -165,11 +169,21 @@ class ClaudeCliClient:
                 self._bridge.set_mcp_config(self._mcp_config)
         return self._bridge
 
-    def _prepare_prompt(self, prompt: str, system_prompt: str) -> str:
-        """Apply PII redaction and build the [SYSTEM INSTRUCTIONS] convention.
+    def _prepare_prompt(self, prompt: str, system_prompt: str) -> tuple[str, str]:
+        """Apply PII redaction; return (user_prompt, system_prompt) SEPARATELY.
 
         Reuses GeminiClient's static-shaped redaction methods (the project's
         single-source-of-truth redaction layer at config/redaction_patterns.json).
+
+        The system prompt must NOT be embedded in the user prompt on this path.
+        The CLI subprocess has its own "you are Claude Code" identity, so an
+        embedded ``[SYSTEM INSTRUCTIONS]`` block + replayed transcript reads as
+        a prompt injection — Sonnet refused exactly that (2026-07-21), narrating
+        tool calls as text instead of invoking native MCP, then breaking
+        character. The callers hand the system part to the bridge, which
+        delivers it as a real ``--system-prompt-file`` (replacing the Claude
+        Code identity). The ``[SYSTEM INSTRUCTIONS]`` convention remains
+        correct for Gemini/report-bridge paths, which have no system channel.
         """
         from src.gemini.gemini_client import GeminiClient
         prompt = GeminiClient._redact_base(None, prompt)
@@ -179,13 +193,7 @@ class ClaudeCliClient:
             prompt = GeminiClient._redact_aggressive(None, prompt)
             if system_prompt:
                 system_prompt = GeminiClient._redact_aggressive(None, system_prompt)
-
-        if system_prompt:
-            return (
-                f"[SYSTEM INSTRUCTIONS]\n{system_prompt}\n"
-                f"[END SYSTEM INSTRUCTIONS]\n\n{prompt}"
-            )
-        return prompt
+        return prompt, (system_prompt or "")
 
     def __del__(self):
         try:

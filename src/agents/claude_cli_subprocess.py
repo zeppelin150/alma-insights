@@ -30,10 +30,18 @@ class CliSubprocess:
     _STDERR_RING_LIMIT = 200
     _STDERR_RING_TRIM = 100
 
-    def __init__(self, cmd: list[str], env: dict, prompt: str) -> None:
+    def __init__(self, cmd: list[str], env: dict, prompt: str,
+                 cwd: str | None = None) -> None:
         self.cmd = cmd
         self.env = env
         self.prompt = prompt
+        # The claude CLI discovers CLAUDE.md files by walking UP from its cwd
+        # and injects them into the model context even under a custom
+        # --system-prompt-file (live-verified on 2.1.216: ~14.6K tokens of
+        # internal engineering directives per turn when cwd is the repo).
+        # Callers pass a NEUTRAL cwd to keep persona sessions clean; None
+        # inherits the parent's cwd (legacy behavior).
+        self.cwd = cwd
         self.proc: subprocess.Popen | None = None
         self.stderr_lines: list[str] = []
         self._stderr_thread: threading.Thread | None = None
@@ -52,6 +60,7 @@ class CliSubprocess:
             errors="replace",
             bufsize=1,
             env=self.env,
+            cwd=self.cwd,
             creationflags=(
                 subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
             ),

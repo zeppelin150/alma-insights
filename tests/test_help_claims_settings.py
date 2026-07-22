@@ -1232,7 +1232,10 @@ class TestAiProvider:
         from src.llm.claude_cli_client import ClaudeCliClient
         from src.gemini.gemini_client import GeminiClient
         client = ClaudeCliClient(pii_redaction=False)
-        out = client._prepare_prompt("write to bob.smith@example.com or 555-123-4567", "")
+        # _prepare_prompt returns (user_prompt, system_prompt) since the
+        # 2026-07-21 fix that moved the persona to a real --system-prompt-file.
+        out, _sys = client._prepare_prompt(
+            "write to bob.smith@example.com or 555-123-4567", "")
         assert "bob.smith@example.com" not in out and "[EMAIL]" in out
         assert "555-123-4567" not in out and "[PHONE]" in out
         # ...and the aggressive pass is what got disabled: it rewrites names.
