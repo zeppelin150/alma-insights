@@ -19,7 +19,11 @@ _CORE_IMPORTS = [
     "numpy",
     "yaml",
     "keyring",
-    "sentence_transformers",
+    # "sentence_transformers" removed 2026-07-22 — the embeddings stack is
+    # temporarily out of requirements while the product NLP lane is parked
+    # (enablement focus). The non-critical model check (checks/model.py)
+    # still surfaces "semantic search unavailable" as a warn. Re-add the
+    # string when the stack returns or a missing install will boot anyway.
     "sklearn",
     "scipy",
 ]

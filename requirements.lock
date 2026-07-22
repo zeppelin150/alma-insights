@@ -21,14 +21,12 @@
 PySide6-Essentials==6.8.1.1
 pandas==2.2.3
 scikit-learn==1.5.2
-nltk==3.9.1
 pyyaml==6.0.2
 numpy==1.26.4
 scipy==1.14.1
 vaderSentiment==3.3.2
-sentence-transformers==3.3.1
 hdbscan==0.8.40
-markdown==3.7
+markdown==3.8.1
 # python-pptx — enablement deck export. Transitive closure (lxml,
 # XlsxWriter, typing_extensions; Pillow already pulled) filled with hashes
 # by the M1 pip-compile run.
@@ -41,7 +39,7 @@ keyring==25.5.0
 # PyJWT[crypto] — pulls `cryptography` for RS256 (GitHub App auth path).
 # Critical for tests/test_github_app_auth.py; without the extra, CI fails
 # at 'from cryptography.hazmat.primitives import serialization'.
-PyJWT[crypto]==2.10.1
+PyJWT[crypto]==2.13.0
 # Google Drive — service-account + per-user OAuth (google-auth-oauthlib =
 # InstalledAppFlow/PKCE). Transitive closure (google-auth-httplib2, httplib2,
 # requests-oauthlib, oauthlib, googleapis-common-protos, …) is filled with
@@ -55,11 +53,9 @@ google-auth-oauthlib==1.2.1
 # target machine fills in --hash= lines that `pip install --require-hashes`
 # can verify. Until then, CI validates only the direct pins above.
 #
-# torch==2.4.1                        # pulled by sentence-transformers
-# transformers==4.46.3                # pulled by sentence-transformers
-# tokenizers==0.20.3
-# huggingface-hub==0.26.3
-# safetensors==0.4.5
+# torch/transformers/tokenizers/huggingface-hub/safetensors lines removed
+# 2026-07-22 with the sentence-transformers pin (NLP lane parked; see
+# requirements.txt for the re-add checklist).
 # filelock==3.16.1
 # joblib==1.4.2
 # threadpoolctl==3.5.0

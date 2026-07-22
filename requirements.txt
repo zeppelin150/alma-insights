@@ -15,14 +15,22 @@
 PySide6==6.8.1.1
 pandas==2.2.3
 scikit-learn==1.5.2
-nltk==3.9.1
+# nltk + sentence-transformers TEMPORARILY REMOVED (2026-07-22): the product
+# NLP lane is parked while focus is enablement, which provably never loads
+# them (ALMA_MCP_EXCLUDE_TOOLS=semantic_search; kb/help search are lexical by
+# owner decision). Removal cleared 25 Snyk findings incl. the only Critical
+# (nltk 3.9.1) and CVE-2026-4372 (transformers). Product-mode NLP degrades
+# without crashing (trending shows an error dialog; theta sentiment reads 0.0).
+# To re-add: restore the pins here + requirements.lock + build_release.py
+# PACKAGES + "sentence_transformers" in startup/checks/environment.py, and
+# re-enable the CPU-torch + model pre-download steps in build_release/CI —
+# the app runs HF-offline, so bundles MUST pre-download the model at build.
 pyyaml==6.0.2
 numpy==1.26.4
 scipy==1.14.1
 vaderSentiment==3.3.2
-sentence-transformers==3.3.1
 hdbscan==0.8.40
-markdown==3.7
+markdown==3.8.1
 # python-pptx — enablement PowerPoint tab generates real .pptx decks.
 # Pulls lxml + XlsxWriter (+ Pillow, already present) as transitives.
 python-pptx==1.0.2
@@ -33,7 +41,7 @@ pypdf==6.14.2
 keyring==25.5.0
 # PyJWT[crypto] pulls `cryptography` as a transitive dep — required for
 # RS256 signing in the optional GitHub App auth path (see github_app_auth.py).
-PyJWT[crypto]==2.10.1
+PyJWT[crypto]==2.13.0
 
 # Test-only — used by pytest.ini for the `--timeout=120` hard cap that
 # prevents Windows test-suite hangs (memory: zombie_processes.md). Safe in

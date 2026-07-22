@@ -60,18 +60,16 @@ PACKAGES = [
     "PySide6==6.8.1.1",   # full PySide6 — Addons carries QtWebEngine (Agent chat)
     "pandas==2.2.3",
     "scikit-learn==1.5.2",
-    "nltk==3.9.1",
     "pyyaml==6.0.2",
     "numpy==1.26.4",
     "scipy==1.14.1",
     "vaderSentiment==3.3.2",
-    "sentence-transformers==3.3.1",
     "hdbscan==0.8.40",
-    "markdown==3.7",
+    "markdown==3.8.1",
     "python-pptx==1.0.2",
     "pypdf==6.14.2",
     "keyring==25.5.0",
-    "PyJWT[crypto]==2.10.1",
+    "PyJWT[crypto]==2.13.0",
     "google-api-python-client==2.149.0",
     "google-auth==2.36.0",
     "google-auth-oauthlib==1.2.1",
@@ -854,20 +852,10 @@ def build_windows():
         site_packages = python_dir / "Lib" / "site-packages"
         site_packages.mkdir(parents=True, exist_ok=True)
 
-        # 4a. Install CPU-only PyTorch (avoids 2GB CUDA download)
-        log_step("Step 4a: Install CPU-only PyTorch")
-        torch_cmd = [
-            str(python_exe), "-m", "pip", "install",
-            "--no-warn-script-location",
-            "--disable-pip-version-check",
-            "--index-url", TORCH_CPU_INDEX,
-            "torch",
-        ]
-        result = run_cmd(torch_cmd, check=False)
-        if result.returncode == 0:
-            log("  CPU-only PyTorch installed")
-        else:
-            log("  [WARN] CPU-only torch install failed — sentence-transformers may pull CUDA version")
+        # 4a. (parked 2026-07-22) CPU-only PyTorch install removed with the
+        # sentence-transformers pin — the NLP lane is temporarily out of the
+        # bundle. When re-adding, restore the TORCH_CPU_INDEX install here
+        # BEFORE the requirements install or pip resolves the 2GB CUDA torch.
 
         # 4b. Install packages
         log_step("Step 4b: Install dependencies")
@@ -894,7 +882,10 @@ def build_windows():
                 log(f"  {result.stderr[:200]}")
 
         # 6. Pre-download sentence-transformers model
-        download_st_model(python_exe, staging)
+        # download_st_model(python_exe, staging)  # parked 2026-07-22 with the
+        # sentence-transformers removal. MUST be restored when the stack returns:
+        # the app runs HF-offline (main.py env_guard), so a bundle shipped without
+        # the pre-downloaded model can never self-fetch at runtime.
 
         # SBOM must run before cleanup — clean_python_dir() strips pip below,
         # and write_sbom() shells out to `python -m pip list`.
@@ -1005,7 +996,10 @@ def build_macos():
             log("  [WARN] PySide6 import check failed — build may still work")
 
         # 5. Pre-download sentence-transformers model
-        download_st_model(python_exe, staging)
+        # download_st_model(python_exe, staging)  # parked 2026-07-22 with the
+        # sentence-transformers removal. MUST be restored when the stack returns:
+        # the app runs HF-offline (main.py env_guard), so a bundle shipped without
+        # the pre-downloaded model can never self-fetch at runtime.
 
         # SBOM must run before cleanup — clean_python_dir() strips pip below,
         # and write_sbom() shells out to `python -m pip list`.

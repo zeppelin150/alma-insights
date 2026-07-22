@@ -17,6 +17,12 @@ from unittest.mock import MagicMock, patch, PropertyMock
 import numpy as np
 import pytest
 
+# nltk left requirements 2026-07-22 (product NLP lane parked for enablement
+# focus). These tests patch "nltk.sentiment.vader..." by string target, which
+# imports nltk before mocking — so without the package they ERROR, not skip.
+# importorskip turns that into a clean whole-file skip until the lane returns.
+pytest.importorskip("nltk")
+
 
 # ---------------------------------------------------------------------------
 #  Fixtures
