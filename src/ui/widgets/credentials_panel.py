@@ -54,6 +54,8 @@ class CredentialsPanel(QWidget):
         self._sections = tuple(sections)
         self._claude_acks = {k: False for k, _ in _CLAUDE_ACKS}
         self._oauth_worker = None
+        self._sa_probe_worker = None
+        self._sa_probed_once = False
         self.setStyleSheet(f"CredentialsPanel {{ background: {ALMA_CREAM}; }}")
         self._build()
         # The panel owns the OAuth worker so the flow works in BOTH Settings
@@ -332,6 +334,14 @@ class CredentialsPanel(QWidget):
         sarow.addWidget(sasave)
         v.addLayout(sarow)
 
+        # The service account's OWN status. Without this the only status text
+        # on the card is the OAuth line below, which reads as a failure on any
+        # build without a bundled GCP client — so a perfectly healthy service
+        # account looked broken. See DriveProbeWorker.
+        self._sa_status = self._status_label()
+        self._sa_status.setWordWrap(True)
+        v.addWidget(self._sa_status)
+
         v.addWidget(self._divider())
         oa_lbl = QLabel(
             "Or connect your own Google account (per-user). The authorization "
@@ -574,10 +584,88 @@ class CredentialsPanel(QWidget):
         drive = dict(cfg.get("drive") or {})
         drive["credentials_path"] = self._sa_path.text().strip()
         drive.setdefault("read_enabled", True)
-        drive.setdefault("auth_type", "service_account")
+        # Assign, do NOT setdefault: an operator who once connected via OAuth
+        # has auth_type='oauth_user' persisted, and setdefault would leave it
+        # there — DriveReader.is_configured() would then take the OAuth branch
+        # and report "not configured" for a service-account key that is fine.
+        drive["auth_type"] = "service_account"
         cfg["drive"] = drive
         set_section("enablement", cfg)
         self.settings_changed.emit({"drive_updated": True})
+        # Only when the card is on screen: the probe is a rendering affordance,
+        # and a headless caller (tests, a programmatic save) must not be left
+        # holding a live network QThread it never asked for.
+        if self.isVisible():
+            self._probe_sa()
+
+    # ── service-account probe (off-thread) ──────────────────────────
+
+    def showEvent(self, event):
+        """Probe when the card is actually SHOWN — never from __init__/refresh.
+
+        __init__ calls refresh(), so probing there starts a network QThread on
+        every construction. Tests construct this panel without a running event
+        loop and the still-live thread crashed the interpreter at teardown
+        (0xC0000409). The OAuth worker beside it has always been user-action
+        only for the same reason; this follows that pattern."""
+        super().showEvent(event)
+        if "external" in self._sections and not self._sa_probed_once:
+            self._sa_probed_once = True
+            self._probe_sa()
+
+    def _probe_sa(self):
+        """Kick the off-thread Drive probe and render its verdict. Single-flight."""
+        if getattr(self, "_sa_status", None) is None:
+            return
+        worker = getattr(self, "_sa_probe_worker", None)
+        if worker is not None:
+            try:
+                if worker.isRunning():
+                    return
+            except RuntimeError:
+                # PySide wrapper outliving its deleted C++ object. Belt to
+                # _on_sa_probe's braces: signal delivery order is not something
+                # to bet a native crash on, so never dereference a stale
+                # wrapper — just replace it.
+                self._sa_probe_worker = None
+        self._sa_status.setText("Checking…")
+        from src.ui.widgets.drive_probe_worker import DriveProbeWorker
+        # Parented so Qt owns it, and torn down on completion — a QThread that
+        # outlives the widget is a native-crash risk, not a leak.
+        self._sa_probe_worker = DriveProbeWorker(self)
+        self._sa_probe_worker.finished.connect(self._on_sa_probe)
+        self._sa_probe_worker.finished.connect(self._sa_probe_worker.deleteLater)
+        self._sa_probe_worker.start()
+
+    def _on_sa_probe(self, result: dict):
+        # Drop the reference BEFORE the queued deleteLater runs. Holding a
+        # Python wrapper around a deleted C++ QThread is what raised
+        # "Internal C++ object (DriveProbeWorker) already deleted" on the
+        # second probe; connection order puts this slot ahead of deleteLater.
+        self._sa_probe_worker = None
+        self._sa_status.setText(self._format_sa_status(result))
+
+    @staticmethod
+    def _format_sa_status(result: dict) -> str:
+        """Render the probe verdict. Pure + static so it is table-testable
+        without Qt, a network, or a key file."""
+        if not isinstance(result, dict):
+            return ""
+        account = str(result.get("account") or "")
+        if not result.get("ok"):
+            detail = str(result.get("detail") or "")
+            return f"Not connected — {detail}" if detail else ""
+        count = int(result.get("count") or 0)
+        if count == 0:
+            # The important case: authentication SUCCEEDED and the account can
+            # simply see nothing. Naming the address to share to is the whole
+            # point — a bare "0 files" reads as a broken key.
+            tail = f" Share a folder with {account} to give it access." if account else ""
+            return "Connected — service account · no files shared with it yet." + tail
+        shown = f"{count}+" if result.get("capped") else str(count)
+        noun = "file" if count == 1 and not result.get("capped") else "files"
+        tail = f" · {account}" if account else ""
+        return f"Connected — service account · {shown} {noun} visible{tail}"
 
     # ── Google OAuth flow (off-thread) ──────────────────────────────
 

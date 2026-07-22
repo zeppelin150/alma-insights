@@ -1,9 +1,12 @@
 """KBWorker — the main-process KB tick (WS2-M3, renn-calendar-kb-studio).
 
 STARTS UNCONDITIONALLY when the KB is enabled and checks
-``google_oauth.is_active()`` PER TICK (the pre-mortem blocker fix: OAuth is
-disable-on-launch, so a start-time gate can NEVER be true at monitor wiring —
-the DriveMonitor precedent). A tick where Google is disconnected marks
+``google_access.google_access_ready()`` PER TICK (the pre-mortem blocker fix:
+OAuth is disable-on-launch, so a start-time gate can NEVER be true at monitor
+wiring — the DriveMonitor precedent). That gate is auth_type-aware: the
+oauth_user path still waits for an explicit Reconnect each launch, while a
+service-account install counts as connected as soon as ``read_enabled`` and a
+credentials file are in place. A tick where Drive isn't reachable marks
 ``skipped`` and no-ops; the tick after the operator Reconnects picks the
 whole backlog up (bounded — queue coalescing + push limits).
 
@@ -38,13 +41,9 @@ def kb_enabled() -> bool:
 
 def tick_once(conn, *, reader=None, exporter=None, do_reconcile: bool = False) -> dict:
     """One KB maintenance pass (shared by the worker, tests, and manual scans)."""
-    from src.data import google_oauth
+    from src.data.google_access import google_access_ready
     from src.data.kb import drive_kb, sync
-    try:
-        active = google_oauth.is_active()
-    except Exception:  # noqa: BLE001 — subprocess guard etc.
-        active = False
-    if not active:
+    if not google_access_ready():
         root = drive_kb.ec_root_id(conn)
         if root:
             sync._mark_sync(conn, root, status="skipped: Google not connected")

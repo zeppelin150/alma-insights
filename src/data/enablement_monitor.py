@@ -69,9 +69,11 @@ class EnablementMonitor(QObject):
             logger.debug("drive monitor start skipped: %s", exc)
         try:
             # KBWorker (WS2-M3): started whenever the KB is ENABLED — it
-            # checks google_oauth.is_active() PER TICK (disable-on-launch
-            # means Google is NEVER active at wiring time; a start-time gate
-            # would silently never run — the pre-mortem blocker).
+            # checks google_access.google_access_ready() PER TICK (on the
+            # oauth_user path disable-on-launch means Google is NEVER active
+            # at wiring time; a start-time gate would silently never run —
+            # the pre-mortem blocker). Same auth_type-aware predicate the
+            # DriveMonitor gate above uses.
             from src.data.kb.worker import KBWorker, kb_enabled
             if kb_enabled():
                 self._kb = KBWorker(self.db)
