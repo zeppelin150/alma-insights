@@ -51,7 +51,10 @@ RENN_SYSTEM_PROMPT = (
     "what you would do:\n"
     "- Find content — LOCAL vs live Google Drive:\n"
     "    · search_local_documents — tokenized search of docs saved in Alma (incl. ones never on Drive).\n"
-    "    · search_google_drive — LIVE Google Drive search via the API for files not yet in Alma (e.g. a new product folder).\n"
+    "    · search_google_drive — LIVE Google Drive search via the API for files not yet in Alma. "
+    "Defaults to the operator's ACTIVE Drive folder(s), searched RECURSIVELY; pass scope='all' for "
+    "everything the account can see. The result's `scope` block states what was actually searched — "
+    "report that scope, never guess it.\n"
     "    · search_everywhere — both at once, labeled by source, when unsure where a doc lives.\n"
     "    · import_drive_doc — pull a Drive file (from search_google_drive) into the local library so it becomes searchable.\n"
     "    · query_business_drive / search_drive_docs / get_drive_doc — the local Drive mirror.\n"
@@ -337,6 +340,7 @@ class EnablementPage(QWidget):
         self.workbench.ai_edit_requested.connect(self._on_ai_edit)
         self.ai_edit_done.connect(self._on_ai_edit_done)
         self.settings.drive_folder_added.connect(self._add_drive_folder)
+        self.settings.drive_folder_picked.connect(self._on_drive_folder_picked)
         self.settings.style_guide_action.connect(self._on_style_guide_action)
         self.settings.style_guide_activate.connect(self._on_style_guide_activate)
         self.settings.style_guide_delete.connect(self._on_style_guide_delete)
@@ -386,6 +390,7 @@ class EnablementPage(QWidget):
             except Exception as exc:  # noqa: BLE001 — surface in the status line
                 self._set_status(f"Load error: {exc}")
         self._refresh_drive_folders()
+        self._refresh_active_drive_folder()
 
     def _header(self) -> QHBoxLayout:
         row = QHBoxLayout()
@@ -601,16 +606,21 @@ class EnablementPage(QWidget):
 
     def _web_reschedule_confirm(self, task, new_date) -> bool:
         """The layer-4 human gate for a web-calendar drag: a NATIVE QMessageBox
-        no page script can click. Defaults to No."""
+        no page script can click. Defaults to No. Built as an instance +
+        style_native_dialog so the page's selectorless cream background can't
+        blank the button labels (2026-07-22 fix)."""
         from PySide6.QtWidgets import QMessageBox
+        from src.ui.pages.enablement._common import style_native_dialog
         title = str(task.get("title") or "Task")
         if len(title) > 78:
             title = title[:77] + "…"
-        return QMessageBox.question(
-            self, "Move task",
-            f"Move “{title}” to {self._fmt_due(new_date)} ({new_date})?",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
-        ) == QMessageBox.Yes
+        box = QMessageBox(self)
+        box.setWindowTitle("Move task")
+        box.setText(f"Move “{title}” to {self._fmt_due(new_date)} ({new_date})?")
+        box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        box.setDefaultButton(QMessageBox.No)
+        style_native_dialog(box)
+        return box.exec() == QMessageBox.Yes
 
     def _get_web_chat_bridge(self):
         """One ChatBridge over THIS page's enablement ChatEngine, published as
@@ -761,8 +771,12 @@ class EnablementPage(QWidget):
 
     def _web_workbench_publish_confirm(self, dest_key: str, title: str) -> bool:
         """The layer-4 human gate for a web-workbench publish: a NATIVE
-        QMessageBox no page script can click. Defaults to No."""
+        QMessageBox no page script can click. Defaults to No. Styled via
+        style_native_dialog so the page background can't blank the buttons
+        (2026-07-22 fix) — a publish gate the operator can't read is worse than
+        a reschedule one."""
         from PySide6.QtWidgets import QMessageBox
+        from src.ui.pages.enablement._common import style_native_dialog
         what = {
             "guru_new": "publish this draft as a NEW Guru card",
             "drive_new": "save this draft as a new Google Doc",
@@ -772,11 +786,13 @@ class EnablementPage(QWidget):
             what = f"update Guru card “{dest_key.split(':', 1)[1]}” from this draft"
         if len(title) > 60:
             title = title[:59] + "…"
-        return QMessageBox.question(
-            self, "Confirm publish",
-            f"“{title}” — {what}?",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
-        ) == QMessageBox.Yes
+        box = QMessageBox(self)
+        box.setWindowTitle("Confirm publish")
+        box.setText(f"“{title}” — {what}?")
+        box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        box.setDefaultButton(QMessageBox.No)
+        style_native_dialog(box)
+        return box.exec() == QMessageBox.Yes
 
     def _web_publish_content_lookup(self, draft_id):
         """The draft's current stored body — the exact bytes store.publish_draft
@@ -1411,6 +1427,35 @@ class EnablementPage(QWidget):
             self._set_status(f"Watching Drive folder “{name}”.")
         except Exception as exc:  # noqa: BLE001
             self._set_status(f"Couldn't add folder: {exc}")
+
+    def _on_drive_folder_picked(self, folder_id: str, name: str, drive_id: str):
+        """Persist a native-picker pick through the SAME impl the chat resolve
+        path uses (``enablement.drive.active_folders`` — settings is the source
+        of truth), so the model path and the button path converge on one state.
+        The impl ignores its conn arg (settings-only write) — None is honest."""
+        try:
+            from src.data.chat_tools.enablement_tools import _set_drive_folder_impl
+            res = _set_drive_folder_impl(None, folder_id, name or None,
+                                         drive_id or None)
+        except Exception as exc:  # noqa: BLE001
+            self._set_status(f"Couldn't save the folder pick: {exc}")
+            return
+        if res.get("ok"):
+            self._set_status(f"Renn's active Drive folder is now “{name or folder_id}”.")
+        else:
+            self._set_status(f"Couldn't save the folder pick: {res.get('error')}")
+        self._refresh_active_drive_folder()
+
+    def _refresh_active_drive_folder(self):
+        """Feed the settings card the current active_folders so the pick (or a
+        chat-side pick) is visible without a restart."""
+        try:
+            from src.data.settings_manager import get_section
+            drive = (get_section("enablement", {}) or {}).get("drive") or {}
+            self.settings.set_active_drive_folders(
+                list(drive.get("active_folders") or []))
+        except Exception:  # noqa: BLE001
+            pass
 
     def _refresh_drive_folders(self):
         # don't force-create the demo DB just to list folders

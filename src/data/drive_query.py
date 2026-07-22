@@ -48,13 +48,15 @@ def query_business_drive(
     *,
     limit: int = 20,
     live_client=None,
-    folder_id: str | None = None,
+    folder_id: str | list[str] | None = None,
 ) -> dict:
     """Search the business Drive for documents matching `query`.
 
     Prefers the live Drive client when one is supplied; otherwise searches the
     locally-indexed mirror. ``folder_id`` (live path only) scopes the search to
-    one Drive folder's direct children.
+    the WHOLE subtree under one Drive folder — or a list of root folders (the
+    active_folders union). Forwarded opaquely to the live client, which owns
+    the recursive tree walk (DriveReader.search_files).
     """
     if live_client is not None:
         try:
@@ -62,8 +64,13 @@ def query_business_drive(
             if folder_id:
                 kwargs["folder_id"] = folder_id
             results = live_client.search_files(query, **kwargs)
+            # Whether the scoped subtree enumeration was capped (drive_reader
+            # sets this per search) — carried up so the tool's scope block can
+            # be honest instead of always claiming full recursion.
+            truncated = bool(getattr(live_client, "_last_scope_truncated", False))
             return {"mode": "live", "configured": True,
-                    "results": list(results), "count": len(results)}
+                    "results": list(results), "count": len(results),
+                    "scope_truncated": truncated}
         except Exception as exc:  # noqa: BLE001 — surface as a failed query
             return {"mode": "live", "configured": True, "error": str(exc), "results": []}
 

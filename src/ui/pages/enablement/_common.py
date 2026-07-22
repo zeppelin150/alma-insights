@@ -7,11 +7,48 @@ from PySide6.QtWidgets import QFrame, QLabel, QSizePolicy
 
 from src.ui.theme import (
     ALMA_ACCENT_TEAL, ALMA_BG_ELEVATED, ALMA_BORDER, ALMA_BORDER_LIGHT,
-    ALMA_ERROR, ALMA_GREEN_LIGHT, ALMA_INFO, ALMA_SUCCESS, ALMA_TEXT_DARK,
-    ALMA_TEXT_LIGHT, ALMA_TEXT_MID, ALMA_WARNING,
+    ALMA_ERROR, ALMA_GREEN_DARK, ALMA_GREEN_LIGHT, ALMA_INFO, ALMA_SUCCESS,
+    ALMA_TEXT_DARK, ALMA_TEXT_LIGHT, ALMA_TEXT_MID, ALMA_TEXT_ON_DARK,
+    ALMA_WHITE, ALMA_WARNING,
 )
 
 _TEAL = ALMA_ACCENT_TEAL
+
+
+def native_dialog_button_qss() -> str:
+    """Button chrome for a NATIVE QMessageBox/QDialog, set on the DIALOG itself.
+
+    The Enablement pages set a selectorless ``background: <cream>`` stylesheet,
+    which Qt cascades to every descendant — including the buttons of a native
+    dialog parented to the page. That overrides the app QSS's green button fill
+    while the app QSS's white text survives: white-on-cream = invisible button
+    labels (the 2026-07-22 web-calendar "Move task" confirm rendered blank).
+
+    A rule on an ANCESTOR loses to the page's own selectorless background by
+    proximity (measured), so the corrective has to be set ON THE DIALOG. Apply
+    via ``style_native_dialog(box)`` or feed this string to a QDialog's
+    setStyleSheet. Styles BOTH the default (question/OK) and flat (Cancel)
+    buttons so every label is legible.
+    """
+    return (
+        f"QPushButton {{"
+        f" background:{ALMA_GREEN_DARK}; color:{ALMA_TEXT_ON_DARK};"
+        f" border:none; border-radius:8px; padding:8px 18px;"
+        f" font-size:12.5px; font-weight:600; min-width:72px; }}"
+        f"QPushButton:hover {{ background:{ALMA_GREEN_LIGHT}; }}"
+        f"QPushButton:default {{ background:{ALMA_GREEN_DARK}; }}"
+    )
+
+
+def style_native_dialog(dialog):
+    """Apply :func:`native_dialog_button_qss` to a native dialog and return it.
+
+    Sets a cream dialog background + legible buttons in one shot, so a native
+    QMessageBox/QDialog under an Enablement page never renders blank buttons.
+    """
+    dialog.setStyleSheet(f"QDialog, QMessageBox {{ background:{ALMA_WHITE}; }}"
+                         + native_dialog_button_qss())
+    return dialog
 
 # kind → (tint background, text colour)
 TINT = {

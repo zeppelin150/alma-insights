@@ -40,6 +40,14 @@ def handle_search_google_drive(conn, args: dict, filters: dict) -> dict:
     surfaces documents that are in Drive but not yet stored in Alma (e.g. a new
     product folder). Returns file names, links, ids, and modified dates; use
     import_drive_doc to pull one into the local library.
+
+    SCOPE (2026-07-22): defaults to the operator's active Drive folder(s)
+    (``enablement.drive.active_folders``), searched RECURSIVELY — so the folder
+    the operator picked in the picker and the folder this tool searches are the
+    same thing. An explicit ``folder_id`` overrides; ``scope="all"`` searches
+    everything the account can see. The result carries a ``scope`` block naming
+    what was ACTUALLY searched — relay it honestly instead of guessing (the
+    model previously narrated "scoped to the folder" for whole-Drive searches).
     """
     from src.data.drive_query import build_live_drive_client, query_business_drive
     client = build_live_drive_client()
@@ -49,11 +57,44 @@ def handle_search_google_drive(conn, args: dict, filters: dict) -> dict:
                             "service-account credential and enable Drive read in "
                             "Settings, or use search_local_documents for docs "
                             "already saved in Alma.")}
+    explicit = str(args.get("folder_id") or "").strip() or None
+    scope_arg = str(args.get("scope") or "").strip().lower()
+    if explicit:
+        folder_scope: object = explicit
+        scope = {"kind": "explicit_folder", "folder_ids": [explicit],
+                 "recursive": True}
+    elif scope_arg == "all":
+        folder_scope = None
+        scope = {"kind": "all_visible", "folder_ids": [], "recursive": False}
+    else:
+        from src.data.settings_manager import get_section
+        drive = (get_section("enablement", {}) or {}).get("drive") or {}
+        ids = [nf["id"] for nf in
+               (_normalize_folder_entry(f)
+                for f in (drive.get("active_folders") or [])) if nf]
+        if ids:
+            folder_scope = ids
+            scope = {"kind": "active_folders", "folder_ids": ids,
+                     "recursive": True}
+        else:
+            folder_scope = None
+            scope = {"kind": "all_visible", "folder_ids": [],
+                     "recursive": False,
+                     "note": "no active Drive folder set — searched everything "
+                             "the account can see"}
     out = query_business_drive(conn, args.get("query", ""),
                                limit=int(args.get("limit", 10)),
                                live_client=client,
-                               folder_id=(args.get("folder_id") or None))
-    return {"ok": "error" not in out, **out}
+                               folder_id=folder_scope)
+    # HONEST scope: if the subtree enumeration was capped, the search did NOT
+    # cover the whole tree — say so instead of claiming recursive:True blindly
+    # (the anti-confabulation contract this tool exists to uphold).
+    if out.get("scope_truncated") and scope.get("recursive"):
+        scope = {**scope, "truncated": True,
+                 "note": ("scope was capped — some deeply-nested folders were "
+                          "NOT searched; narrow with an explicit folder_id or "
+                          "treat a 0-result as inconclusive, not empty")}
+    return {"ok": "error" not in out, "scope": scope, **out}
 
 
 def handle_import_drive_doc(conn, args: dict, filters: dict) -> dict:
@@ -344,14 +385,36 @@ def handle_request_drive_picker(conn, args, session_filters) -> str:
     return _request_drive_picker_impl(conn, _active_session_id())
 
 
+def _normalize_folder_entry(f) -> dict | None:
+    """One ``active_folders`` entry → the canonical ``{id, name, drive_id}``
+    dict, or ``None`` for empties.
+
+    Entries come in TWO shapes: dicts written by the picker paths, and legacy
+    plain-string ids (hand-wired configs). The FIRST live picker resolve ever
+    attempted (2026-07-22) crashed on a legacy string — ``.get`` on a str —
+    which silently failed the pick and left the action request unresolved, so
+    every reader/writer of the list must go through this."""
+    if isinstance(f, dict):
+        if not str(f.get("id") or "").strip():
+            return None
+        return {"id": str(f["id"]).strip(),
+                "name": f.get("name") or None,
+                "drive_id": f.get("drive_id") or None}
+    s = str(f or "").strip()
+    return {"id": s, "name": None, "drive_id": None} if s else None
+
+
 def _set_drive_folder_impl(conn, folder_id, folder_name=None, drive_id=None) -> dict:
     """Persist an active Drive folder into ``enablement.drive.active_folders``.
 
     Append-or-replace by id in the list of ``{id, name, drive_id}`` (a re-pick of
-    the same id updates its name/drive_id in place). ``set_section`` writes the
-    whole section atomically (temp-file rename, no DB transaction) — invariant 11.
-    This is the single source of truth for the chosen folder, written BEFORE Renn
-    is notified on the resolve path (invariant 7).
+    the same id updates its name/drive_id in place). Existing entries are
+    normalized via ``_normalize_folder_entry`` — legacy string entries are
+    tolerated AND rewritten to the dict shape, so one successful pick heals a
+    mixed-shape config. ``set_section`` writes the whole section atomically
+    (temp-file rename, no DB transaction) — invariant 11. This is the single
+    source of truth for the chosen folder, written BEFORE Renn is notified on
+    the resolve path (invariant 7).
     """
     from src.data.settings_manager import get_section, set_section
     fid = str(folder_id or "").strip()
@@ -363,7 +426,8 @@ def _set_drive_folder_impl(conn, folder_id, folder_name=None, drive_id=None) -> 
     entry = {"id": fid,
              "name": (folder_name or None),
              "drive_id": (drive_id or None)}
-    folders = [f for f in folders if (f or {}).get("id") != fid]
+    folders = [nf for nf in (_normalize_folder_entry(f) for f in folders)
+               if nf is not None and nf["id"] != fid]
     folders.append(entry)
     drive["active_folders"] = folders
     en["drive"] = drive
@@ -765,10 +829,12 @@ def _get_enablement_routing_impl(conn) -> dict:
     asana = en.get("asana") or {}
     guru = en.get("guru") or {}
 
-    # Drive — IDS ONLY (invariant 13: never echo a folder NAME here).
+    # Drive — IDS ONLY (invariant 13: never echo a folder NAME here). Both
+    # entry shapes count: skipping legacy string entries made this report
+    # "0 active folders" to the operator while one was configured (2026-07-22).
     folders = drive.get("active_folders") or []
-    folder_ids = [f.get("id") for f in folders
-                  if isinstance(f, dict) and f.get("id")]
+    folder_ids = [nf["id"] for nf in
+                  (_normalize_folder_entry(f) for f in folders) if nf]
 
     board = asana.get("active_board") or {}
 

@@ -22,10 +22,14 @@ class DriveListWorker(QThread):
     """Off-thread Drive folder lister for the M3 picker (the GoogleOAuthWorker
     pattern). DriveReader's HTTP calls block, so they MUST NOT run inside the
     QWebChannel slot (that freezes the Qt event loop per tree expand — invariant
-    6). This worker runs ``list_drives()`` for the roots (empty/``root`` parent)
-    or ``list_folders(parent_id)`` for a node's children, then emits id+name+
-    driveId rows on ``finished`` (queued to the main thread). No file bodies ever
-    cross — only folder rows for lazy-tree navigation.
+    6). This worker runs ``list_picker_roots()`` for the roots (empty/``root``
+    parent) — auth-aware: Shared Drives PLUS shared-with-me folders, the only
+    roots a service account actually has — or ``list_folders(parent_id)`` for a
+    node's children, then emits id+name+driveId(+shared) rows on ``finished``
+    (queued to the main thread). No file bodies ever cross — only folder rows
+    for lazy-tree navigation. Shared by the in-chat React picker AND the native
+    ``DriveFolderPickerDialog`` (the model-independent entry point), so both
+    trees always agree.
     """
 
     finished = Signal(str, str, list)   # (request_id, parent_id, folders)
@@ -44,9 +48,10 @@ class DriveListWorker(QThread):
             if pid and pid.lower() != "root":
                 rows = reader.list_folders(pid)
             else:
-                rows = reader.list_drives()
+                rows = reader.list_picker_roots()
             folders = [{"id": r.get("id"), "name": r.get("name"),
-                        "driveId": r.get("drive_id") or r.get("driveId")}
+                        "driveId": r.get("drive_id") or r.get("driveId"),
+                        "shared": bool(r.get("shared"))}
                        for r in (rows or [])]
             self.finished.emit(self._request_id, self._parent_id, folders)
         except Exception as exc:  # noqa: BLE001 — surface a short, non-PHI message
@@ -659,13 +664,16 @@ class AgentChatController(QObject):
                                       "error": "drive_list_failed"})
 
     def _google_is_active(self) -> bool:
-        """Whether Drive read is active this session (disable-on-launch gate).
+        """Whether Drive read can run right now (the disable-on-launch gate).
 
-        Reads ``google_oauth.is_active()`` WITHOUT building a Drive service or
-        loading credentials — a cheap session-state check, no Google HTTP."""
+        auth_type-aware: on ``oauth_user`` this is still the per-session
+        reconnect flag, but a service-account install is reachable without any
+        Reconnect — gating it on ``google_oauth.is_active()`` alone left the
+        picker permanently answering ``needs_connect``. Cheap: no Drive service
+        is built and no credentials are loaded, so no Google HTTP."""
         try:
-            from src.data import google_oauth
-            return bool(google_oauth.is_active())
+            from src.data.google_access import google_access_ready
+            return google_access_ready()
         except Exception:  # noqa: BLE001 — treat any failure as "not active"
             return False
 
@@ -732,6 +740,10 @@ class AgentChatController(QObject):
             persisted = _set_drive_folder_impl(conn, fid, folder_name or None,
                                                drive_id or None)
             if not persisted.get("ok"):
+                # React surfaces resolve failures weakly — log so a silent
+                # "Use this did nothing" leaves forensics (2026-07-22 incident).
+                logger.warning("resolve_drive_folder: persist failed: %s",
+                               persisted.get("error"))
                 return {"ok": False,
                         "error": persisted.get("error", "persist_failed")}
             # (c) only now mark resolved — single-winner dedupe + closes the gate,
@@ -739,6 +751,7 @@ class AgentChatController(QObject):
             if not mark_resolved(conn, rid):
                 return {"ok": False, "error": "already_resolved"}
         except Exception as exc:  # noqa: BLE001
+            logger.warning("resolve_drive_folder failed: %s", exc)
             return {"ok": False, "error": str(exc)}
         finally:
             conn.close()

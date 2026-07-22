@@ -517,8 +517,12 @@ TOOL_SCHEMAS = [
             "Search the user's LIVE Google Drive via the API for files matching a "
             "query. Finds documents in Drive that may not be in Alma yet (e.g. a "
             "new folder Product just created). Does NOT sync — returns file names, "
-            "links, ids, and modified dates. Optional folder_id scopes to one "
-            "folder's direct children. Follow up with import_drive_doc to pull a "
+            "links, ids, and modified dates. DEFAULT SCOPE: the operator's active "
+            "Drive folder(s), searched RECURSIVELY (whole subtree). Pass "
+            "scope='all' to search everything the account can see, or folder_id "
+            "to scope to one specific folder's subtree. The result's `scope` "
+            "block states what was actually searched — report that scope to the "
+            "operator, never guess it. Follow up with import_drive_doc to pull a "
             "result into Alma. Use search_local_documents for docs already in Alma."
         ),
         "inputSchema": {
@@ -526,7 +530,8 @@ TOOL_SCHEMAS = [
             "properties": {
                 "query": {"type": "string", "description": "What to look for in Google Drive."},
                 "limit": {"type": "integer", "description": "Max results (default 10)."},
-                "folder_id": {"type": "string", "description": "Optional Drive folder id to scope to its direct children."},
+                "folder_id": {"type": "string", "description": "Optional Drive folder id: scope the search to that folder's whole subtree (recursive)."},
+                "scope": {"type": "string", "enum": ["active", "all"], "description": "'active' (default): the operator's active Drive folder(s), recursive. 'all': everything the account can see."},
             },
             "required": ["query"],
         },

@@ -36,8 +36,28 @@ class _FakeReader:
 
 
 # ── search_google_drive (live) ───────────────────────────────────────
+#
+# Since 2026-07-22 the handler AUTO-SCOPES to enablement.drive.active_folders
+# (recursive) unless the model passes folder_id or scope='all' — so these
+# tests pin settings via temp_settings instead of letting the handler read the
+# operator's real config. The result's `scope` block must always state what
+# was ACTUALLY searched (the anti-confabulation contract).
 
-def test_search_google_drive_returns_live_results(empty_db, monkeypatch):
+
+@pytest.fixture()
+def temp_settings(tmp_path, monkeypatch):
+    import src.data.settings_manager as sm
+    path = tmp_path / "settings.yaml"
+    monkeypatch.setattr(sm, "get_settings_path", lambda: path)
+    return path
+
+
+def _set_active_folders(folders):
+    from src.data.settings_manager import set_section
+    set_section("enablement", {"drive": {"active_folders": folders}})
+
+
+def test_search_google_drive_returns_live_results(empty_db, temp_settings, monkeypatch):
     fake = _FakeReader([{"id": "f1", "name": "Deck.pptx", "url": "u",
                          "mime_type": "m", "modified": "2026-07-01"}])
     monkeypatch.setattr(_BLDR, lambda: fake)
@@ -47,11 +67,51 @@ def test_search_google_drive_returns_live_results(empty_db, monkeypatch):
     assert fake.calls[0]["query"] == "pricing" and fake.calls[0]["limit"] == 5
 
 
-def test_search_google_drive_passes_folder_scope(empty_db, monkeypatch):
+def test_search_google_drive_defaults_to_active_folders_recursively(
+        empty_db, temp_settings, monkeypatch):
+    """The 2026-07-22 finding: the picker set an active folder but searches ran
+    whole-Drive (and the model narrated them as scoped). Default scope is now
+    the active folder(s) — including LEGACY plain-string entries."""
     fake = _FakeReader([])
     monkeypatch.setattr(_BLDR, lambda: fake)
-    ET.handle_search_google_drive(empty_db.conn, {"query": "q", "folder_id": "FOLDER-9"}, {})
+    _set_active_folders(["LEGACY-WRAPPER", {"id": "TOP", "name": "top"}])
+    out = ET.handle_search_google_drive(empty_db.conn, {"query": "q"}, {})
+    assert fake.calls[0]["folder_id"] == ["LEGACY-WRAPPER", "TOP"]
+    assert out["scope"] == {"kind": "active_folders",
+                            "folder_ids": ["LEGACY-WRAPPER", "TOP"],
+                            "recursive": True}
+
+
+def test_search_google_drive_explicit_folder_wins(empty_db, temp_settings, monkeypatch):
+    fake = _FakeReader([])
+    monkeypatch.setattr(_BLDR, lambda: fake)
+    _set_active_folders([{"id": "ACTIVE-1"}])
+    out = ET.handle_search_google_drive(
+        empty_db.conn, {"query": "q", "folder_id": "FOLDER-9"}, {})
     assert fake.calls[0]["folder_id"] == "FOLDER-9"
+    assert out["scope"]["kind"] == "explicit_folder"
+    assert out["scope"]["folder_ids"] == ["FOLDER-9"]
+
+
+def test_search_google_drive_scope_all_bypasses_active_folders(
+        empty_db, temp_settings, monkeypatch):
+    fake = _FakeReader([])
+    monkeypatch.setattr(_BLDR, lambda: fake)
+    _set_active_folders([{"id": "ACTIVE-1"}])
+    out = ET.handle_search_google_drive(
+        empty_db.conn, {"query": "q", "scope": "all"}, {})
+    assert fake.calls[0]["folder_id"] is None
+    assert out["scope"]["kind"] == "all_visible"
+
+
+def test_search_google_drive_no_active_folders_searches_all_and_says_so(
+        empty_db, temp_settings, monkeypatch):
+    fake = _FakeReader([])
+    monkeypatch.setattr(_BLDR, lambda: fake)
+    out = ET.handle_search_google_drive(empty_db.conn, {"query": "q"}, {})
+    assert fake.calls[0]["folder_id"] is None
+    assert out["scope"]["kind"] == "all_visible"
+    assert "no active Drive folder" in out["scope"].get("note", "")
 
 
 def test_search_google_drive_not_configured(empty_db, monkeypatch):

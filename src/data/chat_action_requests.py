@@ -135,6 +135,19 @@ def create_action_request(conn, session_id: str, type: str, payload=None) -> str
         raise ValueError("use create_confirm_write for confirm_write rows")
     clean = _validate_payload(payload)
     request_id = uuid.uuid4().hex
+    # SUPERSEDE (2026-07-22 field incident): a new picker/connect request
+    # replaces any older UNRESOLVED request of the same type in this session —
+    # only the newest instance has live UI, so a stale row can never be
+    # resolved by anyone, and has_pending_action (resolved=0, no expiry) would
+    # otherwise keep the human-gate closed for the rest of the session (the
+    # research_plan gate-brick class, reached via a failed/abandoned pick).
+    # confirm_write rows NEVER pass through here (rejected above), so a
+    # pending Confirm card can never be silently resolved by this.
+    conn.execute(
+        "UPDATE chat_action_requests SET resolved=1 "
+        "WHERE session_id=? AND type=? AND resolved=0",
+        (session_id, type),
+    )
     conn.execute(
         """INSERT INTO chat_action_requests
            (session_id, request_id, type, payload_json, consumed, created_at)

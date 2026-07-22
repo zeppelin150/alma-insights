@@ -140,14 +140,194 @@ def test_search_files_no_folder_scope_by_default():
 
 
 def test_search_files_optional_folder_scope():
-    """A folder_id adds a direct-children `<id> in parents` clause so a search
-    can be scoped to one Drive folder (e.g. a new product folder)."""
+    """A folder_id scopes the search via `in parents`. With no subfolders under
+    the root (this mock returns none), the search q carries the single familiar
+    `<id> in parents` clause — the recursion machinery only widens it when the
+    tree walk actually finds children (see TestRecursiveFolderScope)."""
     reader, svc = _reader_with_mock_service()
     reader.search_files("anything", folder_id="FOLDER-42")
     cl = _clauses(_list_kwargs(svc)["q"])
     assert "'FOLDER-42' in parents" in cl
     assert "fullText contains 'anything'" in cl
     assert "trashed = false" in cl
+
+
+# ── recursive folder scope (2026-07-22) ────────────────────────────────────
+#
+# Drive's `in parents` is not recursive; the old scoped search returned 0 for
+# every query against a corpus whose documents live in nested subfolders (the
+# field trap: the operator picked the top folder, docs sat 4-5 levels down).
+# search_files now enumerates the subtree first (list_subtree_folder_ids —
+# level-by-level BFS with chunked parent-OR queries + a short TTL cache) and
+# searches across the whole tree.
+
+
+class _TreeService:
+    """A fake Drive service backed by a folder tree + file rows.
+
+    Folder-enumeration queries (mimeType folder) answer from ``tree``
+    (parent id -> child folder ids); search queries return ``files`` rows
+    whose 'parent' is in the q's parent set.
+    """
+
+    def __init__(self, tree, files):
+        self.tree = tree
+        self.file_rows = files
+        self.enum_queries: list[str] = []
+        self.search_queries: list[str] = []
+
+    def files(self):
+        return self
+
+    def list(self, **kwargs):
+        q = kwargs.get("q", "")
+        svc = self
+
+        class _Req:
+            def execute(self):
+                import re
+                parents = re.findall(r"'([^']+)' in parents", q)
+                if "mimeType = 'application/vnd.google-apps.folder'" in q:
+                    svc.enum_queries.append(q)
+                    kids = [k for p in parents for k in svc.tree.get(p, [])]
+                    return {"files": [{"id": k} for k in kids]}
+                svc.search_queries.append(q)
+                rows = [f for f in svc.file_rows
+                        if not parents or f.get("parent") in parents]
+                return {"files": [{"id": f["id"], "name": f["name"]}
+                                  for f in rows]}
+        return _Req()
+
+
+@pytest.fixture(autouse=True)
+def _clear_subtree_cache():
+    """The subtree memo is module-level state — never let one test's tree leak
+    into another's."""
+    from src.data import drive_reader as dr
+    dr._SUBTREE_CACHE.clear()
+    yield
+    dr._SUBTREE_CACHE.clear()
+
+
+def _tree_reader(tree, files):
+    reader = DriveReader("creds.json")
+    reader._service = _TreeService(tree, files)
+    return reader, reader._service
+
+
+class TestRecursiveFolderScope:
+    def test_scoped_search_reaches_nested_subfolders(self):
+        """The field trap: TOP's only child is a wrapper; docs live below it.
+        The old direct-children scope returned 0 here."""
+        tree = {"TOP": ["WRAP"], "WRAP": ["A", "B"], "A": ["A1"]}
+        files = [{"id": "d1", "name": "deep doc", "parent": "A1"},
+                 {"id": "d2", "name": "mid doc", "parent": "B"}]
+        reader, svc = _tree_reader(tree, files)
+        out = reader.search_files("anything", folder_id="TOP")
+        assert {f["id"] for f in out} == {"d1", "d2"}
+        searched = " ".join(svc.search_queries)
+        for fid in ("TOP", "WRAP", "A", "B", "A1"):
+            assert f"'{fid}' in parents" in searched
+
+    def test_wide_trees_chunk_into_multiple_or_groups(self):
+        from src.data.drive_reader import _PARENTS_PER_QUERY
+        kids = [f"K{i}" for i in range(_PARENTS_PER_QUERY + 5)]
+        reader, svc = _tree_reader({"TOP": kids}, [])
+        reader.search_files("x", folder_id="TOP")
+        assert len(svc.search_queries) == 2   # 21 folders -> 15 + 6
+
+    def test_duplicate_hits_across_chunks_are_deduped(self):
+        from src.data.drive_reader import _PARENTS_PER_QUERY
+        kids = [f"K{i}" for i in range(_PARENTS_PER_QUERY + 1)]
+        # the same file id matches in both chunks (multi-parent file)
+        files = [{"id": "dup", "name": "n", "parent": "TOP"},
+                 {"id": "dup", "name": "n", "parent": kids[-1]}]
+        reader, svc = _tree_reader({"TOP": kids}, files)
+        out = reader.search_files("x", folder_id="TOP")
+        assert [f["id"] for f in out] == ["dup"]
+
+    def test_multi_root_scope_unions_the_trees(self):
+        tree = {"R1": ["C1"], "R2": []}
+        files = [{"id": "a", "name": "n", "parent": "C1"},
+                 {"id": "b", "name": "n", "parent": "R2"}]
+        reader, svc = _tree_reader(tree, files)
+        out = reader.search_files("x", folder_id=["R1", "R2"])
+        assert {f["id"] for f in out} == {"a", "b"}
+
+    def test_subtree_enumeration_is_cached_within_the_ttl(self):
+        tree = {"TOP": ["A"], "A": []}
+        reader, svc = _tree_reader(tree, [])
+        reader.search_files("first", folder_id="TOP")
+        first_enum = len(svc.enum_queries)
+        reader.search_files("second", folder_id="TOP")
+        assert len(svc.enum_queries) == first_enum, (
+            "the second search within the TTL must reuse the memoized subtree")
+        assert len(svc.search_queries) == 2
+
+    def test_search_files_sets_last_scope_truncated(self):
+        reader, svc = _tree_reader({"TOP": ["A"], "A": []}, [])
+        reader.search_files("x", folder_id="TOP")
+        assert reader._last_scope_truncated is False
+
+    def test_max_folders_cap_bounds_the_walk_and_flags_truncation(self):
+        # a 2-level bushy tree far over the cap
+        kids = [f"K{i}" for i in range(40)]
+        tree = {"TOP": kids}
+        tree.update({k: [f"{k}-{j}" for j in range(10)] for k in kids})
+        reader, svc = _tree_reader(tree, [])
+        ids, truncated = reader.list_subtree_folder_ids("TOP", max_folders=25)
+        assert len(ids) <= 25
+        assert ids[0] == "TOP"
+        assert truncated is True
+
+    def test_exact_boundary_truncation_is_flagged(self):
+        """The exact-cap-at-a-level-boundary case the old mid-level-only flag
+        missed: TOP->[A,B] with cap 3 fills seen to exactly 3 (TOP,A,B) but A's
+        child C is never expanded — must report truncated."""
+        reader, svc = _tree_reader({"TOP": ["A", "B"], "A": ["C"]}, [])
+        ids, truncated = reader.list_subtree_folder_ids("TOP", max_folders=3)
+        assert ids == ["TOP", "A", "B"]
+        assert truncated is True
+
+    def test_untruncated_walk_reports_false(self):
+        reader, svc = _tree_reader({"TOP": ["A"], "A": []}, [])
+        ids, truncated = reader.list_subtree_folder_ids("TOP")
+        assert set(ids) == {"TOP", "A"} and truncated is False
+
+    def test_cache_key_includes_caps(self):
+        """A tighter-capped walk must not poison a later default-capped call
+        within the TTL (the caps are part of the cache key)."""
+        kids = [f"K{i}" for i in range(20)]
+        reader, svc = _tree_reader({"TOP": kids}, [])
+        small, t1 = reader.list_subtree_folder_ids("TOP", max_folders=5)
+        big, t2 = reader.list_subtree_folder_ids("TOP", max_folders=250)
+        assert len(small) == 5 and t1 is True
+        assert len(big) == 21 and t2 is False   # TOP + 20
+
+    def test_deep_chunk_is_queried_even_when_shallow_fills_the_limit(self):
+        """THE major review finding: with shallow folders full of matches and a
+        small limit, the deepest chunk must STILL be queried (old code returned
+        at the limit before ever sending the deep chunk's query)."""
+        from src.data.drive_reader import _PARENTS_PER_QUERY
+        # 2 chunks: 15 shallow folders + 1 deep folder holding the needle.
+        shallow = [f"S{i}" for i in range(_PARENTS_PER_QUERY)]
+        tree = {"TOP": shallow + ["DEEP"]}
+        # every shallow folder has a matching doc; the needle is only in DEEP.
+        files = [{"id": f"s{i}", "name": "match", "parent": shallow[i]}
+                 for i in range(_PARENTS_PER_QUERY)]
+        files.append({"id": "needle", "name": "match", "parent": "DEEP"})
+        reader, svc = _tree_reader(tree, files)
+        out = reader.search_files("match", limit=10, folder_id="TOP")
+        # both chunks were searched (not just the first that filled the limit)
+        assert len(svc.search_queries) == 2
+        searched = " ".join(svc.search_queries)
+        assert "'DEEP' in parents" in searched
+
+    def test_empty_roots_return_empty_without_calls(self):
+        reader, svc = _tree_reader({}, [])
+        assert reader.list_subtree_folder_ids([]) == ([], False)
+        assert reader.list_subtree_folder_ids("") == ([], False)
+        assert svc.enum_queries == []
 
 
 # ── Shared Drive support ───────────────────────────────────────────────────

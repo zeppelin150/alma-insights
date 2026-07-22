@@ -266,6 +266,9 @@ class SettingsPage(QWidget):
 
     asana_setup_requested = Signal()       # "Set up with Renn" clicked
     drive_folder_added = Signal(str, str)  # (folder_id, display_name) from "+ Add folder"
+    # (folder_id, display_name, drive_id) from the native Browse Drive… picker —
+    # the model-independent path to what resolve_drive_folder persists.
+    drive_folder_picked = Signal(str, str, str)
     style_guide_action = Signal(str)       # "paste" | "upload" | "upload_folder" | "drive" | "clear"
     style_guide_activate = Signal(str)     # doc_id → make this stored guide active
     style_guide_delete = Signal(str)       # doc_id → delete this stored guide
@@ -362,9 +365,11 @@ class SettingsPage(QWidget):
                 lines.append("• Asana: no token — task sync is off.")
         except Exception:  # noqa: BLE001
             pass
+        # auth_type-aware: a service-account install is connected without any
+        # per-session Reconnect, so is_active() alone would libel it as offline.
         try:
-            from src.data import google_oauth
-            google_ok = google_oauth.is_active()
+            from src.data.google_access import google_access_ready
+            google_ok = google_access_ready()
         except Exception:  # noqa: BLE001
             google_ok = False
         if not google_ok:
@@ -420,8 +425,8 @@ class SettingsPage(QWidget):
         def worker():
             msg = ""
             try:
-                from src.data import google_oauth
-                if not google_oauth.is_active():
+                from src.data.google_access import google_access_ready
+                if not google_access_ready():
                     msg = "Google isn't connected this session — Reconnect first."
                 else:
                     conn = factory()
@@ -823,20 +828,91 @@ class SettingsPage(QWidget):
                                 "and set enablement.drive.read_enabled (org step).", color=ALMA_WARNING))
         wl.addStretch(1)
         v.addWidget(warn)
+        # Model-independent picker entry point: Renn can also open this picker
+        # from chat, but that path depends on the model choosing to call the
+        # tool — this button works every time.
+        browse_row = QHBoxLayout()
+        browse_row.setSpacing(10)
+        browse = QPushButton("Browse Drive…")
+        browse.setCursor(Qt.PointingHandCursor)
+        browse.setStyleSheet(
+            f"QPushButton{{background:{ALMA_GREEN_DARK}; color:{ALMA_TEXT_ON_DARK}; border:none; "
+            f"border-radius:7px; padding:6px 14px; font-size:11.5px; font-weight:600;}}")
+        browse.clicked.connect(self._on_browse_drive)
+        browse_row.addWidget(browse)
+        self._drive_active_lbl = self._text(
+            "Active for Renn: none yet — browse and pick a folder.",
+            color=ALMA_TEXT_LIGHT)
+        browse_row.addWidget(self._drive_active_lbl)
+        browse_row.addStretch(1)
+        v.addLayout(browse_row)
         self._drive_list = QVBoxLayout()
         self._drive_list.setSpacing(8)
         v.addLayout(self._drive_list)
         self._render_drive_folders([])
         return card
 
-    def _on_add_drive_folder(self):
+    def _prompt_text(self, title: str, label: str, text: str = ""):
+        """A QInputDialog whose OK/Cancel buttons stay legible under this page's
+        cascaded cream background (2026-07-22 blank-button fix)."""
         from PySide6.QtWidgets import QInputDialog
-        folder_id, ok = QInputDialog.getText(self, "Add Drive folder", "Google Drive folder ID:")
+        from src.ui.pages.enablement._common import native_dialog_button_qss
+        dlg = QInputDialog(self)
+        dlg.setWindowTitle(title)
+        dlg.setLabelText(label)
+        if text:
+            dlg.setTextValue(text)
+        dlg.setStyleSheet(native_dialog_button_qss())
+        ok = dlg.exec()
+        return dlg.textValue(), bool(ok)
+
+    def _on_add_drive_folder(self):
+        folder_id, ok = self._prompt_text("Add Drive folder", "Google Drive folder ID:")
         folder_id = (folder_id or "").strip()
         if not ok or not folder_id:
             return
-        name, _ = QInputDialog.getText(self, "Add Drive folder", "Display name:", text="Watched folder")
+        name, _ = self._prompt_text("Add Drive folder", "Display name:", text="Watched folder")
         self.drive_folder_added.emit(folder_id, (name or "Watched folder").strip())
+
+    def _on_browse_drive(self):
+        """Open the native Drive folder picker; emit the pick to the host.
+
+        The dialog is cached and reused (not destroyed per open) so a close
+        with a listing in flight never tears down a running QThread's parent —
+        see DriveFolderPickerDialog's module docstring."""
+        from src.ui.dialogs.drive_folder_picker_dialog import DriveFolderPickerDialog
+        dlg = getattr(self, "_drive_picker", None)
+        if dlg is None:
+            dlg = self._drive_picker = DriveFolderPickerDialog(self)
+        else:
+            dlg.reload()
+        from PySide6.QtWidgets import QDialog
+        if dlg.exec() == QDialog.DialogCode.Accepted and dlg.picked:
+            p = dlg.picked
+            self.drive_folder_picked.emit(
+                p.get("id") or "", p.get("name") or "", p.get("drive_id") or "")
+
+    def set_active_drive_folders(self, folders: list[dict]):
+        """Host feeds ``enablement.drive.active_folders`` (the folder(s) Renn
+        works from — the state the chat picker's resolve path writes).
+        Entries may be dicts OR legacy plain-string ids (hand-wired configs);
+        a string entry crashed this label silently on 2026-07-22."""
+        norm = []
+        for f in (folders or []):
+            if isinstance(f, dict):
+                if f.get("id"):
+                    norm.append(f)
+            elif str(f or "").strip():
+                norm.append({"id": str(f).strip()})
+        folders = norm
+        if not folders:
+            self._drive_active_lbl.setText(
+                "Active for Renn: none yet — browse and pick a folder.")
+            return
+        shown = ", ".join(
+            (f.get("name") or f.get("id")) for f in folders[-2:])
+        more = f" (+{len(folders) - 2} more)" if len(folders) > 2 else ""
+        self._drive_active_lbl.setText(f"Active for Renn: {shown}{more}")
 
     def set_drive_folders(self, folders: list[dict]):
         """Host feeds the configured Drive folders (from monitor_sources)."""

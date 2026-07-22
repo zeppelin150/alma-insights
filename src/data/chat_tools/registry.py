@@ -193,7 +193,7 @@ def _ensure_registered():
     _register("query_business_drive", handle_query_business_drive,
               phi_level=0, desc="Search the business Drive's LOCAL mirror (previously-pulled docs); for a live search use search_google_drive")
     _register("search_google_drive", handle_search_google_drive,
-              phi_level=0, desc="LIVE Google Drive search via the API — find files in Drive (may not be in Alma yet; optional folder_id scope); returns names/links, no sync")
+              phi_level=0, desc="LIVE Google Drive search via the API — defaults to the operator's ACTIVE Drive folder(s), searched recursively; scope='all' for everything visible, folder_id for one subtree. The result's scope block says what was searched — report it, never guess. Returns names/links, no sync")
     _register("import_drive_doc", handle_import_drive_doc,
               phi_level=0, desc="Bridge: pull a Google Drive file (id or URL from search_google_drive) into the local library so it becomes tokenized-searchable")
     _register("search_everywhere", handle_search_everywhere,
