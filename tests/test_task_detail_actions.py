@@ -64,6 +64,62 @@ def test_non_asana_panel_hides_comment(qapp):
     assert p.grab().save(out) and os.path.getsize(out) > 0
 
 
+def test_complete_button_is_on_its_own_row_and_not_clipped(qapp):
+    """Regression (2026-07-22): the meta header packed 3 badges + assignee +
+    submitter + the Complete button into one non-wrapping row, so in the 440px
+    panel the button clipped to an unclickable sliver off the right edge. It
+    now lives on its own row, fully inside the panel, with its full label."""
+    from PySide6.QtWidgets import QLabel
+    task = dict(ASANA_TASK, assignee="Christopher Guffey",
+                submitter="Norma Chen", status="open")
+    p = _panel(task)
+    p.setFixedWidth(440)
+    p.show()
+    qapp.processEvents()
+
+    btn = p._complete_btn
+    assert btn.text() == "Mark complete"
+    geo = btn.geometry()
+    assert 0 <= geo.left() and geo.right() <= p.width(), (
+        f"Complete button clips the panel: right={geo.right()} width={p.width()}")
+
+    # The button must NOT share the badges row — walk the row that holds it and
+    # assert it carries no badge QLabels (only the button + a stretch).
+    layout = p.layout()
+    comp_row = None
+    for i in range(layout.count()):
+        item = layout.itemAt(i)
+        sub = item.layout()
+        if sub is None:
+            continue
+        for j in range(sub.count()):
+            if sub.itemAt(j).widget() is btn:
+                comp_row = sub
+                break
+    assert comp_row is not None, "Complete button is not inside a row layout"
+    row_widgets = [comp_row.itemAt(k).widget() for k in range(comp_row.count())]
+    labels = [w for w in row_widgets if isinstance(w, QLabel)]
+    assert labels == [], "Complete button still shares its row with metadata labels"
+    p.hide()
+
+
+def test_header_badges_and_who_line_do_not_clip(qapp):
+    """The badge row and the assignee/submitter 'who' line must also stay
+    within the panel — long names previously truncated ('Chris Guffe')."""
+    from PySide6.QtWidgets import QLabel
+    task = dict(ASANA_TASK, assignee="Christopher Guffey",
+                submitter="Alexandra Montgomery-Whitfield", status="open")
+    p = _panel(task)
+    p.setFixedWidth(440)
+    p.show()
+    qapp.processEvents()
+    # every QLabel that carries the assignee/submitter text must fit horizontally
+    for lbl in p.findChildren(QLabel):
+        if "Guffey" in lbl.text() or "requested by" in lbl.text():
+            assert lbl.geometry().right() <= p.width()
+    p.hide()
+
+
 def test_subtask_input_emits_and_clears(qapp):
     p = _panel(ASANA_TASK)
     seen = []

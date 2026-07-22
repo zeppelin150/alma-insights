@@ -48,34 +48,53 @@ class TaskDetailPanel(QWidget):
         title.setStyleSheet(f"color:{ALMA_TEXT_DARK}; font-size:18px; font-weight:700; border:none;")
         v.addWidget(title)
 
+        # Badges only on this row — short and predictable, so they never clip.
+        # Assignee/submitter (variable-length names) and the Complete button
+        # used to share this row; in the 440px panel they overflowed and the
+        # button clipped to an unclickable sliver off the right edge
+        # (2026-07-22). Each now gets its own row.
         meta = QHBoxLayout()
         meta.setSpacing(8)
         src = self._task.get("source", "drive")
         meta.addWidget(badge(src.capitalize(), src))
         prio = self._task.get("priority", "normal")
         meta.addWidget(badge(prio.capitalize(), prio))
-        asg = self._task.get("assignee", "—")
-        if asg and asg != "—":
-            a = QLabel(asg)
-            a.setTextFormat(Qt.PlainText)
-            a.setStyleSheet(f"color:{ALMA_TEXT_MID}; font-size:12px; border:none;")
-            meta.addWidget(a)
-        sub = (self._task.get("submitter") or "").strip()
-        if sub:
-            rb = QLabel(f"· requested by {sub}")
-            rb.setTextFormat(Qt.PlainText)
-            rb.setStyleSheet(f"color:{ALMA_TEXT_LIGHT}; font-size:12px; border:none;")
-            meta.addWidget(rb)
         if self._is_asana:
             meta.addWidget(badge("Asana two-way", "asana"))
         meta.addStretch(1)
+        v.addLayout(meta)
+
+        # Who: assignee + submitter on their own wrapping line.
+        asg = self._task.get("assignee", "—")
+        sub = (self._task.get("submitter") or "").strip()
+        if (asg and asg != "—") or sub:
+            who_row = QHBoxLayout()
+            who_row.setSpacing(8)
+            if asg and asg != "—":
+                a = QLabel(asg)
+                a.setWordWrap(True)
+                a.setTextFormat(Qt.PlainText)
+                a.setStyleSheet(f"color:{ALMA_TEXT_MID}; font-size:12px; border:none;")
+                who_row.addWidget(a)
+            if sub:
+                rb = QLabel(f"· requested by {sub}")
+                rb.setWordWrap(True)
+                rb.setTextFormat(Qt.PlainText)
+                rb.setStyleSheet(f"color:{ALMA_TEXT_LIGHT}; font-size:12px; border:none;")
+                who_row.addWidget(rb)
+            who_row.addStretch(1)
+            v.addLayout(who_row)
+
         # Complete/Reopen (WS1-M5): direct write — the click IS the consent.
+        # Its own row so the full label always fits and stays clickable.
         is_done = (self._task.get("status") == "done")
         self._complete_btn = self._action_btn("Reopen" if is_done else "Mark complete")
         self._complete_btn.clicked.connect(
             lambda _=False, done=not is_done: self.completed_changed.emit(done))
-        meta.addWidget(self._complete_btn)
-        v.addLayout(meta)
+        comp_row = QHBoxLayout()
+        comp_row.addWidget(self._complete_btn)
+        comp_row.addStretch(1)
+        v.addLayout(comp_row)
 
         # ── Haiku brief (WS1-M4; only when brief_status='ok' — degrade path
         # is "render nothing extra", the raw description below stays authoritative) ──
