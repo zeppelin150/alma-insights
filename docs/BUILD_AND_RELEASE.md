@@ -56,16 +56,14 @@ Model          Qwen/Qwen3-Embedding-0.6B
 PySide6-Essentials==6.8.1.1
 pandas==2.2.3
 scikit-learn==1.5.2
-nltk==3.9.1
 pyyaml==6.0.2
-numpy==1.26.4        # intentionally held on 1.x for torch compat
+numpy==1.26.4        # held on 1.x (torch-compat note is historical; NLP lane parked 2026-07-22)
 scipy==1.14.1
 vaderSentiment==3.3.2
-sentence-transformers==3.3.1
 hdbscan==0.8.40
-markdown==3.7
+markdown==3.8.1
 keyring==25.5.0
-PyJWT==2.10.1
+PyJWT==2.13.0
 ```
 
 ## Supply-chain artefacts shipped in every bundle

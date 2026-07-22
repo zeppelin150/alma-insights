@@ -44,7 +44,6 @@ committed to the repository.
 | **PySide6-Essentials** | `>=6.6.0` | Qt GUI framework (QtCore, QtGui, QtWidgets only) | LGPL v3 |
 | **pandas** | `>=2.0.0` | Data manipulation and analysis | BSD 3-Clause |
 | **scikit-learn** | `>=1.3.0` | Machine learning (TF-IDF, clustering) | BSD 3-Clause |
-| **nltk** | `>=3.8.0` | Natural language text processing | Apache 2.0 |
 | **pyyaml** | `>=6.0` | YAML config file parsing | MIT |
 | **numpy** *(transitive)* | *(pulled by pandas/sklearn)* | Numerical computing | BSD 3-Clause |
 | **scipy** *(transitive)* | *(pulled by sklearn)* | Scientific computing | BSD 3-Clause |

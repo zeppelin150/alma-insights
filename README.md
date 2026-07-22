@@ -49,7 +49,6 @@ Python packages (installed automatically by setup):
 - PySide6 (Qt desktop framework)
 - pandas (data processing)
 - scikit-learn (TF-IDF text analysis)
-- nltk (tokenization)
 - pyyaml (configuration)
 
 ---

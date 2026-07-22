@@ -98,7 +98,9 @@ Everything else (code, config, migrations, runtimes) is replaced.
 | macOS    | ~280-420 MB | ~550-750 MB |
 
 Size breakdown: PySide6 (~150MB), scikit-learn/scipy/numpy (~80MB),
-sentence-transformers model (~80MB), Node.js + Gemini CLI (~50MB), app source (~5MB).
+Node.js + Gemini CLI (~50MB), app source (~5MB). (The sentence-transformers
+model is no longer bundled — the NLP/embeddings lane is parked as of
+2026-07-22; see requirements.txt for the re-add checklist.)
 
 ## Bundled runtimes
 
