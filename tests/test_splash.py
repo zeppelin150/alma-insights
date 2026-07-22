@@ -126,7 +126,10 @@ class TestSplashRow:
 
 class TestSplashConstruction:
     def test_constructs_without_errors(self, make_splash):
-        win = make_splash(app_version="v9.3.0-test")
+        # mode pinned: without it the splash resolves the dev machine's
+        # settings, and a box whose default mode is enablement would brand
+        # as the Content Command Center (see TestBranding).
+        win = make_splash(app_version="v9.3.0-test", mode="product")
         assert win.windowTitle().startswith("Alma Insights")
         assert win._continue_btn is not None
         assert win._continue_btn.isEnabled() is False
@@ -134,6 +137,57 @@ class TestSplashConstruction:
     def test_continue_disabled_before_run(self, make_splash):
         win = make_splash()
         assert not win._continue_btn.isEnabled()
+
+
+# ──────────────────────────────────────────────────────────────────
+# Mode-aware branding (product = classic, enablement = CCC)
+# ──────────────────────────────────────────────────────────────────
+
+def _label_texts(win):
+    from PySide6.QtWidgets import QLabel
+    return [lbl.text() for lbl in win.findChildren(QLabel)]
+
+
+class TestBranding:
+    def test_product_mode_keeps_classic_branding(self, make_splash):
+        win = make_splash(app_version="v1", mode="product")
+        texts = _label_texts(win)
+        assert win.windowTitle() == "Alma Insights — Starting up"
+        assert "ALMA INSIGHTS" in texts
+        assert "RCM ISSUE ANALYSIS" in texts
+        assert "v1 — RCM Operations" in texts
+
+    def test_enablement_mode_brands_as_content_command_center(self, make_splash):
+        win = make_splash(app_version="v1", mode="enablement")
+        texts = _label_texts(win)
+        assert win.windowTitle() == "Content Command Center — Starting up"
+        assert "CONTENT COMMAND CENTER" in texts
+        assert "v1 — Content Command Center" in texts
+        # The RCM header/tagline must be gone in enablement.
+        assert "ALMA INSIGHTS" not in texts
+        assert "RCM ISSUE ANALYSIS" not in texts
+        assert not any("RCM" in t for t in texts)
+
+    def test_unpinned_mode_resolves_via_app_modes(self, make_splash, monkeypatch):
+        from src.ui import app_modes
+        monkeypatch.setattr(app_modes, "resolve_startup_mode",
+                            lambda: "enablement")
+        win = make_splash(app_version="v1")
+        assert win.windowTitle() == "Content Command Center — Starting up"
+
+    def test_resolution_failure_falls_back_to_product(self, make_splash, monkeypatch):
+        from src.ui import app_modes
+
+        def boom():
+            raise RuntimeError("settings unreadable")
+
+        monkeypatch.setattr(app_modes, "resolve_startup_mode", boom)
+        win = make_splash(app_version="v1")
+        assert win.windowTitle() == "Alma Insights — Starting up"
+
+    def test_unknown_mode_string_gets_product_branding(self, make_splash):
+        win = make_splash(app_version="v1", mode="bogus")
+        assert win.windowTitle() == "Alma Insights — Starting up"
 
 
 # ──────────────────────────────────────────────────────────────────

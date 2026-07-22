@@ -1,4 +1,12 @@
-"""Enablement Settings — the ETL source config (Asana / Drive / Guru)."""
+"""Enablement Settings — the Content Command Center's config surface.
+
+Seven sub-tabs: Connections (status + workspace basics), Providers
+(identity + the shared CredentialsPanel), Sources (Asana / Drive / the
+knowledge base), Style Guide (guide + card template libraries), and the
+three system tabs ported from the product side on 2026-07-22 — Updates
+(shared UpdatesPanel), Usage (shared CostDashboard, lazily built when a
+warehouse is wired) and Maintenance (shared MaintenancePanel).
+"""
 
 from __future__ import annotations
 
@@ -262,7 +270,12 @@ class _GuideSection(QFrame):
 
 
 class SettingsPage(QWidget):
-    """Operator config for the Extract sources — persisted to monitor_sources."""
+    """Operator config for the enablement side — sources, providers, system.
+
+    Source config persists to monitor_sources; workspace choices go through
+    settings_manager; the system tabs host the same shared panels the product
+    Settings page embeds, so behavior and store are identical across modes.
+    """
 
     asana_setup_requested = Signal()       # "Set up with Renn" clicked
     drive_folder_added = Signal(str, str)  # (folder_id, display_name) from "+ Add folder"
@@ -297,19 +310,37 @@ class SettingsPage(QWidget):
         self.credentials = CredentialsPanel(sections=("llm", "external"))
 
         # Sub-tabs give the (formerly one long scroll) settings some order.
+        # Icons are navigational, not decorative: with seven tabs the glyphs
+        # let the eye find "the tab with the pie chart" without reading.
+        from PySide6.QtCore import QSize
+        from src.ui.design.icons import icon as design_icon
+
         self._tabs = QTabWidget()
         self._tabs.setObjectName("AnalysisTab")
-        self._tabs.addTab(self._tab([self._connections()]), "Connections")
-        self._tabs.addTab(self._tab([self._identity(), self.credentials]), "Providers")
-        self._tabs.addTab(self._tab([self._asana(), self._drive(),
-                                     self._knowledge_base()]), "Sources")
-        self._tabs.addTab(self._tab([self._style_guide(), self._card_template()]),
-                          "Style Guide")
+        self._tabs.setIconSize(QSize(14, 14))
+
+        def _add(widget, glyph, label):
+            self._tabs.addTab(widget, design_icon(glyph, 14, ALMA_TEXT_MID), label)
+
+        _add(self._tab([self._connections()]), "antenna", "Connections")
+        _add(self._tab([self._identity(), self.credentials]), "sliders", "Providers")
+        _add(self._tab([self._asana(), self._drive(),
+                        self._knowledge_base()]), "database", "Sources")
+        _add(self._tab([self._style_guide(), self._card_template()]),
+             "pen", "Style Guide")
+        # ── System tabs (shared with the product Settings page) ──
+        _add(self._tab([self._updates_panel()]), "download", "Updates")
+        _add(self._usage_tab(), "pie", "Usage")
+        _add(self._tab([self._maintenance_panel()]), "zap", "Maintenance")
         outer.addWidget(self._tabs, 1)
+        self._tabs.currentChanged.connect(self._on_tab_selected)
         # Host may wire a connection factory (page._conn) so the KB card can
         # show counts + run the bootstrap; absent, the card degrades to
         # settings-only status with the button disabled.
         self.kb_conn_factory = None
+        # Host may wire a DatabaseManager factory so the Usage tab can build
+        # the shared CostDashboard; absent, the tab keeps its placeholder.
+        self.usage_db_factory = None
         self._kb_bootstrap_finished.connect(self._kb_bootstrap_done)
 
     # ── knowledge base (WS2-M7: status + bootstrap + degraded-state) ──
@@ -584,40 +615,77 @@ class SettingsPage(QWidget):
 
     # ── sections ──────────────────────────────────────────────────
     def _intro(self):
+        """Page header — title, one-line description, Test connections."""
         row = QHBoxLayout()
-        row.addWidget(self._text("ETL Sources — Extract › Transform › Load.  Configure where tasks come from.", color=ALMA_TEXT_LIGHT))
+        row.setSpacing(10)
+        col = QVBoxLayout()
+        col.setSpacing(2)
+        title = QLabel("Settings")
+        title.setStyleSheet(
+            f"color:{ALMA_TEXT_DARK}; font-size:19px; font-weight:700; "
+            "border:none; background:transparent;")
+        col.addWidget(title)
+        col.addWidget(self._text(
+            "Connections, providers, content sources, and system tools for "
+            "the Content Command Center.", color=ALMA_TEXT_LIGHT))
+        row.addLayout(col)
         row.addStretch(1)
         b = QPushButton("Test connections")
         b.setStyleSheet(
             f"QPushButton{{background:transparent; color:{ALMA_GREEN_DARK}; border:1px solid {ALMA_BORDER}; "
             f"border-radius:7px; padding:6px 14px; font-size:12px; font-weight:600;}}"
         )
-        row.addWidget(b)
+        row.addWidget(b, 0, Qt.AlignVCenter)
         return row
 
+    def _divider(self) -> QFrame:
+        line = QFrame()
+        line.setFixedHeight(1)
+        line.setStyleSheet(
+            f"background:{ALMA_BORDER_LIGHT}; border:none;")
+        return line
+
     def _connections(self):
+        """Connection health + the workspace basics, one readable card:
+        row 1 = live status dots, row 2 = the three workspace choices."""
         card = card_frame()
-        h = QHBoxLayout(card)
-        h.setContentsMargins(20, 14, 20, 14)
-        h.setSpacing(10)
-        h.addWidget(section_label("CONNECTIONS"))
-        h.addSpacing(12)
+        v = QVBoxLayout(card)
+        v.setContentsMargins(20, 14, 20, 14)
+        v.setSpacing(12)
+
+        head = QHBoxLayout()
+        head.setSpacing(10)
+        head.addWidget(section_label("CONNECTIONS"))
+        head.addStretch(1)
+        head.addWidget(self._text("Poll every"))
+        head.addWidget(field("15 min", w=86))
+        v.addLayout(head)
+
+        dots = QHBoxLayout()
+        dots.setSpacing(10)
         self._conn_widgets: dict[str, tuple] = {}
         for key, name in (("asana", "Asana"), ("drive", "Google Drive"), ("guru", "Guru")):
             dot = QLabel("•")
             dot.setStyleSheet(f"color:{ALMA_TEXT_LIGHT}; font-size:16px; border:none;")
             lbl = self._text(f"{name} —", color=ALMA_TEXT_DARK)
             self._conn_widgets[key] = (dot, lbl, name)
-            h.addWidget(dot)
-            h.addWidget(lbl)
-            h.addSpacing(14)
-        h.addStretch(1)
-        h.addWidget(self._text("Poll every"))
-        h.addWidget(field("15 min", w=86))
-        h.addWidget(self._text("Provider"))
-        h.addWidget(self._provider_combo())
-        h.addWidget(self._text("Start in"))
-        h.addWidget(self._default_mode_combo())
+            dots.addWidget(dot)
+            dots.addWidget(lbl)
+            dots.addSpacing(14)
+        dots.addStretch(1)
+        v.addLayout(dots)
+
+        v.addWidget(self._divider())
+
+        wk = QHBoxLayout()
+        wk.setSpacing(8)
+        wk.addWidget(self._text("Assistant provider", bold=True))
+        wk.addWidget(self._provider_combo())
+        wk.addSpacing(18)
+        wk.addWidget(self._text("Start in", bold=True))
+        wk.addWidget(self._default_mode_combo())
+        wk.addStretch(1)
+        v.addLayout(wk)
         return card
 
     def set_connection_status(self, key: str, ok: bool, detail: str = ""):
@@ -947,22 +1015,69 @@ class SettingsPage(QWidget):
             elif item.layout() is not None:
                 SettingsPage._clear_layout(item.layout())
 
-    def _guru(self):
-        card, v = self._section("GURU CARDS  ·  watch & publish", "+ Add card")
-        v.addWidget(self._text("Watch cards (product-update posts via GitHub Action)", bold=True))
-        chips = QHBoxLayout()
-        chips.setSpacing(8)
-        for cid in ("card 4a1f…", "card 9c2b…", "card 77fa…"):
-            chips.addWidget(pill(cid, "#DCEFEC", _TEAL))
-        chips.addStretch(1)
-        v.addLayout(chips)
-        pub = QHBoxLayout()
-        pub.setSpacing(8)
-        pub.addWidget(self._text("Publish new cards to", bold=True))
-        pub.addWidget(field("Provider Enablement", w=200, strong=True))
-        pub.addSpacing(16)
-        pub.addWidget(self._text("Draft generator", bold=True))
-        pub.addWidget(field("enablement_card_gen", w=180))
-        pub.addStretch(1)
-        v.addLayout(pub)
-        return card
+    # ── system tabs (shared widgets, also hosted by product Settings) ──
+
+    def _updates_panel(self):
+        """Auto-update / GitHub repo / support & recovery — the shared
+        UpdatesPanel, so enablement users can check, install, roll back and
+        export crash reports without switching modes."""
+        from src.ui.widgets.updates_panel import UpdatesPanel
+        self._updates = UpdatesPanel()
+        return self._updates
+
+    def _maintenance_panel(self):
+        """Memory diagnostics + the database danger zone (typed confirm)."""
+        from src.ui.widgets.maintenance_panel import MaintenancePanel
+        self._maintenance = MaintenancePanel()
+        return self._maintenance
+
+    def _usage_tab(self) -> QWidget:
+        """Host for the Renn usage panel.
+
+        Built lazily on first visit once the host wires ``usage_db_factory``
+        (a callable returning a DatabaseManager) — a standalone SettingsPage
+        keeps the placeholder and never touches a database. The panel shows
+        Renn's own metered activity (turns, tokens, CLI-reported cost); the
+        scan-centric cost dashboard stays on the product side."""
+        host = QWidget()
+        v = QVBoxLayout(host)
+        v.setContentsMargins(2, 8, 2, 8)
+        v.setSpacing(8)
+        self._usage_placeholder = QLabel(
+            "Usage appears once a warehouse is connected.")
+        self._usage_placeholder.setAlignment(Qt.AlignCenter)
+        self._usage_placeholder.setStyleSheet(
+            f"color:{ALMA_TEXT_LIGHT}; font-size:13px; padding:40px; "
+            "border:none; background:transparent;")
+        v.addWidget(self._usage_placeholder, 1)
+        self._usage_layout = v
+        self._usage_dashboard = None
+        return host
+
+    def _on_tab_selected(self, index: int):
+        if self._tabs.tabText(index) == "Usage":
+            self._maybe_build_usage()
+
+    def _maybe_build_usage(self):
+        """Swap the Usage placeholder for the live Renn usage panel, once."""
+        if self._usage_dashboard is not None:
+            return
+        factory = getattr(self, "usage_db_factory", None)
+        if factory is None:
+            return
+        try:
+            db = factory()
+        except Exception:  # noqa: BLE001 — a broken factory keeps the placeholder
+            db = None
+        if db is None:
+            return
+        try:
+            from src.ui.pages.enablement.usage_tab import RennUsagePanel
+            panel = RennUsagePanel(db)
+        except Exception as exc:  # noqa: BLE001 — never break Settings over usage
+            self._usage_placeholder.setText(
+                f"Usage panel unavailable: {str(exc)[:120]}")
+            return
+        self._usage_placeholder.hide()
+        self._usage_layout.addWidget(panel, 1)
+        self._usage_dashboard = panel

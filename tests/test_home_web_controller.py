@@ -45,9 +45,11 @@ def test_viewmodel_shape_is_complete(qapp, empty_db):
     ctrl, seen = _controller(empty_db)
     ctrl.refresh()
     vm = seen["data"][-1]
-    assert set(vm) == {"mode", "greeting", "subtitle", "empty_activity",
-                       "tiles", "stats", "quick_actions", "activity"}
+    assert set(vm) == {"mode", "greeting", "subtitle", "banner",
+                       "empty_activity", "tiles", "stats", "quick_actions",
+                       "activity"}
     assert vm["mode"] == app_modes.MODE_PRODUCT
+    assert vm["banner"] is None          # CCC banner is enablement-only
     assert len(vm["tiles"]) == 2
     assert len(vm["stats"]) == 3
     for tile in vm["tiles"]:
@@ -55,6 +57,19 @@ def test_viewmodel_shape_is_complete(qapp, empty_db):
     for stat in vm["stats"]:
         assert set(stat) == {"label", "caption", "value", "display",
                              "available"}
+
+
+def test_banner_present_in_enablement_and_matches_branding(qapp, empty_db):
+    from src.branding import (
+        CONTENT_COMMAND_CENTER, CONTENT_COMMAND_CENTER_DESCRIPTION)
+    ctrl, seen = _controller(empty_db, mode=app_modes.MODE_ENABLEMENT)
+    ctrl.refresh()
+    banner = seen["data"][-1]["banner"]
+    assert banner == {"title": CONTENT_COMMAND_CENTER,
+                      "desc": CONTENT_COMMAND_CENTER_DESCRIPTION}
+    # Switching back to product drops it.
+    ctrl.set_mode(app_modes.MODE_PRODUCT)
+    assert seen["data"][-1]["banner"] is None
 
 
 def test_exactly_one_tile_is_active(qapp, empty_db):
@@ -348,6 +363,23 @@ def test_tiles_match_native_copy(qapp, empty_db):
     ctrl.refresh()
     web = [(t["key"], t["title"], t["desc"]) for t in seen["data"][-1]["tiles"]]
     assert web == [tuple(t) for t in native_mod._MODE_TILES]
+
+
+def test_banner_matches_native_home_page(qapp, empty_db):
+    """Both surfaces render the CCC banner from src.branding; this pins that
+    the web payload carries exactly the strings the native widget shows."""
+    from PySide6.QtWidgets import QLabel
+    from src.ui.pages.home_page import HomePage
+    native = HomePage(empty_db, current_mode=app_modes.MODE_ENABLEMENT)
+    assert native._ccc_banner.isVisibleTo(native)
+    native_texts = [lbl.text()
+                    for lbl in native._ccc_banner.findChildren(QLabel)]
+
+    ctrl, seen = _controller(empty_db, mode=app_modes.MODE_ENABLEMENT)
+    ctrl.refresh()
+    banner = seen["data"][-1]["banner"]
+    assert banner["title"].upper() in native_texts
+    assert banner["desc"] in native_texts
 
 
 def test_quick_actions_match_native_copy(qapp, empty_db):

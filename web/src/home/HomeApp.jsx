@@ -17,6 +17,7 @@ const EMPTY_VM = {
   mode: "",
   greeting: "",
   subtitle: "",
+  banner: null,
   empty_activity: "",
   tiles: [],
   stats: [],
@@ -40,6 +41,18 @@ export function Tile({ tile, onSwitch }) {
         </button>
       )}
     </div>
+  );
+}
+
+// Enablement-only Content Command Center banner. Strings arrive finished
+// from src/branding.py via the controller; null means product mode.
+export function CccBanner({ banner }) {
+  if (!banner) return null;
+  return (
+    <section className="home-ccc">
+      <span className="home-ccc-title">{banner.title}</span>
+      <p className="home-ccc-desc">{banner.desc}</p>
+    </section>
   );
 }
 
@@ -103,6 +116,13 @@ export default function HomeApp() {
           mode: p.mode || "",
           greeting: p.greeting || "",
           subtitle: p.subtitle || "",
+          banner:
+            p.banner && typeof p.banner === "object"
+              ? {
+                  title: String(p.banner.title || ""),
+                  desc: String(p.banner.desc || ""),
+                }
+              : null,
           empty_activity: p.empty_activity || "",
           tiles: Array.isArray(p.tiles) ? p.tiles : [],
           stats: Array.isArray(p.stats) ? p.stats : [],
@@ -155,6 +175,8 @@ export default function HomeApp() {
           </button>
         )}
       </header>
+
+      <CccBanner banner={vm.banner} />
 
       <div className="home-tiles">
         {vm.tiles.map((t) => (

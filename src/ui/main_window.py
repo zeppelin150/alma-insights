@@ -173,9 +173,12 @@ class MainWindow(QMainWindow):
         title.setObjectName("TopBarTitle")
         layout.addWidget(title)
 
-        subtitle = QLabel("RCM Issue Analysis")
-        subtitle.setObjectName("TopBarSubtitle")
-        layout.addWidget(subtitle)
+        # Mode-aware: "RCM Issue Analysis" in product, the Content Command
+        # Center in enablement. Kept as an attribute so switch_mode can
+        # retext it without rebuilding the bar.
+        self._top_bar_subtitle = QLabel(self._chrome_subtitle(self._mode))
+        self._top_bar_subtitle.setObjectName("TopBarSubtitle")
+        layout.addWidget(self._top_bar_subtitle)
 
         layout.addStretch()
 
@@ -196,6 +199,28 @@ class MainWindow(QMainWindow):
         layout.addWidget(feedback_btn)
 
         return bar
+
+    # ── Mode-aware chrome (top-bar subtitle + sidebar footer) ──
+
+    def _chrome_subtitle(self, mode):
+        from src.branding import CONTENT_COMMAND_CENTER
+        if mode == app_modes.MODE_ENABLEMENT:
+            return CONTENT_COMMAND_CENTER
+        return "RCM Issue Analysis"
+
+    def _sidebar_footer_text(self, mode):
+        from src import VERSION
+        from src.branding import CONTENT_COMMAND_CENTER
+        label = (CONTENT_COMMAND_CENTER
+                 if mode == app_modes.MODE_ENABLEMENT else "RCM Operations")
+        return f"v{VERSION} — {label} · Drive + local search"
+
+    def _apply_mode_chrome(self, mode):
+        """Retext the static chrome after a mode switch."""
+        if getattr(self, "_top_bar_subtitle", None) is not None:
+            self._top_bar_subtitle.setText(self._chrome_subtitle(mode))
+        if getattr(self, "_sidebar_footer", None) is not None:
+            self._sidebar_footer.setText(self._sidebar_footer_text(mode))
 
     # ═══════════════════════════════════════════
     #  SIDEBAR
@@ -248,9 +273,8 @@ class MainWindow(QMainWindow):
         self._collapse_btn.clicked.connect(self._toggle_sidebar)
         layout.addWidget(self._collapse_btn)
 
-        # Footer
-        from src import VERSION
-        self._sidebar_footer = QLabel(f"v{VERSION} — RCM Operations · Drive + local search")
+        # Footer (mode-aware — see _sidebar_footer_text)
+        self._sidebar_footer = QLabel(self._sidebar_footer_text(self._mode))
         self._sidebar_footer.setObjectName("SidebarFooter")
         layout.addWidget(self._sidebar_footer)
         self._sidebar_text_widgets.append(self._sidebar_footer)
@@ -585,6 +609,7 @@ class MainWindow(QMainWindow):
             app_modes.set_current_mode(mode)
             self._mount_mode_pages(mode)
             self._populate_sidebar(mode)
+            self._apply_mode_chrome(mode)
             self._start_services_for_mode(mode)
             if getattr(self, "home_page", None) is not None:
                 self.home_page.set_mode(mode)

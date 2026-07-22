@@ -261,6 +261,11 @@ class EnablementPage(QWidget):
         # KB card (WS2-M7): give Settings a connection factory so it can show
         # card counts and run the EC bootstrap off-thread.
         self.settings.kb_conn_factory = self._conn
+        # Usage tab: a DatabaseManager factory so the shared CostDashboard can
+        # build on first visit. Demo mode meters the throwaway demo warehouse
+        # (all zeros) rather than reaching the real one.
+        self.settings.usage_db_factory = (
+            self._ensure_demo_db if self.demo else (lambda: self.db))
         # Scroll-wrap the tall pages so content scrolls instead of compressing
         # (compression was overlapping rows on Settings). Workbench fills exactly.
         from src.ui.pages.enablement.analytics import AnalyticsPage

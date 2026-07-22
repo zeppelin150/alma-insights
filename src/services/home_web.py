@@ -27,6 +27,9 @@ from datetime import datetime
 
 from PySide6.QtCore import QObject, Signal
 
+from src.branding import (
+    CONTENT_COMMAND_CENTER, CONTENT_COMMAND_CENTER_DESCRIPTION,
+)
 from src.ui import app_modes
 
 _ACCENT = "#0D7D72"
@@ -51,8 +54,9 @@ _MODE_TILES = (
      "Full analytics suite — conversations, TRC analytics, trending, "
      "incidents, and AI reporting."),
     (app_modes.MODE_ENABLEMENT, "Enablement",
-     "Lightweight workbench — calendar, tasks, Guru card drafting, and "
-     "the Renn assistant. Skips the heavy analytics stack."),
+     "Content Command Center — connects Asana, Guru, and Zendesk to review "
+     "requests, draft updates, and publish content in one workflow. Skips "
+     "the heavy analytics stack."),
 )
 
 _QUICK_ACTIONS = {
@@ -169,6 +173,14 @@ class HomeWebController(QObject):
             "mode": self._mode,
             "greeting": self._greeting(),
             "subtitle": _SUBTITLE,
+            # Enablement-only Content Command Center banner; None in product.
+            # Strings come from src.branding — the same constants the native
+            # HomePage renders, so the two surfaces cannot drift.
+            "banner": (
+                {"title": CONTENT_COMMAND_CENTER,
+                 "desc": CONTENT_COMMAND_CENTER_DESCRIPTION}
+                if self._mode == app_modes.MODE_ENABLEMENT else None
+            ),
             "empty_activity": _EMPTY_ACTIVITY,
             "tiles": [
                 {

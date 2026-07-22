@@ -141,81 +141,83 @@ class TestMakeRelease(unittest.TestCase):
 # ════════════════════════════════════════════════════
 
 class TestUpdatesTabHandlers(unittest.TestCase):
-    """Test the new handler methods added in P5-T2."""
+    """Handler tests for the update flow (P5-T2), retargeted at the shared
+    UpdatesPanel after the 2026-07-22 extraction from the product page."""
 
-    def _make_page(self):
-        """Create a minimal SettingsPage mock with needed attributes."""
-        page = MagicMock()
-        page._install_btn = MagicMock()
-        page._update_progress = MagicMock()
-        page._progress_label = MagicMock()
-        page._restart_btn = MagicMock()
-        page._update_msg = MagicMock()
-        page._last_checked_label = MagicMock()
-        page._latest_download_url = "https://github.com/org/repo/releases/download/v1.0.0/alma-insights-v1.0.0.zip"
-        page._latest_new_version = "1.0.0"
-        return page
+    def _make_panel(self):
+        """Create a minimal UpdatesPanel mock with needed attributes."""
+        panel = MagicMock()
+        panel._install_btn = MagicMock()
+        panel._update_progress = MagicMock()
+        panel._progress_label = MagicMock()
+        panel._restart_btn = MagicMock()
+        panel._update_msg = MagicMock()
+        panel._last_checked_label = MagicMock()
+        panel._latest_download_url = "https://github.com/org/repo/releases/download/v1.0.0/alma-insights-v1.0.0.zip"
+        panel._latest_new_version = "1.0.0"
+        return panel
 
     def test_on_update_progress(self):
-        from src.ui.pages.settings_page import SettingsPage
-        page = self._make_page()
-        SettingsPage._on_update_progress(page, 50, "Downloading...")
-        page._update_progress.setValue.assert_called_with(50)
-        page._progress_label.setText.assert_called_with("Downloading...")
+        from src.ui.widgets.updates_panel import UpdatesPanel
+        panel = self._make_panel()
+        UpdatesPanel._on_update_progress(panel, 50, "Downloading...")
+        panel._update_progress.setValue.assert_called_with(50)
+        panel._progress_label.setText.assert_called_with("Downloading...")
 
     def test_on_update_complete(self):
-        from src.ui.pages.settings_page import SettingsPage
-        page = self._make_page()
-        SettingsPage._on_update_complete(page)
-        page._update_progress.setVisible.assert_called_with(False)
-        page._restart_btn.setVisible.assert_called_with(True)
+        from src.ui.widgets.updates_panel import UpdatesPanel
+        panel = self._make_panel()
+        UpdatesPanel._on_update_complete(panel)
+        panel._update_progress.setVisible.assert_called_with(False)
+        panel._restart_btn.setVisible.assert_called_with(True)
 
     def test_on_update_failed_shows_error(self):
-        from src.ui.pages.settings_page import SettingsPage
-        page = self._make_page()
-        SettingsPage._on_update_failed(page, "Network error")
-        page._update_msg.setText.assert_called_with("Update failed: Network error")
-        page._install_btn.setVisible.assert_called_with(True)
+        from src.ui.widgets.updates_panel import UpdatesPanel
+        panel = self._make_panel()
+        UpdatesPanel._on_update_failed(panel, "Network error")
+        panel._update_msg.setText.assert_called_with("Update failed: Network error")
+        panel._install_btn.setVisible.assert_called_with(True)
 
-    @patch("src.ui.pages.settings_page.set_section")
-    @patch("src.ui.pages.settings_page.get_section")
-    def test_save_last_checked(self, mock_get, mock_set):
-        from src.ui.pages.settings_page import SettingsPage
-        page = self._make_page()
-        SettingsPage._save_last_checked(page)
-        mock_set.assert_called_once()
-        args = mock_set.call_args
+    @patch("src.ui.widgets.updates_panel.update_section")
+    def test_save_last_checked(self, mock_update):
+        from src.ui.widgets.updates_panel import UpdatesPanel
+        panel = self._make_panel()
+        UpdatesPanel._save_last_checked(panel)
+        # MERGE via update_section — a bare set_section would clobber
+        # github_repo (the historical bug the panel keeps fixed).
+        mock_update.assert_called_once()
+        args = mock_update.call_args
         self.assertEqual(args[0][0], "updates")
         self.assertIn("last_checked", args[0][1])
 
-    @patch("src.ui.pages.settings_page.get_section")
+    @patch("src.ui.widgets.updates_panel.get_section")
     def test_load_last_checked_with_value(self, mock_get):
-        from src.ui.pages.settings_page import SettingsPage
+        from src.ui.widgets.updates_panel import UpdatesPanel
         mock_get.return_value = {"last_checked": "2026-03-11 10:30"}
-        page = self._make_page()
-        SettingsPage._load_last_checked(page)
-        page._last_checked_label.setText.assert_called_with(
+        panel = self._make_panel()
+        UpdatesPanel._load_last_checked(panel)
+        panel._last_checked_label.setText.assert_called_with(
             "Last checked: 2026-03-11 10:30"
         )
 
-    @patch("src.ui.pages.settings_page.get_section")
+    @patch("src.ui.widgets.updates_panel.get_section")
     def test_load_last_checked_empty(self, mock_get):
-        from src.ui.pages.settings_page import SettingsPage
+        from src.ui.widgets.updates_panel import UpdatesPanel
         mock_get.return_value = {}
-        page = self._make_page()
-        SettingsPage._load_last_checked(page)
-        page._last_checked_label.setText.assert_not_called()
+        panel = self._make_panel()
+        UpdatesPanel._load_last_checked(panel)
+        panel._last_checked_label.setText.assert_not_called()
 
     def test_on_install_update_hides_button_shows_progress(self):
         """Verify _on_install_update hides install btn and shows progress."""
-        from src.ui.pages.settings_page import SettingsPage
-        page = self._make_page()
+        from src.ui.widgets.updates_panel import UpdatesPanel
+        panel = self._make_panel()
         mock_updater = MagicMock()
         with patch("src.updater.updater.Updater", return_value=mock_updater):
-            SettingsPage._on_install_update(page)
-        page._install_btn.setVisible.assert_called_with(False)
-        page._update_progress.setVisible.assert_called_with(True)
-        page._progress_label.setVisible.assert_called_with(True)
+            UpdatesPanel._on_install_update(panel)
+        panel._install_btn.setVisible.assert_called_with(False)
+        panel._update_progress.setVisible.assert_called_with(True)
+        panel._progress_label.setVisible.assert_called_with(True)
 
 
 class TestDownloadUrlConstruction(unittest.TestCase):

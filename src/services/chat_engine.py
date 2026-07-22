@@ -438,6 +438,7 @@ class ChatEngine(QObject):
 
     def set_client(self, client):
         """Inject a pre-built client (warm path for Follow-Up Chat)."""
+        self._attach_usage_sink(client)
         self._warm_client = client
 
     def set_model(self, model_id: str):
@@ -450,7 +451,31 @@ class ChatEngine(QObject):
         client = build_client_for_task(self._task_type)
         if client and self._model_override:
             client.model = self._model_override
+        self._attach_usage_sink(client)
         return client
+
+    def _attach_usage_sink(self, client):
+        """Meter Renn's turns (enablement tasks on the Claude CLI path).
+
+        The CLI reports real per-turn tokens/cost; clients that expose
+        ``set_usage_sink`` (ClaudeCliClient / ClaudeCliBridge) get a recorder
+        writing ``source='renn_chat'`` rows into this engine's warehouse —
+        the demo db in demo mode, never a db this engine wasn't given.
+        Product chat paths are untouched: no enablement task, no sink.
+        Best-effort by design; metering must never break chat.
+        """
+        if client is None or not self._db_path:
+            return
+        if not str(self._task_type or "").startswith("enablement"):
+            return
+        if not hasattr(client, "set_usage_sink"):
+            return
+        try:
+            from src.data.renn_usage import RENN_CHAT_SOURCE, RennUsageRecorder
+            client.set_usage_sink(
+                RennUsageRecorder(self._db_path), source=RENN_CHAT_SOURCE)
+        except Exception:  # noqa: BLE001
+            pass
 
     # ── Core: send message ────────────────────────────────
 

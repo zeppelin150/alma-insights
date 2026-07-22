@@ -22,7 +22,39 @@ def test_subtabs_present(qapp):
     s = _settings(qapp)
     assert isinstance(s._tabs, QTabWidget)
     titles = [s._tabs.tabText(i) for i in range(s._tabs.count())]
-    assert titles == ["Connections", "Providers", "Sources", "Style Guide"]
+    assert titles == ["Connections", "Providers", "Sources", "Style Guide",
+                      "Updates", "Usage", "Maintenance"]
+
+
+def test_system_tabs_host_the_shared_panels(qapp):
+    """The Updates/Maintenance tabs embed the same widgets the product
+    Settings page hosts; Usage stays a placeholder until the host wires a
+    DatabaseManager factory (a standalone page never opens a database)."""
+    from src.ui.widgets.maintenance_panel import MaintenancePanel
+    from src.ui.widgets.updates_panel import UpdatesPanel
+    s = _settings(qapp)
+    assert isinstance(s._updates, UpdatesPanel)
+    assert isinstance(s._maintenance, MaintenancePanel)
+    assert s._usage_dashboard is None
+    # Visiting Usage without a factory keeps the placeholder.
+    s._tabs.setCurrentIndex(
+        [s._tabs.tabText(i) for i in range(s._tabs.count())].index("Usage"))
+    assert s._usage_dashboard is None
+    assert s._usage_placeholder.isVisibleTo(s)
+
+
+def test_usage_tab_builds_renn_usage_panel_when_db_wired(qapp, empty_db):
+    from src.ui.pages.enablement.usage_tab import RennUsagePanel
+    s = _settings(qapp)
+    s.usage_db_factory = lambda: empty_db
+    titles = [s._tabs.tabText(i) for i in range(s._tabs.count())]
+    s._tabs.setCurrentIndex(titles.index("Usage"))
+    assert isinstance(s._usage_dashboard, RennUsagePanel)
+    # Idempotent — a second visit must not build a second panel.
+    first = s._usage_dashboard
+    s._tabs.setCurrentIndex(0)
+    s._tabs.setCurrentIndex(titles.index("Usage"))
+    assert s._usage_dashboard is first
 
 
 def test_credentials_panel_on_providers_tab(qapp):

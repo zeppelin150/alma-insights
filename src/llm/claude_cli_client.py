@@ -149,6 +149,18 @@ class ClaudeCliClient:
         if self._bridge is not None:
             self._bridge.set_mcp_config(self._mcp_config)
 
+    def set_usage_sink(self, sink, source: str = "renn_chat") -> None:
+        """Meter every CLI turn into a usage sink (carried across rebuilds).
+
+        Same lifecycle rule as set_mcp_config: the bridge is rebuilt on death,
+        so the sink is stored here and re-applied by _ensure_bridge — a mid-
+        session bridge respawn must not silently stop the metering.
+        """
+        self._usage_sink = sink
+        self._usage_source = source
+        if self._bridge is not None:
+            self._bridge.set_usage_sink(sink, source=source)
+
     def shutdown(self) -> None:
         """Tear down the underlying bridge if alive. Idempotent."""
         if self._bridge is not None:
@@ -167,6 +179,10 @@ class ClaudeCliClient:
             self._bridge.ensure_running()
             if self._mcp_config:
                 self._bridge.set_mcp_config(self._mcp_config)
+            if getattr(self, "_usage_sink", None) is not None:
+                self._bridge.set_usage_sink(
+                    self._usage_sink,
+                    source=getattr(self, "_usage_source", "renn_chat"))
         return self._bridge
 
     def _prepare_prompt(self, prompt: str, system_prompt: str) -> tuple[str, str]:

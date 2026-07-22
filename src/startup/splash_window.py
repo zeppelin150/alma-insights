@@ -24,6 +24,8 @@ are either I/O-light or already bounded by their own timeouts.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtGui import QFont, QPalette
 from PySide6.QtWidgets import (
@@ -54,24 +56,81 @@ from src.ui.theme import (
 )
 
 
+@dataclass(frozen=True)
+class _Branding:
+    """The mode-dependent text on the splash chrome."""
+    window_title: str
+    header_title: str
+    tagline: str
+    footer_suffix: str
+
+
+_PRODUCT_BRANDING = _Branding(
+    window_title="Alma Insights — Starting up",
+    header_title="ALMA INSIGHTS",
+    tagline="RCM ISSUE ANALYSIS",
+    footer_suffix="RCM Operations",
+)
+
+# When the app is opening into enablement mode the splash brands as the
+# Content Command Center instead of the RCM analysis suite (owner request,
+# 2026-07-22). The tagline is drawn from the CCC description's opening.
+_ENABLEMENT_BRANDING = _Branding(
+    window_title="Content Command Center — Starting up",
+    header_title="CONTENT COMMAND CENTER",
+    tagline="AI-POWERED CONTENT WORKSPACE",
+    footer_suffix="Content Command Center",
+)
+
+
+def _branding_for_mode(mode: str) -> _Branding:
+    """Pick the splash branding for an app mode string."""
+    return _ENABLEMENT_BRANDING if mode == "enablement" else _PRODUCT_BRANDING
+
+
+def _resolve_branding(mode: str | None) -> _Branding:
+    """Resolve the branding for the mode the app is about to open in.
+
+    ``mode=None`` (the production path) asks ``app_modes.resolve_startup_mode``,
+    which honors the ``--mode`` CLI override (parsed in main.py before the
+    splash) and ``app.default_mode`` / ``app.last_mode`` from settings. Any
+    failure — settings unreadable, import broken — falls back to the classic
+    product branding: the splash must never crash over a label.
+    """
+    if mode is None:
+        try:
+            from src.ui.app_modes import resolve_startup_mode
+            mode = resolve_startup_mode()
+        except Exception:  # noqa: BLE001 — branding only, never block startup
+            mode = None
+    return _branding_for_mode(mode or "product")
+
+
 class SplashWindow(QDialog):
     """
     Modal splash shown before the main window. Closes automatically only
     if the caller invokes .accept() — clicking "Continue" does so.
+
+    Branding follows the mode the app is about to open in: product keeps
+    the classic "ALMA INSIGHTS / RCM ISSUE ANALYSIS" header, enablement
+    brands as the Content Command Center. Pass ``mode`` to pin it (tests);
+    omit it to resolve from CLI/settings via ``resolve_startup_mode``.
     """
 
     continue_clicked = Signal()
     support_clicked = Signal()
 
-    def __init__(self, app_version: str = "unknown", parent: QWidget | None = None):
+    def __init__(self, app_version: str = "unknown",
+                 parent: QWidget | None = None, mode: str | None = None):
         super().__init__(parent)
         self._app_version = app_version
+        self._branding = _resolve_branding(mode)
         self._checker: Checker | None = None
         self._rows_layout: QVBoxLayout | None = None
         self._continue_btn: QPushButton | None = None
         self._summary_label: QLabel | None = None
 
-        self.setWindowTitle("Alma Insights — Starting up")
+        self.setWindowTitle(self._branding.window_title)
         self.setModal(True)
         self.setMinimumSize(640, 620)
         self._apply_palette()
@@ -193,7 +252,7 @@ class SplashWindow(QDialog):
     def _build_header(self) -> QVBoxLayout:
         header = QVBoxLayout()
         header.setSpacing(4)
-        title = QLabel("ALMA INSIGHTS")
+        title = QLabel(self._branding.header_title)
         title_font = QFont()
         title_font.setPointSize(20)
         title_font.setBold(True)
@@ -203,7 +262,7 @@ class SplashWindow(QDialog):
         title.setStyleSheet(f"color: {ALMA_CREAM}; letter-spacing: 4px;")
         header.addWidget(title)
 
-        tagline = QLabel("RCM ISSUE ANALYSIS")
+        tagline = QLabel(self._branding.tagline)
         tagline.setAlignment(Qt.AlignCenter)
         tagline.setStyleSheet(
             f"color: {ALMA_TEXT_ON_DARK}; opacity: 0.75; font-size: 11px; letter-spacing: 3px;"
@@ -289,7 +348,8 @@ class SplashWindow(QDialog):
 
         footer.addLayout(buttons)
 
-        foot_version = QLabel(f"{self._app_version} — RCM Operations")
+        foot_version = QLabel(
+            f"{self._app_version} — {self._branding.footer_suffix}")
         foot_version.setAlignment(Qt.AlignCenter)
         foot_version.setStyleSheet(
             f"color: {ALMA_TEXT_ON_DARK}; opacity: 0.45; font-size: 10px; padding-top: 12px;"

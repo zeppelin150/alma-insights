@@ -748,6 +748,20 @@ body {
 .home-pill.active { background: #E5F3EC; color: var(--green); }
 .home-pill.demo { background: #F7E2E2; color: var(--err); align-self: center; }
 
+/* Content Command Center banner (enablement mode only) */
+.home-ccc {
+  background: var(--panel); border: 1px solid var(--line);
+  border-left: 3px solid var(--green); border-radius: 10px;
+  padding: 14px 20px; display: flex; flex-direction: column; gap: 4px;
+}
+.home-ccc-title {
+  font-size: 12px; font-weight: 700; color: var(--green);
+  letter-spacing: 1.5px; text-transform: uppercase;
+}
+.home-ccc-desc {
+  margin: 0; font-size: 12.5px; color: var(--mid); line-height: 1.5;
+}
+
 /* mode tiles */
 .home-tiles { display: flex; gap: 14px; flex-wrap: wrap; }
 .home-tile {

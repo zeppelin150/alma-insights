@@ -95,8 +95,12 @@ class ClaudeCliBridge:
         self._system_prompt_path: str | None = None
 
         # Compatibility surface mirroring ACPBridge — death callbacks
-        # in scan_orchestrator read these by name.
+        # in scan_orchestrator read these by name. scan_orchestrator assigns
+        # _usage_tracker directly; _usage_source defaults to its historical
+        # value so that path keeps logging exactly as before. Other hosts
+        # (Renn chat) use set_usage_sink to pick their own source.
         self._usage_tracker = None
+        self._usage_source = "nlp_scan"
         self._scan_id = None
         self._boot_count = 0
         self._last_stderr_lines: list[str] = []
@@ -574,22 +578,42 @@ class ClaudeCliBridge:
         stream.events.append(terminal)
         self._safe_on_token(on_token, terminal)
 
+    def set_usage_sink(self, sink, source: str = "nlp_scan",
+                       scan_id: str | None = None) -> None:
+        """Attach a usage sink (UsageTracker / RennUsageRecorder shape).
+
+        ``source`` names the ledger row's origin (e.g. ``renn_chat``), so one
+        gemini_usage table serves scan, report and assistant accounting.
+        """
+        self._usage_tracker = sink
+        self._usage_source = source or "nlp_scan"
+        if scan_id is not None:
+            self._scan_id = scan_id
+
     def _log_usage_if_configured(
         self, stream: StreamResult, prompt: str,
     ) -> None:
-        """Best-effort usage tracking matching ACPBridge semantics."""
+        """Best-effort usage tracking matching ACPBridge semantics.
+
+        Real counts from the CLI's stream/result events win; token estimates
+        are only the fallback. ``cost_usd`` passes the CLI's reported
+        ``total_cost_usd`` through verbatim (None when unreported — e.g. a
+        subscription login — so the sink records 0 rather than a Gemini-priced
+        guess for a Claude turn).
+        """
         if not self._usage_tracker or stream.parser.error:
             return
         parser = stream.parser
         try:
             self._usage_tracker.log_call(
-                source="nlp_scan",
+                source=self._usage_source,
                 tokens_in=parser.input_tokens
                 or self._usage_tracker.estimate_tokens(prompt),
                 tokens_out=parser.output_tokens
                 or self._usage_tracker.estimate_tokens(parser.full_text),
                 scan_id=self._scan_id,
                 model=self._model,
+                cost_usd=(parser.cost_usd or None),
             )
         except Exception as e:
             logger.debug("Usage tracking failed: %s", e)

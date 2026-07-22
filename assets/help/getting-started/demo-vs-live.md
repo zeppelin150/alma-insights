@@ -4,7 +4,7 @@ title: Demo mode and live mode
 section: getting-started
 section_title: Getting started
 section_order: 1
-order: 4
+order: 5
 status: available
 features: [en_workbench, en_settings, en_tasks, en_calendar]
 summary: Demo mode runs the real workflow against a throwaway database and never reaches your Guru; live mode uses your actual accounts.

@@ -30,7 +30,7 @@ class _StubBase:
         return max(1, len(text or "") // 4)
 
     def log_call(self, source, tokens_in, tokens_out,
-                 model="gemini-2.5-flash", scan_id=None):
+                 model="gemini-2.5-flash", scan_id=None, cost_usd=None):
         self.calls.append({
             "source": source, "tokens_in": tokens_in,
             "tokens_out": tokens_out, "model": model, "scan_id": scan_id,

@@ -16,6 +16,8 @@
 
 Before the main window opens, a dark Alma-green splash runs the 9 health checks in order, streaming results into the UI. The **Continue** button only activates when every *critical* check has passed. A **Submit support ticket** button is always available for mid-launch failures.
 
+**Mode-aware branding (2026-07-22).** The header, window title and footer follow the mode the app is about to open in, resolved via `app_modes.resolve_startup_mode()` (the `--mode` CLI override is parsed in `main.py` before the splash, so it is honored here too). Product keeps the classic "ALMA INSIGHTS / RCM ISSUE ANALYSIS"; enablement brands as **CONTENT COMMAND CENTER** (strings in [src/branding.py](../src/branding.py) and `splash_window._ENABLEMENT_BRANDING`). Any resolution failure falls back to the product branding — the splash never crashes over a label.
+
 ## Check matrix
 
 | # | id | Check module | Critical? | Purpose |
@@ -36,7 +38,9 @@ Check 4 is intentionally a non-critical stub this phase. Phase 3 replaces it wit
 
 ```
 SplashWindow (QDialog)
-    ├── _build_header     "ALMA INSIGHTS" + "RCM ISSUE ANALYSIS" + version
+    ├── _build_header     mode-aware title + tagline + version
+    │                     (product: "ALMA INSIGHTS" / "RCM ISSUE ANALYSIS";
+    │                      enablement: "CONTENT COMMAND CENTER")
     ├── _build_rows_scroll
     │       └── SplashRow[]         (one per CheckResult)
     └── _build_footer

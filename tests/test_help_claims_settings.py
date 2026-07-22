@@ -167,10 +167,13 @@ def combo_with(w, *values) -> QComboBox | None:
 
 class TestOverviewTabs:
 
-    def test_settings_has_exactly_four_named_sub_tabs(self, page):
-        """settings-overview: 'one page with four sub-tabs' named Connections,
-        Providers, Sources and Style Guide."""
-        assert tab_names(page) == ["Connections", "Providers", "Sources", "Style Guide"]
+    def test_settings_has_exactly_seven_named_sub_tabs(self, page):
+        """settings-overview: 'one page with seven sub-tabs' — the original
+        four plus the system tabs (Updates, Usage, Maintenance) ported from
+        the product side on 2026-07-22."""
+        assert tab_names(page) == ["Connections", "Providers", "Sources",
+                                   "Style Guide", "Updates", "Usage",
+                                   "Maintenance"]
 
     def test_connections_tab_holds_dots_provider_and_startup_mode(self, page):
         """settings-overview: Connections = status dots for Asana/Drive/Guru,
@@ -207,16 +210,17 @@ class TestOverviewTabs:
         assert "STYLE GUIDE" in texts
         assert "CARD / ARTICLE TEMPLATE" in texts
 
-    def test_intro_row_describes_etl_and_carries_test_connections_button(self, page):
-        """settings-overview: 'Above the tabs, a single row describes the page as
-        an ETL source config and carries a button labelled Test connections.'"""
-        assert any("ETL Sources" in t for t in label_texts(page))
+    def test_header_row_names_the_page_and_carries_test_connections_button(self, page):
+        """settings-overview: 'Above the tabs, a header titles the page and
+        carries a button labelled Test connections.'"""
+        assert "Settings" in label_texts(page)
+        assert any("Content Command Center" in t for t in label_texts(page))
         assert button(page, "Test connections") is not None
 
     def test_no_reachable_guru_cards_section(self, page):
-        """settings-overview: 'There is no reachable Guru cards section on this
-        page.' (SettingsPage._guru exists but is never mounted.)"""
-        assert hasattr(SettingsPage, "_guru"), "dead _guru builder removed — update the article"
+        """settings-overview: 'There is no Guru cards section on this page.'
+        (The never-mounted _guru builder was deleted outright on 2026-07-22.)"""
+        assert not hasattr(SettingsPage, "_guru")
         assert not any("GURU CARDS" in t for t in label_texts(page))
         assert not any("Publish new cards to" in t for t in label_texts(page))
 
@@ -301,6 +305,121 @@ class TestOverviewWebTabsFlag:
         assert web_tabs_mode() == "off"
         settings.set_section("enablement", {"web_tabs": "all"})
         assert web_tabs_mode() == "all"
+
+
+class TestOverviewSystemTabs:
+    """settings-overview: the Updates / Usage / Maintenance tabs (added
+    2026-07-22) are 'the same widgets the product Settings page hosts'."""
+
+    def test_updates_tab_carries_the_full_update_surface(self, page):
+        """settings-overview: Updates = 'checking and installing app updates,
+        the GitHub repository the check reads, and support & recovery
+        (crash-report export and rollback)'."""
+        w = tab(page, "Updates")
+        texts = label_texts(w)
+        for section in ("AUTO-UPDATE", "GITHUB REPOSITORY", "SUPPORT & RECOVERY"):
+            assert section in texts, f"{section} missing from the Updates tab"
+        for name in ("Check for Updates", "Save Repository Settings",
+                     "Export Crash Reports", "Rollback to Previous Version"):
+            b = button(w, name)
+            assert b is not None, f"no {name!r} button"
+            assert clicked_receivers(b) >= 1, f"{name!r} is not wired"
+
+    def test_updates_tab_is_the_shared_product_panel(self, page):
+        """settings-overview: 'the same widget the product Settings page
+        embeds' — one implementation, not a copy."""
+        from src.ui.widgets.updates_panel import UpdatesPanel
+        assert tab(page, "Updates").findChildren(UpdatesPanel)
+
+    def test_usage_tab_stays_placeholder_without_a_warehouse(self, page):
+        """settings-overview: 'Until a warehouse is connected the tab shows a
+        placeholder' — a standalone Settings page opens no database."""
+        w = tab(page, "Usage")
+        assert page._usage_dashboard is None
+        assert any("Usage appears once a warehouse is connected" in t
+                   for t in label_texts(w))
+
+    def test_usage_tab_builds_the_renn_panel_on_visit(self, page, empty_db):
+        """settings-overview: Usage = 'Renn's metered activity — turns,
+        tokens and the CLI-reported cost', built on first visit."""
+        from src.ui.pages.enablement.usage_tab import RennUsagePanel
+        page.usage_db_factory = lambda: empty_db
+        page._tabs.setCurrentIndex(tab_names(page).index("Usage"))
+        assert isinstance(page._usage_dashboard, RennUsagePanel)
+
+    def test_usage_tab_says_what_is_and_is_not_metered(self, page, empty_db):
+        """settings-overview: usage 'comes from the Claude CLI's own per-turn
+        reports', 'cost shows $0.00 on a subscription CLI login', and
+        'background generation jobs are not metered yet'."""
+        page.usage_db_factory = lambda: empty_db
+        page._tabs.setCurrentIndex(tab_names(page).index("Usage"))
+        texts = " ".join(label_texts(tab(page, "Usage")))
+        assert "per-turn usage reports" in texts
+        assert "subscription CLI login" in texts
+        assert "aren't metered yet" in texts
+
+    def test_usage_tab_carries_no_scanner_concepts(self, page, empty_db):
+        """settings-overview: 'The NLP scanner's cost limits and plan
+        utilization are gone from this side' — they stay on the product
+        page's Scanning Costs tab."""
+        page.usage_db_factory = lambda: empty_db
+        page._tabs.setCurrentIndex(tab_names(page).index("Usage"))
+        texts = " ".join(label_texts(tab(page, "Usage")))
+        for scanner_term in ("Per-Scan", "Cost Limits", "Gemini Token Usage",
+                             "Plan Utilization", "This Scan"):
+            assert scanner_term not in texts, (
+                f"scanner concept {scanner_term!r} leaked into the Usage tab")
+
+    def test_every_renn_turn_is_recorded_automatically(self, tmp_path):
+        """settings-overview: 'each Renn turn is recorded automatically' —
+        the chat engine attaches the usage recorder to any capable client on
+        the enablement path, and only there."""
+        from src.data.renn_usage import RennUsageRecorder
+        from src.services.chat_engine import ChatEngine
+        import types as _types
+
+        sinks = []
+        client = _types.SimpleNamespace(
+            set_usage_sink=lambda sink, source="renn_chat":
+                sinks.append((sink, source)))
+        stub = _types.SimpleNamespace(
+            _task_type="enablement_chat", _db_path=str(tmp_path / "w.db"))
+        ChatEngine._attach_usage_sink(stub, client)
+        assert len(sinks) == 1
+        assert isinstance(sinks[0][0], RennUsageRecorder)
+        assert sinks[0][1] == "renn_chat"
+
+        product = _types.SimpleNamespace(
+            _task_type="report_generation", _db_path=str(tmp_path / "w.db"))
+        ChatEngine._attach_usage_sink(product, client)
+        assert len(sinks) == 1, "a product chat path got metered as Renn"
+
+    def test_maintenance_tab_carries_profiler_and_danger_zone(self, page):
+        """settings-overview: Maintenance = 'the memory profiler and the
+        full-database reset danger zone'."""
+        w = tab(page, "Maintenance")
+        texts = label_texts(w)
+        assert "MEMORY DIAGNOSTICS" in texts
+        assert "DATA MANAGEMENT" in texts
+        assert "Memory Profiler" in texts
+        assert "Full Database Reset" in texts
+
+    def test_database_reset_requires_the_typed_confirmation(self, page, monkeypatch):
+        """settings-overview: the reset 'asks you to type DELETE first — a
+        cancelled or mistyped confirm does nothing.'"""
+        from PySide6.QtWidgets import QInputDialog, QMessageBox
+        from src.ui.widgets.maintenance_panel import MaintenancePanel
+        panel = tab(page, "Maintenance").findChildren(MaintenancePanel)[0]
+        monkeypatch.setattr(
+            QInputDialog, "getText",
+            staticmethod(lambda *a, **k: ("delete-but-wrong", True)))
+        monkeypatch.setattr(
+            QMessageBox, "information",
+            staticmethod(lambda *a, **k: pytest.fail("reset ran without DELETE")))
+        monkeypatch.setattr(
+            QMessageBox, "critical",
+            staticmethod(lambda *a, **k: pytest.fail("reset attempted without DELETE")))
+        panel._full_database_reset()   # must be a silent no-op
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -914,9 +1033,11 @@ class TestTestConnections:
 
     def test_the_dots_are_not_refreshed_by_a_timer(self, page):
         """settings-test-connections: 'The dots only refresh when the app
-        starts' / 'The dots do not refresh mid-session.'"""
+        starts' / 'The dots do not refresh mid-session.' Scoped to the
+        Connections tab, which owns the dots — the system tabs added
+        2026-07-22 host unrelated widgets."""
         from PySide6.QtCore import QTimer
-        assert page.findChildren(QTimer) == []
+        assert tab(page, "Connections").findChildren(QTimer) == []
 
 
 # ══════════════════════════════════════════════════════════════════════

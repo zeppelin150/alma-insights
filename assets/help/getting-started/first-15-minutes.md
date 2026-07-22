@@ -4,7 +4,7 @@ title: Your first 15 minutes
 section: getting-started
 section_title: Getting started
 section_order: 1
-order: 2
+order: 3
 status: partial
 features: [en_settings, en_agent]
 summary: Connect Guru, then Google, then Asana — and know which of those three still needs an administrator.

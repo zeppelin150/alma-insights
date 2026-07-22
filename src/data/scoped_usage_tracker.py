@@ -70,7 +70,8 @@ class ScopedUsageTracker:
 
     def log_call(self, source: str, tokens_in: int, tokens_out: int,
                  model: str = "gemini-2.5-flash",
-                 scan_id: str | None = None) -> None:
+                 scan_id: str | None = None,
+                 cost_usd: float | None = None) -> None:
         """Inject the bound scan_id when the caller didn't supply one."""
         return self._base.log_call(
             source=source,
@@ -78,6 +79,7 @@ class ScopedUsageTracker:
             tokens_out=tokens_out,
             model=model,
             scan_id=scan_id or self._scan_id,
+            cost_usd=cost_usd,
         )
 
     # ── Attribute fall-through ─────────────────────────────────────

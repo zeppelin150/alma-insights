@@ -77,7 +77,8 @@ class UsageTracker:
     # ── Logging ──
 
     def log_call(self, source: str, tokens_in: int, tokens_out: int,
-                 model: str = "gemini-2.5-flash", scan_id: str = None):
+                 model: str = "gemini-2.5-flash", scan_id: str = None,
+                 cost_usd: float = None):
         """Log a Gemini API call to gemini_usage table.
 
         Args:
@@ -86,8 +87,12 @@ class UsageTracker:
             tokens_out: estimated output tokens
             model: model name
             scan_id: optional scan_id for NLP scan calls
+            cost_usd: a REAL reported cost (e.g. the Claude CLI's
+                total_cost_usd). None → estimate from Gemini plan pricing
+                as before; callers with real numbers should pass them.
         """
-        cost = self.estimate_cost(tokens_in, tokens_out, model)
+        cost = (float(cost_usd) if cost_usd is not None
+                else self.estimate_cost(tokens_in, tokens_out, model))
         now = datetime.now()
         try:
             self.db.log_gemini_usage(

@@ -1,13 +1,14 @@
 """Accuracy audit of the in-app Help Center — section ``getting-started``.
 
-Every test below settles ONE falsifiable claim made by one of the five
+Every test below settles ONE falsifiable claim made by one of the six
 articles in ``assets/help/getting-started/``:
 
-    what-this-is.md        (getting-started-what-this-is)
-    first-15-minutes.md    (getting-started-first-15-minutes)
-    reading-this-help.md   (getting-started-reading-this-help)
-    demo-vs-live.md        (getting-started-demo-vs-live)
-    the-surfaces.md        (getting-started-the-surfaces)
+    what-this-is.md              (getting-started-what-this-is)
+    content-command-center.md    (getting-started-content-command-center)
+    first-15-minutes.md          (getting-started-first-15-minutes)
+    reading-this-help.md         (getting-started-reading-this-help)
+    demo-vs-live.md              (getting-started-demo-vs-live)
+    the-surfaces.md              (getting-started-the-surfaces)
 
 Each test docstring names the article and quotes (or closely paraphrases) the
 claim it settles. Where the code does NOT do what the article says, the test
@@ -326,6 +327,94 @@ def test_renn_tools_point_at_the_real_warehouse_in_live_mode(live_page):
 
 
 # ════════════════════════════════════════════════════════════════════
+#  content-command-center.md — "The Content Command Center"
+# ════════════════════════════════════════════════════════════════════
+
+def test_ccc_description_in_help_matches_the_app_verbatim():
+    """ARTICLE getting-started-content-command-center opens with the owner's
+    one-sentence description. The enablement Home banner renders the same
+    sentence from ``src.branding`` — the two copies must never drift.
+    Whitespace is normalized so a markdown re-wrap does not count as drift;
+    any wording change does."""
+    from src import branding
+    from src.data.help import loader
+    article = loader.parse_article(
+        _REPO / "assets" / "help" / "getting-started"
+        / "content-command-center.md")
+    assert article is not None
+    normalized = " ".join(article["body"].split())
+    assert branding.CONTENT_COMMAND_CENTER_DESCRIPTION in normalized
+
+
+def test_ccc_is_what_the_startup_screen_says_in_enablement_mode():
+    """ARTICLE getting-started-content-command-center: "When the app opens in
+    enablement mode, the startup screen says Content Command Center rather
+    than the product side's 'Alma Insights — RCM Issue Analysis'."""
+    from src.startup import splash_window as sw
+    enablement = sw._branding_for_mode("enablement")
+    product = sw._branding_for_mode("product")
+    assert enablement.header_title == "CONTENT COMMAND CENTER"
+    assert "RCM" not in " ".join(
+        (enablement.window_title, enablement.header_title,
+         enablement.tagline, enablement.footer_suffix))
+    assert product.header_title == "ALMA INSIGHTS"
+    assert product.tagline == "RCM ISSUE ANALYSIS"
+
+
+def test_ccc_name_sits_in_the_top_bar_in_enablement_mode():
+    """ARTICLE getting-started-content-command-center: "the same name sits in
+    the top bar". ``_chrome_subtitle`` reads nothing off self, so it is
+    settled the same way this file already drives ``_wire_enablement_monitor``
+    — against a bare namespace, no window construction."""
+    from types import SimpleNamespace
+    from src.branding import CONTENT_COMMAND_CENTER
+    from src.ui import app_modes
+    from src.ui.main_window import MainWindow
+    host = SimpleNamespace()
+    assert MainWindow._chrome_subtitle(
+        host, app_modes.MODE_ENABLEMENT) == CONTENT_COMMAND_CENTER
+    assert MainWindow._chrome_subtitle(
+        host, app_modes.MODE_PRODUCT) == "RCM Issue Analysis"
+
+
+def test_ccc_banner_is_on_home_in_enablement_and_not_in_product(qapp, tmp_path):
+    """ARTICLE getting-started-content-command-center: the name is "on the
+    banner at the top of Home" — with the full description, and only in
+    enablement mode."""
+    from src.branding import (
+        CONTENT_COMMAND_CENTER, CONTENT_COMMAND_CENTER_DESCRIPTION)
+    from src.data.db_manager import DatabaseManager
+    from src.ui import app_modes
+    from src.ui.pages.home_page import HomePage
+
+    db = DatabaseManager(db_path=tmp_path / "ccc-home.db")
+    db.initialize()
+    page = HomePage(db, current_mode=app_modes.MODE_ENABLEMENT)
+    assert page._ccc_banner.isVisibleTo(page)
+    assert _has_label_containing(page, CONTENT_COMMAND_CENTER.upper())
+    assert _has_label_containing(page, CONTENT_COMMAND_CENTER_DESCRIPTION)
+
+    page.set_mode(app_modes.MODE_PRODUCT)
+    assert not page._ccc_banner.isVisibleTo(page)
+    db.conn.close()
+
+
+def test_ccc_connects_asana_guru_zendesk_surfaces(demo_page):
+    """ARTICLE getting-started-content-command-center: "connects Asana, Guru,
+    and Zendesk" — enablement mode registers a surface for each connection
+    (Calendar/Tasks ← Asana, Workbench/Guru Analytics ← Guru, the Zendesk
+    tab ← Zendesk), and each resolves to a real tab of the live screen."""
+    from src.ui import app_modes
+    ids = {s.page_id
+           for s in app_modes.pages_for_mode(app_modes.MODE_ENABLEMENT)}
+    for page_id in ("en_calendar", "en_tasks", "en_workbench",
+                    "en_analytics", "en_zendesk"):
+        assert page_id in ids, f"{page_id} is not an enablement surface"
+    for tab_key in ("calendar", "tasks", "workbench", "analytics", "zendesk"):
+        assert tab_key in demo_page._tab_widgets, f"no {tab_key} tab"
+
+
+# ════════════════════════════════════════════════════════════════════
 #  first-15-minutes.md — "Your first 15 minutes"
 # ════════════════════════════════════════════════════════════════════
 
@@ -350,10 +439,15 @@ def test_providers_tab_has_guru_email_token_and_a_save_button(settings_page, mon
 
 def test_settings_sub_tabs_are_named_as_the_article_says(settings_page):
     """ARTICLE getting-started-first-15-minutes: the article routes the reader
-    to the Providers, Sources and Style Guide tabs of Settings."""
+    to the Providers, Sources and Style Guide tabs of Settings. (The full tab
+    list grew system tabs — Updates / Usage / Maintenance — on 2026-07-22;
+    the three the article names must all still exist.)"""
     tabs = settings_page._tabs
     names = [tabs.tabText(i) for i in range(tabs.count())]
-    assert names == ["Connections", "Providers", "Sources", "Style Guide"]
+    assert names == ["Connections", "Providers", "Sources", "Style Guide",
+                     "Updates", "Usage", "Maintenance"]
+    for routed in ("Providers", "Sources", "Style Guide"):
+        assert routed in names
 
 
 def test_google_offers_both_a_service_account_file_and_a_per_user_connect(settings_page):
@@ -620,7 +714,7 @@ def test_every_getting_started_article_declares_a_valid_status():
     from src.data.help import loader, store
     directory = _REPO / "assets" / "help" / "getting-started"
     articles = [loader.parse_article(p) for p in sorted(directory.glob("*.md"))]
-    assert len(articles) == 5
+    assert len(articles) == 6
     for article in articles:
         assert article is not None
         assert article["status"] in store.STATUSES, article["article_id"]

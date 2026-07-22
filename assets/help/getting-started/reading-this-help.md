@@ -4,7 +4,7 @@ title: How to read this Help Center
 section: getting-started
 section_title: Getting started
 section_order: 1
-order: 3
+order: 4
 status: available
 features: [en_help]
 summary: Badges tell you what actually works; when a badge and the prose disagree, believe the badge.

@@ -55,7 +55,7 @@ If it still searches, flag it with your exact wording — the phrasing that
 misroutes is the useful part of the report.
 
 **A source you have connected is reported as not connected.** Do not rely on
-the "Test connections" button on the Settings ETL Sources tab — it is not
+the "Test connections" button in the Settings page header — it is not
 wired to anything and does nothing when clicked. Instead ask Renn directly,
 "what's connected?" It reports your active Drive folders and their count, the
 active Asana board, and the Guru publish target from the app's live settings.

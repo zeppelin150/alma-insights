@@ -3,7 +3,7 @@
 // locked here: they must always render as escaped React children, never markup.
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { ActivityRow, Stat, Tile } from "./HomeApp.jsx";
+import { ActivityRow, CccBanner, Stat, Tile } from "./HomeApp.jsx";
 import { buildDemoHome } from "./demo.js";
 
 const noop = () => {};
@@ -92,6 +92,31 @@ describe("Tile", () => {
   });
 });
 
+describe("CccBanner", () => {
+  it("renders nothing at all when banner is null (product mode)", () => {
+    const out = renderToStaticMarkup(<CccBanner banner={null} />);
+    expect(out).toBe("");
+  });
+
+  it("renders the Python-supplied name and description verbatim", () => {
+    const banner = {
+      title: "Content Command Center",
+      desc: "Content Command Center is an AI-powered workspace that connects Asana, Guru, and Zendesk.",
+    };
+    const out = renderToStaticMarkup(<CccBanner banner={banner} />);
+    expect(out).toContain("Content Command Center");
+    expect(out).toContain("connects Asana, Guru, and Zendesk");
+  });
+
+  it("escapes banner copy — markup renders as text, never as elements", () => {
+    const banner = { title: "<b>x</b>", desc: "<script>alert(1)</script>" };
+    const out = renderToStaticMarkup(<CccBanner banner={banner} />);
+    expect(out).toContain("&lt;b&gt;");
+    expect(out).toContain("&lt;script&gt;");
+    expect(out).not.toContain("<script>");
+  });
+});
+
 describe("Stat", () => {
   it("renders the Python-formatted display string verbatim", () => {
     const out = renderToStaticMarkup(
@@ -108,9 +133,11 @@ describe("demo fixture", () => {
   it("matches the viewmodel contract the controller emits", () => {
     const vm = buildDemoHome();
     expect(Object.keys(vm).sort()).toEqual([
-      "activity", "empty_activity", "greeting", "mode", "quick_actions",
-      "stats", "subtitle", "tiles",
+      "activity", "banner", "empty_activity", "greeting", "mode",
+      "quick_actions", "stats", "subtitle", "tiles",
     ]);
+    // The demo fixture is product mode, so the CCC banner is absent.
+    expect(vm.banner).toBeNull();
     expect(vm.tiles).toHaveLength(2);
     expect(vm.tiles.filter((t) => t.active)).toHaveLength(1);
     expect(vm.stats).toHaveLength(3);

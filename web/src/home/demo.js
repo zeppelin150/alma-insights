@@ -11,6 +11,7 @@ export function buildDemoHome() {
     mode: "product",
     greeting: "Good afternoon",
     subtitle: "Choose a workspace, or pick up where you left off.",
+    banner: null,
     empty_activity:
       "No recent activity yet — run a search or scan to get started.",
     tiles: [
@@ -24,7 +25,7 @@ export function buildDemoHome() {
       {
         key: "enablement",
         title: "Enablement",
-        desc: "Lightweight workbench — calendar, tasks, Guru card drafting, and the Renn assistant. Skips the heavy analytics stack.",
+        desc: "Content Command Center — connects Asana, Guru, and Zendesk to review requests, draft updates, and publish content in one workflow. Skips the heavy analytics stack.",
         icon: "pen",
         active: false,
       },

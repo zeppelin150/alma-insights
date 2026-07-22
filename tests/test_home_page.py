@@ -102,6 +102,23 @@ def test_unknown_mode_ignored(qapp, empty_db):
     assert page._mode == "product"
 
 
+def test_ccc_banner_only_in_enablement_mode(qapp, empty_db):
+    from src.branding import (
+        CONTENT_COMMAND_CENTER, CONTENT_COMMAND_CENTER_DESCRIPTION)
+    page = _home(empty_db, mode="product")
+    assert not page._ccc_banner.isVisibleTo(page)
+
+    page.set_mode("enablement")
+    assert page._ccc_banner.isVisibleTo(page)
+    from PySide6.QtWidgets import QLabel
+    texts = [lbl.text() for lbl in page._ccc_banner.findChildren(QLabel)]
+    assert CONTENT_COMMAND_CENTER.upper() in texts
+    assert CONTENT_COMMAND_CENTER_DESCRIPTION in texts
+
+    page.set_mode("product")
+    assert not page._ccc_banner.isVisibleTo(page)
+
+
 class TestUplift:
     def test_stat_cards_render(self, qapp, empty_db):
         page = _home(empty_db, mode="enablement")

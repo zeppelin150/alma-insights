@@ -16,6 +16,9 @@ from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout,
 )
 
+from src.branding import (
+    CONTENT_COMMAND_CENTER, CONTENT_COMMAND_CENTER_DESCRIPTION,
+)
 from src.ui import app_modes
 from src.ui.design.icons import icon as _icon
 from src.ui.theme import (
@@ -70,8 +73,9 @@ _MODE_TILES = (
      "Full analytics suite — conversations, TRC analytics, trending, "
      "incidents, and AI reporting."),
     (app_modes.MODE_ENABLEMENT, "Enablement",
-     "Lightweight workbench — calendar, tasks, Guru card drafting, and "
-     "the Renn assistant. Skips the heavy analytics stack."),
+     "Content Command Center — connects Asana, Guru, and Zendesk to review "
+     "requests, draft updates, and publish content in one workflow. Skips "
+     "the heavy analytics stack."),
 )
 
 
@@ -116,6 +120,11 @@ class HomePage(QFrame):
         outer.addWidget(subtitle)
         outer.addSpacing(6)
 
+        # Content Command Center banner — enablement mode only (toggled in
+        # set_mode). Carries the workspace name + the owner description.
+        self._ccc_banner = self._build_ccc_banner()
+        outer.addWidget(self._ccc_banner)
+
         tiles = QHBoxLayout()
         tiles.setSpacing(14)
         for mode, title, desc in _MODE_TILES:
@@ -145,6 +154,31 @@ class HomePage(QFrame):
         outer.addWidget(self._activity_card)
 
         outer.addStretch()
+
+    def _build_ccc_banner(self):
+        card = card_frame()
+        card.setObjectName("CccBanner")
+        card.setStyleSheet(
+            f"#CccBanner{{background:{ALMA_BG_ELEVATED}; "
+            f"border:1px solid {ALMA_BORDER}; border-left:3px solid {_ACCENT}; "
+            "border-radius:10px;}")
+        v = QVBoxLayout(card)
+        v.setContentsMargins(20, 14, 20, 14)
+        v.setSpacing(4)
+
+        name = QLabel(CONTENT_COMMAND_CENTER.upper())
+        name.setStyleSheet(
+            f"font-size: 12px; font-weight: 700; color: {_ACCENT}; "
+            "letter-spacing: 1.5px; background: transparent; border: none;")
+        v.addWidget(name)
+
+        desc = QLabel(CONTENT_COMMAND_CENTER_DESCRIPTION)
+        desc.setWordWrap(True)
+        desc.setStyleSheet(
+            f"font-size: 12.5px; color: {ALMA_TEXT_MID}; "
+            "background: transparent; border: none;")
+        v.addWidget(desc)
+        return card
 
     def _heading(self, text):
         lbl = QLabel(text)
@@ -212,6 +246,7 @@ class HomePage(QFrame):
         if mode not in app_modes.MODES:
             return
         self._mode = mode
+        self._ccc_banner.setVisible(mode == app_modes.MODE_ENABLEMENT)
         for m, tile in self._tiles.items():
             tile._active_pill.setVisible(m == mode)
             tile._switch_btn.setVisible(m != mode)

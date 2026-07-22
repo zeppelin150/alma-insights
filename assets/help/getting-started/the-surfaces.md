@@ -4,7 +4,7 @@ title: Where everything lives
 section: getting-started
 section_title: Getting started
 section_order: 1
-order: 5
+order: 6
 status: partial
 features: [en_agent, en_calendar, en_tasks, en_workbench, en_powerpoint, en_zendesk, en_attention, en_analytics, en_help, en_settings]
 summary: A tour of the ten sidebar entries on the enablement side, and the one capability that has no screen at all.
