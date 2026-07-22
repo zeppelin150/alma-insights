@@ -6,7 +6,7 @@
 
 **The delta:** 27 commits, 295 files (206 added, 89 modified, **zero deleted** — a copy-over sync is complete), +60,225 / −3,220 lines. 8 new SQL migrations (043–050). 1 new Python dependency (`pypdf==6.14.2`). ~150 new/changed source files, 73 test files, 63 Help-Center articles, 5 prompt templates, 2 asset templates (one binary).
 
-**Transfer mechanism (the owner's decision — do not substitute another):** the code arrives as a **GitHub source zip** of this branch, downloaded by the owner, inflated on the Mac, compared locally against the existing tree, then synced file-over-file. There is **no `git fetch` / `pull` / `checkout` in this flow**, even if the Mac checkout has a configured remote — git on the Mac (if present) is used only for a rescue snapshot and as an audit trail, never to move code. Phase 2 has the exact commands. Target commit: `6890a70d150193fa1b5b49346a53b483e1b208a2` (= `dbb5c8f` + four 2026-07-22 follow-up commits: two snyk-workflow CI repairs, the NLP-stack parking + markdown/PyJWT bumps, and the text_diff.diff_words restoration — see the Appendix A addendum).
+**Transfer mechanism (the owner's decision — do not substitute another):** the code arrives as a **GitHub source zip** of this branch, downloaded by the owner, inflated on the Mac, compared locally against the existing tree, then synced file-over-file. There is **no `git fetch` / `pull` / `checkout` in this flow**, even if the Mac checkout has a configured remote — git on the Mac (if present) is used only for a rescue snapshot and as an audit trail, never to move code. Phase 2 has the exact commands. Target commit: `989905897359e4502b1d1684f180479f152ae0cd` (= `dbb5c8f` + the 2026-07-22 follow-up commits: snyk-workflow CI repairs, NLP-stack parking + markdown/PyJWT bumps, text_diff.diff_words restoration, scan_server npm-audit fix, CI action SHA-pinning, and installer/docs currency — see the Appendix A addendum).
 
 This guide supersedes (but does not delete) two narrower prior guides that ship inside this very range:
 - `docs/THREE_PILLAR_SURGICAL_PATCH_GUIDE.md` — covers only `7adbe7b..870fade` (the first ~3 feature commits). Its **Section 0 hard invariants remain binding**.
@@ -93,7 +93,7 @@ Nothing can now be lost. Note: after the Phase-2 sync, `git status` will show th
 ### Getting the zip (the owner does the download)
 Preferred URL pins the exact commit, so a later push to the branch can't race the download:
 ```
-https://github.com/zeppelin150/alma-insights/archive/6890a70d150193fa1b5b49346a53b483e1b208a2.zip
+https://github.com/zeppelin150/alma-insights/archive/989905897359e4502b1d1684f180479f152ae0cd.zip
 ```
 The branch form (`…/archive/refs/heads/enablement-content-tabs.zip`) is acceptable if downloaded before anything else lands on the branch — Phase 2 authenticates the snapshot either way.
 
@@ -157,7 +157,7 @@ sw_vers; <venv-python> --version; pip freeze | grep -iE "pyside6|shiboken|pypdf|
 ```bash
 mkdir -p ~/alma_port_incoming
 unzip -z  <path-to-zip>                      # AUTHENTICATE FIRST: GitHub stamps the commit SHA as the
-                                             # archive comment — it MUST print 6890a70d150193fa1b5b49346a53b483e1b208a2
+                                             # archive comment — it MUST print 989905897359e4502b1d1684f180479f152ae0cd
 unzip -q  <path-to-zip> -d ~/alma_port_incoming
 SRC=$(ls -d ~/alma_port_incoming/alma-insights-*)   # GitHub top dir: <repo>-<branch or sha>
 xattr -rd com.apple.quarantine "$SRC" 2>/dev/null || true   # belt-and-braces quarantine strip
@@ -669,8 +669,14 @@ If every line is ✅, the Mac is functionally identical to the Windows dev box a
 `installer/build_release.py`, `src/startup/checks/environment.py`, `.github/workflows/ci.yml`,
 `.github/workflows/snyk.yml`, `tests/unit/test_trending_engine.py`;
 `6890a70` restores `src/data/text_diff.py` (`diff_words` — fixes 3 committed
-`test_workbench_bridge.py` failures that shipped with `dbb5c8f`). The pre-sync compare will
-show these 9 paths beyond the 295 below — expected.
+`test_workbench_bridge.py` failures that shipped with `dbb5c8f`);
+`b8cc2db` adds this guide + the per-file dossier under `docs/`;
+`ea0c037` bumps `scan_server/package-lock.json` (npm audit fix — node-forge, path-to-regexp,
+express/qs/body-parser; the remaining uuid moderate is unreachable code and deferred);
+`9899058` SHA-pins every action in the four active workflows and brings
+`installer/README.md`, `installer/README_IT_SECURITY.md`, `setup_alma_insights.py`, root
+`README.md`, and `docs/BUILD_AND_RELEASE.md` current with the parked NLP lane.
+The pre-sync compare will show these ~20 paths beyond the 295 below — expected.
 
 Generated from `git diff --numstat 7adbe7b..dbb5c8f`. A = added, M = modified (no files were deleted in this range). This is a VERIFICATION checklist — it is what the Phase-2 pre-sync compare should show against a clean July-2 baseline, and everything lands via the single rsync pass. It is NOT a list of manual copies.
 
