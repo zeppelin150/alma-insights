@@ -23,15 +23,18 @@ knowledge base on or off, and a separate control to create and verify the EC
 folder.
 
 The status line is the single place that explains why any background capability
-is idle. It names the specific reason — demo mode on, no Asana token, Google
-not connected this session, knowledge base disabled, or enabled but the folder
-was never created. Read it before assuming something is broken.
+is idle. It names the specific reason — demo mode on, no Asana token, Drive
+access unavailable, knowledge base disabled, or enabled but the folder was
+never created. Read it before assuming something is broken.
 
 **Turning it on comes first.** The folder setup control stays unavailable until
 the knowledge base is enabled.
 
-**Creating the folder requires Google connected for this session.** The
-connection is deliberately dropped at every launch, so reconnect first.
+**Creating the folder requires Drive access to be available.** What that means
+depends on how you connected: on a personal Google account it means connected
+*for this session*, because that connection is deliberately dropped at every
+launch, so reconnect first; on a service account it means Drive reads are
+enabled and the credentials file is still in place, which survives a restart.
 
 **The setup step writes to your Drive.** It does not just look for an existing
 folder. It creates the EC folder if there is none, then uploads a small marker
@@ -80,8 +83,11 @@ on at that moment. Turning it on mid-session does not start it.
 **The folder setup control does nothing or is unavailable.** Check the
 knowledge base is turned on first — the control stays disabled until it is.
 
-**Setup reports that Google is not connected.** Reconnect Google for this
-session and try again. This will recur after every app launch by design.
+**Setup reports that Google is not connected.** On a personal Google account,
+reconnect for this session and try again — this will recur after every app
+launch by design. On a service account there is nothing to reconnect: check
+instead that Drive reads are enabled and the credentials file is still where
+you pointed it.
 
 **Renn refuses to index and says the knowledge base is disabled, in demo mode,
 or not set up.** All three are real states with a real fix, and the message

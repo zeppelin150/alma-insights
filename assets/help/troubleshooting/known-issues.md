@@ -67,9 +67,10 @@ this problem.
 **The Drive folder picker has no search box.** You navigate the folder tree by
 expanding it, which is slow with many folders.
 
-**Drive search results can be truncated.** Only the first page of matches is
-read, so a match beyond the first page is invisible. There is also no retry
-when Google rate-limits a request.
+**Drive search reads every page of results** (up to the requested limit) and
+retries with backoff when Google rate-limits a request, so matches beyond the
+first page are found. Very large result sets are still capped by the limit you
+ask for.
 
 **Drive folder monitoring does not descend into subfolders**, so changes in a
 nested folder can be missed. Knowledge-base indexing is unaffected — it walks

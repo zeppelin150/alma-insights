@@ -36,9 +36,12 @@ reverse is not true: **the app never deletes anything in your Drive.** If a
 source document disappears, the card built from it is marked as having a
 missing source and kept.
 
-Sync only runs while Google is connected for the session. A pass with no
-connection does nothing and records that it was skipped; the next connected
-pass picks up the whole backlog.
+Sync only runs while Drive access is available. What that means depends on how
+you connected: on a personal Google account it means connected *for the
+session*, because that connection is dropped at every launch; on a service
+account it means Drive reads are enabled and the credentials file is still in
+place, which survives a restart. A pass with no access does nothing and records
+that it was skipped; the next connected pass picks up the whole backlog.
 
 ## How it should work
 
@@ -55,10 +58,12 @@ dropped rather than released as a flood when you reconnect.
 
 ## If it doesn't
 
-**Nothing has synced for a long time.** The usual cause is Google not being
-connected for this session — the connection is deliberately dropped at launch
-and has to be re-established. Check the knowledge base status in the enablement
-settings, which lists every reason a background job is inactive.
+**Nothing has synced for a long time.** The usual cause is Drive access not
+being available. On a personal Google account the connection is deliberately
+dropped at launch and has to be re-established each session; on a service
+account, check that Drive reads are still enabled and the credentials file is
+still where it was. Check the knowledge base status in the enablement settings,
+which lists every reason a background job is inactive.
 
 **Your Drive edit did not take.** Give it a full sync interval, then check the
 file actually saved in Drive. If the card genuinely changed in Drive and the

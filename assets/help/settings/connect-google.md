@@ -60,8 +60,11 @@ next connection after a disconnect will open a browser again.
 **Drive stopped working after you relaunched the app.** Expected. Reconnect. This
 is the disable-on-launch behaviour, not a failure, and it happens every launch.
 
-**The knowledge base status says Google is not connected this session.** Same
-cause, same fix. Reconnect, then retry whatever you were doing.
+**The knowledge base status says Google is not connected this session.** On a
+personal Google account that is the same cause and the same fix — reconnect,
+then retry whatever you were doing. On a service account it is not a session
+problem at all: check that Drive reads are enabled and the credentials file is
+still where you pointed it.
 
 **Reconnect opens a browser every time.** It should be silent when a valid
 authorization is stored. A browser on every reconnect means the stored record is

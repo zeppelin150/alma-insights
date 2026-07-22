@@ -388,13 +388,26 @@ def test_knowledge_base_ships_turned_off(monkeypatch):
 
 def test_shipped_settings_file_carries_no_kb_configuration():
     """kb-bootstrapping: "A fresh install has no knowledge base configuration
-    at all, so the knowledge base is off and no EC folder exists"."""
+    at all, so the knowledge base is off and no EC folder exists".
+
+    data/settings.yaml is gitignored and generated per machine — it is never
+    shipped. On a machine where the operator has deliberately bootstrapped the
+    KB, ``enablement.kb`` in the LIVE file is correct product behavior and
+    cannot falsify a claim about FRESH installs — so skip rather than fail
+    there (the behavioral pin for the claim is test_knowledge_base_ships_
+    turned_off: empty config -> kb_enabled() False). The assert still bites on
+    fresh checkouts/CI, where kb appearing would mean something ships it."""
     import yaml
     path = REPO / "data" / "settings.yaml"
     if not path.exists():
         pytest.skip("no local settings.yaml to inspect")
     cfg = yaml.safe_load(path.read_text("utf-8")) or {}
 
+    kb = (cfg.get("enablement") or {}).get("kb")
+    if kb:
+        pytest.skip("operator has bootstrapped the KB on this machine — the "
+                    "fresh-install claim can't be falsified from a used "
+                    "machine's live settings file")
     assert "kb" not in (cfg.get("enablement") or {})
 
 
@@ -772,9 +785,9 @@ def test_each_sync_pass_pushes_queued_writes_before_it_reads_drive_back(kb,
     """kb-sync-rules: "Each pass does the same sequence: send any card writes
     the app has queued up, then read back everything that changed in Drive
     since last time"."""
-    from src.data import google_oauth
+    from src.data import google_access
     order: list[str] = []
-    monkeypatch.setattr(google_oauth, "is_active", lambda: True)
+    monkeypatch.setattr(google_access, "google_access_ready", lambda: True)
     monkeypatch.setattr(SYNC, "reset_stale_claims", lambda conn: 0)
     monkeypatch.setattr(SYNC, "expire_stale_pending", lambda conn, **k: 0)
     monkeypatch.setattr(SYNC, "drain_index_jobs", lambda conn, **k: 0)
@@ -871,12 +884,11 @@ def test_a_card_whose_source_vanished_is_marked_missing_and_kept(kb):
 
 def test_a_pass_with_no_google_connection_does_nothing_and_records_it(kb,
                                                                       monkeypatch):
-    """kb-sync-rules: "Sync only runs while Google is connected for the
-    session. A pass with no connection does nothing and records that it was
-    skipped"."""
-    from src.data import google_oauth
+    """kb-sync-rules: "Sync only runs while Drive access is available ... A
+    pass with no access does nothing and records that it was skipped"."""
+    from src.data import google_access
     conn = kb["conn"]
-    monkeypatch.setattr(google_oauth, "is_active", lambda: False)
+    monkeypatch.setattr(google_access, "google_access_ready", lambda: False)
     STORE.upsert_card(conn, _card_meta(), "body", topic_folder_id=kb["topic"])
     ING._enqueue_write(conn, "kb-aaaa1111")
     calls_before = len(kb["ex"].calls)
@@ -949,8 +961,8 @@ def test_deletion_detection_runs_on_the_periodic_full_pass_not_every_pass(
     """kb-sync-rules: "Periodically it also does a fuller pass that checks for
     cards you deleted" / "Deletion removal happens on the periodic full pass,
     not every pass"."""
-    from src.data import google_oauth
-    monkeypatch.setattr(google_oauth, "is_active", lambda: True)
+    from src.data import google_access
+    monkeypatch.setattr(google_access, "google_access_ready", lambda: True)
     conn = kb["conn"]
 
     ordinary = WORKER.tick_once(conn, reader=kb["reader"], exporter=kb["ex"])
@@ -1396,11 +1408,11 @@ def test_the_kb_settings_card_offers_a_status_line_a_toggle_and_a_setup_button(
     knowledge base on or off, and a separate control to create and verify the
     EC folder"."""
     import src.data.settings_manager as sm
-    from src.data import asana_setup, google_oauth
+    from src.data import asana_setup, google_access
     monkeypatch.setattr(sm, "get_section", lambda name, default=None: {
         "demo_mode": False, "kb": {}})
     monkeypatch.setattr(asana_setup, "is_asana_connected", lambda: True)
-    monkeypatch.setattr(google_oauth, "is_active", lambda: True)
+    monkeypatch.setattr(google_access, "google_access_ready", lambda: True)
     from src.ui.pages.enablement.settings import SettingsPage
 
     page = SettingsPage()
@@ -1421,7 +1433,7 @@ def test_the_toggle_turns_the_knowledge_base_on(qapp, monkeypatch):
     """kb-bootstrapping: "a control to turn the knowledge base on or off" —
     clicking it must actually flip the persisted setting."""
     import src.data.settings_manager as sm
-    from src.data import asana_setup, google_oauth
+    from src.data import asana_setup, google_access
     from src.ui.pages.enablement.settings import SettingsPage
     state = {"demo_mode": False, "kb": {"enabled": False}}
     written: list[tuple] = []
@@ -1429,7 +1441,7 @@ def test_the_toggle_turns_the_knowledge_base_on(qapp, monkeypatch):
     monkeypatch.setattr(sm, "set_section",
                         lambda name, value: written.append((name, value)))
     monkeypatch.setattr(asana_setup, "is_asana_connected", lambda: True)
-    monkeypatch.setattr(google_oauth, "is_active", lambda: True)
+    monkeypatch.setattr(google_access, "google_access_ready", lambda: True)
 
     page = SettingsPage()
     try:
@@ -1450,12 +1462,12 @@ def test_the_setup_control_stays_disabled_until_the_kb_is_turned_on(qapp,
     control does nothing or is unavailable. Check the knowledge base is turned
     on first"."""
     import src.data.settings_manager as sm
-    from src.data import asana_setup, google_oauth
+    from src.data import asana_setup, google_access
     from src.ui.pages.enablement.settings import SettingsPage
     state = {"demo_mode": False, "kb": {"enabled": False}}
     monkeypatch.setattr(sm, "get_section", lambda name, default=None: state)
     monkeypatch.setattr(asana_setup, "is_asana_connected", lambda: True)
-    monkeypatch.setattr(google_oauth, "is_active", lambda: True)
+    monkeypatch.setattr(google_access, "google_access_ready", lambda: True)
 
     page = SettingsPage()
     try:
@@ -1475,15 +1487,15 @@ def test_the_status_line_names_the_specific_reason_each_capability_is_idle(
         qapp, monkeypatch):
     """kb-bootstrapping: "The status line is the single place that explains why
     any background capability is idle. It names the specific reason — demo
-    mode on, no Asana token, Google not connected this session, knowledge base
-    disabled, or enabled but the folder was never created"."""
+    mode on, no Asana token, Drive access unavailable, knowledge base disabled,
+    or enabled but the folder was never created"."""
     import src.data.settings_manager as sm
-    from src.data import asana_setup, google_oauth
+    from src.data import asana_setup, google_access
     from src.ui.pages.enablement.settings import SettingsPage
     state = {"demo_mode": True, "kb": {"enabled": False}}
     monkeypatch.setattr(sm, "get_section", lambda name, default=None: state)
     monkeypatch.setattr(asana_setup, "is_asana_connected", lambda: False)
-    monkeypatch.setattr(google_oauth, "is_active", lambda: False)
+    monkeypatch.setattr(google_access, "google_access_ready", lambda: False)
 
     page = SettingsPage()
     try:
@@ -1507,7 +1519,7 @@ def test_the_status_line_reports_active_with_card_and_topic_counts(
     should say the knowledge base is active and show a card and topic
     count"."""
     import src.data.settings_manager as sm
-    from src.data import asana_setup, google_oauth
+    from src.data import asana_setup, google_access
     from src.data.connection_factory import get_connection
     from src.ui.pages.enablement.settings import SettingsPage
     conn, ex = empty_db.conn, FakeExporter()
@@ -1520,7 +1532,7 @@ def test_the_status_line_reports_active_with_card_and_topic_counts(
     monkeypatch.setattr(sm, "get_section", lambda name, default=None: {
         "demo_mode": False, "kb": {"enabled": True, "ec_folder_id": root}})
     monkeypatch.setattr(asana_setup, "is_asana_connected", lambda: True)
-    monkeypatch.setattr(google_oauth, "is_active", lambda: True)
+    monkeypatch.setattr(google_access, "google_access_ready", lambda: True)
 
     page = SettingsPage()
     try:
@@ -1536,16 +1548,17 @@ def test_the_status_line_reports_active_with_card_and_topic_counts(
 
 def test_bootstrap_reports_that_google_must_be_connected_for_the_session(
         qapp, monkeypatch):
-    """kb-bootstrapping: "Creating the folder requires Google connected for
-    this session" / "Setup reports that Google is not connected"."""
+    """kb-bootstrapping: "Creating the folder requires Drive access to be
+    available ... on a personal Google account it means connected *for this
+    session*" / "Setup reports that Google is not connected"."""
     import src.data.settings_manager as sm
     from PySide6.QtCore import QCoreApplication
-    from src.data import asana_setup, google_oauth
+    from src.data import asana_setup, google_access
     from src.ui.pages.enablement.settings import SettingsPage
     monkeypatch.setattr(sm, "get_section", lambda name, default=None: {
         "demo_mode": False, "kb": {"enabled": True}})
     monkeypatch.setattr(asana_setup, "is_asana_connected", lambda: True)
-    monkeypatch.setattr(google_oauth, "is_active", lambda: False)
+    monkeypatch.setattr(google_access, "google_access_ready", lambda: False)
 
     page = SettingsPage()
     try:
@@ -1635,9 +1648,9 @@ def test_the_quarantine_check_runs_on_re_bootstrap_not_on_the_routine_sync(
     continuously. The routine background sync does not re-test whether the EC
     folder is still in the trash or still writable ... writes can keep going
     into the trashed folder"."""
-    from src.data import google_oauth
+    from src.data import google_access
     conn, ex, reader = kb["conn"], kb["ex"], kb["reader"]
-    monkeypatch.setattr(google_oauth, "is_active", lambda: True)
+    monkeypatch.setattr(google_access, "google_access_ready", lambda: True)
     ex.folders[kb["topic"]]["trashed"] = True
     STORE.upsert_card(conn, _card_meta(), "body", topic_folder_id=kb["topic"])
     ING._enqueue_write(conn, "kb-aaaa1111")

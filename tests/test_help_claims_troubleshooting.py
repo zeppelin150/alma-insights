@@ -952,20 +952,31 @@ def test_known_issue_drive_publish_from_the_workbench_writes_nothing(qapp):
             f"{dest} status no longer marks itself as a stub: {stub.status[0]!r}")
 
 
-def test_known_issue_web_tabs_flag_is_absent_and_defaults_off():
-    """known-issues.md: "The React Calendar and Workbench never render. They
-    are behind a setting that is absent from the shipped configuration, so the
-    standard Qt versions are what you see."
-    """
-    from src.ui.web.web_flags import VALID_MODES, web_tabs_mode
+def test_known_issue_web_tabs_flag_is_absent_and_defaults_off(monkeypatch):
+    """known-issues.md: the web Calendar/Workbench are behind a setting absent
+    from the SHIPPED configuration, so a fresh install shows the Qt versions.
 
-    settings = REPO / "data" / "settings.yaml"
-    if settings.exists():
-        assert "web_tabs" not in settings.read_text(encoding="utf-8"), (
-            "enablement.web_tabs is now present in data/settings.yaml")
+    The claim is about a FRESH install. data/settings.yaml is gitignored and
+    per-machine; an operator who deliberately enables the flag on their own box
+    (as done 2026-07-22 to trial the web tabs) cannot falsify the fresh-install
+    claim, so the live-file absence check skips there. The behavioral default is
+    pinned robustly instead: over an EMPTY config, the flag reads "off"."""
+    import src.data.settings_manager as sm
+    from src.ui.web import web_flags
+    from src.ui.web.web_flags import VALID_MODES
 
     assert VALID_MODES == ("off", "calendar", "all")
-    assert web_tabs_mode() == "off", "the web tabs are no longer off by default"
+    # Default behavior, independent of the live file: empty config -> off.
+    # (web_flags imports get_section from settings_manager per-call, so patching
+    # the source module is what takes effect.)
+    monkeypatch.setattr(sm, "get_section", lambda name, default=None: {})
+    assert web_flags.web_tabs_mode() == "off", (
+        "the web tabs must default off on a fresh install")
+
+    settings = REPO / "data" / "settings.yaml"
+    if settings.exists() and "web_tabs" in settings.read_text(encoding="utf-8"):
+        pytest.skip("operator enabled web_tabs on this machine — can't speak "
+                    "to fresh-install shipped config from a modified settings file")
 
 
 def test_known_issue_web_tabs_mode_degrades_to_off(monkeypatch):
@@ -1100,10 +1111,11 @@ def test_known_issue_drive_folder_picker_has_no_search_box():
     assert "<input" in asana, "control failed — the Asana picker has no input either"
 
 
-def test_known_issue_drive_search_reads_only_the_first_page(monkeypatch):
-    """known-issues.md: "Drive search results can be truncated. Only the first
-    page of matches is read, so a match beyond the first page is invisible."
-    """
+def test_known_issue_drive_search_now_paginates(monkeypatch):
+    """known-issues.md (flipped 2026-07-22): "Drive search reads every page of
+    results (up to the requested limit)". The old claim ("only the first page
+    of matches is read") went stale when D2 pagination landed — search_files
+    must follow nextPageToken until the limit is met."""
     from src.data.drive_reader import DriveReader
 
     calls = []
@@ -1114,7 +1126,7 @@ def test_known_issue_drive_search_reads_only_the_first_page(monkeypatch):
 
         def execute(self):
             calls.append(self._kwargs)
-            return {"files": [{"id": "f1", "name": "one"}],
+            return {"files": [{"id": f"f{len(calls)}", "name": "one"}],
                     "nextPageToken": "MORE-RESULTS-EXIST"}
 
     class FakeFiles:
@@ -1130,20 +1142,22 @@ def test_known_issue_drive_search_reads_only_the_first_page(monkeypatch):
 
     results = reader.search_files("payer", limit=5)
 
-    assert len(calls) == 1, (
-        f"search_files now paginates ({len(calls)} requests) — the article is stale")
-    assert "pageToken" not in calls[0], "search_files now sends a pageToken"
-    assert len(results) == 1, "a second page was fetched despite nextPageToken"
+    assert len(calls) > 1, (
+        "search_files stopped paginating — the article now promises every page")
+    assert any("pageToken" in c for c in calls[1:]), (
+        "follow-up requests must carry the nextPageToken")
+    assert len(results) == 5, "pagination must stop at the requested limit"
 
 
-def test_known_issue_drive_reader_has_no_rate_limit_retry():
-    """known-issues.md: "There is also no retry when Google rate-limits a
-    request."
-    """
+def test_known_issue_drive_reader_retries_rate_limits():
+    """known-issues.md (flipped 2026-07-22): "retries with backoff when Google
+    rate-limits a request". The old claim ("no retry") went stale when D3
+    landed (_read_with_retry, 429/5xx backoff)."""
     source = (REPO / "src" / "data" / "drive_reader.py").read_text(encoding="utf-8")
-    for marker in ("retry", "backoff", "429", "sleep(", "num_retries"):
-        assert marker not in source.lower(), (
-            f"drive_reader now has retry logic ({marker!r}) — the article is stale")
+    for marker in ("retry", "429"):
+        assert marker in source.lower(), (
+            f"drive_reader lost its retry logic ({marker!r}) — the article now "
+            "promises backoff on rate limits")
 
 
 def test_known_issue_drive_monitoring_does_not_descend_into_subfolders(monkeypatch):
