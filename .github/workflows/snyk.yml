@@ -178,13 +178,19 @@ jobs:
               print(f"| `{pkg}` | {emoji} {sev.capitalize()} | {title} | {fix} |")
           EOF
 
+      # continue-on-error: the JSON artifact is a convenience copy — the SARIF
+      # upload to the Security tab is the durable record. A transient artifact-
+      # storage-quota error must not mark a successful scan as failed
+      # (2026-07-22: stale quota counter failed this step and paged the owner
+      # with "All jobs have failed" for a scan that found and reported fine).
       - name: Upload results as artifact
         if: always() && hashFiles('snyk-results.json') != ''
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: snyk-report
           path: snyk-results.json
-          retention-days: 30
+          retention-days: 7
 
       - name: Upload SARIF file
         if: always() && hashFiles('snyk.sarif') != ''
