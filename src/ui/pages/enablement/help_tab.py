@@ -162,20 +162,20 @@ class HelpTab(QFrame):
         if conn is None:
             self._status.setText("Help content unavailable.")
             return
+        # Self-healing + self-SYNCING: the bundled corpus is the source of
+        # truth and grows across releases. sync_bundled_help loads whenever the
+        # DB is BEHIND the shipped files (empty OR stale) — not only when empty,
+        # which left a DB first populated at 8 articles frozen there while 62
+        # shipped (2026-07-22 field bug). Cheap when already current (one COUNT).
+        try:
+            from src.data.help import loader
+            loader.sync_bundled_help(conn)
+        except Exception:  # noqa: BLE001 — help must never break the page
+            pass
         try:
             articles = store.list_articles(conn)
         except Exception:  # noqa: BLE001 — table missing (migration not run)
             articles = []
-        if not articles:
-            # Self-healing: the bundled corpus is the source of truth, so an
-            # empty table just means it has not been loaded into THIS database
-            # yet (fresh install, new warehouse, demo DB). Load and retry once.
-            try:
-                from src.data.help import loader
-                loader.load_bundled_help(conn)
-                articles = store.list_articles(conn)
-            except Exception:  # noqa: BLE001 — help must never break the page
-                articles = []
         if not articles:
             self._status.setText(
                 "No help articles are loaded. Reinstalling the app restores "

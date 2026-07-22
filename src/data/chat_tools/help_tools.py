@@ -21,22 +21,21 @@ logger = logging.getLogger("alma.help.tool")
 
 
 def _ensure_corpus(conn) -> bool:
-    """Load the bundled help corpus if this DB has none. Returns True when the
-    corpus is queryable, False when it could not be made available (e.g. the
-    help_articles table does not exist because migration 048 has not run)."""
+    """Sync the bundled help corpus, then report whether it is queryable.
+
+    Uses ``sync_bundled_help`` (loads only when the DB is BEHIND the bundled
+    files), not a presence gate — a DB populated against an older, smaller
+    corpus must pick up newly-shipped articles, not stay frozen at whatever it
+    first loaded (the 2026-07-22 "8 of 62 articles" bug). Returns False only
+    when the corpus could not be made available (e.g. the help_articles table
+    does not exist because migration 048 has not run)."""
     try:
         from src.data.help import store
-        if store.count_articles(conn) > 0:
-            return True
-    except Exception:  # noqa: BLE001 — table missing / not migrated
-        pass
-    try:
-        from src.data.help.loader import load_bundled_help
-        load_bundled_help(conn)
-        from src.data.help import store
+        from src.data.help.loader import sync_bundled_help
+        sync_bundled_help(conn)
         return store.count_articles(conn) > 0
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("help corpus load failed: %s", exc)
+    except Exception as exc:  # noqa: BLE001 — table missing / not migrated
+        logger.debug("help corpus sync failed: %s", exc)
         return False
 
 

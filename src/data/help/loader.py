@@ -95,6 +95,40 @@ def parse_article(path: Path) -> dict | None:
     }
 
 
+def bundled_file_count(directory: Path | None = None) -> int:
+    """How many ``*.md`` files the bundled corpus ships. Cheap (no parse) —
+    used as the cross-check against the DB row count to decide whether a
+    re-sync is needed. An over-count (a malformed file that won't parse) only
+    causes one extra idempotent load, never a miss."""
+    root = directory or _HELP_DIR
+    if not root.exists():
+        return 0
+    return sum(1 for _ in root.rglob("*.md"))
+
+
+def sync_bundled_help(conn, *, directory: Path | None = None) -> dict:
+    """Load the corpus IFF the DB is behind the bundled files, else no-op.
+
+    The corpus is the source of truth and grows over releases; a DB populated
+    against an older, smaller corpus (the 2026-07-22 "only 8 of 62 articles"
+    field bug) must re-sync when new files ship — not only when the table is
+    empty. Runs the (upsert-on-hash, idempotent) loader when the on-disk file
+    count exceeds the DB row count; otherwise returns ``{"skipped_current": N}``
+    so an already-current DB pays only one COUNT, no re-hash of every file.
+
+    Returns the loader summary (or the skip marker). Never raises.
+    """
+    try:
+        db_n = store.count_articles(conn)
+        disk_n = bundled_file_count(directory)
+    except Exception as exc:  # noqa: BLE001 — a count failure must not break help
+        logger.debug("help sync count failed: %s", exc)
+        return {"loaded": 0, "skipped": 0, "unchanged": 0, "errors": []}
+    if db_n >= disk_n and db_n > 0:
+        return {"skipped_current": db_n}
+    return load_bundled_help(conn, directory=directory)
+
+
 def load_bundled_help(conn, *, directory: Path | None = None) -> dict:
     """Load every ``assets/help/**/*.md`` into ``help_articles``.
 
