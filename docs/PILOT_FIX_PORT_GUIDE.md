@@ -838,6 +838,65 @@ def test_confirm_dialog_does_not_stomp_concurrent_writes(qapp, monkeypatch):
    If the splash still blocks, capture the FULL text of every red item —
    the second critical failure from 2026-07-23 was never read.
 
+## Appendix A — Corrected delivery path (file-copy method, 2026-07-24)
+
+Status: an earlier execution applied all files correctly but to
+`~/Downloads/AlmaInsights/` — a scratch folder, **not** a repo checkout
+(only 8 of the tree's files existed there). Nothing has reached the
+CoveHealth repository yet. The file-copy method below replaces Edits 1–5;
+the source zip already contains every edit pre-applied, so no in-place
+editing is needed — but the copies must land in the REAL clone.
+
+A1. Locate the actual CoveHealth clone: open **GitHub Desktop**, select
+    the CoveHealth alma-insights repository, menu **Repository → Show in
+    Finder**. Call that folder CLONE. Verify it is real: it must contain
+    a full tree (~1,000 files) including `installer/build_release.py`,
+    `src/data/pat_store.py`, `src/ui/pages/enablement/settings.py`, and
+    a `.git` directory (hidden). If any of those are absent, STOP — the
+    wrong folder is selected.
+
+A2. In GitHub Desktop, confirm the current branch is the one CI builds
+    from (the branch the 2026-07-23/24 fixes were made on), and press
+    **Fetch origin / Pull** so the clone is current.
+
+A3. From the extracted source zip
+    (`/tmp/enablement_v4/alma-insights-enablement-content-tabs/`), copy
+    these 7 files into CLONE at the SAME relative paths, overwriting
+    where the file exists:
+
+    - `installer/build_release.py`
+    - `installer/README_IT_SECURITY.md`
+    - `src/data/pat_store.py`
+    - `src/ui/pages/enablement/settings.py`
+    - `tests/test_build_release_cleanup.py`   (new)
+    - `tests/test_pat_store_backend.py`       (new)
+    - `tests/test_demo_mode_toggle.py`        (new)
+
+    Do NOT copy anything else from the zip — in particular not the
+    `.github/workflows/` files (the CoveHealth copies are ahead) and not
+    `main.py` or any other file.
+
+A4. GitHub Desktop → **Changes** tab. Expect EXACTLY 7 files listed:
+    4 modified + 3 new. Review each modified file's diff against these
+    expectations:
+
+    - `build_release.py` — 2 hunks: the dist-info removal block replaced
+      by the KEPT comment; a short comment above `arch_label = "x64"`.
+    - `pat_store.py` — 2 hunks: `import sys`; the
+      `_ensure_keyring_backend` block + call.
+    - `settings.py` — 3 hunks: the Connections-tab call; the
+      operating-mode methods block; the `refresh_kb_status` bullet.
+    - `README_IT_SECURITY.md` — 2 hunks: runner table; cleanup bullet.
+
+    If ANY other file appears in Changes, or any diff shows hunks beyond
+    the above, STOP and report — do not commit.
+
+A5. Commit with summary
+    `port: pilot fixes — keyring dist-info+self-heal, OPERATING MODE card, tests`
+    and **Push origin**.
+
+A6. Continue at "Post-port verification" above.
+
 ## Known-and-accepted limitations shipping with this port
 
 - A mode flip is only fully real after an app **restart**: live→demo does
