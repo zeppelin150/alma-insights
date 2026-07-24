@@ -322,7 +322,8 @@ class SettingsPage(QWidget):
         def _add(widget, glyph, label):
             self._tabs.addTab(widget, design_icon(glyph, 14, ALMA_TEXT_MID), label)
 
-        _add(self._tab([self._connections()]), "antenna", "Connections")
+        _add(self._tab([self._mode_card(), self._connections()]),
+             "antenna", "Connections")
         _add(self._tab([self._identity(), self.credentials]), "sliders", "Providers")
         _add(self._tab([self._asana(), self._drive(),
                         self._knowledge_base()]), "database", "Sources")
@@ -342,6 +343,116 @@ class SettingsPage(QWidget):
         # the shared CostDashboard; absent, the tab keeps its placeholder.
         self.usage_db_factory = None
         self._kb_bootstrap_finished.connect(self._kb_bootstrap_done)
+
+    # ── operating mode (demo ⇄ live) ─────────────────────────────────
+    # The flag (`enablement.demo_mode`, default ON) previously had NO UI
+    # writer — going live meant hand-editing settings.yaml, which the first
+    # end-user pilot proved untenable. Going live is the authority-bearing
+    # direction, so it gets a native confirm; returning to demo never does.
+    def _mode_card(self) -> QFrame:
+        # Boot-time flag snapshot: pages, the chat DB, and the background
+        # monitor were all built against this value, and a settings flip
+        # only fully lands after restart — the card must show the halfway
+        # state honestly instead of claiming the new mode is in force.
+        from src.data.settings_manager import get_section
+        try:
+            en0 = get_section("enablement", {}) or {}
+        except Exception:  # noqa: BLE001
+            en0 = {}
+        self._boot_demo = bool(en0.get("demo_mode", True))
+
+        card = card_frame()
+        v = QVBoxLayout(card)
+        v.setContentsMargins(20, 16, 20, 16)
+        v.setSpacing(10)
+        v.addWidget(section_label("OPERATING MODE"))
+        self._mode_status = QLabel("")
+        self._mode_status.setWordWrap(True)
+        self._mode_status.setStyleSheet(
+            f"color:{ALMA_TEXT_MID}; font-size:12px; border:none;")
+        v.addWidget(self._mode_status)
+        row = QHBoxLayout()
+        self._mode_toggle_btn = QPushButton("")
+        self._mode_toggle_btn.setCursor(Qt.PointingHandCursor)
+        self._mode_toggle_btn.setStyleSheet(
+            f"QPushButton{{background:{ALMA_BG_ELEVATED}; color:{_TEAL}; "
+            f"border:1px solid {_TEAL}; border-radius:7px; padding:6px 12px; "
+            f"font-size:12px; font-weight:600;}}")
+        self._mode_toggle_btn.clicked.connect(self._on_mode_toggle)
+        row.addWidget(self._mode_toggle_btn)
+        row.addStretch(1)
+        v.addLayout(row)
+        self._refresh_mode_card()
+        return card
+
+    def _refresh_mode_card(self):
+        from src.data.settings_manager import get_section
+        try:
+            en = get_section("enablement", {}) or {}
+        except Exception:  # noqa: BLE001
+            en = {}
+        demo = bool(en.get("demo_mode", True))
+        if demo != self._boot_demo:
+            still = ("Background sync started in live mode is STILL RUNNING "
+                     "until you restart."
+                     if not self._boot_demo else
+                     "Pages and background workers stay in demo until you "
+                     "restart.")
+            self._mode_status.setText(
+                f"Mode change saved — restart the app to apply it. {still}")
+        elif demo:
+            self._mode_status.setText(
+                "Demo mode — a practice sandbox. Asana sync, Guru "
+                "publishing, KB indexing and briefs are simulated, and "
+                "Workbench/calendar work lives in a temporary practice "
+                "database that is cleared at every launch. Renn chat still "
+                "uses the live AI service.")
+        else:
+            self._mode_status.setText(
+                "Live mode — connected integrations act for real.")
+        self._mode_toggle_btn.setText(
+            "Go live…" if demo else "Return to demo mode")
+
+    def _on_mode_toggle(self):
+        from PySide6.QtWidgets import QMessageBox
+        from src.data.settings_manager import get_section, set_section
+        demo = bool((get_section("enablement", {}) or {}).get(
+            "demo_mode", True))
+        if demo:
+            resp = QMessageBox.question(
+                self, "Leave demo mode?",
+                "Live mode lets connected integrations act for real:\n"
+                "Guru publishes reach your Guru workspace, Asana updates "
+                "real tasks, and the KB indexes your Drive.\n\n"
+                "The switch only fully applies after you RESTART the app — "
+                "until then, pages and Renn keep parts of demo mode.\n"
+                "You can return to demo mode here at any time.",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if resp != QMessageBox.Yes:
+                return
+        # Re-read AFTER the modal: its nested event loop keeps main-thread
+        # slots firing (e.g. the chat action poll writes enablement subkeys
+        # via whole-section set_section) — writing a pre-dialog snapshot
+        # back would silently revert those.
+        cfg = dict(get_section("enablement", {}) or {})
+        cfg["demo_mode"] = not demo
+        if not set_section("enablement", cfg):
+            QMessageBox.warning(
+                self, "Couldn't save",
+                "The mode change could not be written to settings — the "
+                "app is still in its previous mode. Check that the data "
+                "folder is writable, then try again.")
+            return
+        self._refresh_mode_card()
+        self.refresh_kb_status()
+        if not demo:
+            # live→demo is the panic direction and has no confirm, so the
+            # restart truth has to land right here, not in a status line.
+            QMessageBox.information(
+                self, "Restart needed",
+                "Demo mode is saved but only fully applies after a "
+                "restart. Background sync started in live mode is still "
+                "running until then.")
 
     # ── knowledge base (WS2-M7: status + bootstrap + degraded-state) ──
     def _knowledge_base(self) -> QFrame:
@@ -387,7 +498,12 @@ class SettingsPage(QWidget):
             en = {}
         kb = en.get("kb") or {}
         lines = []
-        if en.get("demo_mode", True):
+        demo_now = bool(en.get("demo_mode", True))
+        if demo_now != getattr(self, "_boot_demo", demo_now):
+            lines.append("• Mode change pending — restart to apply. "
+                         "Background monitors still reflect the previous "
+                         "mode.")
+        if demo_now:
             lines.append("• Demo mode is ON — no live monitor (Asana sync, "
                          "briefs, KB) runs until it's disabled.")
         try:
