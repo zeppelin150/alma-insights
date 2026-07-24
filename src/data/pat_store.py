@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -67,6 +68,57 @@ _SECRET_KEYS: frozenset[str] = frozenset({
 _CONFIG_DIR = Path.home() / ".alma-insights"
 _STATE_FILE = _CONFIG_DIR / "ui_state.json"
 _LEGACY_FILE = _CONFIG_DIR / "credentials.json"
+
+
+# ──────────────────────────────────────────────────────────────────
+# Backend self-heal
+# ──────────────────────────────────────────────────────────────────
+
+def _ensure_keyring_backend() -> None:
+    """
+    Recover when keyring resolves to the fail stub because backend
+    DISCOVERY failed: an environment without *.dist-info metadata (a
+    slimmed bundle, a frozen app) has no entry points to scan, so keyring
+    finds nothing even though the platform backend imports and works.
+    Direct-import the OS backend in that case.
+
+    Deliberately narrow, in two ways:
+    - Windows/macOS only — the platforms bundles ship to, where the OS
+      vault always exists. On Linux the fail stub usually means the
+      SecretService viability probe failed (no D-Bus session/daemon);
+      installing that backend anyway would turn today's graceful
+      degradation (NoKeyringError → load_setting returns default) into
+      uncaught SecretServiceNotAvailableException crashes.
+    - Never when PYTHON_KEYRING_BACKEND or a keyringrc is present: an
+      admin may configure the fail backend ON PURPOSE to keep this app
+      out of the OS vault. Explicit configuration outranks healing.
+    """
+    try:
+        if sys.platform not in ("win32", "darwin"):
+            return
+        if os.environ.get("PYTHON_KEYRING_BACKEND"):
+            return
+        try:
+            import keyring.util.platform_ as _kp
+            if (Path(_kp.config_root()) / "keyringrc.cfg").exists():
+                return
+        except Exception:  # noqa: BLE001 — config probe is best-effort
+            pass
+        from keyring.backends import fail as _fail
+        if not isinstance(keyring.get_keyring(), _fail.Keyring):
+            return
+        if sys.platform == "darwin":
+            from keyring.backends import macOS as _mod
+            backend = _mod.Keyring()
+        else:
+            from keyring.backends import Windows as _mod
+            backend = _mod.WinVaultKeyring()
+        keyring.set_keyring(backend)
+    except Exception:  # noqa: BLE001 — never block import; the splash check reports
+        pass
+
+
+_ensure_keyring_backend()
 
 # Preserved for any external reference (e.g. diagnostic tools).
 # New code should not read or write this path directly.
