@@ -146,6 +146,53 @@ def test_write_failure_warns_and_keeps_state(qapp, monkeypatch):
         page.deleteLater()
 
 
+def test_full_round_trip_against_real_settings_file(qapp, monkeypatch, tmp_path):
+    """Integration: no settings mocks — the real settings_manager against a
+    temp settings.yaml, the real button clicked through Qt. Covers the
+    whole chain the unit tests stub out: YAML load, atomic write-and-
+    rename, re-read, pending-state detection, section preservation."""
+    import yaml as _yaml
+
+    import src.data.settings_manager as sm
+
+    sp = tmp_path / "settings.yaml"
+    sp.write_text(
+        "enablement:\n  demo_mode: true\n  kb: {}\nother_section:\n  keep: 1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sm, "get_settings_path", lambda: sp)
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes),
+    )
+    monkeypatch.setattr(
+        QMessageBox, "information", staticmethod(lambda *a, **k: None)
+    )
+    from src.ui.pages.enablement.settings import SettingsPage
+
+    page = SettingsPage()
+    try:
+        assert page._mode_toggle_btn.text() == "Go live…"
+
+        page._mode_toggle_btn.click()  # demo → live, real write
+
+        on_disk = _yaml.safe_load(sp.read_text(encoding="utf-8"))
+        assert on_disk["enablement"]["demo_mode"] is False
+        assert on_disk["enablement"]["kb"] == {}, "sibling keys preserved"
+        assert on_disk["other_section"] == {"keep": 1}, "other sections preserved"
+        assert "restart" in page._mode_status.text().lower()
+
+        page._mode_toggle_btn.click()  # live → demo, panic direction
+
+        on_disk = _yaml.safe_load(sp.read_text(encoding="utf-8"))
+        assert on_disk["enablement"]["demo_mode"] is True
+        # Back in sync with the boot-time flag → normal demo copy again.
+        assert "Demo mode" in page._mode_status.text()
+    finally:
+        page.deleteLater()
+
+
 def test_confirm_dialog_does_not_stomp_concurrent_writes(qapp, monkeypatch):
     # The modal confirm spins a nested event loop; other slots (the chat
     # action poll) may write enablement subkeys meanwhile. The toggle must
