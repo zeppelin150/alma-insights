@@ -7,8 +7,8 @@ section_order: 5
 order: 4
 status: partial
 features: [en_zendesk]
-summary: The macro editor exposes only the public reply, and saving rewrites that reply as plain text while keeping the macro's other actions.
-last_verified: 2026-07-20
+summary: The classic macro editor exposes only the public reply, and saving rewrites that reply as plain text while keeping the macro's other actions; the web workspace shows the full action list.
+last_verified: 2026-07-24
 ---
 
 A Zendesk macro is a list of actions — set a status, add tags, assign a group,
@@ -80,3 +80,15 @@ editor covers the name and the reply only. Use Zendesk for the rest.
 **A push reports success but the macro is unchanged in Zendesk.** Check that
 Zendesk is connected. If it is, flag it — macro writes are a thin path and worth
 reporting with the macro name and what you expected to change.
+
+## The web workspace's macro editor
+
+Everything above describes the classic tab. When the web workspace is enabled
+(see *Zendesk: syncing and drafting articles*), macros render in a replica of
+Zendesk's Admin Center editor instead: the **full action list** as rows — status,
+priority, tags, assignee, the reply and the rest — read from the local mirror.
+Renn's proposed macro changes appear as revisions with the reply preserved
+verbatim as plain text — copying a reply puts plain text on the clipboard, so
+formatting still has to be applied in Zendesk's editor — and nothing pushes to
+Zendesk from there: you review the diff, copy the final values exactly, and
+paste them into Zendesk yourself.

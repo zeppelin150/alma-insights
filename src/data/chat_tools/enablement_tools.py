@@ -2010,51 +2010,44 @@ def handle_list_guru_folder_items(conn, args, session_filters) -> dict:
     return _list_guru_folder_items_impl(conn, args.get("folder_id"))
 
 
-# ── Zendesk Help Center tools (search + deterministic list) ──────────
+# ── Zendesk tools (LOCAL MIRROR — repointed, zendesk-clone-web WS5) ──
 #
-# NEW surface: Renn previously had NO Zendesk tools. A shared ZendeskClient is
-# built from stored creds (ZendeskClient.from_settings — mirrors how GuruClient is
-# built from load_credentials). All degrade to {ok:False,'zendesk_not_connected'}
-# when creds are absent, so the chat never crashes.
-#
-# search_zendesk_articles is a query-ranked SEARCH (Help Center search endpoint —
-# may miss articles). list_zendesk_articles is DETERMINISTIC enumeration of the
-# Help Center. list_zendesk_macros lists the account's macros.
-
-
-def _zendesk_client_or_none():
-    """A ZendeskClient from stored creds, or None when Zendesk isn't connected.
-
-    Mirrors GuruClient's creds-presence gate. ``ZendeskClient.from_settings``
-    returns None when subdomain/email/api_key are missing. Never raises.
-    """
-    try:
-        from src.data.zendesk_client import ZendeskClient
-        return ZendeskClient.from_settings()
-    except Exception:  # noqa: BLE001 — keyring/import fault → treat as not connected
-        return None
+# These three tools now read the mig-051 LOCAL MIRROR (populated by the GET
+# pull / manual import), never the live API — Renn works exclusively out of
+# the mirror. Names and result shapes are preserved from the live-API era
+# (search rows gain snippet/score additively); the degrade message becomes
+# {ok:False, error:'zendesk_mirror_empty', hint} when the mirror has no rows
+# for the family. The mirror-tool family proper (search_zendesk_mirror,
+# get_zendesk_article, propose_*, ...) lives in zendesk_mirror_tools.py.
 
 
 def _search_zendesk_articles_impl(conn, query, *, limit=25) -> dict:
-    """SEARCH the Zendesk Help Center by query (query-ranked — may miss articles).
-
-    Wraps ``ZendeskClient.search_articles(query)``. To ENUMERATE the Help Center
-    completely use ``list_zendesk_articles``. No creds →
-    ``{ok:False, error:'zendesk_not_connected'}``. Returns
-    ``{ok, count, articles:[{id, title, html_url?, section?}]}``.
+    """SEARCH the mirrored Help Center articles by keyword (FTS, query-ranked
+    — may miss articles). To ENUMERATE the mirror completely use
+    ``list_zendesk_articles``. Empty mirror →
+    ``{ok:False, error:'zendesk_mirror_empty', hint}``. Returns
+    ``{ok, count, articles:[{id, title, html_url, section, snippet, score}]}``.
     """
-    client = _zendesk_client_or_none()
-    if client is None:
-        return {"ok": False, "error": "zendesk_not_connected"}
+    from src.data import zendesk_store
+    from src.data.chat_tools.zendesk_mirror_tools import mirror_empty
+    empty = mirror_empty(conn, "articles")
+    if empty is not None:
+        return empty
     try:
-        results = client.search_articles(query or "")
-    except Exception as exc:  # noqa: BLE001 — surface as a failed search
-        return {"ok": False, "error": str(exc)[:160]}
-    lim = int(limit or 25)
-    out = [{"id": a.get("id"), "title": a.get("title"),
-            "html_url": a.get("html_url"),
-            "section": a.get("section_id")}
-           for a in (results or [])[:lim]]
+        lim = max(1, min(int(limit), 100))
+    except (TypeError, ValueError):
+        lim = 25
+    hits = zendesk_store.search_mirror(conn, query or "", kind="articles",
+                                       limit=lim)
+    out = []
+    for h in hits.get("articles", []):
+        row = conn.execute(
+            "SELECT html_url FROM zendesk_articles WHERE article_id=?",
+            (h["id"],)).fetchone()
+        out.append({"id": h["id"], "title": h.get("title"),
+                    "html_url": row[0] if row else None,
+                    "section": h.get("section_id"),
+                    "snippet": h.get("snippet"), "score": h.get("score")})
     return {"ok": True, "query": query, "count": len(out), "articles": out}
 
 
@@ -2064,29 +2057,32 @@ def handle_search_zendesk_articles(conn, args, session_filters) -> dict:
 
 
 def _list_zendesk_articles_impl(conn, *, limit=100, offset=0) -> dict:
-    """DETERMINISTICALLY enumerate the Zendesk Help Center articles (COMPLETE).
+    """DETERMINISTICALLY enumerate the mirrored Help Center articles.
 
-    Wraps ``ZendeskClient.get_articles(per_page)``. Reports the ``total`` fetched
-    plus a ``limit``/``offset`` window. No creds →
-    ``{ok:False, error:'zendesk_not_connected'}``. Returns
-    ``{ok, count, total, offset, articles:[{id, title, html_url?, section?}]}``.
+    Reads ``zendesk_store.list_articles_full`` with the mirror row count as
+    ``total`` plus a ``limit``/``offset`` window. Empty mirror →
+    ``{ok:False, error:'zendesk_mirror_empty', hint}``. Returns
+    ``{ok, count, total, offset, articles:[{id, title, html_url, section}]}``.
     """
-    client = _zendesk_client_or_none()
-    if client is None:
-        return {"ok": False, "error": "zendesk_not_connected"}
-    lim = int(limit or 100)
-    off = max(0, int(offset or 0))
+    from src.data import zendesk_store
+    from src.data.chat_tools.zendesk_mirror_tools import mirror_empty
+    empty = mirror_empty(conn, "articles")
+    if empty is not None:
+        return empty
     try:
-        # Follow next_page to the END so the LIST is COMPLETE (not one page),
-        # and report Zendesk's own `count` as the true Help Center total.
-        articles, total = client.get_articles_paged(per_page=100)
-    except Exception as exc:  # noqa: BLE001 — surface as a failed enumeration
-        return {"ok": False, "error": str(exc)[:160]}
-    window = (articles or [])[off:off + lim]
-    out = [{"id": a.get("id"), "title": a.get("title"),
+        lim = max(1, int(limit))
+    except (TypeError, ValueError):
+        lim = 100
+    try:
+        off = max(0, int(offset))
+    except (TypeError, ValueError):
+        off = 0
+    total = conn.execute("SELECT COUNT(*) FROM zendesk_articles").fetchone()[0]
+    rows = zendesk_store.list_articles_full(conn, limit=off + lim)
+    out = [{"id": a.get("article_id"), "title": a.get("title"),
             "html_url": a.get("html_url"),
             "section": a.get("section_id")}
-           for a in window]
+           for a in rows[off:off + lim]]
     return {"ok": True, "count": len(out), "total": total,
             "offset": off, "articles": out}
 
@@ -2097,24 +2093,26 @@ def handle_list_zendesk_articles(conn, args, session_filters) -> dict:
 
 
 def _list_zendesk_macros_impl(conn, *, limit=100) -> dict:
-    """DETERMINISTICALLY list the Zendesk account's macros.
+    """DETERMINISTICALLY list the mirrored Zendesk macros.
 
-    Wraps ``ZendeskClient.list_macros``. No creds →
-    ``{ok:False, error:'zendesk_not_connected'}``. Returns
-    ``{ok, count, macros:[{id, title, active?}]}``.
+    Direct mirror read (``zendesk_store.list_macros`` omits the ``active``
+    flag the historical result shape carries). Empty mirror →
+    ``{ok:False, error:'zendesk_mirror_empty', hint}``. Returns
+    ``{ok, count, total, macros:[{id, title, active}]}``.
     """
-    client = _zendesk_client_or_none()
-    if client is None:
-        return {"ok": False, "error": "zendesk_not_connected"}
+    from src.data.chat_tools.zendesk_mirror_tools import mirror_empty
+    empty = mirror_empty(conn, "macros")
+    if empty is not None:
+        return empty
     try:
-        # Follow next_page to the END so the macro list is COMPLETE.
-        macros, total = client.list_macros_paged(per_page=100)
-    except Exception as exc:  # noqa: BLE001 — surface as a failed enumeration
-        return {"ok": False, "error": str(exc)[:160]}
-    lim = int(limit or 100)
-    out = [{"id": m.get("id"), "title": m.get("title"),
-            "active": m.get("active")}
-           for m in (macros or [])[:lim]]
+        lim = max(1, int(limit))
+    except (TypeError, ValueError):
+        lim = 100
+    total = conn.execute("SELECT COUNT(*) FROM zendesk_macros").fetchone()[0]
+    rows = conn.execute(
+        "SELECT macro_id, name, active FROM zendesk_macros "
+        "ORDER BY updated_at DESC, macro_id LIMIT ?", (lim,)).fetchall()
+    out = [{"id": r[0], "title": r[1], "active": bool(r[2])} for r in rows]
     return {"ok": True, "count": len(out), "total": total, "macros": out}
 
 
@@ -2286,8 +2284,9 @@ def handle_search_catalog(conn, args, session_filters) -> dict:
 
 # ── UNIFIED cross-source search (M9 part 2) ──────────────────────────
 #
-# search_content FANS OUT to the per-source LIVE SEARCH impls (Guru search_cards,
-# Zendesk search_articles, Drive doc search) for the requested/available sources,
+# search_content FANS OUT to the per-source SEARCH impls (LIVE Guru
+# search_cards, the LOCAL Zendesk mirror FTS, Drive doc search) for the
+# requested/available sources,
 # merges into one ranked-ish list, and LABELS every result with its source. It
 # answers "do we have anything on X ANYWHERE". It is READ-ONLY, un-gated, and
 # degrades PER-SOURCE: a source that isn't connected is SKIPPED (its status is
@@ -2323,14 +2322,23 @@ def _unified_guru_results(conn, query, limit) -> dict:
 
 
 def _unified_zendesk_results(conn, query, limit) -> dict:
-    """One fan-out arm: LIVE Zendesk Help Center search → labeled rows or a status."""
+    """One fan-out arm: mirrored Help Center search → labeled rows or a status.
+
+    Reads the LOCAL mirror via the repointed ``_search_zendesk_articles_impl``
+    (never the live API). An empty mirror reports status 'empty_mirror' —
+    skipped like a not-connected source, never fatal."""
     r = _search_zendesk_articles_impl(conn, query, limit=limit)
     if not r.get("ok"):
         err = r.get("error", "")
-        status = "not_connected" if "not_connected" in err else "error"
+        if "not_connected" in err:
+            status = "not_connected"
+        elif "mirror_empty" in err:
+            status = "empty_mirror"
+        else:
+            status = "error"
         return {"results": [], "status": status, "error": err}
     rows = [{"source": "zendesk", "id": a.get("id"), "title": a.get("title"),
-             "snippet": None, "url": a.get("html_url")}
+             "snippet": a.get("snippet"), "url": a.get("html_url")}
             for a in r.get("articles", [])]
     return {"results": rows, "status": "ok"}
 

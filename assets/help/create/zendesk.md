@@ -7,12 +7,17 @@ section_order: 5
 order: 3
 status: partial
 features: [en_zendesk]
-summary: Sync pulls your Help Center into a local cache and writes nothing back; the article list shows drafts, and today there is no way to start one from this tab.
-last_verified: 2026-07-20
+summary: Sync pulls your Help Center into a local cache and writes nothing back; the article list shows drafts, and the web workspace works entirely out of a local mirror that Renn can propose updates into.
+last_verified: 2026-07-24
 ---
 
 The Zendesk tab has two halves: a one-way sync that reads your Help Center, and
 a draft-and-push flow for articles. The two are less connected than they look.
+
+There is also a newer, flag-gated **web workspace** (see *The web workspace and
+the local mirror* below) that replaces this tab with a high-fidelity replica of
+Zendesk's own editors, working entirely out of a local mirror. Everything in
+the next sections describes the classic tab, which remains the default.
 
 ## How it works
 
@@ -58,10 +63,11 @@ Zendesk with your title and body.
 **The article list is empty after a successful sync.** Expected. Sync fills the
 cache; the list shows drafts. They are separate.
 
-**There is no way to start a new article draft.** This is a genuine gap in the
-current build — nothing in this tab creates one, and the drafts you see in the
-demo data were seeded rather than authored. Until that is wired up, draft the
-content elsewhere. Worth flagging if you need it.
+**There is no way to start a new article draft from this tab.** Nothing in the
+classic tab creates one, and the drafts you see in the demo data were seeded
+rather than authored. Renn can, though: ask it to propose an article or macro
+update and the draft lands in the local mirror with a rationale attached, ready
+for review in the web workspace's Revision Center.
 
 **Syncing says to connect Zendesk first.** No credentials are configured. Set
 them up in settings, then sync again.
@@ -80,3 +86,34 @@ credentials and permissions, then flag it with the error text.
 actually connected — a push with no connection marks the draft locally and
 stops. If it is connected and the article still is not there, that is a real
 bug; flag it with the draft title.
+
+## The web workspace and the local mirror
+
+When the `enablement.web_tabs` setting includes `zendesk` (or is `all`), this
+tab is replaced by a web workspace that replicates Zendesk's own Guide article
+editor and Admin Center macro editor, working entirely out of a **local
+mirror** instead of your live instance.
+
+**Filling the mirror.** Two ways, both one-directional into the app:
+
+- **Pull** fetches Help Center articles, sections, categories and macros over
+  read-only API calls. It needs Zendesk credentials and reports not-connected
+  without them. Unlike the classic sync, it follows pagination — your whole
+  Help Center, not just the first page.
+- **Import** ingests files you downloaded yourself: Zendesk API/export JSON
+  (single objects, arrays, or envelopes), saved article HTML, or any document
+  the app can read. Each file gets a per-file report; re-importing an unchanged
+  file is recognised and skipped.
+
+**Working in the mirror.** The article and macro editors look and behave like
+Zendesk's, but every change stays local. Renn researches from your go-to-market
+docs, ticket exports and Asana briefs, and proposes updates as **revisions** —
+each with a rationale and its sources. Revisions move pending → ready → copied:
+you review the diff against the mirrored original, use **Copy exact** to put
+the final content on the clipboard byte-for-byte, paste it into real Zendesk
+yourself, and mark the revision copied.
+
+**Nothing writes back.** Neither the web workspace nor Renn can touch your
+Zendesk instance — there is deliberately no push, no publish, and no API write
+anywhere in this surface. The specialist's copy-and-paste is the only path from
+mirror to live, which is the point.

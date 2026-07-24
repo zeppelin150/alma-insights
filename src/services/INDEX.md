@@ -102,3 +102,16 @@
 
 **Depends on:** (none from src/)
 **Depended by:** `src.agents.worker_agent`, `src.agents.tool_registry`, `tests.unit.test_ticket_index_writer`
+
+---
+
+### zendesk_web.py
+> `ZendeskWebController` — the Python authority behind the web Zendesk workspace (QtWebEngine tab on `#/zendesk`). Owns all SQL reads, viewmodel shaping, sanitize-every-srcdoc, and the gated actions: read-only pull, file/folder import via native pickers, copy-exact via Python-side clipboard reading exact DB bytes, revision transitions, and native-confirmed destructive purge/delete. Mirrors the native `ZendeskPage` signal surface so `page.py` feeds either implementation unchanged; never emits push/sync signals and never references a `ZendeskClient` write method (structurally tested).
+
+**Public API:**
+- `ZendeskWebController(conn_fn=None, confirm_fn=None, clipboard_fn=None, file_pick_fn=None, folder_pick_fn=None, pull_runner=None, import_runner=None, now_fn=None, demo=False, parent=None)`
+- Web signals (JSON str): `zendesk_data`, `article_detail`, `macro_detail`, `revisions_data`, `diff_ready`, `import_resolved`, `pull_resolved`, `copy_resolved`, `action_resolved`; `status_text` (plain)
+- `js_*` entry points relayed by `src.ui.web.zendesk_bridge.ZendeskBridge` (silent no-op on forged/stale ids; single-winner inflight claims)
+
+**Depends on:** `src.data.zendesk_store`, `src.data.zendesk_import`, `src.data.html_sanitize`, `src.data.text_diff`
+**Depended by:** `src.ui.pages.enablement.page` (`_make_zendesk`), `src.ui.web.zendesk_bridge`, `tests.test_zendesk_bridge`, `tests.test_zendesk_web_tab`

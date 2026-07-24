@@ -89,7 +89,7 @@ wider enablement monitor.
 | `style_guide_doc_id` | The document acting as the active style guide. |
 | `card_template_doc_id` | The document acting as the active card template. |
 | `help.bug_form_url` | The Asana bug-report form the Help tab opens. |
-| `web_tabs` | Whether Calendar and Workbench render as React views. |
+| `web_tabs` | Whether Calendar, Workbench and the Zendesk workspace render as React views. |
 
 ## How it should work
 
@@ -108,11 +108,12 @@ instead of opening a dead link. The form deliberately opens in your own
 browser rather than inside the app, so the app never captures logs,
 screenshots or document text into a bug report.
 
-`web_tabs` accepts `off`, `calendar` or `all`, and defaults to `off`. With it
-absent, the native Calendar and Workbench tabs render and the React versions
-do not. Anything unrecognised also degrades to `off` — a bad value can never
-take the working tabs away from you. See *Where Renn appears* for what this
-costs you in practice.
+`web_tabs` accepts `off`, `calendar`, `zendesk` or `all`, and defaults to
+`off`. With it absent, the native Calendar, Workbench and Zendesk tabs render
+and the React versions do not; `calendar` and `zendesk` enable just that web
+surface, and `all` enables all three. Anything unrecognised also degrades to
+`off` — a bad value can never take the working tabs away from you. See *Where
+Renn appears* for what this costs you in practice.
 
 There is a related app-level key, `ui.web_home`, which is deliberately kept
 separate from `web_tabs` because Home is the first screen at launch. Turning

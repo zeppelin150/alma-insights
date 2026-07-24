@@ -3,6 +3,7 @@ import ChatApp from "./chat/ChatApp.jsx";
 import CalendarApp from "./calendar/CalendarApp.jsx";
 import WorkbenchApp from "./workbench/WorkbenchApp.jsx";
 import HomeApp from "./home/HomeApp.jsx";
+import ZendeskApp from "./zendesk/ZendeskApp.jsx";
 
 // Hash router for the single-file SPA. Each WebHost loads the same
 // dist/index.html with its own fragment: no hash (the Agent page, pre-router
@@ -13,6 +14,7 @@ function routeFromHash() {
   if (h.startsWith("calendar")) return "calendar";
   if (h.startsWith("workbench")) return "workbench";
   if (h.startsWith("home")) return "home";
+  if (h.startsWith("zendesk")) return "zendesk";
   return "chat";
 }
 
@@ -29,5 +31,6 @@ export default function App() {
   if (route === "calendar") return <CalendarApp />;
   if (route === "workbench") return <WorkbenchApp />;
   if (route === "home") return <HomeApp />;
+  if (route === "zendesk") return <ZendeskApp />;
   return <ChatApp />;
 }

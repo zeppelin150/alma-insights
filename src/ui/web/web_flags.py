@@ -4,7 +4,19 @@
 
 - ``"off"``      — (default) the native Qt tabs render, zero WebEngine cost
 - ``"calendar"`` — the Calendar tab hosts the SPA route ``#/calendar``
-- ``"all"``      — Calendar + Workbench both host their SPA routes
+- ``"zendesk"``  — the Zendesk tab hosts the SPA route ``#/zendesk``
+- ``"all"``      — Calendar + Workbench + Zendesk all host their SPA routes
+
+Per-tab semantics:
+
+===========  ========  =========  =======
+value        calendar  workbench  zendesk
+===========  ========  =========  =======
+``off``      native    native     native
+``calendar`` web       native     native
+``zendesk``  native    native     web
+``all``      web       web        web
+===========  ========  =========  =======
 
 ``ui.web_home`` — the app-level Home page, deliberately a SEPARATE flag:
 
@@ -25,7 +37,7 @@ import it headlessly.
 
 from __future__ import annotations
 
-VALID_MODES = ("off", "calendar", "all")
+VALID_MODES = ("off", "calendar", "all", "zendesk")
 
 _TRUTHY = ("on", "true", "yes", "1")
 
@@ -39,6 +51,16 @@ def web_tabs_mode() -> str:
         return "off"
     mode = str(section.get("web_tabs", "off")).strip().lower()
     return mode if mode in VALID_MODES else "off"
+
+
+def zendesk_web_enabled() -> bool:
+    """True when the Zendesk tab should render the SPA ``#/zendesk`` route.
+
+    One-liner gate so page.py's branch stays an expression and the semantics
+    are testable here: ``zendesk`` (solo rollout) and ``all`` enable it;
+    everything else — including every degrade path — keeps the native tab.
+    """
+    return web_tabs_mode() in ("zendesk", "all")
 
 
 def web_home_enabled() -> bool:

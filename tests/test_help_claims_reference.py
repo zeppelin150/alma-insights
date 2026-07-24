@@ -606,20 +606,20 @@ class TestSettingsKeys:
         assert poll_once(conn) == {"skipped": "no_credentials"}, (
             "the key exists but does not turn polling on")
 
-    def test_web_tabs_accepts_three_values_and_defaults_to_off(
+    def test_web_tabs_accepts_four_values_and_defaults_to_off(
             self, settings_file):
-        """SETTINGS-KEYS: "``web_tabs`` accepts ``off``, ``calendar`` or
-        ``all``, and defaults to ``off``. ... Anything unrecognised also
-        degrades to ``off``."
+        """SETTINGS-KEYS: "``web_tabs`` accepts ``off``, ``calendar``,
+        ``zendesk`` or ``all``, and defaults to ``off``. ... Anything
+        unrecognised also degrades to ``off``."
         """
         from src.ui.web.web_flags import VALID_MODES, web_tabs_mode
 
-        assert VALID_MODES == ("off", "calendar", "all")
+        assert set(VALID_MODES) == {"off", "calendar", "all", "zendesk"}
 
         settings_file({"enablement": {}})
         assert web_tabs_mode() == "off", "an absent web_tabs did not default off"
 
-        for value in ("off", "calendar", "all"):
+        for value in ("off", "calendar", "all", "zendesk"):
             settings_file({"enablement": {"web_tabs": value}})
             assert web_tabs_mode() == value
 

@@ -361,32 +361,40 @@ def seed_demo_decks(conn) -> dict:
 # ── demo Zendesk content (E5) ────────────────────────────────────────
 
 def seed_demo_zendesk(conn) -> dict:
-    """Synthetic synced articles/macros + drafts for the Zendesk tab demo."""
-    import json as _json
+    """Synthetic synced articles/macros + drafts for the Zendesk tab demo.
+
+    Routed through the zendesk_store ON CONFLICT upserts (never INSERT OR
+    REPLACE — that fires only the FTS insert trigger and desyncs the
+    contentless mirror) so body_text/content_hash are populated."""
     from datetime import datetime, timezone
-    from src.data.connection_factory import atomic
     from src.data import zendesk_store
     now = datetime.now(timezone.utc).isoformat()
-    with atomic(conn):
+    articles = [
+        {"id": aid, "title": title, "body": f"<p>{title} body.</p>",
+         "locale": "en-us", "section_id": 9, "html_url": "", "updated_at": now}
         for aid, title in ((101, "Setting up SSO"), (102, "Returns & Refunds"),
-                           (103, "Claims Resubmission")):
-            conn.execute(
-                "INSERT OR REPLACE INTO zendesk_articles (article_id, title, body, "
-                "locale, section_id, html_url, updated_at, fetched_at) "
-                "VALUES (?,?,?,?,?,?,?,?)",
-                (aid, title, f"<p>{title} body.</p>", "en-us", 9, "", now, now))
+                           (103, "Claims Resubmission"))]
+    zendesk_store.upsert_articles(conn, articles, origin="pull")
+    macros = [
+        {"id": mid, "title": name, "description": "", "active": True,
+         "updated_at": now,
+         "actions": [{"field": "comment_value", "value": name}]}
         for mid, name in ((201, "Password reset — provider portal"),
-                          (202, "Claim status — pending")):
-            conn.execute(
-                "INSERT OR REPLACE INTO zendesk_macros (macro_id, name, description, "
-                "actions_json, active, updated_at, fetched_at) VALUES (?,?,?,?,?,?,?)",
-                (mid, name, "", _json.dumps([{"field": "comment_value", "value": name}]),
-                 1, now, now))
-    # one of each as an AI draft
-    a = zendesk_store.save_article_draft(
+                          (202, "Claim status — pending"))]
+    zendesk_store.upsert_macros(conn, macros, origin="pull")
+    # one of each as an AI draft — idempotent: the web tab's demo pull
+    # re-seeds on every click, so skip when the identical seed draft already
+    # exists (mirrors the hash-dedup the article/macro upserts above get).
+    row = conn.execute(
+        "SELECT id FROM zendesk_article_drafts WHERE source_ref='demo' "
+        "AND title=? ORDER BY id LIMIT 1", ("SSO Setup (refresh)",)).fetchone()
+    a = row[0] if row else zendesk_store.save_article_draft(
         conn, title="SSO Setup (refresh)", body="## Steps\n1. Open console\n",
         article_id=101, source_ref="demo")
-    m = zendesk_store.save_macro_draft(
+    row = conn.execute(
+        "SELECT id FROM zendesk_macro_drafts WHERE source_ref='demo' "
+        "AND name=? ORDER BY id LIMIT 1", ("Refund approved",)).fetchone()
+    m = row[0] if row else zendesk_store.save_macro_draft(
         conn, name="Refund approved", actions=[{"field": "comment_value",
         "value": "Your refund has been approved."}], source_ref="demo")
     return {"articles": 3, "macros": 2, "article_draft": a, "macro_draft": m}

@@ -916,6 +916,21 @@ with `findings_json`, `pipeline_kind`, `specialist_count`,
 
 ---
 
+### zendesk_import.py
+> Manual population of the local Zendesk mirror: parses Help Center / macro export files (API-shaped JSON in single-object, array, or envelope form; saved article HTML; doc_reader documents) plus the GET-only live pull. Never calls a Zendesk write endpoint.
+
+**Public API:**
+- `sniff_payload(data) -> str` — classify a parsed JSON payload ('articles'|'macros'|'sections'|'categories'|'article'|'macro'|'unknown')
+- `import_file(conn, path) -> dict` — ingest one file; per-file ImportReport `{file, kind, imported, updated, skipped_unchanged, conflicts, errors}`
+- `import_paths(conn, paths) -> dict` — ingest many files; `{ok, files:[ImportReport], totals}`
+- `import_folder(conn, folder) -> dict` — ingest a folder's supported files (top level, non-recursive)
+- `pull_mirror(conn, client=None) -> dict` — read-only full-fidelity pull (articles/sections/categories/macros via paged GETs); `{ok:False, error:'zendesk_not_connected'}` without credentials
+
+**Depends on:** `src.data.zendesk_store`, `src.data.zendesk_client`, `src.data.doc_reader`
+**Depended by:** `src.ui.pages.enablement.page` (import/pull workers), `tests.test_zendesk_import`
+
+---
+
 ### zendesk_monitor.py
 > Background polling service that fetches new tickets from Zendesk at a configurable interval and computes TRC spike alerts.
 
@@ -928,3 +943,38 @@ with `findings_json`, `pipeline_kind`, `specialist_count`,
 
 **Depends on:** `src.data.source_types`, `src.data.zendesk_client`
 **Depended by:** `src.ui.main_window`, `tests.test_source_monitor`
+
+---
+
+### zendesk_store.py
+> The local Zendesk mirror (migrations 030 + 051): Help Center articles/sections/categories and macros with content-hash dedup, FTS5 search, and the AI revision lifecycle (pending → ready → copied) the specialist copies into real Zendesk by hand.
+
+**Public API:**
+- `sync_articles(conn, client, *, locale='en-us') -> dict` / `sync_macros(conn, client) -> dict` — legacy single-page cache sync (classic tab)
+- `upsert_articles(conn, articles, *, origin='pull', source_file=None) -> dict` — mirror upsert with content-hash dedup; `{inserted, updated, unchanged, conflicts, conflict_ids}`
+- `upsert_macros / upsert_sections / upsert_categories` — same pattern for the other families
+- `search_mirror(conn, query, *, kind='all', limit=25) -> dict` — sanitized FTS5 over articles + macros; never raises
+- `list_articles_full / list_sections / list_categories / get_article / get_macro` — mirror reads
+- `list_revisions(conn, *, status=None, kind=None, limit=...) -> list[dict]` — unified article+macro draft rows
+- `set_draft_status(conn, kind, draft_id, status, *, expected=None) -> dict` — transition matrix (pending→ready→copied; copied/pushed immutable)
+- `delete_draft / purge_mirror(conn, *, scope='all')` — destructive ops (native-confirm gated by the web controller)
+- `save_article_draft / save_macro_draft / update_* / publish_*_draft` — draft CRUD + the classic tab's human-gated push
+- `backfill_mirror_projections(conn) -> dict` — migration-051 post-hook (body_text/actions_text/content_hash + FTS rebuild)
+
+**Depends on:** `src.data.html_markdown`
+**Depended by:** `src.ui.pages.enablement.page`, `src.services.zendesk_web`, `src.data.zendesk_import`, `src.data.chat_tools.zendesk_mirror_tools`, `src.data.enablement_sim`, `tests.test_zendesk_content`, `tests.test_zendesk_mirror_schema`
+
+---
+
+### chat_tools/zendesk_mirror_tools.py
+> Renn's mirror-only Zendesk tool family: search/read the local mirror and propose article/macro revisions (pending drafts with mandatory rationale + sources). Tools can never change draft status, never reach the network, and never touch ZendeskClient.
+
+**Public API:**
+- `handle_search_zendesk_mirror(conn, args, filters) -> dict` — FTS over both families
+- `handle_get_zendesk_article / handle_get_zendesk_macro` — single-entity reads with section/category resolution
+- `handle_propose_article_update / handle_propose_macro_update` — create pending drafts (rationale + sources_json required)
+- `handle_list_zendesk_revisions` — revision listing for the model
+- `mirror_empty(conn, family) -> dict | None` — shared `{ok:False, error:'zendesk_mirror_empty', hint}` degrade
+
+**Depends on:** `src.data.zendesk_store`
+**Depended by:** `src.data.chat_tools.registry`, `src.data.chat_tools.enablement_tools` (repointed legacy zendesk tools), `src.mcp.chat_mcp_server`, `src.llm.claude_tools`, `tests.test_zendesk_mirror_tools`

@@ -101,11 +101,13 @@ audit checklist: `~/.claude/projects/C--alma-insights/memory/reports_drift_audit
 
 ## Enablement Web Pivot — React/QtWebEngine tabs (M0–M6, 2026-07-14)
 
-The Calendar and Workbench enablement tabs have React/QtWebEngine
+The Calendar, Workbench, and Zendesk enablement tabs have React/QtWebEngine
 implementations behind the `enablement.web_tabs` setting
-(`off` default | `calendar` | `all`); the native Qt tabs stay intact and
-render when the flag is off. Same in-process QWebChannel architecture as the
-Agent chat — **no web server, no localhost**, one `file://` bundle.
+(`off` default | `calendar` | `zendesk` | `all` — the single values enable
+just that web surface, `all` enables all three); the native Qt tabs stay
+intact and render when the flag is off. Same in-process QWebChannel
+architecture as the Agent chat — **no web server, no localhost**, one
+`file://` bundle.
 
 **Home page (`ui.web_home`, 2026-07-20).** The app-level Home page
 ([`src/ui/pages/home_page.py`](src/ui/pages/home_page.py)) also has a web
@@ -171,6 +173,40 @@ teardown stacks to exit 255 across files, and offscreen grabs are always
 blank, so assert via `runJavaScript`, never screenshots. JS: `npm --prefix web
 run test` (vitest). Full plan + per-milestone build log:
 `~/.claude/plans/enablement-web-pivot.md`.
+
+## Zendesk Mirror + Web Workspace (2026-07-24)
+
+The enablement Zendesk tab has a web implementation on `#/zendesk`
+(`enablement.web_tabs` = `zendesk` | `all`) that replicates Zendesk's Guide
+article editor + Admin Center macro editor (Garden v8 tokens, dossier at
+`~/.claude/plans/zendesk-ui-dossier.md`) over a **local mirror** — the AI and
+the workspace never touch the live Zendesk instance.
+
+- **Mirror** (migration 051 extends the mig-030 tables): articles + sections +
+  categories + macros with `content_hash` dedup, `origin` 'pull'|'import'
+  provenance, contentless FTS5 mirrors with delete-discipline triggers.
+  Store API in [`src/data/zendesk_store.py`](src/data/zendesk_store.py).
+  **Never INSERT OR REPLACE into mirror tables** (grep-guarded by
+  `tests/test_zendesk_mirror_schema.py`).
+- **Population**: [`src/data/zendesk_import.py`](src/data/zendesk_import.py) —
+  manual file import (API-shaped JSON / HTML / doc_reader docs, per-file
+  reports, hostile-input hardened) + `pull_mirror` (GET-only paged pull;
+  degrades to `zendesk_not_connected` without credentials).
+- **Web triple**: [`src/services/zendesk_web.py`](src/services/zendesk_web.py)
+  controller (all authority; sanitize-every-srcdoc; copy-exact via Python
+  QClipboard reading DB bytes; native confirms only for destructive
+  purge/delete) + `src/ui/web/zendesk_bridge.py` pure relay +
+  `web/src/zendesk/` SPA. Wired via `page.py::_make_zendesk` with the native
+  `ZendeskPage` as construction-failure fallback.
+- **Revisions**: Renn's `zendesk_mirror_tools.py` propose tools create
+  `pending` drafts (rationale + sources mandatory); the specialist reviews the
+  word-diff, marks ready, copies exact content, pastes into real Zendesk by
+  hand, marks copied (`pending → ready → copied`; `copied`/`pushed`
+  immutable). **No new surface or tool may call a ZendeskClient write method**
+  — structurally tested in `tests/test_zendesk_bridge.py`.
+- The classic tab (`zendesk_tab.py`, human-gated push) is unchanged and stays
+  the default; its locked contracts in `tests/test_zendesk_content.py` must
+  keep passing. Plan: `~/.claude/plans/zendesk-clone-web.md`.
 
 ## Bug Bash Protocol (MANDATORY)
 

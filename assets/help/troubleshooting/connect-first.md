@@ -8,7 +8,7 @@ order: 3
 status: available
 features: [en_settings, en_workbench, en_calendar]
 summary: Most empty screens are a missing connection rather than a fault — how to tell the difference.
-last_verified: 2026-07-20
+last_verified: 2026-07-24
 ---
 
 The most common "something is broken" report is a screen with nothing on it.
@@ -30,6 +30,10 @@ The usual causes, roughly in order of frequency:
   source. Note that Asana cannot currently be connected at all — see
   *Known issues and current limitations*.
 - **Guru is not connected**, so card lists and pickers come back empty.
+- **The Zendesk mirror is empty.** The Zendesk workspace and Renn's Zendesk
+  tools read a local mirror, not the live API — until you pull or import
+  content, they report an empty mirror rather than a connection problem. Only
+  the pull itself needs Zendesk credentials.
 - **Nothing has been scanned yet.** Sources are pulled on a scan or a monitor
   tick, not continuously.
 

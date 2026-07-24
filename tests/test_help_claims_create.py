@@ -963,19 +963,22 @@ def test_a_pushed_article_draft_disables_the_push_button(qapp):
 
 def test_nothing_in_the_zendesk_tab_creates_a_new_article_draft(conn, qapp):
     """zendesk.md ("If it doesn't"): "There is no way to start a new article
-    draft. This is a genuine gap in the current build — nothing in this tab
-    creates one, and the drafts you see in the demo data were seeded rather
-    than authored.\""""
+    draft from this tab. Nothing in the classic tab creates one, and the
+    drafts you see in the demo data were seeded rather than authored. Renn
+    can, though: ask it to propose an article or macro update and the draft
+    lands in the local mirror.\""""
     from src.ui.pages.enablement import zendesk_tab as zt
     src = Path(zt.__file__).read_text(encoding="utf-8")
     assert "save_article_draft" not in src
     assert "new_article" not in src
-    # the only in-app caller of save_article_draft is the demo seeder
+    # in-app callers of save_article_draft: the demo seeder and Renn's
+    # mirror propose tools — never the classic tab
     hits = []
     for py in (_PROJECT_ROOT / "src").rglob("*.py"):
         if "save_article_draft" in py.read_text(encoding="utf-8"):
             hits.append(py.name)
-    assert sorted(hits) == ["enablement_sim.py", "zendesk_store.py"]
+    assert sorted(hits) == [
+        "enablement_sim.py", "zendesk_mirror_tools.py", "zendesk_store.py"]
 
 
 def test_syncing_without_credentials_says_to_connect_zendesk_first(conn):

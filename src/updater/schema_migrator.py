@@ -149,12 +149,28 @@ class SchemaMigrator:
 
     _POST_HOOKS: dict[str, str] = {
         "009_chat_data_layer.sql": "_posthook_009_extract_json_messages",
+        "051_zendesk_mirror.sql": "_posthook_051_zendesk_projections",
     }
 
     def _run_post_hook(self, filename: str, conn: sqlite3.Connection) -> None:
         hook_name = self._POST_HOOKS.get(filename)
         if hook_name:
             getattr(self, hook_name)(conn)
+
+    @staticmethod
+    def _posthook_051_zendesk_projections(conn: sqlite3.Connection) -> None:
+        """Backfill body_text/actions_text + content_hash for pre-051 mirror
+        rows, then rebuild both contentless FTS mirrors.
+
+        The projections are Python-side (tag stripping) so the SQL migration
+        cannot compute them; without this, rows synced before 051 index empty
+        body text and stay invisible to body search — unrepairable on boxes
+        with no API key to re-pull from.
+        """
+        from src.data.zendesk_store import backfill_mirror_projections
+        fixed = backfill_mirror_projections(conn)
+        if fixed.get("articles") or fixed.get("macros"):
+            logger.info("051 post-hook backfilled projections: %s", fixed)
 
     @staticmethod
     def _posthook_009_extract_json_messages(conn: sqlite3.Connection) -> None:

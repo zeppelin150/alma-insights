@@ -722,17 +722,18 @@ TOOL_SCHEMAS = [
     {
         "name": "search_zendesk_articles",
         "description": (
-            "SEARCH the Zendesk Help Center by query. This is a QUERY search — it is "
-            "query-ranked and MAY MISS articles that don't match. To ENUMERATE the "
-            "Help Center completely, use list_zendesk_articles. Returns articles "
-            "[{id, title, html_url, section}]. Returns zendesk_not_connected when "
-            "Zendesk credentials aren't configured."
+            "SEARCH the LOCAL Zendesk mirror's Help Center articles by keyword. This "
+            "is a QUERY search — query-ranked FTS that MAY MISS articles; it reads "
+            "the local mirror (no network). To ENUMERATE the mirror completely, use "
+            "list_zendesk_articles. Returns articles [{id, title, html_url, section, "
+            "snippet, score}]. Returns zendesk_mirror_empty when nothing has been "
+            "pulled or imported yet."
         ),
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
             "properties": {
-                "query": {"type": "string", "description": "What to search the Help Center for."},
+                "query": {"type": "string", "description": "What to search the mirrored Help Center for."},
                 "limit": {"type": "integer", "description": "Max articles to return (default 25)."},
             },
             "required": ["query"],
@@ -741,11 +742,11 @@ TOOL_SCHEMAS = [
     {
         "name": "list_zendesk_articles",
         "description": (
-            "LIST (enumerate) the Zendesk Help Center articles — DETERMINISTIC and "
-            "COMPLETE. THE tool that answers 'what articles are in the Help Center'. "
-            "Reports the total count plus a limit/offset window of articles "
-            "[{id, title, html_url, section}]. Returns zendesk_not_connected when "
-            "Zendesk credentials aren't configured."
+            "LIST (enumerate) the mirrored Zendesk Help Center articles — "
+            "DETERMINISTIC and COMPLETE over the LOCAL mirror. THE tool that answers "
+            "'what articles are in the Help Center'. Reports the total count plus a "
+            "limit/offset window of articles [{id, title, html_url, section}]. "
+            "Returns zendesk_mirror_empty when nothing has been pulled or imported."
         ),
         "inputSchema": {
             "type": "object",
@@ -760,14 +761,150 @@ TOOL_SCHEMAS = [
     {
         "name": "list_zendesk_macros",
         "description": (
-            "LIST the Zendesk account's macros (id, title, active). Returns "
-            "zendesk_not_connected when Zendesk credentials aren't configured."
+            "LIST the mirrored Zendesk macros (id, title, active) — DETERMINISTIC "
+            "over the LOCAL mirror. Returns zendesk_mirror_empty when nothing has "
+            "been pulled or imported."
         ),
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
             "properties": {
                 "limit": {"type": "integer", "description": "Max macros to return (default 100)."},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "search_zendesk_mirror",
+        "description": (
+            "SEARCH the LOCAL Zendesk mirror — Help Center articles AND macros "
+            "already pulled/imported into the app — by keyword in one call. "
+            "Query-ranked FTS that MAY MISS items; works offline and never touches "
+            "the live API. To ENUMERATE completely use list_zendesk_articles / "
+            "list_zendesk_macros. Returns articles [{id, title, section, snippet, "
+            "score}] + macros [{id, name, description, snippet, score}] + counts. "
+            "Returns zendesk_mirror_empty when the mirror has no content yet."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "query": {"type": "string", "description": "Keyword(s) to search the mirror for."},
+                "kind": {"type": "string", "enum": ["articles", "macros", "all"],
+                         "description": "Restrict to one family (default all)."},
+                "limit": {"type": "integer", "description": "Max hits per family (default 10, max 25)."},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "get_zendesk_article",
+        "description": (
+            "Read ONE mirrored Help Center article in full from the LOCAL mirror: "
+            "title, section/category, labels, plain body text (capped), html_url, "
+            "origin, and how many open revisions target it. Ids come from "
+            "search_zendesk_mirror or list_zendesk_articles."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "article_id": {"type": "integer", "description": "The mirror article id to read."},
+            },
+            "required": ["article_id"],
+        },
+    },
+    {
+        "name": "get_zendesk_macro",
+        "description": (
+            "Read ONE mirrored Zendesk macro in full from the LOCAL mirror: name, "
+            "description, active flag, and the decoded actions list. Ids come from "
+            "search_zendesk_mirror or list_zendesk_macros."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "macro_id": {"type": "integer", "description": "The mirror macro id to read."},
+            },
+            "required": ["macro_id"],
+        },
+    },
+    {
+        "name": "propose_article_update",
+        "description": (
+            "PROPOSE a Help Center article revision: stages a PENDING draft in the "
+            "Revision Center for the specialist to review. Pass article_id to revise "
+            "an existing mirrored article (rejected if unknown), or omit it to "
+            "propose a brand-new article. rationale is MANDATORY — say WHY the "
+            "change is needed; pass sources for the evidence you used. This does "
+            "NOT touch real Zendesk and you CANNOT publish a draft or change its "
+            "status — the specialist reviews the diff and copies the approved text "
+            "into Zendesk by hand."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "title": {"type": "string", "description": "The proposed article title."},
+                "body_markdown": {"type": "string", "description": "The full proposed article body, in markdown."},
+                "rationale": {"type": "string", "description": "MANDATORY: why this change is needed (shown to the reviewer)."},
+                "article_id": {"type": "integer", "description": "Mirror article id to revise; omit for a brand-new article."},
+                "sources": {"type": "array",
+                            "items": {"type": "object",
+                                      "properties": {"ref": {"type": "string"},
+                                                     "label": {"type": "string"}}},
+                            "description": "Evidence used, as [{ref, label}] (doc ids, card ids, URLs)."},
+            },
+            "required": ["title", "body_markdown", "rationale"],
+        },
+    },
+    {
+        "name": "propose_macro_update",
+        "description": (
+            "PROPOSE a Zendesk macro revision: stages a PENDING draft in the "
+            "Revision Center. The reply becomes the macro's comment action; when "
+            "macro_id targets an existing mirrored macro (rejected if unknown), its "
+            "non-comment actions are preserved and any existing comment action is "
+            "replaced, never duplicated. rationale is MANDATORY. This does NOT "
+            "touch real Zendesk and you CANNOT publish a draft or change its "
+            "status — the specialist copies the approved text by hand."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "name": {"type": "string", "description": "The proposed macro name."},
+                "reply": {"type": "string", "description": "The proposed public reply text (becomes the comment action)."},
+                "rationale": {"type": "string", "description": "MANDATORY: why this change is needed (shown to the reviewer)."},
+                "macro_id": {"type": "integer", "description": "Mirror macro id to revise; omit for a brand-new macro."},
+                "sources": {"type": "array",
+                            "items": {"type": "object",
+                                      "properties": {"ref": {"type": "string"},
+                                                     "label": {"type": "string"}}},
+                            "description": "Evidence used, as [{ref, label}] (doc ids, card ids, URLs)."},
+            },
+            "required": ["name", "reply", "rationale"],
+        },
+    },
+    {
+        "name": "list_zendesk_revisions",
+        "description": (
+            "LIST the AI revision drafts for Zendesk content — articles + macros in "
+            "one unified view (kind, draft_id, target_id, target_title, title, "
+            "status, rationale, timestamps). Filter by status (pending | ready | "
+            "copied | pushed) and/or kind (article | macro). Use this to report "
+            "what has been proposed and where each proposal stands."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "status": {"type": "string", "enum": ["pending", "ready", "copied", "pushed"],
+                           "description": "Optional status filter."},
+                "kind": {"type": "string", "enum": ["article", "macro"],
+                         "description": "Optional kind filter."},
+                "limit": {"type": "integer", "description": "Max rows (default 25, max 50)."},
             },
             "required": [],
         },

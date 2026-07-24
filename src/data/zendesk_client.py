@@ -372,6 +372,30 @@ class ZendeskClient(SourceClient):
         data = self._get(f"/help_center/articles/search.json?query={quote(query)}")
         return data.get("results", []) if isinstance(data, dict) else []
 
+    # ── Help Center taxonomy (GET-only; feeds the mirror pull) ──────
+
+    def get_sections(self, *, locale: str = "en-us", per_page: int = 100) -> list[dict]:
+        data = self._get(f"/help_center/{locale}/sections.json?per_page={per_page}")
+        return data.get("sections", []) if isinstance(data, dict) else []
+
+    def get_sections_paged(self, *, locale: str = "en-us", per_page: int = 100,
+                           max_pages: int = 50) -> tuple[list[dict], int]:
+        """ALL Help Center sections (follows ``next_page`` to the end) + true total."""
+        return self._paged(
+            "sections", f"/help_center/{locale}/sections.json?per_page={per_page}",
+            max_pages=max_pages)
+
+    def get_categories(self, *, locale: str = "en-us", per_page: int = 100) -> list[dict]:
+        data = self._get(f"/help_center/{locale}/categories.json?per_page={per_page}")
+        return data.get("categories", []) if isinstance(data, dict) else []
+
+    def get_categories_paged(self, *, locale: str = "en-us", per_page: int = 100,
+                             max_pages: int = 50) -> tuple[list[dict], int]:
+        """ALL Help Center categories (follows ``next_page`` to the end) + true total."""
+        return self._paged(
+            "categories", f"/help_center/{locale}/categories.json?per_page={per_page}",
+            max_pages=max_pages)
+
     def create_article(self, section_id, title: str, body: str, *,
                        locale: str = "en-us") -> dict:
         data = self._write(

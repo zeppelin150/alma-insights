@@ -37,8 +37,10 @@ def test_missing_section_is_off(monkeypatch):
     ("off", "off"),
     ("calendar", "calendar"),
     ("all", "all"),
+    ("zendesk", "zendesk"),
     ("  CALENDAR  ", "calendar"),   # whitespace + case tolerated
     ("ALL", "all"),
+    ("  Zendesk ", "zendesk"),
 ])
 def test_valid_modes_pass_through(monkeypatch, raw, expected):
     _patch_section(monkeypatch, {"web_tabs": raw})
@@ -59,6 +61,47 @@ def test_settings_error_degrades_to_off(monkeypatch):
 
     monkeypatch.setattr(sm, "get_section", boom)
     assert wf.web_tabs_mode() == "off"
+
+
+# ── zendesk_web_enabled (the Zendesk tab gate) ───────────────────────
+
+@pytest.mark.parametrize("raw,expected", [
+    ("off", False),
+    ("calendar", False),           # solo calendar rollout keeps zendesk native
+    ("zendesk", True),             # solo zendesk rollout
+    ("all", True),
+    ("  ZENDESK ", True),
+    ("workbench", False),          # unknown degrades to off → native
+    ("", False),
+    (["zendesk"], False),
+])
+def test_zendesk_web_enabled_semantics(monkeypatch, raw, expected):
+    _patch_section(monkeypatch, {"web_tabs": raw})
+    assert wf.zendesk_web_enabled() is expected
+
+
+def test_zendesk_web_enabled_default_off(monkeypatch):
+    _patch_section(monkeypatch, {})
+    assert wf.zendesk_web_enabled() is False
+
+
+def test_zendesk_web_enabled_settings_error_fails_closed(monkeypatch):
+    import src.data.settings_manager as sm
+
+    def boom(*_a, **_k):
+        raise RuntimeError("settings unavailable")
+
+    monkeypatch.setattr(sm, "get_section", boom)
+    assert wf.zendesk_web_enabled() is False
+
+
+def test_zendesk_web_enabled_tracks_web_tabs_mode(monkeypatch):
+    """The helper is a pure view over web_tabs_mode — a module-attr patch of
+    web_tabs_mode (the pattern the @ui page tests use) must steer it too."""
+    monkeypatch.setattr(wf, "web_tabs_mode", lambda: "zendesk")
+    assert wf.zendesk_web_enabled() is True
+    monkeypatch.setattr(wf, "web_tabs_mode", lambda: "off")
+    assert wf.zendesk_web_enabled() is False
 
 
 # ── ui.web_home (the Home boot surface) ──────────────────────────────

@@ -345,11 +345,11 @@ def _ensure_registered():
     _register("list_guru_folder_items", handle_list_guru_folder_items,
               phi_level=0, desc="LIST (enumerate) a Guru folder's items — cards AND nested sub-folders (id, item_id, type, title). DETERMINISTIC; answers 'what's in this folder'. Recurse into sub-folders with another call.")
     _register("search_zendesk_articles", handle_search_zendesk_articles,
-              phi_level=0, desc="SEARCH the Zendesk Help Center by query — query-ranked, MAY MISS articles. To enumerate the Help Center completely use list_zendesk_articles. Degrades to zendesk_not_connected when creds are absent.")
+              phi_level=0, desc="SEARCH the LOCAL Zendesk mirror's Help Center articles by keyword — query-ranked FTS, MAY MISS articles; no network. To enumerate the mirror completely use list_zendesk_articles. Degrades to zendesk_mirror_empty when nothing has been pulled/imported.")
     _register("list_zendesk_articles", handle_list_zendesk_articles,
-              phi_level=0, desc="LIST (enumerate) the Zendesk Help Center articles — DETERMINISTIC + COMPLETE; reports the total count (id, title, url, section). Degrades to zendesk_not_connected when creds are absent.")
+              phi_level=0, desc="LIST (enumerate) the mirrored Zendesk Help Center articles — DETERMINISTIC + COMPLETE over the LOCAL mirror; reports the total count (id, title, url, section). Degrades to zendesk_mirror_empty when nothing has been pulled/imported.")
     _register("list_zendesk_macros", handle_list_zendesk_macros,
-              phi_level=0, desc="LIST (enumerate) the Zendesk account's macros — DETERMINISTIC + COMPLETE (id, title, active). Degrades to zendesk_not_connected when creds are absent.")
+              phi_level=0, desc="LIST (enumerate) the mirrored Zendesk macros — DETERMINISTIC + COMPLETE over the LOCAL mirror (id, title, active). Degrades to zendesk_mirror_empty when nothing has been pulled/imported.")
     _register("search_asana_tasks", handle_search_asana_tasks,
               phi_level=0, desc="SEARCH the tasks on an Asana board by a case-insensitive name substring (lists the paginated board, then filters by name). Defaults to the active board when project_gid is omitted.")
     _register("research_topic", handle_research_topic,
@@ -375,6 +375,31 @@ def _ensure_registered():
               phi_level=0, desc="Call this when the user asks which cards are stale / overdue for verification — returns overdue cards (falling back to the least-fresh cards) ranked staleest-first")
     _register("find_content_gaps", handle_find_content_gaps,
               phi_level=0, desc="Call this when the user asks about content gaps or duplicate cards — returns cards flagged as a coverage gap or a near-duplicate, each noting the gap vs the duplicated card ids")
+
+    # ── Zendesk mirror tools (zendesk-clone-web WS5) ──
+    # Mirror-only family: FTS search / full reads / pending-draft proposals
+    # over the mig-051 local mirror. propose_* can never publish or change
+    # a draft's status — the specialist copies into real Zendesk by hand.
+    from src.data.chat_tools.zendesk_mirror_tools import (
+        handle_search_zendesk_mirror,
+        handle_get_zendesk_article,
+        handle_get_zendesk_macro,
+        handle_propose_article_update,
+        handle_propose_macro_update,
+        handle_list_zendesk_revisions,
+    )
+    _register("search_zendesk_mirror", handle_search_zendesk_mirror,
+              phi_level=0, desc="SEARCH the LOCAL Zendesk mirror (Help Center articles + macros already pulled/imported) by keyword — query-ranked FTS, MAY MISS items; works offline, never touches the live API. To ENUMERATE completely use list_zendesk_articles / list_zendesk_macros. Degrades to zendesk_mirror_empty.")
+    _register("get_zendesk_article", handle_get_zendesk_article,
+              phi_level=0, desc="Read ONE mirrored Help Center article in full (body text, section/category, labels, open revision count) by id from the LOCAL mirror — ids come from search_zendesk_mirror / list_zendesk_articles.")
+    _register("get_zendesk_macro", handle_get_zendesk_macro,
+              phi_level=0, desc="Read ONE mirrored Zendesk macro in full (actions list included) by id from the LOCAL mirror — ids come from search_zendesk_mirror / list_zendesk_macros.")
+    _register("propose_article_update", handle_propose_article_update,
+              phi_level=0, desc="PROPOSE a Help Center article revision (or a brand-new article when article_id is omitted): stages a PENDING draft in the Revision Center with a MANDATORY rationale + optional sources. Does NOT touch real Zendesk and CANNOT publish or change draft status — the specialist reviews the diff and copies the approved text by hand.")
+    _register("propose_macro_update", handle_propose_macro_update,
+              phi_level=0, desc="PROPOSE a Zendesk macro revision (or a new macro when macro_id is omitted): stages a PENDING draft — the reply becomes the comment action and a targeted macro's non-comment actions are preserved. MANDATORY rationale; never touches real Zendesk; status changes are specialist-only.")
+    _register("list_zendesk_revisions", handle_list_zendesk_revisions,
+              phi_level=0, desc="LIST the AI revision drafts for Zendesk content (articles + macros, unified) with optional status (pending | ready | copied | pushed) and kind (article | macro) filters — the audit view of proposed changes.")
 
     # ── Backward-compat aliases for old tool names ──
     # These map old names to new handlers so existing prompts keep working

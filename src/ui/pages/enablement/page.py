@@ -70,10 +70,29 @@ RENN_SYSTEM_PROMPT = (
     "search_guru_cards, search_zendesk_articles, search_asana_tasks (query-ranked — may "
     "be partial).\n"
     "- To check 'do we have anything on X ANYWHERE', use search_content — it fans one "
-    "query out across LIVE Guru + Zendesk + Drive at once and returns a single merged "
-    "list, each result labeled with its source; a source that isn't connected is simply "
-    "skipped and reported (e.g. tell the operator '(Zendesk not connected)'), never an "
-    "error. Use search_catalog only for the local pre-indexed summary catalog.\n"
+    "query out across LIVE Guru + the local Zendesk mirror + Drive at once and returns "
+    "a single merged list, each result labeled with its source; a source that isn't "
+    "available is simply skipped and reported (e.g. tell the operator "
+    "'(Guru not connected)'), never an error. The Zendesk arm searches the LOCAL "
+    "mirror and never needs credentials: an empty mirror means tell the operator to "
+    "run the pull or import a Help Center export in the Zendesk tab (only the pull "
+    "needs Zendesk credentials). Use search_catalog only for the local pre-indexed "
+    "summary catalog.\n"
+    "- ZENDESK (LOCAL MIRROR — you never touch live Zendesk): the app keeps a local "
+    "mirror of the Help Center + macros (populated by the GET-only pull or a manual "
+    "import). search_zendesk_mirror SEARCHES the mirror (articles + macros at once, "
+    "query-ranked FTS — may miss; works offline); list_zendesk_articles / "
+    "list_zendesk_macros ENUMERATE it completely and report true totals; "
+    "get_zendesk_article / get_zendesk_macro read one item in full. "
+    "zendesk_mirror_empty means nothing is mirrored yet — tell the operator to run "
+    "the pull or import a Help Center export in the Zendesk tab.\n"
+    "- Propose Zendesk changes (mirror-only, human-copied): propose_article_update / "
+    "propose_macro_update stage a PENDING draft in the Revision Center — rationale "
+    "is MANDATORY (say WHY the change is needed; the reviewer sees it) and pass "
+    "sources ([{ref, label}]) for the evidence you used. You can NEVER publish, "
+    "push, or change a draft's status; the specialist reviews the diff and copies "
+    "the approved text into real Zendesk by hand. list_zendesk_revisions reports "
+    "existing proposals and their status (pending | ready | copied).\n"
     "- KNOWLEDGE BASE (check it FIRST for product/policy questions): kb_search "
     "(query-ranked over the index cards Renn built, plus a full-text floor over "
     "stored docs), kb_list_topics / kb_list_cards (complete enumeration), "
@@ -209,6 +228,7 @@ class EnablementPage(QWidget):
     task_action_done = Signal(dict)  # off-thread Asana write-back result
     pptx_modeled = Signal(dict)      # off-thread deck-model result
     zendesk_synced = Signal(dict)    # off-thread Zendesk sync result
+    zendesk_mirror_done = Signal(dict)  # off-thread mirror pull/import result (web tab)
     ai_edit_done = Signal(dict)      # off-thread inline AI-edit (revise) result
 
     def __init__(self, db=None, demo: bool = True, parent=None):
@@ -271,17 +291,15 @@ class EnablementPage(QWidget):
         from src.ui.pages.enablement.analytics import AnalyticsPage
         from src.ui.pages.enablement.attention_queue_tab import AttentionQueueTab
         from src.ui.pages.enablement.pptx_tab import PptxPage
-        from src.ui.pages.enablement.zendesk_tab import ZendeskPage
         self.attention = AttentionQueueTab()
         self.analytics = AnalyticsPage()
         self.pptx = PptxPage()
-        self.zendesk = ZendeskPage()
+        self.zendesk, zendesk_tab = self._make_zendesk()
         home_tab = self._scroll(self.attention)
         cal_tab = self._calendar_tab
         tasks_tab = self._scroll(self.tasks)
         analytics_tab = self._scroll(self.analytics)
         pptx_tab = self._scroll(self.pptx)
-        zendesk_tab = self._scroll(self.zendesk)
         settings_tab = self._scroll(self.settings)
         self.tabs.addTab(home_tab, "Home")
         self.tabs.addTab(cal_tab, "Calendar")
@@ -386,6 +404,7 @@ class EnablementPage(QWidget):
         self.zendesk.macro_saved.connect(self._on_zd_macro_saved)
         self.zendesk.macro_push.connect(self._on_zd_macro_push)
         self.zendesk_synced.connect(self._on_zendesk_synced)
+        self.zendesk_mirror_done.connect(self._on_zendesk_mirror_done)
         self._refresh_style_guide_status()
         self._refresh_card_template_status()
 
@@ -806,6 +825,128 @@ class EnablementPage(QWidget):
         from src.data import enablement_store as store
         draft = store.get_draft(self._conn(), int(draft_id))
         return (draft or {}).get("content")
+
+    def _make_zendesk(self):
+        """The Zendesk tab: the React/WebHost Garden clone behind
+        ``enablement.web_tabs`` (values ``zendesk``/``all``), else the native
+        Qt ZendeskPage. The controller mirrors ZendeskPage's surface (signals
+        + setters), so the wiring and ``_load_zendesk`` below work identically
+        against either. ANY web-branch failure — import or construction —
+        falls back to the native tab. Returns (zendesk, tab_widget)."""
+        from src.ui.web.web_flags import zendesk_web_enabled
+        if zendesk_web_enabled():
+            try:
+                from src.services.zendesk_web import ZendeskWebController
+                from src.ui.web.web_host import WebHost
+                from src.ui.web.zendesk_bridge import ZendeskBridge
+
+                ctrl = ZendeskWebController(
+                    conn_fn=self._conn,
+                    # Destructive gate (delete revision / purge mirror): a
+                    # NATIVE QMessageBox no page script can click.
+                    confirm_fn=self._web_zendesk_confirm,
+                    # Copy exact: Python-side QClipboard reading DB bytes.
+                    clipboard_fn=self._web_zendesk_clipboard,
+                    file_pick_fn=self._web_zendesk_file_pick,
+                    folder_pick_fn=self._web_zendesk_folder_pick,
+                    pull_runner=self._run_zendesk_pull,
+                    import_runner=self._run_zendesk_import,
+                    demo=self.demo)
+                self._web_zd_bridge = ZendeskBridge(
+                    data_signal=ctrl.zendesk_data,
+                    article_signal=ctrl.article_detail,
+                    macro_signal=ctrl.macro_detail,
+                    revisions_signal=ctrl.revisions_data,
+                    diff_signal=ctrl.diff_ready,
+                    import_signal=ctrl.import_resolved,
+                    pull_signal=ctrl.pull_resolved,
+                    copy_signal=ctrl.copy_resolved,
+                    action_signal=ctrl.action_resolved,
+                    status_signal=ctrl.status_text,
+                    refresh_fn=ctrl.js_refresh,
+                    view_fn=ctrl.js_set_view,
+                    open_article_fn=ctrl.js_open_article,
+                    open_macro_fn=ctrl.js_open_macro,
+                    search_fn=ctrl.js_search,
+                    revisions_fn=ctrl.js_request_revisions,
+                    diff_fn=ctrl.js_request_diff,
+                    save_fn=ctrl.js_save_draft,
+                    ready_fn=ctrl.js_mark_ready,
+                    copied_fn=ctrl.js_mark_copied,
+                    copy_fn=ctrl.js_copy_field,
+                    import_fn=ctrl.js_request_import,
+                    import_folder_fn=ctrl.js_request_import_folder,
+                    pull_fn=ctrl.js_request_pull,
+                    delete_fn=ctrl.js_delete_revision,
+                    purge_fn=ctrl.js_purge_mirror,
+                )
+                self._web_zd_ctrl = ctrl                # GC guard
+                host = WebHost(bridge=self._web_zd_bridge,
+                               channel_name="zendeskBridge", route="/zendesk",
+                               log_name="alma.enablement.web.zendesk",
+                               extra_bridges={
+                                   "almaBridge": self._get_web_chat_bridge()})
+                # Copy announcements ride the NATIVE status line — a trusted
+                # surface page scripts cannot forge (status_text is plain text).
+                ctrl.status_text.connect(self._set_status)
+                return ctrl, host
+            except Exception:  # noqa: BLE001 — WebEngine absent / broken → native tab
+                # Drop any half-built web state so _on_zendesk_mirror_done
+                # can never notify an orphaned controller.
+                self._web_zd_ctrl = None
+                self._web_zd_bridge = None
+                logger.warning("web zendesk tab unavailable — native fallback",
+                               exc_info=True)
+        from src.ui.pages.enablement.zendesk_tab import ZendeskPage
+        page = ZendeskPage()
+        return page, self._scroll(page)
+
+    def _web_zendesk_confirm(self, title: str, text: str) -> bool:
+        """The destructive gate for the web Zendesk tab: a NATIVE QMessageBox
+        no page script can click. Defaults to No; styled via
+        style_native_dialog so the page background can't blank the buttons
+        (2026-07-22 fix)."""
+        from PySide6.QtWidgets import QMessageBox
+        from src.ui.pages.enablement._common import style_native_dialog
+        box = QMessageBox(self)
+        box.setWindowTitle(str(title or "Confirm"))
+        box.setText(str(text or ""))
+        box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        box.setDefaultButton(QMessageBox.No)
+        style_native_dialog(box)
+        return box.exec() == QMessageBox.Yes
+
+    def _web_zendesk_clipboard(self, text, html=None) -> bool:
+        """Copy-exact conduit: the controller re-read the DB bytes; this puts
+        them on the system clipboard (plain text + optional text/html mime for
+        the rich variant)."""
+        from PySide6.QtCore import QMimeData
+        from PySide6.QtWidgets import QApplication
+        cb = QApplication.clipboard()
+        if cb is None:
+            return False
+        mime = QMimeData()
+        mime.setText(str(text or ""))
+        if html:
+            mime.setHtml(str(html))
+        cb.setMimeData(mime)
+        return True
+
+    _ZD_IMPORT_FILTER = ("Zendesk exports (*.json *.html *.htm *.docx *.md *.txt)"
+                         ";;All files (*)")
+
+    def _web_zendesk_file_pick(self):
+        """Native file picker for the mirror import — the page never sees
+        filesystem paths."""
+        from PySide6.QtWidgets import QFileDialog
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Import Zendesk content", "", self._ZD_IMPORT_FILTER)
+        return paths or []
+
+    def _web_zendesk_folder_pick(self):
+        from PySide6.QtWidgets import QFileDialog
+        path = QFileDialog.getExistingDirectory(self, "Import Zendesk folder")
+        return path or None
 
     def _web_workbench_upload(self):
         """The web Upload button → the NATIVE file dialog (the page never sees
@@ -2221,6 +2362,144 @@ class EnablementPage(QWidget):
                 f"Synced {res.get('articles', 0)} articles, {res.get('macros', 0)} macros.")
         else:
             self.zendesk.set_status(f"Sync issue: {res.get('error')}")
+        self._load_zendesk()
+
+    # ── Zendesk mirror workers (web tab: pull / import) ─────────────
+
+    def _run_zendesk_pull(self) -> bool:
+        """Start the off-thread GET-only mirror pull (web-tab pull_runner).
+        Returns True when a worker was started — the controller holds its
+        ``_pull_inflight`` claim until ``zendesk_mirror_done`` lands back on
+        the main thread. Demo mode re-seeds via seed_demo_zendesk (mirrors
+        the _on_zendesk_sync demo branch). The worker NEVER touches settings
+        — the last_pull stamp is written in the main-thread done slot."""
+        db_path = self._engine_db_path()
+        if not db_path:
+            return False
+        if self.demo:
+            self._ensure_demo_db()       # demo DB must exist before the worker opens it
+        demo = self.demo
+        import threading
+
+        def worker():
+            res = {"ok": False, "error": "pull failed"}
+            conn = None
+            try:
+                from src.data.connection_factory import get_connection
+                conn = get_connection(db_path)
+                if demo:
+                    from src.data.enablement_sim import seed_demo_zendesk
+                    seed = seed_demo_zendesk(conn)
+                    res = {"ok": True, "articles": seed.get("articles", 0),
+                           "macros": seed.get("macros", 0), "sections": 0,
+                           "categories": 0, "truncated": False, "demo": True}
+                else:
+                    from src.data.zendesk_import import pull_mirror
+                    res = pull_mirror(conn)
+            except Exception as exc:  # noqa: BLE001
+                res = {"ok": False, "error": str(exc)}
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+            self.zendesk_mirror_done.emit({"kind": "pull", "report": res})
+
+        threading.Thread(target=worker, daemon=True).start()
+        return True
+
+    def _run_zendesk_import(self, paths) -> bool:
+        """Start the off-thread file import (web-tab import_runner). Parsing
+        and upserts run in the daemon worker, never on the UI thread.
+        Directories (the 'Import folder…' lane hands the picked folder as a
+        one-element paths list) are expanded via import_folder; files go
+        through import_paths — the merged report keeps the same shape."""
+        db_path = self._engine_db_path()
+        try:
+            paths = [str(p) for p in (paths or [])]
+        except Exception:  # noqa: BLE001
+            return False
+        if not db_path or not paths:
+            return False
+        if self.demo:
+            self._ensure_demo_db()
+        import threading
+
+        def worker():
+            res = {"ok": False, "error": "import failed", "files": [], "totals": {}}
+            conn = None
+            try:
+                import os
+                from src.data.connection_factory import get_connection
+                from src.data.zendesk_import import import_folder, import_paths
+                conn = get_connection(db_path)
+                files: list = []
+                totals = {"files": 0, "imported": 0, "updated": 0,
+                          "skipped_unchanged": 0, "conflicts": 0, "errors": 0}
+
+                def merge(sub):
+                    files.extend(sub.get("files") or [])
+                    t = sub.get("totals") or {}
+                    for k in totals:
+                        totals[k] += int(t.get(k) or 0)
+
+                for p in paths:
+                    if os.path.isdir(p):
+                        sub = import_folder(conn, p)
+                        if not sub.get("ok"):
+                            # TOCTOU: the folder vanished between the picker
+                            # and the worker — a per-path error, not a wedge.
+                            sub = {"files": [{
+                                "file": p, "kind": "folder", "imported": 0,
+                                "updated": 0, "skipped_unchanged": 0,
+                                "conflicts": [],
+                                "errors": [str(sub.get("error")
+                                               or "folder import failed")]}],
+                                "totals": {"files": 1, "errors": 1}}
+                        merge(sub)
+                    else:
+                        merge(import_paths(conn, [p]))
+                res = {"ok": True, "files": files, "totals": totals}
+            except Exception as exc:  # noqa: BLE001
+                res = {"ok": False, "error": str(exc), "files": [], "totals": {}}
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+            self.zendesk_mirror_done.emit({"kind": "import", "report": res})
+
+        threading.Thread(target=worker, daemon=True).start()
+        return True
+
+    def _on_zendesk_mirror_done(self, payload: dict):
+        """Main-thread completion for the mirror workers: stamp last_pull
+        (settings writes are unlocked load-merge-save of the whole file — a
+        worker-thread write racing a main-thread enablement write is a real
+        data race, so it happens ONLY here), release the controller's claim
+        via notify_*_done, and refresh the compat feed."""
+        kind = (payload or {}).get("kind")
+        report = (payload or {}).get("report") or {}
+        # Demo pulls only re-seed the throwaway demo DB — never stamp the
+        # real settings file with a last_pull a live Zendesk never served.
+        if kind == "pull" and report.get("ok") and not report.get("demo"):
+            try:
+                from datetime import datetime, timezone
+                from src.data.settings_manager import get_section, update_section
+                zd = dict((get_section("enablement", {}) or {}).get("zendesk") or {})
+                zd["last_pull"] = datetime.now(timezone.utc).isoformat(
+                    timespec="seconds")
+                update_section("enablement", {"zendesk": zd})
+            except Exception:  # noqa: BLE001 — the stamp is display/cooldown only
+                logger.debug("zendesk last_pull stamp skipped", exc_info=True)
+        ctrl = getattr(self, "_web_zd_ctrl", None)
+        if ctrl is not None:
+            if kind == "pull":
+                ctrl.notify_pull_done(report)
+            elif kind == "import":
+                ctrl.notify_import_done(report)
         self._load_zendesk()
 
     def _on_zd_article_selected(self, draft_id: int):

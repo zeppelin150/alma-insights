@@ -95,6 +95,11 @@ GATED_SLOT_TESTS = {
     # persists app.last_mode and rebuilds the sidebar), proven there with the
     # allowlist / single-winner / native-confirm / deferred-dispatch shape.
     "src/ui/web/home_bridge.py": "tests/test_home_bridge.py",
+    # Zendesk mirror tab: delete/purge run the full destructive gate
+    # (single-winner claim before the native confirm, re-verify, fail
+    # closed), pull/import claim before the nested-event-loop pickers, and
+    # the no-Zendesk-write guarantee is asserted structurally there.
+    "src/ui/web/zendesk_bridge.py": "tests/test_zendesk_bridge.py",
 }
 
 _KNOWN_BRIDGES = {"chat_bridge.py"}   # pre-pivot; gating reviewed 2026-06/07

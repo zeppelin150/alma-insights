@@ -479,15 +479,16 @@ TOOL_DEFINITIONS = [
     {
         "name": "search_zendesk_articles",
         "description": (
-            "SEARCH the Zendesk Help Center by query — query-ranked and MAY MISS "
-            "articles. To ENUMERATE the Help Center completely use "
-            "list_zendesk_articles. Returns articles [{id, title, html_url, "
-            "section}]. Returns zendesk_not_connected when creds aren't configured."
+            "SEARCH the LOCAL Zendesk mirror's Help Center articles by keyword — "
+            "query-ranked FTS, MAY MISS articles; reads the local mirror, no "
+            "network. To ENUMERATE the mirror completely use list_zendesk_articles. "
+            "Returns articles [{id, title, html_url, section, snippet, score}]. "
+            "Returns zendesk_mirror_empty when nothing has been pulled/imported."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "What to search the Help Center for."},
+                "query": {"type": "string", "description": "What to search the mirrored Help Center for."},
                 "limit": {"type": "integer", "description": "Max articles to return (default 25)."},
             },
             "required": ["query"],
@@ -496,10 +497,10 @@ TOOL_DEFINITIONS = [
     {
         "name": "list_zendesk_articles",
         "description": (
-            "LIST (enumerate) the Zendesk Help Center articles — DETERMINISTIC and "
-            "COMPLETE; reports the total count. Returns articles [{id, title, "
-            "html_url, section}]. Returns zendesk_not_connected when creds aren't "
-            "configured."
+            "LIST (enumerate) the mirrored Zendesk Help Center articles — "
+            "DETERMINISTIC and COMPLETE over the LOCAL mirror; reports the total "
+            "count. Returns articles [{id, title, html_url, section}]. Returns "
+            "zendesk_mirror_empty when nothing has been pulled/imported."
         ),
         "input_schema": {
             "type": "object",
@@ -512,13 +513,139 @@ TOOL_DEFINITIONS = [
     {
         "name": "list_zendesk_macros",
         "description": (
-            "LIST the Zendesk account's macros (id, title, active). Returns "
-            "zendesk_not_connected when creds aren't configured."
+            "LIST the mirrored Zendesk macros (id, title, active) — DETERMINISTIC "
+            "over the LOCAL mirror. Returns zendesk_mirror_empty when nothing has "
+            "been pulled/imported."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "limit": {"type": "integer", "description": "Max macros to return (default 100)."},
+            },
+        },
+    },
+    {
+        "name": "search_zendesk_mirror",
+        "description": (
+            "SEARCH the LOCAL Zendesk mirror — Help Center articles AND macros "
+            "already pulled/imported — by keyword in one call. Query-ranked FTS "
+            "that MAY MISS items; works offline, never touches the live API. To "
+            "ENUMERATE completely use list_zendesk_articles / list_zendesk_macros. "
+            "Returns articles [{id, title, section, snippet, score}] + macros "
+            "[{id, name, description, snippet, score}] + counts. Returns "
+            "zendesk_mirror_empty when the mirror has no content yet."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Keyword(s) to search the mirror for."},
+                "kind": {"type": "string", "enum": ["articles", "macros", "all"],
+                         "description": "Restrict to one family (default all)."},
+                "limit": {"type": "integer", "description": "Max hits per family (default 10, max 25)."},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "get_zendesk_article",
+        "description": (
+            "Read ONE mirrored Help Center article in full from the LOCAL mirror: "
+            "title, section/category, labels, plain body text (capped), html_url, "
+            "origin, and how many open revisions target it. Ids come from "
+            "search_zendesk_mirror or list_zendesk_articles."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "article_id": {"type": "integer", "description": "The mirror article id to read."},
+            },
+            "required": ["article_id"],
+        },
+    },
+    {
+        "name": "get_zendesk_macro",
+        "description": (
+            "Read ONE mirrored Zendesk macro in full from the LOCAL mirror: name, "
+            "description, active flag, and the decoded actions list. Ids come from "
+            "search_zendesk_mirror or list_zendesk_macros."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "macro_id": {"type": "integer", "description": "The mirror macro id to read."},
+            },
+            "required": ["macro_id"],
+        },
+    },
+    {
+        "name": "propose_article_update",
+        "description": (
+            "PROPOSE a Help Center article revision: stages a PENDING draft in the "
+            "Revision Center. Pass article_id to revise an existing mirrored "
+            "article (rejected if unknown) or omit it for a brand-new article. "
+            "rationale is MANDATORY — say WHY the change is needed; pass sources "
+            "for the evidence used. Does NOT touch real Zendesk; you CANNOT "
+            "publish a draft or change its status — the specialist reviews the "
+            "diff and copies the approved text into Zendesk by hand."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "The proposed article title."},
+                "body_markdown": {"type": "string", "description": "The full proposed article body, in markdown."},
+                "rationale": {"type": "string", "description": "MANDATORY: why this change is needed (shown to the reviewer)."},
+                "article_id": {"type": "integer", "description": "Mirror article id to revise; omit for a brand-new article."},
+                "sources": {"type": "array",
+                            "items": {"type": "object",
+                                      "properties": {"ref": {"type": "string"},
+                                                     "label": {"type": "string"}}},
+                            "description": "Evidence used, as [{ref, label}] (doc ids, card ids, URLs)."},
+            },
+            "required": ["title", "body_markdown", "rationale"],
+        },
+    },
+    {
+        "name": "propose_macro_update",
+        "description": (
+            "PROPOSE a Zendesk macro revision: stages a PENDING draft in the "
+            "Revision Center. The reply becomes the comment action; when macro_id "
+            "targets an existing mirrored macro (rejected if unknown), its "
+            "non-comment actions are preserved and any existing comment action is "
+            "replaced, never duplicated. rationale is MANDATORY. Does NOT touch "
+            "real Zendesk; status changes are specialist-only."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "The proposed macro name."},
+                "reply": {"type": "string", "description": "The proposed public reply text (becomes the comment action)."},
+                "rationale": {"type": "string", "description": "MANDATORY: why this change is needed (shown to the reviewer)."},
+                "macro_id": {"type": "integer", "description": "Mirror macro id to revise; omit for a brand-new macro."},
+                "sources": {"type": "array",
+                            "items": {"type": "object",
+                                      "properties": {"ref": {"type": "string"},
+                                                     "label": {"type": "string"}}},
+                            "description": "Evidence used, as [{ref, label}] (doc ids, card ids, URLs)."},
+            },
+            "required": ["name", "reply", "rationale"],
+        },
+    },
+    {
+        "name": "list_zendesk_revisions",
+        "description": (
+            "LIST the AI revision drafts for Zendesk content — articles + macros "
+            "in one unified view (kind, draft_id, target_id, target_title, title, "
+            "status, rationale, timestamps). Filter by status (pending | ready | "
+            "copied | pushed) and/or kind (article | macro)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "status": {"type": "string", "enum": ["pending", "ready", "copied", "pushed"],
+                           "description": "Optional status filter."},
+                "kind": {"type": "string", "enum": ["article", "macro"],
+                         "description": "Optional kind filter."},
+                "limit": {"type": "integer", "description": "Max rows (default 25, max 50)."},
             },
         },
     },
@@ -1398,23 +1525,72 @@ def _list_guru_folder_items(args: dict, db) -> dict:
 
 
 def _search_zendesk_articles(args: dict, db) -> dict:
-    """Search twin (Claude path). Query-ranked Help Center search."""
+    """Search twin (Claude path). Query-ranked FTS over the LOCAL mirror."""
     from src.data.chat_tools.enablement_tools import _search_zendesk_articles_impl
     return _search_zendesk_articles_impl(_ent_conn(db), args.get("query", ""),
                                          limit=args.get("limit", 25))
 
 
 def _list_zendesk_articles(args: dict, db) -> dict:
-    """LIST twin (Claude path). Deterministic Help Center enumeration."""
+    """LIST twin (Claude path). Deterministic LOCAL-mirror enumeration."""
     from src.data.chat_tools.enablement_tools import _list_zendesk_articles_impl
     return _list_zendesk_articles_impl(_ent_conn(db), limit=args.get("limit", 100),
                                        offset=args.get("offset", 0))
 
 
 def _list_zendesk_macros(args: dict, db) -> dict:
-    """LIST twin (Claude path). Zendesk macros list."""
+    """LIST twin (Claude path). Mirrored Zendesk macros list."""
     from src.data.chat_tools.enablement_tools import _list_zendesk_macros_impl
     return _list_zendesk_macros_impl(_ent_conn(db), limit=args.get("limit", 100))
+
+
+def _search_zendesk_mirror(args: dict, db) -> dict:
+    """Mirror-search twin (Claude path). Articles + macros FTS in one call."""
+    from src.data.chat_tools.zendesk_mirror_tools import _search_zendesk_mirror_impl
+    return _search_zendesk_mirror_impl(_ent_conn(db), args.get("query", ""),
+                                       kind=args.get("kind", "all"),
+                                       limit=args.get("limit", 10))
+
+
+def _get_zendesk_article(args: dict, db) -> dict:
+    """Mirror-read twin (Claude path). One article in full from the mirror."""
+    from src.data.chat_tools.zendesk_mirror_tools import _get_zendesk_article_impl
+    return _get_zendesk_article_impl(_ent_conn(db), args.get("article_id"))
+
+
+def _get_zendesk_macro(args: dict, db) -> dict:
+    """Mirror-read twin (Claude path). One macro in full from the mirror."""
+    from src.data.chat_tools.zendesk_mirror_tools import _get_zendesk_macro_impl
+    return _get_zendesk_macro_impl(_ent_conn(db), args.get("macro_id"))
+
+
+def _propose_article_update(args: dict, db) -> dict:
+    """Draft-propose twin (Claude path). Pending draft ONLY — mandatory
+    rationale; no publish, no status authority (specialist copies by hand)."""
+    from src.data.chat_tools.zendesk_mirror_tools import _propose_article_update_impl
+    return _propose_article_update_impl(
+        _ent_conn(db), title=args.get("title", ""),
+        body_markdown=args.get("body_markdown", ""),
+        rationale=args.get("rationale", ""),
+        article_id=args.get("article_id"), sources=args.get("sources"))
+
+
+def _propose_macro_update(args: dict, db) -> dict:
+    """Draft-propose twin (Claude path). Pending draft ONLY — mandatory
+    rationale; no publish, no status authority (specialist copies by hand)."""
+    from src.data.chat_tools.zendesk_mirror_tools import _propose_macro_update_impl
+    return _propose_macro_update_impl(
+        _ent_conn(db), name=args.get("name", ""), reply=args.get("reply", ""),
+        rationale=args.get("rationale", ""), macro_id=args.get("macro_id"),
+        sources=args.get("sources"))
+
+
+def _list_zendesk_revisions(args: dict, db) -> dict:
+    """LIST twin (Claude path). Unified article + macro revision drafts."""
+    from src.data.chat_tools.zendesk_mirror_tools import _list_zendesk_revisions_impl
+    return _list_zendesk_revisions_impl(_ent_conn(db), status=args.get("status"),
+                                        kind=args.get("kind"),
+                                        limit=args.get("limit", 25))
 
 
 def _search_content(args: dict, db) -> dict:
@@ -1636,6 +1812,12 @@ _DISPATCH = {
     "search_zendesk_articles": _search_zendesk_articles,
     "list_zendesk_articles": _list_zendesk_articles,
     "list_zendesk_macros": _list_zendesk_macros,
+    "search_zendesk_mirror": _search_zendesk_mirror,
+    "get_zendesk_article": _get_zendesk_article,
+    "get_zendesk_macro": _get_zendesk_macro,
+    "propose_article_update": _propose_article_update,
+    "propose_macro_update": _propose_macro_update,
+    "list_zendesk_revisions": _list_zendesk_revisions,
     "search_content": _search_content,
     "request_guru_publish_picker": _request_guru_publish_picker,
     "set_guru_publish_target": _set_guru_publish_target,

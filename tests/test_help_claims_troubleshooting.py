@@ -410,7 +410,9 @@ def test_a_disconnected_source_is_reported_not_raised(empty_db, tool_registry, m
     """connect-first.md: "A disconnected source should be reported as
     disconnected — never as an error, and never silently skipped."
 
-    Zendesk with no credentials is the reference case.
+    Zendesk is mirror-backed now: the reference empty state is an
+    unpopulated mirror, reported as zendesk_mirror_empty (with a hint)
+    rather than raised — credentials play no part in reads.
     """
     import src.data.settings_manager as sm
     monkeypatch.setattr(sm, "get_section", lambda name, default=None: {})
@@ -418,10 +420,11 @@ def test_a_disconnected_source_is_reported_not_raised(empty_db, tool_registry, m
     handler = tool_registry["list_zendesk_articles"]["handler"]
     result = handler(empty_db.conn, {}, None)
 
-    assert isinstance(result, dict), f"disconnected source returned {type(result)}"
-    blob = repr(result).lower()
-    assert "not_connected" in blob or "not connected" in blob, (
-        f"a disconnected Zendesk was not reported as disconnected: {result!r}")
+    assert isinstance(result, dict), f"empty mirror returned {type(result)}"
+    assert result.get("ok") is False
+    assert result.get("error") == "zendesk_mirror_empty", (
+        f"an empty Zendesk mirror was not reported as empty: {result!r}")
+    assert result.get("hint"), "the empty-mirror report should carry a hint"
 
 
 def test_test_connections_button_does_nothing(qapp):
@@ -965,7 +968,7 @@ def test_known_issue_web_tabs_flag_is_absent_and_defaults_off(monkeypatch):
     from src.ui.web import web_flags
     from src.ui.web.web_flags import VALID_MODES
 
-    assert VALID_MODES == ("off", "calendar", "all")
+    assert set(VALID_MODES) == {"off", "calendar", "all", "zendesk"}
     # Default behavior, independent of the live file: empty config -> off.
     # (web_flags imports get_section from settings_manager per-call, so patching
     # the source module is what takes effect.)

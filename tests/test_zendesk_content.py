@@ -113,6 +113,24 @@ class TestSync:
         assert zendesk_store.list_articles(conn)[0]["article_id"] == 101
         assert zendesk_store.list_macros(conn)[0]["macro_id"] == 201
 
+    def test_sync_delegates_to_upserts_populating_projections(self, empty_db):
+        """Mig-051: sync rows must carry body_text/content_hash (the upsert
+        path), not the bare mig-030 column set."""
+        conn = empty_db.conn
+        zendesk_store.sync_articles(conn, FakeZendesk())
+        row = conn.execute(
+            "SELECT body_text, content_hash, body_html, body "
+            "FROM zendesk_articles WHERE article_id=101").fetchone()
+        assert row[0] == "b"                 # <p>b</p> stripped
+        assert row[1]                        # content_hash populated
+        assert row[2] == "<p>b</p>"          # verbatim body_html
+        assert row[3] == "<p>b</p>"          # legacy body column still fed
+        zendesk_store.sync_macros(conn, FakeZendesk())
+        mrow = conn.execute(
+            "SELECT actions_text, content_hash FROM zendesk_macros "
+            "WHERE macro_id=201").fetchone()
+        assert mrow[0] is not None and mrow[1]
+
 
 class TestArticleDrafts:
     def test_draft_from_document(self, empty_db):
@@ -178,7 +196,13 @@ class TestDemoSeed:
 
 @pytest.mark.ui
 class TestPage:
-    def test_enablement_has_zendesk_tab(self, empty_db):
+    """Locked native-tab contracts. The web_tabs flag is PINNED off here so
+    a 'zendesk'/'all' settings value (the dev box runs 'all') can never route
+    these assertions at the WebHost surface — the flag-on branch is owned by
+    tests/test_zendesk_web_tab.py."""
+
+    def test_enablement_has_zendesk_tab(self, empty_db, monkeypatch):
+        monkeypatch.setattr("src.ui.web.web_flags.web_tabs_mode", lambda: "off")
         from PySide6.QtWidgets import QApplication
         QApplication.instance() or QApplication([])
         from src.ui.pages.enablement import EnablementPage
@@ -188,7 +212,8 @@ class TestPage:
         assert page.zendesk._a_list.count() >= 1   # demo article draft
         assert page.zendesk._m_list.count() >= 1   # demo macro draft
 
-    def test_article_push_demo_marks_pushed(self, empty_db):
+    def test_article_push_demo_marks_pushed(self, empty_db, monkeypatch):
+        monkeypatch.setattr("src.ui.web.web_flags.web_tabs_mode", lambda: "off")
         from PySide6.QtWidgets import QApplication
         QApplication.instance() or QApplication([])
         from src.ui.pages.enablement import EnablementPage
