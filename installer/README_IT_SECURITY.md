@@ -91,7 +91,8 @@ The workflow file is `.github/workflows/build.yml` in the repository.
 | Job | Runner | Output |
 |-----|--------|--------|
 | `build-windows` | `windows-latest` (GitHub-hosted) | `AlmaInsights-win64.zip` |
-| `build-macos` | `macos-14` (GitHub-hosted, Apple Silicon) | `AlmaInsights-macOS-arm64.zip` |
+| `build-macos` (arm64) | `macos-15` (GitHub-hosted, Apple Silicon) | `AlmaInsights-macOS-arm64.zip` |
+| `build-macos` (x64) | `macos-15-intel` (GitHub-hosted, Intel) | `AlmaInsights-macOS-x64.zip` |
 
 ### 3.2 Build Steps (both platforms)
 
@@ -106,7 +107,10 @@ The workflow file is `.github/workflows/build.yml` in the repository.
    - Runs `pip install` to fetch packages from PyPI over HTTPS
    - Verifies that PySide6 loads correctly
    - Copies the application source into the staging directory
-   - Removes build artifacts (`__pycache__`, `.dist-info`, test dirs, pip itself)
+   - Removes build artifacts (`__pycache__`, test dirs, pip itself).
+     Package `.dist-info` metadata is retained: `importlib.metadata`
+     entry points live there, and the `keyring` credential backends are
+     discovered through them at runtime.
    - Zips everything into the final distribution archive
 4. **Upload** the zip as a GitHub Actions artifact (`actions/upload-artifact@v4`)
 

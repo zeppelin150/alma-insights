@@ -189,11 +189,11 @@ def clean_python_dir(python_dir):
             shutil.rmtree(cache_dir, ignore_errors=True)
             removed += 1
 
-    # Remove .dist-info directories (pip metadata)
-    for dist_info in python_dir.rglob("*.dist-info"):
-        if dist_info.is_dir():
-            shutil.rmtree(dist_info, ignore_errors=True)
-            removed += 1
+    # .dist-info directories are KEPT: importlib.metadata entry points live
+    # there, and keyring 25.x resolves every backend (macOS Keychain, Windows
+    # Credential Manager) through the 'keyring.backends' entry-point group.
+    # Stripping them ships bundles whose keyring is the fail stub — a critical
+    # "Keyring unavailable" splash failure on every end-user machine.
 
     # Remove test directories from packages
     for test_dir in python_dir.rglob("tests"):
@@ -937,7 +937,9 @@ def build_macos():
         arch_label = "arm64"
     else:
         pbs_filename = PBS_MAC_X86
-        arch_label = "x86_64"
+        # "x64", not platform.machine()'s "x86_64" — the release workflow and
+        # updater (manifest_fetcher.py) both expect AlmaInsights-macOS-x64.zip.
+        arch_label = "x64"
 
     pbs_url = f"{PBS_BASE}/{pbs_filename}"
 

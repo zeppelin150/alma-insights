@@ -31,10 +31,10 @@ jobs:
           - os: windows-latest
             platform: windows
             artifact: AlmaInsights-win64.zip
-          - os: macos-14          # Apple Silicon
+          - os: macos-15          # Apple Silicon
             platform: macos
             artifact: AlmaInsights-macOS-arm64.zip
-          - os: macos-13          # Last Intel runner
+          - os: macos-15-intel    # Intel (macos-13 retired Dec 2025; Intel images end Fall 2027)
             platform: macos
             artifact: AlmaInsights-macOS-x64.zip
 
@@ -99,6 +99,9 @@ jobs:
           name: ${{ matrix.artifact }}
           path: dist/${{ matrix.artifact }}
           retention-days: 7
+          # Fail loudly if build_release.py wrote a differently-named zip —
+          # a green job with no artifact is worse than a red one.
+          if-no-files-found: error
 
   # ─────────────────────────────────────────────────────────────
   # 2. Aggregate artifacts, build the manifest, publish a Release
