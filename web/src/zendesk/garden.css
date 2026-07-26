@@ -32,7 +32,6 @@
              Oxygen-Sans, Ubuntu, Cantarell, "Helvetica Neue", Arial, sans-serif;
   --zd-mono: SFMono-Regular, Consolas, "Liberation Mono", Menlo, Courier, monospace;
 
-  flex-direction: row;
   background: #ffffff;
   color: var(--zd-grey-800);
   font-family: var(--zd-font);
@@ -41,45 +40,22 @@
 }
 .zd-app * { box-sizing: border-box; }
 
-/* ── Kale chrome rail (60px collapsed nav) ─────────────────────────── */
-.zd-rail {
-  width: 60px; min-width: 60px;
-  background: var(--zd-kale-700);
-  display: flex; flex-direction: column; align-items: center;
-  padding: 10px 0; gap: 6px;
-}
-.zd-rail-brand {
-  width: 36px; height: 36px; border-radius: 4px;
-  background: var(--zd-kale-600); color: #ffffff;
-  display: flex; align-items: center; justify-content: center;
-  font-weight: 600; font-size: 16px; margin-bottom: 10px;
-  user-select: none;
-}
-.zd-rail-btn {
-  width: 44px; height: 44px; border: none; border-radius: 4px;
-  background: transparent; color: var(--zd-kale-300);
-  display: flex; align-items: center; justify-content: center;
-  cursor: pointer; transition: var(--zd-transition); position: relative;
-}
-.zd-rail-btn:hover { background: rgba(255, 255, 255, 0.1); color: #ffffff; }
-.zd-rail-btn.active { background: var(--zd-kale-600); color: #ffffff; }
-.zd-rail-btn:focus-visible { outline: none; box-shadow: var(--zd-focus-ring); }
-.zd-rail-btn svg { width: 20px; height: 20px; }
-.zd-rail-count {
-  position: absolute; top: 4px; right: 4px; min-width: 15px; height: 15px;
-  border-radius: 100px; background: var(--zd-blue-600); color: #ffffff;
-  font-size: 10px; line-height: 15px; font-weight: 600; padding: 0 4px;
-}
-.zd-rail-spacer { flex: 1; }
-
-/* ── Main column + white 52px header ───────────────────────────────── */
-.zd-main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+/* ── Single compact white header row (~52px; wraps, never clips) ───── */
 .zd-hdr {
-  height: 52px; min-height: 52px;
+  min-height: 52px;
   background: #ffffff; border-bottom: 1px solid var(--zd-grey-300);
-  display: flex; align-items: center; gap: 12px; padding: 0 16px;
+  display: flex; align-items: center; flex-wrap: wrap;
+  column-gap: 16px; padding: 0 16px;
 }
-.zd-crumb { font-size: 13px; color: var(--zd-grey-600); white-space: nowrap; }
+.zd-hdr-left {
+  display: flex; align-items: center; gap: 12px;
+  min-height: 52px; min-width: 0;
+}
+.zd-hdr-right {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-left: auto; padding: 8px 0;
+}
+.zd-crumb { font-size: 12px; color: var(--zd-grey-600); white-space: nowrap; }
 .zd-crumb b { color: var(--zd-grey-800); font-weight: 600; }
 .zd-crumb .sep { margin: 0 5px; color: var(--zd-grey-400); }
 .zd-hdr-spacer { flex: 1; }
@@ -445,7 +421,7 @@
   text-decoration: line-through;
 }
 
-/* ── Mirror overflow menu (purge affordance; confirms stay native) ──── */
+/* ── Mirror menu (imports + purge; dialogs/confirms stay native) ────── */
 .zd-menu { position: relative; display: inline-flex; }
 .zd-menu summary { list-style: none; user-select: none; }
 .zd-menu summary::-webkit-details-marker { display: none; }
@@ -466,11 +442,16 @@
 .zd-menu-item {
   border: none; background: transparent; text-align: left; cursor: pointer;
   padding: 8px 14px; font-size: 13px; font-family: var(--zd-font);
-  color: var(--zd-red-600); transition: var(--zd-transition); white-space: nowrap;
+  color: var(--zd-grey-800); transition: var(--zd-transition); white-space: nowrap;
 }
-.zd-menu-item:hover { background: var(--zd-red-100); color: var(--zd-red-700); }
+.zd-menu-item:hover { background: var(--zd-hover); color: var(--zd-blue-700); }
+.zd-menu-item.danger { color: var(--zd-red-600); }
+.zd-menu-item.danger:hover { background: var(--zd-red-100); color: var(--zd-red-700); }
 .zd-menu-item:focus-visible { outline: none; box-shadow: var(--zd-focus-ring); }
 .zd-menu-item:disabled { color: var(--zd-grey-400); cursor: default; background: transparent; }
+.zd-menu-divider {
+  border-top: 1px solid var(--zd-grey-200); margin: 4px 0;
+}
 
 /* Demo badge (mirrors the calendar/workbench badge placement) */
 .zd-app .cal-demo-badge { margin-left: 2px; }

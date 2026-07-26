@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useBridge } from "../lib/bridge.js";
 import ChatDrawer from "../chat/ChatDrawer.jsx";
 import { makeDemoRenn } from "../chat/demoRenn.js";
-import GardenChrome, { KaleRail } from "./GardenChrome.jsx";
+import GardenChrome from "./GardenChrome.jsx";
 import ArticleList from "./ArticleList.jsx";
 import ArticleEditor from "./ArticleEditor.jsx";
 import MacroList from "./MacroList.jsx";
@@ -415,16 +415,13 @@ export default function ZendeskApp() {
 
   return (
     <div className="app route-zendesk zd-app">
-      <KaleRail view={view} counts={data.counts} onNav={nav} />
-      <div className="zd-main">
-        <GardenChrome view={view} counts={data.counts} connected={data.connected}
-                      demo={demo} onNav={nav} onPull={pull} onImport={importFiles}
-                      onImportFolder={importFolder} onPurge={purgeMirror}
-                      pullBusy={pullBusy}
-                      lastPull={data.last_pull_display}
-                      onOpenChat={rennBridge ? () => setChatOpen(true) : null} />
-        {body}
-      </div>
+      <GardenChrome view={view} counts={data.counts} connected={data.connected}
+                    demo={demo} onNav={nav} onPull={pull} onImport={importFiles}
+                    onImportFolder={importFolder} onPurge={purgeMirror}
+                    pullBusy={pullBusy}
+                    lastPull={data.last_pull_display}
+                    onOpenChat={rennBridge ? () => setChatOpen(true) : null} />
+      {body}
       {flash && <div className="cal-flash">{flash}</div>}
       <ChatDrawer bridge={rennBridge} open={chatOpen} onClose={() => setChatOpen(false)} />
     </div>

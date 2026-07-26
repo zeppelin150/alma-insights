@@ -39,6 +39,9 @@ describe("ZendeskApp compile + disconnected state", () => {
   it("renders the waiting state without a bridge (also compile-checks the app)", () => {
     const out = renderToStaticMarkup(<ZendeskApp />);
     expect(out).toContain("Waiting for the Zendesk bridge…");
+    // the kale icon rail is gone — one compact header, nothing beside it
+    expect(out).not.toContain("zd-rail");
+    expect(out).not.toContain("zd-main");
   });
 });
 
@@ -376,39 +379,93 @@ describe("editor revision links carry the draft status (jump filter fix)", () =>
   });
 });
 
-describe("GardenChrome Mirror menu (purge affordance)", () => {
+describe("GardenChrome single header row + Mirror menu", () => {
   const chromeProps = {
     view: "articles", counts: { articles: 0, macros: 0, revisions_open: 0 },
     connected: true, demo: false, onNav: noop, onPull: noop, onImport: noop,
     onImportFolder: noop, pullBusy: false, lastPull: "Never", onOpenChat: null,
   };
 
-  it("renders the four purge scopes with Zendesk wording when onPurge exists", () => {
+  it("is one compact header: crumb + tabs left, actions right, no rail", () => {
+    const out = renderToStaticMarkup(<GardenChrome {...chromeProps} onPurge={noop} />);
+    expect(out).toContain('class="zd-hdr"');
+    expect(out).not.toContain("zd-rail");
+    expect(out).toContain("Guide admin");
+    expect(out).toContain("Manage articles");
+    expect(out).toContain("Last pull:");
+    expect(out).toContain("Pull from Zendesk");
+    // the crumb+tabs group precedes the right action cluster
+    expect(out.indexOf("zd-hdr-left")).toBeLessThan(out.indexOf("zd-hdr-right"));
+    expect(out.indexOf("zd-tabs")).toBeLessThan(out.indexOf("zd-hdr-right"));
+  });
+
+  it("keeps the SAMPLE DATA badge in the header row in demo mode", () => {
+    const out = renderToStaticMarkup(<GardenChrome {...chromeProps} demo />);
+    expect(out).toContain("SAMPLE DATA");
+  });
+
+  it("folds the imports into the Mirror menu ahead of the purge scopes", () => {
     const out = renderToStaticMarkup(<GardenChrome {...chromeProps} onPurge={noop} />);
     expect(out).toContain("Mirror ▾");
+    expect(out).toContain("Import files…");
+    expect(out).toContain("Import folder…");
     expect(out).toContain("Delete all mirrored content…");
     expect(out).toContain("Delete mirrored articles…");
     expect(out).toContain("Delete mirrored macros…");
     expect(out).toContain("Delete imported content only…");
     expect(out).toContain("real Zendesk is never touched");
+    // imports first, then the divider, then the purge scopes
+    expect(out.indexOf("Import files…")).toBeLessThan(out.indexOf("Import folder…"));
+    expect(out.indexOf("Import folder…")).toBeLessThan(out.indexOf("zd-menu-divider"));
+    expect(out.indexOf("zd-menu-divider"))
+      .toBeLessThan(out.indexOf("Delete all mirrored content…"));
+    // no standalone import buttons left in the header outside the menu
+    const beforeMenu = out.slice(0, out.indexOf("zd-menu"));
+    expect(beforeMenu).not.toContain("Import files…");
+    expect(beforeMenu).not.toContain("Import folder…");
+  });
+
+  it("Import files / Import folder still fire through the menu", () => {
+    const fired = [];
+    const tree = GardenChrome({
+      ...chromeProps,
+      onImport: () => fired.push("files"),
+      onImportFolder: () => fired.push("folder"),
+      onPurge: noop,
+    });
+    const items = collectElements(
+      tree, (n) => n.props && n.props.className === "zd-menu-item");
+    expect(items).toHaveLength(2);
+    const ev = { currentTarget: { closest: () => null } };
+    items.forEach((b) => b.props.onClick(ev));
+    expect(fired).toEqual(["files", "folder"]);
   });
 
   it("menu items ask for exactly the js_purge_mirror scopes, in order", () => {
     const scopes = [];
     const tree = GardenChrome({ ...chromeProps, onPurge: (s) => scopes.push(s) });
     const items = collectElements(
-      tree, (n) => n.props && n.props.className === "zd-menu-item");
+      tree, (n) => n.props && n.props.className === "zd-menu-item danger");
     expect(items).toHaveLength(4);
     const ev = { currentTarget: { closest: () => null } };
     items.forEach((b) => b.props.onClick(ev));
     expect(scopes).toEqual(["all", "articles", "macros", "imported"]);
   });
 
-  it("items disable while an import/pull claim is busy; no menu without onPurge", () => {
+  it("every menu item disables while an import/pull claim is busy", () => {
     const busy = renderToStaticMarkup(
       <GardenChrome {...chromeProps} onPurge={noop} pullBusy />);
     expect(busy).toContain('class="zd-menu-item" role="menuitem" disabled');
-    const none = renderToStaticMarkup(<GardenChrome {...chromeProps} />);
-    expect(none).not.toContain("Mirror ▾");
+    expect(busy).toContain('class="zd-menu-item danger" role="menuitem" disabled');
+    expect(busy).not.toContain('class="zd-menu-item" role="menuitem" title');
+  });
+
+  it("without onPurge the menu still carries the imports (no purge, no divider)", () => {
+    const out = renderToStaticMarkup(<GardenChrome {...chromeProps} />);
+    expect(out).toContain("Mirror ▾");
+    expect(out).toContain("Import files…");
+    expect(out).toContain("Import folder…");
+    expect(out).not.toContain("Delete all mirrored content…");
+    expect(out).not.toContain("zd-menu-divider");
   });
 });
