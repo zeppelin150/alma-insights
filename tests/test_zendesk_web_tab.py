@@ -111,6 +111,109 @@ def test_flag_on_takes_web_branch(monkeypatch, mode):
     assert inst._web_zd_bridge is made["bridge"]
 
 
+def test_make_zendesk_injects_every_callable_the_bridge_exposes(monkeypatch):
+    """SEC-2 regression. ``save_body_edit_fn`` was never passed here, so
+    ``ZendeskBridge._save_body_edit_fn`` stayed None and the bridge's
+    ``saveBodyEdit`` slot silently did nothing: the ENTIRE specialist
+    body-edit feature was a no-op in the shipped app, with no error anywhere
+    (the bridge swallows an absent callable by design, which is right for a
+    relay and lethal for a wiring omission).
+
+    Enumerate the bridge's injection points from its own signature rather
+    than listing them here — a future slot that page.py forgets to wire
+    fails CI on the day it is added, not on the day a user reports a dead
+    button."""
+    import inspect
+
+    import src.ui.pages.enablement.page as pg
+    import src.ui.web.web_flags as wf
+    import src.ui.web.web_host as wh
+    from src.ui.web.zendesk_bridge import ZendeskBridge
+
+    monkeypatch.setattr(wf, "web_tabs_mode", lambda: "zendesk")
+    monkeypatch.setattr(wh, "WebHost", _stub_host_cls())
+    inst = _bare_page(pg)
+    ctrl, _tab = pg.EnablementPage._make_zendesk(inst)
+    bridge = inst._web_zd_bridge
+
+    params = inspect.signature(ZendeskBridge.__init__).parameters
+    fn_params = [n for n in params if n.endswith("_fn")]
+    assert len(fn_params) >= 17, "the callable scan broke, not the wiring"
+    missing = [n for n in fn_params if getattr(bridge, "_" + n, None) is None]
+    assert not missing, f"_make_zendesk never injects: {missing}"
+    # the one that shipped broken, named explicitly
+    assert bridge._save_body_edit_fn == ctrl.js_save_body_edit
+
+    # and the outbound half: every signal the bridge declares is actually
+    # fed by a controller signal (an unconnected one is the same class of
+    # silent omission, in the other direction).
+    from PySide6.QtCore import Signal
+    bridge_signals = [n for n, v in vars(ZendeskBridge).items()
+                      if isinstance(v, Signal)]
+    assert len(bridge_signals) >= 10
+    fired = set()
+    for name in bridge_signals:
+        getattr(bridge, name).connect(
+            lambda _payload, n=name: fired.add(n))
+    for name, value in vars(type(ctrl)).items():
+        if not isinstance(value, Signal):
+            continue
+        try:
+            getattr(ctrl, name).emit("probe")   # the str-carrying web feed
+        except TypeError:
+            continue                            # compat signals (int/void)
+    assert set(bridge_signals) == fired, (
+        f"never relayed: {sorted(set(bridge_signals) - fired)}")
+
+
+def test_renn_bridge_shares_the_zendesk_channel_e2_structural_note(monkeypatch):
+    """E2, pinned as a STRUCTURAL FACT rather than a hope.
+
+    The Zendesk WebHost co-registers the Renn chat bridge on the SAME
+    QWebChannel, and ``ChatBridge.send`` is a page-callable ``@Slot(str)``.
+    So a page script chooses the exact text Renn receives, and Renn's
+    propose tools write those page-chosen bytes into a draft VERBATIM —
+    through a Python-side actor ``ZendeskWebController`` never observes.
+
+    That is why the draft-copy gate cannot be authorship-based, and why the
+    round-4 provenance ledger was deleted rather than patched. The behaviour
+    is intentional (the in-page Renn drawer is the point of M5.5), so this
+    test does not forbid it — it records it, next to the clipboard
+    regression it forced (see tests/test_zendesk_bridge.py,
+    ``test_e2_renn_written_draft_still_demands_a_confirm``).
+
+    If a future change ever DOES isolate the channels, this test failing is
+    the signal to re-read that reasoning — not to weaken the confirm."""
+    from PySide6.QtCore import QMetaMethod
+
+    import src.ui.pages.enablement.page as pg
+    import src.ui.web.web_flags as wf
+    import src.ui.web.web_host as wh
+    from src.ui.web.chat_bridge import ChatBridge
+
+    monkeypatch.setattr(wf, "web_tabs_mode", lambda: "zendesk")
+    stub = _stub_host_cls()
+    monkeypatch.setattr(wh, "WebHost", stub)
+    inst = _bare_page(pg)
+    ctrl, _tab = pg.EnablementPage._make_zendesk(inst)
+
+    made = stub.made[-1]
+    assert "almaBridge" in made["extra_bridges"], (
+        "the Renn bridge no longer shares the Zendesk channel — re-read the "
+        "E2 reasoning before changing the copy gate")
+    # ...and `send` really is page-callable: a QWebChannel exposes @Slot
+    # methods to any script on the page, so the page picks Renn's input.
+    meta = ChatBridge.staticMetaObject
+    slots = {bytes(meta.method(i).name()).decode()
+             for i in range(meta.methodCount())
+             if meta.method(i).methodType() == QMetaMethod.Slot}
+    assert "send" in slots
+
+    # the controller therefore holds NO authorship ledger: the draft-copy
+    # confirm is universal (module docstring item 6).
+    assert not hasattr(ctrl, "_page_authored")
+
+
 def test_web_controller_carries_zendesk_page_compat_surface(monkeypatch):
     """page.py's existing wiring (381-388) + _load_zendesk must work
     unchanged against the controller — the full ZendeskPage surface."""

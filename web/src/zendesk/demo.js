@@ -53,7 +53,7 @@ const ARTICLES = [
   articleRow(102, "Resetting your password", 9, { labels: ["account"], updated: "Jun 18, 2026" }),
   articleRow(103, "Supported browsers", 9, { draft: true, updated: "May 30, 2026" }),
   articleRow(104, "Creating your first client profile", 10, { labels: ["clients"], updated: "Jun 25, 2026" }),
-  articleRow(105, "Importing client rosters", 10, { outdated: true, labels: ["clients", "import"], updated: "Apr 12, 2026" }),
+  articleRow(105, "Importing client rosters", 10, { outdated: true, labels: ["clients", "import"], open_revisions: 1, updated: "Apr 12, 2026" }),
   articleRow(106, "Submitting a claim", 11, { labels: ["claims"], open_revisions: 1, updated: "Jul 8, 2026" }),
   articleRow(107, "Claim denial codes", 11, { draft: true, labels: ["claims"], updated: "Jun 2, 2026" }),
   articleRow(108, "Payment schedules", 12, { labels: ["payments"], updated: "Jun 29, 2026" }),
@@ -89,6 +89,52 @@ const BODIES = {
     "file.</p><h2>Submitting</h2><ol><li>Open the session note</li><li>Click " +
     "<b>Submit claim</b></li><li>Watch the claim status column for payer " +
     "acknowledgement</li></ol>",
+  // Render fidelity showcase: custom classes, an id, a data-attribute, an
+  // inline style and a table all survive the PREVIEW profile and render the
+  // way an end user would see them — they are inert inside sandbox="".
+  110: '<div class="callout" id="cred-lead" data-hc-block="callout" ' +
+    'style="border-left-color:#d4a017">' +
+    "<p><b>Credentialing runs 60-90 days.</b> Start before the provider's " +
+    "first session.</p></div><h2 id=\"timeline\">Timeline</h2>" +
+    '<table class="timeline"><thead><tr><th>Week</th><th>Milestone</th></tr>' +
+    "</thead><tbody><tr><td>0</td><td>Roster submitted</td></tr>" +
+    "<tr><td>2</td><td>Payer acknowledgement</td></tr>" +
+    "<tr><td>8-12</td><td>Effective date issued</td></tr></tbody></table>",
+};
+
+// The exact stored bytes, WHERE THEY DIVERGE from the preview. One fixture
+// row diverges on purpose: the imported article carries a script tag and an
+// event handler the preview strips, which is precisely when markup_notice
+// fires. Everything else renders byte-for-byte, so the alert stays the rare
+// signal the owner asked for rather than a permanent banner.
+const SOURCE_OVERRIDES = {
+  110: BODIES[110] +
+    '<p onclick="track()">Questions? Ask the enablement team.</p>' +
+    "<script>window.__x = 1;</script>",
+};
+
+// Verbatim wording of the controller's _MARKUP_NOTICE.
+const MARKUP_NOTICE = "this content contains markup the preview does not " +
+  "display - read the HTML source before pasting";
+
+// Plain/markdown source text of the mirrored bodies — what js_save_body_edit
+// seeds the specialist's textarea from (article_detail.body_text).
+const BODY_TEXTS = {
+  101: "## Overview\nProviders can self-serve SSO configuration from the " +
+    "admin console.\n\n## Steps\n1. Open Admin Console, then Security, then " +
+    "SSO\n2. Choose your identity provider (Okta, Azure AD, Google)\n3. " +
+    "Upload the metadata XML and save\n4. Test with a pilot org before " +
+    "enabling org-wide\n\nNote: current sessions stay active until SSO is " +
+    "enabled org-wide.",
+  105: "Rosters import from CSV under Clients > Import.\n\n## Columns\n" +
+    "- first_name, last_name (required)\n- email, phone (optional)\n\n" +
+    "This article predates the v2 importer and is flagged outdated.",
+  106: "## Before you start\nConfirm the client's payer and plan are on " +
+    "file.\n\n## Submitting\n1. Open the session note\n2. Click Submit " +
+    "claim\n3. Watch the claim status column for payer acknowledgement",
+  110: "Credentialing runs 60-90 days. Start before the provider's first " +
+    "session.\n\n## Timeline\n- Week 0: roster submitted\n- Week 2: payer " +
+    "acknowledgement\n- Weeks 8-12: effective date issued",
 };
 
 function articleDetail(row) {
@@ -108,8 +154,20 @@ function articleDetail(row) {
     origin: row.origin,
     source_file: row.origin === "import" ? "C:/exports/credentialing.html" : null,
     updated_display: row.updated_display,
+    // The RENDERED preview — the primary review surface. Python's preview
+    // profile keeps presentational markup (classes, ids, data-attributes,
+    // inline styles, tables) so this looks like the end user's article.
     body_srcdoc: BODIES[row.id] ||
       "<p>" + row.title + " — sample mirrored body for the demo fixture.</p>",
+    // The exact stored bytes the clipboard would deliver, rendered as
+    // escaped text inside the COLLAPSED source disclosure. Identical to the
+    // preview for all but the one divergent fixture row, so markup_notice
+    // fires exactly once across the fixture.
+    body_source: SOURCE_OVERRIDES[row.id] || BODIES[row.id] ||
+      "<p>" + row.title + " — sample mirrored body for the demo fixture.</p>",
+    markup_notice: SOURCE_OVERRIDES[row.id] ? MARKUP_NOTICE : "",
+    body_text: BODY_TEXTS[row.id] ||
+      row.title + " — sample mirrored body for the demo fixture.",
     revisions: DRAFT_ROWS.filter((r) => r.kind === "article" && r.target_id === row.id)
       .map((r) => ({ draft_id: r.draft_id, status: r.status, title: r.title,
                      updated_display: r.created_display })),
@@ -156,6 +214,12 @@ function macroDetail(row) {
     active: row.active,
     updated_display: row.updated_display,
     actions: MACRO_ACTIONS[row.id] || [],
+    // Canonical source rendering of the same actions — the exact bytes
+    // "Copy reply" would deliver (controller: _actions_source).
+    actions_source: JSON.stringify(
+      (MACRO_ACTIONS[row.id] || []).map(
+        (a) => ({ field: a.field, value: String(a.value == null ? "" : a.value) })),
+      null, 2),
     revisions: DRAFT_ROWS.filter((r) => r.kind === "macro" && r.target_id === row.id)
       .map((r) => ({ draft_id: r.draft_id, status: r.status, name: r.title })),
   };
@@ -166,21 +230,50 @@ const DRAFT_ROWS = [
     title: "Setting up SSO (SAML)", status: "ready",
     rationale: "Steps 3-5 were stale after the July release renamed the Security menu.",
     sources: [{ ref: "doc:sso-runbook", label: "SSO runbook" }],
+    source_ref: null,
+    body: "## Overview\nProviders can self-serve SSO configuration from the " +
+      "admin console.\n\n## Steps\n1. Open Admin Console, then Access, then " +
+      "SSO\n2. Choose your identity provider (Okta, Azure AD, Google)\n3. " +
+      "Upload the metadata XML and save\n4. Test with two pilot orgs before " +
+      "enabling org-wide",
     created_display: "Jul 23, 2026", copied_display: null, is_new: false },
   { draft_id: 8, kind: "article", target_id: 106, target_title: "Submitting a claim",
     title: "Submitting a claim", status: "pending",
     rationale: "Payer acknowledgement now shows within minutes, not 24 hours.",
     sources: [{ ref: "doc:claims-v2", label: "Claims v2 release notes" }],
+    source_ref: null,
+    body: "## Before you start\nConfirm the client's payer and plan are on " +
+      "file.\n\n## Submitting\n1. Open the session note\n2. Click Submit " +
+      "claim\n3. Watch the claim status column — acknowledgement usually " +
+      "arrives within a few minutes.",
     created_display: "Jul 22, 2026", copied_display: null, is_new: false },
   { draft_id: 9, kind: "article", target_id: null, target_title: null,
     title: "Telehealth billing FAQ", status: "pending",
     rationale: "Twelve tickets this month asked the same three telehealth billing questions.",
     sources: [{ ref: "trc:telehealth", label: "Telehealth ticket cluster" }],
+    source_ref: null,
+    body: "## Telehealth billing FAQ\n- Which CPT codes apply to telehealth " +
+      "sessions?\n- Does place-of-service 10 vs 02 change reimbursement?\n" +
+      "- How do modifier 95 claims get flagged?",
     created_display: "Jul 21, 2026", copied_display: null, is_new: true },
+  { draft_id: 10, kind: "article", target_id: 105,
+    target_title: "Importing client rosters",
+    title: "Importing client rosters", status: "pending",
+    rationale: "Edited in the workspace.",
+    sources: [],
+    source_ref: "specialist-edit",
+    body: "Rosters import from CSV under Clients > Import.\n\n## Columns\n" +
+      "- first_name, last_name (required)\n- email, phone (optional)\n\n" +
+      "This article covers the v2 importer.",
+    created_display: "Jul 25, 2026", copied_display: null, is_new: false },
   { draft_id: 3, kind: "macro", target_id: 201, target_title: "Refund apology",
     title: "Refund apology v2", status: "copied",
     rationale: "The old reply promised 7-10 days; finance now settles in 3-5.",
     sources: [{ ref: "doc:refund-sla", label: "Refund SLA update" }],
+    source_ref: null,
+    body: "Hi {{ticket.requester.first_name}},\n\nWe're sorry about the " +
+      "billing mix-up. Your refund was issued today and lands in 3-5 " +
+      "business days.",
     created_display: "Jul 18, 2026", copied_display: "Jul 19, 2026", is_new: false },
 ];
 
@@ -227,6 +320,20 @@ const DIFFS = {
     change_count: 0, title: { changed: false, old: null, new: "Telehealth billing FAQ" },
     rows: [],
   },
+  "article:10": {
+    request_id: "demo-d10", kind: "article", draft_id: 10, baseline_present: true,
+    change_count: 1,
+    title: { changed: false, old: "Importing client rosters", new: "Importing client rosters" },
+    rows: [
+      { tag: "ctx", text: "Rosters import from CSV under Clients > Import." },
+      { tag: "change", spans: [
+        { tag: "equal", text: "This article " },
+        { tag: "del", text: "predates the v2 importer and is flagged outdated" },
+        { tag: "add", text: "covers the v2 importer" },
+        { tag: "equal", text: "." },
+      ] },
+    ],
+  },
   "macro:3": {
     request_id: "demo-d3", kind: "macro", draft_id: 3, baseline_present: true,
     change_count: 1, title: { changed: true, old: "Refund apology", new: "Refund apology v2" },
@@ -241,6 +348,24 @@ const DIFFS = {
   },
 };
 
+// Every diff_ready payload carries the full review contract: `rows` is the
+// AUTHORITATIVE source diff and `text_rows` the SECONDARY readable
+// projection. The sample rows above stand in for the source pane; the
+// secondary pane is left empty rather than faking a second, differently
+// worded diff of the same fixture. `warning` stays null because these
+// fixtures are internally consistent (no changes ⇒ bytes equal).
+Object.keys(DIFFS).forEach((key) => {
+  const d = DIFFS[key];
+  DIFFS[key] = {
+    ...d,
+    bytes_equal: d.change_count === 0,
+    warning: null,
+    markup_notice: "",
+    text_rows: [],
+    text_change_count: 0,
+  };
+});
+
 export function buildDemoZendesk() {
   const article_details = {};
   ARTICLES.forEach((a) => { article_details[a.id] = articleDetail(a); });
@@ -251,7 +376,7 @@ export function buildDemoZendesk() {
       view: "articles",
       connected: false,
       demo: true,
-      counts: { articles: ARTICLES.length, macros: MACROS.length, revisions_open: 3 },
+      counts: { articles: ARTICLES.length, macros: MACROS.length, revisions_open: 4 },
       categories: CATEGORIES,
       articles: ARTICLES,
       macros: MACROS,

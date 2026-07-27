@@ -871,6 +871,7 @@ class EnablementPage(QWidget):
                     revisions_fn=ctrl.js_request_revisions,
                     diff_fn=ctrl.js_request_diff,
                     save_fn=ctrl.js_save_draft,
+                    save_body_edit_fn=ctrl.js_save_body_edit,
                     ready_fn=ctrl.js_mark_ready,
                     copied_fn=ctrl.js_mark_copied,
                     copy_fn=ctrl.js_copy_field,
@@ -901,16 +902,33 @@ class EnablementPage(QWidget):
         page = ZendeskPage()
         return page, self._scroll(page)
 
-    def _web_zendesk_confirm(self, title: str, text: str) -> bool:
-        """The destructive gate for the web Zendesk tab: a NATIVE QMessageBox
-        no page script can click. Defaults to No; styled via
-        style_native_dialog so the page background can't blank the buttons
-        (2026-07-22 fix)."""
+    def _web_zendesk_confirm(self, title: str, text: str,
+                             detail: str = None) -> bool:
+        """The native gate for the web Zendesk tab: a QMessageBox no page
+        script can click. Defaults to No; styled via style_native_dialog so
+        the page background can't blank the buttons (2026-07-22 fix).
+
+        Used by the destructive gates (delete revision / purge mirror) and by
+        the UNIVERSAL DRAFT-COPY gate, which passes ``detail`` — the exact
+        clipboard payload. It lands in the scrollable detail pane
+        (setDetailedText), because that gate's whole point is that the
+        operator sees the characters before they reach production.
+
+        This is the reason the draft gate cannot be authorship-based. The
+        Zendesk WebHost co-registers the Renn chat bridge (``almaBridge``)
+        on the SAME QWebChannel, and ``ChatBridge.send`` is a page-callable
+        slot, so a page script can choose the exact text Renn receives and
+        drive Renn's propose tools into writing page-chosen bytes into a
+        draft — through a Python-side actor the controller never observes.
+        A native dialog showing the bytes is the only channel Python can
+        prove a human perceived, so every draft copy takes one."""
         from PySide6.QtWidgets import QMessageBox
         from src.ui.pages.enablement._common import style_native_dialog
         box = QMessageBox(self)
         box.setWindowTitle(str(title or "Confirm"))
         box.setText(str(text or ""))
+        if detail:
+            box.setDetailedText(str(detail))
         box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
         box.setDefaultButton(QMessageBox.No)
         style_native_dialog(box)
@@ -939,13 +957,17 @@ class EnablementPage(QWidget):
         """Native file picker for the mirror import — the page never sees
         filesystem paths."""
         from PySide6.QtWidgets import QFileDialog
+        from src.data.app_paths import start_dir
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "Import Zendesk content", "", self._ZD_IMPORT_FILTER)
+            self, "Import Zendesk content", start_dir("zendesk_imports"),
+            self._ZD_IMPORT_FILTER)
         return paths or []
 
     def _web_zendesk_folder_pick(self):
         from PySide6.QtWidgets import QFileDialog
-        path = QFileDialog.getExistingDirectory(self, "Import Zendesk folder")
+        from src.data.app_paths import start_dir
+        path = QFileDialog.getExistingDirectory(
+            self, "Import Zendesk folder", start_dir("zendesk_imports"))
         return path or None
 
     def _web_workbench_upload(self):
@@ -2253,8 +2275,10 @@ class EnablementPage(QWidget):
         from src.data import pptx_store
         deck = pptx_store.get_deck(self._conn(), deck_id)
         default = (deck.get("title", "deck") if deck else "deck").replace(" ", "_") + ".pptx"
+        from src.data.app_paths import start_dir
         path, _ = QFileDialog.getSaveFileName(
-            self, "Export deck", default, "PowerPoint (*.pptx)")
+            self, "Export deck", start_dir("exports", default),
+            "PowerPoint (*.pptx)")
         if not path:
             return
         res = pptx_store.export_pptx(self._conn(), deck_id, path)

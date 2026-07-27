@@ -420,6 +420,88 @@
   background: var(--zd-red-100); color: var(--zd-red-700);
   text-decoration: line-through;
 }
+/* The authoritative/secondary split: the source pane leads, the readable
+   projection is visibly demoted so nobody approves a copy from it alone. */
+.zd-diff-hd.secondary {
+  margin-top: 20px; padding-top: 12px;
+  border-top: 1px dashed var(--zd-grey-300); font-weight: 600;
+}
+.zd-diff-note {
+  font-family: var(--zd-font); font-size: 11px; color: var(--zd-grey-500);
+  margin-bottom: 8px;
+}
+.zd-diff-empty {
+  font-family: var(--zd-font); font-size: 12px; color: var(--zd-grey-500);
+  padding: 4px 0;
+}
+.zd-diff-warn {
+  font-family: var(--zd-font); font-size: 12px; font-weight: 600;
+  color: var(--zd-red-700); background: var(--zd-red-100);
+  border: 1px solid var(--zd-red-400, var(--zd-red-700));
+  border-radius: 4px; padding: 8px 10px; margin-bottom: 10px;
+}
+
+/* Exact-source disclosure (mirror articles + macros) — COLLAPSED by default.
+   The rendered article above it is the primary surface; these are the bytes
+   "Copy HTML" would deliver, escaped text only, one click away. */
+.zd-article-review {
+  flex: 1; display: flex; flex-direction: column; min-height: 0;
+  overflow: auto;
+}
+.zd-source-panel {
+  flex: none;
+  border-top: 1px solid var(--zd-grey-300); background: var(--zd-grey-100);
+}
+.zd-source-panel > summary { list-style: none; }
+.zd-source-panel > summary::-webkit-details-marker { display: none; }
+.zd-source-summary {
+  display: flex; align-items: center; gap: 10px; cursor: pointer;
+  padding: 9px 20px; font-size: 12px; color: var(--zd-grey-700);
+  user-select: none; transition: var(--zd-transition);
+}
+.zd-source-summary:hover { background: var(--zd-hover); color: var(--zd-blue-700); }
+.zd-source-summary:focus-visible { outline: none; box-shadow: var(--zd-focus-ring); }
+.zd-source-summary::before {
+  content: "›"; display: inline-block; font-size: 15px; line-height: 1;
+  color: var(--zd-grey-600); transition: var(--zd-transition);
+}
+.zd-source-panel[open] > .zd-source-summary::before { transform: rotate(90deg); }
+.zd-source-summary-label { font-weight: 600; }
+.zd-source-panel > .zd-diff-warn { margin: 0 20px 10px; }
+.zd-source-panel > .zd-source { margin: 0 20px 16px; }
+.zd-source {
+  font-family: var(--zd-mono); font-size: 12px; line-height: 1.55;
+  white-space: pre-wrap; word-break: break-word; margin: 0;
+  max-height: 320px; overflow: auto; padding: 10px 12px;
+  background: var(--zd-white, #fff); border: 1px solid var(--zd-grey-300);
+  border-radius: 4px;
+}
+
+/* Markup alert — the RARE case where the preview genuinely cannot display
+   the stored bytes. Loud on purpose, and rendered only when it fires: a
+   warning that is always on is a warning nobody reads. */
+.zd-markup-alert {
+  flex: none; display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  margin: 10px 16px 0; padding: 10px 14px;
+  border: 1px solid var(--zd-red-600); border-left-width: 4px;
+  border-radius: 4px; background: var(--zd-red-100);
+}
+.zd-markup-alert-text {
+  flex: 1; min-width: 220px; font-size: 13px; font-weight: 600;
+  color: var(--zd-red-700);
+}
+
+/* Copy affordance: primary = drafted content, overflow = exact stored bytes */
+.zd-copy-controls { display: inline-flex; align-items: center; gap: 6px; }
+.zd-copy-menu .zd-menu-items { min-width: 220px; }
+/* In the Revision Center the copy row sits at the BOTTOM of the panel, so
+   its overflow opens upward instead of off the end of the pane. */
+.zd-rev-actions .zd-copy-menu .zd-menu-items {
+  top: auto; bottom: calc(100% + 4px);
+}
+.zd-copy-pending {
+  font-size: 12px; color: var(--zd-grey-600); white-space: nowrap;
+}
 
 /* ── Mirror menu (imports + purge; dialogs/confirms stay native) ────── */
 .zd-menu { position: relative; display: inline-flex; }
@@ -452,6 +534,36 @@
 .zd-menu-divider {
   border-top: 1px solid var(--zd-grey-200); margin: 4px 0;
 }
+
+/* ── Specialist body editing (plain textarea; no rich toolbar in v1) ── */
+.zd-body-edit {
+  display: flex; flex-direction: column; gap: 8px; flex: 1; min-height: 0;
+}
+.zd-body-edit-wrap {
+  flex: 1; display: flex; flex-direction: column; min-height: 0;
+  margin: 0 16px;
+}
+.zd-body-textarea {
+  flex: 1; width: 100%; min-height: 220px; resize: vertical;
+  border: 1px solid var(--zd-grey-300); border-radius: 4px;
+  padding: 12px 16px; background: #ffffff; color: var(--zd-grey-800);
+  font-family: var(--zd-mono); font-size: 13px; line-height: 1.6;
+  transition: var(--zd-transition);
+}
+.zd-body-textarea:hover { border-color: var(--zd-blue-600); }
+.zd-body-textarea:focus {
+  outline: none; border-color: var(--zd-blue-600); box-shadow: var(--zd-focus-ring);
+}
+.zd-body-edit-actions {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+
+/* Jump link inside the flash toast (button-as-link, keyboard reachable) */
+.zd-flash-link {
+  border: none; background: transparent; padding: 0; cursor: pointer;
+  color: inherit; font: inherit; text-decoration: underline;
+}
+.zd-flash-link:focus-visible { outline: none; box-shadow: var(--zd-focus-ring); }
 
 /* Demo badge (mirrors the calendar/workbench badge placement) */
 .zd-app .cal-demo-badge { margin-left: 2px; }

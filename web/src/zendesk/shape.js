@@ -75,6 +75,126 @@ export function groupRevisions(revisions) {
   return lanes;
 }
 
+// ── Specialist body edits (articles only, v1) ─────────────────────────
+// The js_save_body_edit payload carries ONLY the "body" key — markdown or
+// plain text, capped at 200000 chars (mirrored Python-side). The page can
+// never supply HTML: body_html is ALWAYS recomputed Python-side as
+// sanitize_html(markdown_to_html(body)), so the reviewed diff, the stored
+// body_html, and the clipboard copy can never diverge.
+export const BODY_EDIT_MAX = 200000;
+
+export function bodyEditPayload(text) {
+  return { body: String(text ?? "").slice(0, BODY_EDIT_MAX) };
+}
+
+// Only open pending ARTICLE drafts are editable in v1: ready/copied/pushed
+// are immutable Python-side (silent no-op), macros are out of scope. The UI
+// mirrors the gate so buttons don't invite clicks Python will refuse.
+export function canEditDraftBody(rev) {
+  return !!rev && rev.kind === "article" && rev.status === "pending";
+}
+
+// Origin tag from the additive list_revisions source_ref key: drafts created
+// by in-workspace specialist edits carry source_ref='specialist-edit';
+// everything else is a Renn proposal.
+export function originInfo(sourceRef) {
+  if (sourceRef === "specialist-edit") {
+    return { label: "Specialist edit", specialist: true };
+  }
+  return { label: "Renn", specialist: false };
+}
+
+// action_resolved {action:"body_edit", ok:false} → flash text. The
+// controller attaches an error token string on failure.
+export function bodyEditFailureText(p) {
+  const src = p && typeof p === "object" ? p : {};
+  if (typeof src.error === "string" && src.error) {
+    return "Edit didn't save — " + src.error + ".";
+  }
+  return "Edit didn't save — see the app status bar.";
+}
+
+// Demo-only local simulation of js_save_body_edit (there is no Python to
+// ask). Mirrors the controller's article-target rule: update the open
+// pending specialist-edit draft when one already targets the article, else
+// create a new pending draft. Returns the next revisions array plus the
+// touched draft_id (null = silent no-op, matching the controller).
+export function applyDemoBodyEdit(revisions, targetKind, targetId, body, article) {
+  const rows = asList(revisions);
+  if (targetKind === "draft") {
+    const hit = rows.find((x) => x.kind === "article" && x.draft_id === targetId);
+    if (!hit || hit.status !== "pending") return { revisions: rows, draft_id: null };
+    return {
+      revisions: rows.map((x) => (x === hit ? { ...x, body } : x)),
+      draft_id: targetId,
+    };
+  }
+  const existing = rows.find((x) =>
+    x.kind === "article" && x.status === "pending" &&
+    x.source_ref === "specialist-edit" && x.target_id === targetId);
+  if (existing) {
+    return {
+      revisions: rows.map((x) => (x === existing ? { ...x, body } : x)),
+      draft_id: existing.draft_id,
+    };
+  }
+  const draftId = rows.reduce((m, x) => Math.max(m, Number(x.draft_id) || 0), 0) + 1;
+  const title = article && article.title ? article.title : "Edited article";
+  const row = {
+    draft_id: draftId, kind: "article", target_id: targetId,
+    target_title: title, title, status: "pending",
+    rationale: "Edited in the workspace.", sources: [],
+    source_ref: "specialist-edit", created_display: "Just now",
+    copied_display: null, is_new: false, body,
+  };
+  return { revisions: rows.concat([row]), draft_id: draftId };
+}
+
+// ── Copy affordances (owner correction, 2026-07-26) ───────────────────
+// The workflow copies DRAFTED CONTENT — the prose a specialist authored and
+// reviewed — not verbatim HTML. So the primary clipboard button asks for
+// this field and "Copy HTML" / "Copy rich text" move into an overflow.
+// ONE constant, used by every surface: the copy field vocabulary is
+// Python's (_COPY_FIELDS), so a rename there is a one-line change here.
+export const COPY_DRAFTED_FIELD = "body_text";
+
+const COPY_LABELS = {
+  body_text: "drafted content",
+  body_html: "HTML source",
+  body_rich: "rich text",
+  title: "title",
+  macro_name: "macro name",
+  macro_reply: "reply",
+};
+
+export function copyFieldLabel(field) {
+  return COPY_LABELS[field] || String(field || "content");
+}
+
+// copy_resolved payload → flash text.
+//
+// NOTHING here may claim a copy happened before Python says so. Copies of
+// page-authored bytes now run a NATIVE confirm inside js_copy_field, and a
+// cancelled/refused copy resolves with ok:false or does not resolve at all
+// (the controller returns silently) — so the caller arms a self-clearing
+// busy flag and this builder only ever describes a RESOLVED outcome.
+export function copyFlashText(p) {
+  const src = p && typeof p === "object" ? p : {};
+  const what = copyFieldLabel(src.field);
+  if (src.approved === false) {
+    return "Copy cancelled — nothing was placed on the clipboard.";
+  }
+  if (!src.ok) {
+    return "Copy didn't run — see the app status bar.";
+  }
+  let text = `Copied the ${what} — ${formatChars(src.chars)} chars` +
+    (src.sanitized ? " (rich copy sanitized)" : "") + ".";
+  if (typeof src.notice === "string" && src.notice) {
+    text += " Warning: " + src.notice + ".";
+  }
+  return text;
+}
+
 // Client-side mirror of the controller's revision filter (demo mode has no
 // Python to re-query; live mode re-requests but this keeps the UI instant).
 export function filterRevisions(revisions, filter) {

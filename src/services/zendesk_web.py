@@ -15,6 +15,10 @@ Security posture (the QWebChannel trust boundary):
   allowlists, and save payload keys against a hard RENAME-ONLY allowlist
   (a page script can never ride a status transition — or draft CONTENT —
   through a save; reviewed bytes and copied bytes must never diverge).
+  The one content-bearing slot, ``js_save_body_edit``, honors ONLY a
+  markdown ``body`` key and ALWAYS recomputes ``body_html`` Python-side as
+  ``sanitize_html(markdown_to_html(body))`` — page-supplied HTML never
+  lands, so the same no-divergence guarantee holds.
 * Destructive actions (delete revision, purge mirror) run the workbench
   gate verbatim: validate → single-winner ``_action_inflight`` claim BEFORE
   the native confirm modal → re-verify after approve → dispatch → resolve.
@@ -22,8 +26,112 @@ Security posture (the QWebChannel trust boundary):
 * While EITHER inflight claim is held every mutating slot silently refuses
   (confused-deputy freeze); the claim is taken BEFORE any native nested
   event loop (the QMessageBox AND the QFileDialog pickers).
-* Every article HTML string leaving this controller passes
-  ``sanitize_html`` (``_article_srcdoc`` is the only srcdoc producer).
+* Every article HTML string RENDERED by this controller passes a sanitizer
+  (``_article_srcdoc`` is the only srcdoc producer). The rendered preview
+  uses the wider, rendering-only ``sanitize_html_preview`` profile so a
+  pulled article looks the way an end user would see it in Zendesk —
+  classes, ids, data-attributes, style, tables and embeds are inert inside
+  the SPA's ``sandbox=""`` iframe. STORED content and the ``text/html``
+  clipboard flavour keep the STRICT ``sanitize_html``; the two profiles are
+  separate objects in ``html_sanitize`` precisely so widening the preview
+  can never widen a paste.
+* **THE CLIPBOARD INVARIANT (the whole point of this module).**
+
+      Whatever reaches the clipboard is byte-identical to something the
+      reviewer was shown, and nothing can be present in the copied bytes
+      without being present in the reviewed material.
+
+  A specialist reads a review surface and then pastes the copied bytes
+  into live Zendesk by hand, so anything the review surface drops is
+  invisible yet published. Projections DROP things by construction (a
+  readable text projection erases attributes, styles, script bodies,
+  duplicate attributes, zero-size spans...), so a projection can never be
+  the authority. The structure here instead is:
+
+  1. **The authoritative review is a SOURCE diff of the exact bytes the
+     clipboard will deliver** (``js_request_diff``): the HTML source text
+     itself for articles, the canonical actions JSON for macros, diffed
+     line/word-wise. Every attribute, style declaration, ``<script>`` body
+     and hidden span is literally on screen. The readable
+     ``html_to_review_text`` projection ships alongside as an explicitly
+     SECONDARY convenience view and is never shown alone.
+  2. **Copy releases only reviewed bytes** (``_resolve_copy`` +
+     ``_review_covers``): the payload is recomputed from the DB by
+     ``_copy_bundle`` — the SAME function that built the reviewed material
+     — and every exact string about to be handed to the clipboard (the
+     text flavour AND the text/html mime flavour) must hash-match a string
+     the recorded review showed, on top of a recompute-from-row content
+     hash. This gate covers DRAFTS **and** mirror articles/macros: the
+     mirror review is recorded by ``js_open_article`` /``js_open_macro``,
+     whose payloads carry the exact source bytes (``body_source``). No
+     record, any mismatch, or a row that changed under the review means NO
+     clipboard write — fail closed everywhere.
+  3. **Verbatim bytes are honest, not silently rewritten.** ``origin='pull'``
+     mirror rows are byte-faithful to remote Zendesk by design, so when the
+     bytes differ from what ``sanitize_html`` would produce the review and
+     the copy status line say so explicitly (``_MARKUP_NOTICE``).
+  4. **No silent zero-change**: if the source diff reports zero changed
+     lines while the bytes differ from the baseline, that is a diff bug —
+     the payload carries ``warning`` instead of an innocent "0 changed
+     lines".
+  5. Every draft-content mutator drops the recorded review, so a stale
+     on-screen diff can never authorize a copy, and pending drafts are
+     refused at the clipboard regardless.
+
+  Precision on "shown": of the strings ``_record_review`` binds, the plain
+  flavours are rendered literally — the diff rows, ``body_source``, the
+  title row. The rich (``text/html`` mime) flavour is not independent
+  content: it is ``sanitize_html`` of the string the reviewer WAS shown,
+  and sanitize only removes and escapes — it can never introduce a tag,
+  attribute or URL absent from the source. That derivation is asserted in
+  tests, not assumed. (The rendered preview srcdoc is a THIRD, wider
+  rendering — ``sanitize_html_preview``, see ``_article_srcdoc`` — and is
+  never a clipboard flavour.)
+
+  6. **EVERY DRAFT COPY TAKES A NATIVE CONFIRM THAT DISPLAYS THE BYTES.**
+
+         No clipboard release of DRAFT content — article draft or macro
+         draft, every field, both mime flavours — happens without a NATIVE
+         confirm showing the EXACT characters about to be released. No
+         ``confirm_fn`` injected, declined, or the row's bytes moved while
+         the dialog was open ⇒ nothing is written to the clipboard and NO
+         ``copy_resolved`` receipt is emitted.
+
+     Rationale, and why this replaced an authorship ledger: a draft is by
+     definition content that is NOT yet in Zendesk and is about to be
+     pasted into a public site by hand. Python can prove a human perceived
+     exactly two surfaces — a native Qt dialog and the native status line.
+     Everything emitted over QWebChannel may be discarded by a page that
+     renders nothing, and ``js_request_diff`` / ``js_open_article`` /
+     ``js_open_macro`` are page-callable and record the review as a side
+     effect, so "was this reviewed" is not provable on its own.
+
+     Round 4 tried to gate only bytes the PAGE authored, tracked in a
+     provenance ledger. That model assumed "a Python-side actor wrote it"
+     implies "the page did not choose it". **That is false.** page.py
+     co-registers the Renn chat bridge on this same QWebChannel, and
+     ``ChatBridge.send`` is a page-callable slot — so a page script chooses
+     the exact text Renn receives, Renn calls ``propose_article_update``,
+     and the page-chosen bytes land in a draft through a Python actor this
+     controller never observes. No stamp, no confirm, clipboard. Any Python
+     actor whose INPUT the page controls is not a trustworthy authorship
+     source, and authorship is therefore unknowable here. The ledger also
+     failed on partial writes (a second write raising after the first
+     committed left the bytes stamped by nobody).
+
+     Gating EVERY draft copy is simpler AND strictly stronger: it does not
+     matter who authored the content, because the human sees exactly what
+     is going to the clipboard at the moment it goes. It doubles as a
+     useful "this is what you are pasting" preview, and the owner's
+     workflow is copy-then-paste, so the dialog costs one click on an
+     action that is already deliberate.
+
+     The confirm runs the destructive-gate discipline verbatim (freeze
+     check → claim before the nested event loop → confirm → re-verify the
+     bytes did not move → release). MIRROR rows (articles/macros already
+     live in Zendesk, unmodified) keep the review-record gate and the
+     markup notice ALONE — the risk there is different and the ergonomics
+     matter more. mark-ready / mark-copied stay confirm-free by design.
 * **This controller can never write to real Zendesk**: it holds no client,
   the compat ``article_push`` / ``macro_push`` / ``sync_requested`` signals
   exist for page.py wiring parity only and are NEVER emitted, and the only
@@ -32,6 +140,7 @@ Security posture (the QWebChannel trust boundary):
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
@@ -70,13 +179,110 @@ _FIELD_DISPLAY = {"comment_value": "Comment/Reply",
                   "remove_tags": "Remove tags",
                   "comment_mode": "Comment mode"}
 
+# draft kind -> copy target, the key shape of the review ledger.
+_DRAFT_TARGET = {"article": "article_draft", "macro": "macro_draft"}
+# The copy targets that are DRAFT content — not yet in Zendesk, about to be
+# pasted into a public site by hand. Every clipboard release from one of
+# these takes the native confirm (module docstring, item 6).
+_DRAFT_COPY_TARGETS = frozenset(_DRAFT_TARGET.values())
+
+# Said out loud whenever the sandboxed preview genuinely CANNOT display part
+# of the stored bytes — a script/style/form/plugin container was dropped, an
+# event handler was stripped, a javascript:-style URL was refused. The mirror
+# keeps pull-origin bytes verbatim on purpose, so the honest move is to
+# announce it, never to silently rewrite or hide it.
+#
+# Measured against the PREVIEW profile (``sanitize_html_preview``), not the
+# strict one: the strict profile also throws away classes, ids, data-attrs,
+# most style declarations and table scaffolding, none of which hides content,
+# so measuring against it fired this notice on essentially every pulled
+# article. A warning that is always on is a warning nobody reads.
+_MARKUP_NOTICE = ("this content contains markup the preview does not "
+                  "display - read the HTML source before pasting")
+# The macro flavour of the same honesty. A macro reply has no sanitized
+# preview (every action value renders verbatim as escaped text), so the
+# warning is about the DESTINATION: these bytes carry active markup that
+# the live Zendesk comment editor will interpret.
+_MACRO_MARKUP_NOTICE = ("this reply contains active markup a sanitizer "
+                        "would strip - read the exact action source before "
+                        "pasting")
+# A macro reply is frequently PLAIN TEXT, where sanitize_html differs from
+# the input purely by entity-escaping ("Billing & Claims"). Escaping alone
+# hides nothing, so the macro notice additionally requires something that
+# actually opens a tag; article bodies are HTML by definition and keep the
+# stricter "any divergence is announced" rule unchanged.
+_MARKUP_TAG_RE = re.compile(r"<[A-Za-z/!]")
+# A source diff that finds nothing while the bytes differ is a DIFF BUG,
+# not a clean revision. Never render it as an innocent "0 changed lines".
+_ZERO_CHANGE_WARNING = ("The stored bytes differ from the baseline but the "
+                        "source diff found no changed line. Do NOT copy this "
+                        "revision - report it.")
+
 _ID_RE = re.compile(r"^-?\d+$")     # mirror ids (imports use negative ids)
 _QUERY_CAP = 200
 _TITLE_CAP = 255
+_BODY_CAP = 200_000                 # specialist body-edit markdown ceiling
+_BODY_EDIT_KINDS = ("draft", "article")
+# The ONE draft status js_save_body_edit accepts. Also decides which drafts
+# the revisions feed carries a `body` for — the seed for the edit textarea
+# is served exactly where an edit is accepted, so the feed can never grow
+# hundreds of 200k-char bodies and the editor can never open blank.
+_EDITABLE_DRAFT_STATUS = "pending"
+# Below this many characters the exact bytes go in the confirm's main text;
+# longer ones ride the scrollable detail pane.
+_CONFIRM_INLINE_CAP = 400
+_SPECIALIST_REF = "specialist-edit"
+_SPECIALIST_RATIONALE = "Edited in the workspace."
 _PULL_COOLDOWN_S = 60               # untrusted slot must not drive traffic
 _PULL_FAIL_COOLDOWN_S = 5           # a failed pull must not lock out retry
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+# Zendesk Guide (Copenhagen theme) article typography, so the sandboxed
+# preview approximates what an end user sees on the Help Center rather than
+# unstyled browser defaults. Ships INSIDE the srcdoc: the iframe is
+# ``sandbox=""``, so this stylesheet is the only CSS in that document and it
+# cannot reach — or be reached by — the host page.
+_ARTICLE_PREVIEW_CSS = """
+:root { color-scheme: light; }
+* { box-sizing: border-box; }
+body { margin: 0; padding: 28px 32px 40px; background: #fff; color: #2f3941;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+  "Helvetica Neue", Arial, sans-serif; font-size: 15px; line-height: 1.65;
+  word-wrap: break-word; }
+.alma-hc-article { max-width: 46rem; margin: 0 auto; }
+h1, h2, h3, h4, h5, h6 { color: #2f3941; font-weight: 600; line-height: 1.3;
+  margin: 1.8em 0 .6em; }
+h1 { font-size: 2rem; } h2 { font-size: 1.5rem; } h3 { font-size: 1.25rem; }
+h4 { font-size: 1.1rem; } h5, h6 { font-size: 1rem; }
+h1:first-child, h2:first-child, h3:first-child { margin-top: 0; }
+p, ul, ol, dl, table, blockquote, pre, figure { margin: 0 0 1.1em; }
+ul, ol { padding-left: 1.6em; } li { margin: .3em 0; }
+a { color: #1f73b7; text-decoration: none; }
+a:hover { text-decoration: underline; }
+img { max-width: 100%; height: auto; }
+hr { border: 0; border-top: 1px solid #e9ebed; margin: 2em 0; }
+blockquote { border-left: 4px solid #e9ebed; margin-left: 0;
+  padding: .2em 0 .2em 1em; color: #68737d; }
+code, pre, kbd, samp { font-family: "SFMono-Regular", Menlo, Consolas,
+  monospace; font-size: .9em; }
+code { background: #f8f9f9; border: 1px solid #e9ebed; border-radius: 3px;
+  padding: .1em .35em; }
+pre { background: #f8f9f9; border: 1px solid #e9ebed; border-radius: 4px;
+  padding: 12px 14px; overflow-x: auto; }
+pre code { background: none; border: 0; padding: 0; }
+table { border-collapse: collapse; width: 100%; }
+th, td { border: 1px solid #e9ebed; padding: 8px 10px; text-align: left;
+  vertical-align: top; }
+th { background: #f8f9f9; font-weight: 600; }
+caption { caption-side: bottom; color: #68737d; font-size: .875em;
+  padding-top: .5em; }
+iframe { max-width: 100%; border: 1px solid #e9ebed; border-radius: 4px; }
+details { border: 1px solid #e9ebed; border-radius: 4px; padding: .6em .9em;
+  margin: 0 0 1.1em; }
+summary { cursor: pointer; font-weight: 600; }
+mark { background: #fff7d5; }
+""".strip()
 
 
 def _probe_connected() -> bool:
@@ -121,6 +327,33 @@ def _actions_plain(actions) -> str:
             if piece:
                 parts.append(piece)
     return "\n".join(parts)
+
+
+def _sha(text) -> str:
+    """Hash of an EXACT string.
+
+    This is the identity used to prove that bytes reaching the clipboard
+    are bytes the reviewer was shown, so it must hash the string itself —
+    never a projection, a strip, or a normalization of it."""
+    return hashlib.sha256(
+        ("" if text is None else str(text)).encode("utf-8", "surrogatepass")
+    ).hexdigest()
+
+
+def _actions_source(actions) -> str:
+    """Canonical SOURCE rendering of a macro actions list for the
+    authoritative review diff.
+
+    JSON with a key per line, so every character of every action value —
+    markup, whitespace, control characters, duplicate-looking fields —
+    is literally visible to the reviewer. ``_actions_plain`` (the readable
+    projection) is the secondary view, not this."""
+    rows = []
+    for a in actions or []:
+        if isinstance(a, dict):
+            rows.append({"field": str(a.get("field", "")),
+                         "value": str(a.get("value", ""))})
+    return json.dumps(rows, indent=2, ensure_ascii=False, sort_keys=True)
 
 
 def _first_reply(actions):
@@ -203,7 +436,15 @@ class ZendeskWebController(QObject):
         self._served_article_ids: set[int] = set()
         self._served_macro_ids: set[int] = set()
         self._served_drafts: dict[tuple[str, int], str] = {}
+        # THE REVIEW LEDGER — (copy target, row id) -> {"content": hash of
+        # the row's content at review time, "bytes": frozenset of _sha() of
+        # every EXACT string that review showed}. Written only by
+        # _record_review (from js_request_diff / js_open_article /
+        # js_open_macro), read only by _review_covers. Covers drafts AND
+        # mirror rows; see the clipboard-invariant note above.
+        self._reviewed: dict[tuple[str, int], dict] = {}
         self._last_filter = "open"
+        self._open_article_id = None    # last article served as a detail
 
     # ── the ZendeskPage-compatible setters page.py drives ────────────
     def set_articles(self, synced_count, drafts):
@@ -240,6 +481,10 @@ class ZendeskWebController(QObject):
         traffic stays bounded by the inflight claim + the short floor)."""
         self._pull_inflight = False
         ok = isinstance(report, dict) and bool(report.get("ok"))
+        # A pull rewrites mirror rows underneath any recorded review; the
+        # content-hash check would catch it, but dropping the records is
+        # the fail-closed move (re-open, re-read, then copy).
+        self._reviewed.clear()
         self._last_pull_done = self._now()
         self._pull_cooldown_s = (_PULL_COOLDOWN_S if ok
                                  else _PULL_FAIL_COOLDOWN_S)
@@ -252,6 +497,7 @@ class ZendeskWebController(QObject):
 
     def notify_import_done(self, report):
         self._pull_inflight = False
+        self._reviewed.clear()          # imports rewrite mirror rows too
         self._emit(self.import_resolved,
                    report if isinstance(report, dict) else {})
         self._serve_data()
@@ -289,7 +535,21 @@ class ZendeskWebController(QObject):
 
     def js_open_article(self, article_id):
         """Open an article detail. Digits/'-'-digits only, and the row must
-        exist in the mirror — anything else is a silent no-op."""
+        exist in the mirror — anything else is a silent no-op.
+
+        THIS IS THE MIRROR REVIEW SURFACE. The payload carries BOTH the
+        ``body_srcdoc`` (the rendered preview — the PRIMARY surface, and
+        the reason it uses the wider preview profile) and ``body_source``
+        — the exact stored bytes the clipboard would deliver, which the SPA
+        renders as escaped text in a collapsed disclosure — plus
+        ``markup_notice`` when the preview genuinely cannot display part of
+        those bytes. Serving it
+        RECORDS the review for this article, which is what unlocks
+        ``js_copy_field`` for it; before this, a mirror copy is refused
+        exactly like an unreviewed draft. Previously the ONLY on-screen
+        view of a mirror article was the sanitized preview while
+        ``_resolve_copy`` released the raw row bytes, so imported
+        script/form markup was invisible yet copyable."""
         s = str(article_id or "")
         if not _ID_RE.match(s):
             return
@@ -308,9 +568,15 @@ class ZendeskWebController(QObject):
                 revisions.append({
                     "draft_id": r["draft_id"], "status": r["status"],
                     "title": r.get("title") or "",
+                    "source_ref": r.get("source_ref"),
                     "updated_display": _display_date(r.get("updated_at"))})
                 self._served_drafts[("article", r["draft_id"])] = r["status"]
         self._served_article_ids.add(aid)
+        self._open_article_id = aid
+        payloads = self._html_payloads(art.get("title") or "",
+                                       self._article_source(art))
+        self._record_review("article", aid, payloads,
+                            str(art.get("content_hash") or ""))
         self._emit(self.article_detail, {
             "id": aid, "title": art.get("title") or "",
             "section_id": art.get("section_id"), "section": section,
@@ -324,6 +590,16 @@ class ZendeskWebController(QObject):
             "source_file": art.get("source_file"),
             "updated_display": _display_date(art.get("updated_at")),
             "body_srcdoc": self._article_srcdoc(art),
+            # The EXACT stored bytes — what "Copy HTML" delivers. Rendered
+            # as escaped text by the SPA (never as markup), so the reviewer
+            # reads the same characters the clipboard will carry.
+            "body_source": payloads["body_html"]["text"],
+            # Plain/markdown seed for the specialist edit textarea
+            # (ArticleEditor -> BodyEditForm). Without it the editor opened
+            # BLANK and a save silently replaced the whole body with only
+            # what was typed.
+            "body_text": self._article_body_text(art),
+            "markup_notice": payloads["body_html"]["notice"],
             "revisions": revisions,
         })
 
@@ -356,12 +632,24 @@ class ZendeskWebController(QObject):
                     "name": r.get("title") or ""})
                 self._served_drafts[("macro", r["draft_id"])] = r["status"]
         self._served_macro_ids.add(mid)
+        # Mirror review record: the editor renders every action value
+        # verbatim as escaped text, so opening a macro IS being shown the
+        # exact bytes its copy fields release. Without this record
+        # js_copy_field refuses the macro exactly like an unreviewed draft.
+        self._record_review(
+            "macro", mid,
+            self._macro_payloads(macro.get("name") or "",
+                                 macro.get("actions")),
+            str(macro.get("content_hash") or ""))
         self._emit(self.macro_detail, {
             "id": mid, "name": macro.get("name") or "",
             "description": macro.get("description") or "",
             "active": bool(macro.get("active")),
             "updated_display": _display_date(macro.get("updated_at")),
             "actions": actions, "revisions": revisions,
+            # Canonical source rendering of the same actions — the exact
+            # bytes "Copy reply" delivers, shown as escaped text.
+            "actions_source": _actions_source(macro.get("actions")),
         })
 
     def js_request_revisions(self, filter):  # noqa: A002 — bridge slot name
@@ -372,8 +660,27 @@ class ZendeskWebController(QObject):
         self._push_revisions(f)
 
     def js_request_diff(self, kind, draft_id):
-        """Word-level diff of a draft against its mirror baseline, computed
-        in Python over the plain-text projections (pure renderer rule)."""
+        """THE AUTHORITATIVE REVIEW SURFACE for a draft.
+
+        ``rows`` is a diff of the exact SOURCE bytes the clipboard will
+        deliver — the HTML source text for articles, the canonical actions
+        JSON (``_actions_source``) for macros — so every attribute, style
+        declaration, ``<script>`` body, duplicate attribute and zero-size
+        span is literally on screen. A readable projection
+        (``html_to_review_text`` / ``_actions_plain``, both sides
+        like-for-like) ships as ``text_rows``, explicitly SECONDARY: it
+        drops things by construction and must never be the only thing a
+        reviewer sees before a copy.
+
+        Emitting the diff RECORDS the review: hashes of every exact string
+        ``_copy_bundle`` can release for this draft. ``_resolve_copy``
+        releases nothing whose hash is absent, so nothing can be present in
+        the copied bytes without having been present, character for
+        character, in this diff.
+
+        ``warning`` is set when the source diff reports no changed line
+        although the bytes differ from the baseline — a diff bug, surfaced
+        instead of an innocent "0 changed lines"."""
         kind = str(kind or "")
         if kind not in _DRAFT_KINDS:
             return
@@ -385,52 +692,55 @@ class ZendeskWebController(QObject):
             return
         from src.data import zendesk_store as store
         from src.data.text_diff import change_count, diff_words
+        target = _DRAFT_TARGET[kind]
+        bundle = self._copy_bundle(conn, target, did)
+        if bundle is None:
+            return
+        payloads, content_hash, d = bundle
         if kind == "article":
-            d = store.get_article_draft(conn, did)
-            if d is None:
-                return
-            target = (store.get_article(conn, d["article_id"])
-                      if d.get("article_id") else None)
-            baseline = ""
-            if target is not None:
-                baseline = target.get("body_text")
-                if baseline is None:
-                    baseline = store.html_to_text(
-                        target.get("body_html") or target.get("body") or "")
-            # Belt: diff EXACTLY what the clipboard will deliver. When the
-            # draft carries body_html, _resolve_copy prefers it over the
-            # markdown body — so the reviewed text must be its plain-text
-            # projection, never a field the copy path ignores (reviewed ==
-            # copied, always).
-            if d.get("body_html"):
-                new_text = store.html_to_text(d["body_html"])
-            else:
-                new_text = d.get("body") or ""
-            old_title = (target or {}).get("title") or ""
-            new_title = d.get("title") or ""
+            base_row = (store.get_article(conn, d["article_id"])
+                        if d.get("article_id") else None)
+            base_src = ("" if base_row is None
+                        else self._article_source(base_row))
+            # EXACTLY the bytes _resolve_copy will hand to the clipboard —
+            # never a field the copy path ignores.
+            new_src = payloads["body_html"]["text"]
+            base_text = store.html_to_review_text(base_src)
+            new_text = store.html_to_review_text(new_src)
+            old_title = (base_row or {}).get("title") or ""
+            new_title = payloads["title"]["text"]
         else:
-            d = store.get_macro_draft(conn, did)
-            if d is None:
-                return
-            target = (store.get_macro(conn, d["macro_id"])
-                      if d.get("macro_id") else None)
-            baseline = ""
-            if target is not None:
-                baseline = target.get("actions_text")
-                if baseline is None:
-                    baseline = _actions_plain(target.get("actions"))
+            base_row = (store.get_macro(conn, d["macro_id"])
+                        if d.get("macro_id") else None)
+            base_actions = (base_row or {}).get("actions")
+            base_src = "" if base_row is None else _actions_source(base_actions)
+            new_src = _actions_source(d.get("actions"))
+            base_text = ("" if base_row is None
+                         else _actions_plain(base_actions))
             new_text = _actions_plain(d.get("actions"))
-            old_title = (target or {}).get("name") or ""
-            new_title = d.get("name") or ""
-        rows = diff_words(baseline, new_text)
+            old_title = (base_row or {}).get("name") or ""
+            new_title = payloads["macro_name"]["text"]
+        rows = diff_words(base_src, new_src)
+        n_changed = change_count(rows)
+        bytes_equal = base_src == new_src
+        text_rows = diff_words(base_text, new_text)
+        notice = next((p["notice"] for p in payloads.values()
+                       if p.get("notice")), "")
+        self._record_review(target, did, payloads, content_hash)
         self._req_seq += 1
         self._emit(self.diff_ready, {
             "request_id": f"d-{self._req_seq}", "kind": kind, "draft_id": did,
-            "baseline_present": target is not None,
-            "change_count": change_count(rows),
+            "baseline_present": base_row is not None,
+            "change_count": n_changed,
+            "bytes_equal": bytes_equal,
+            "warning": (_ZERO_CHANGE_WARNING
+                        if (n_changed == 0 and not bytes_equal) else None),
+            "markup_notice": notice,
             "title": {"changed": old_title != new_title,
                       "old": old_title, "new": new_title},
-            "rows": rows,
+            "rows": rows,                       # SOURCE — authoritative
+            "text_rows": text_rows,             # readable — SECONDARY
+            "text_change_count": change_count(text_rows),
         })
 
     def js_save_draft(self, kind, draft_id, payload_json):
@@ -442,7 +752,21 @@ class ZendeskWebController(QObject):
         page-written body would ride attacker content past the review gate
         (reviewed bytes and copied bytes must never diverge). Status keys
         stay dropped too, so a page script can never ride a status
-        transition past the js_mark_* gates."""
+        transition past the js_mark_* gates.
+
+        Title/name ARE copy fields, so the recorded review is dropped BEFORE
+        the write is attempted: dropping a review can only make a copy
+        harder, so doing it first means a write that fails halfway can never
+        leave a stale review blessing bytes it did not show. Copying the
+        result then takes the universal draft-copy confirm regardless
+        (module docstring, item 6) — no authorship question is asked.
+
+        E1: the macro branch writes ``name`` and ``description`` in ONE
+        transaction. They used to be two separately-committed writes, so a
+        payload whose description sqlite refuses to bind (a lone unpaired
+        surrogate survives ``json.loads`` and dies at the bind) committed
+        the page's new NAME and then raised — a partially-applied page
+        write, with the controller's post-write bookkeeping skipped."""
         if self._frozen():
             return
         kind = str(kind or "")
@@ -461,6 +785,10 @@ class ZendeskWebController(QObject):
         if conn is None:
             return
         from src.data import zendesk_store as store
+        target = _DRAFT_TARGET[kind]
+        # Drop the recorded review FIRST — fail-closed ordering, so a write
+        # that raises part-way through cannot leave the old review in place.
+        self._reviewed.pop((target, did), None)
         try:
             if kind == "article":
                 d = store.get_article_draft(conn, did)
@@ -480,15 +808,20 @@ class ZendeskWebController(QObject):
                 desc = payload.get("description")
                 if not isinstance(name, str) and not isinstance(desc, str):
                     return
-                if isinstance(name, str):
-                    store.update_macro_draft(conn, did,
-                                             name=name[:_TITLE_CAP])
-                if isinstance(desc, str):
-                    # update_macro_draft has no description kwarg; same
-                    # table, same _txn discipline (pass-through when the
-                    # caller already holds a transaction).
-                    from datetime import datetime, timezone
-                    with store._txn(conn):  # noqa: SLF001
+                # ONE transaction for both fields (E1). update_macro_draft's
+                # own _txn passes through when a transaction is already open,
+                # and the description UPDATE hits the same table, so a bind
+                # failure on either rolls BOTH back — a page rename is
+                # applied whole or not at all.
+                from datetime import datetime, timezone
+                with store._txn(conn):  # noqa: SLF001
+                    if isinstance(name, str):
+                        res = store.update_macro_draft(
+                            conn, did, name=name[:_TITLE_CAP])
+                        if not res.get("ok"):
+                            raise RuntimeError(res.get("error"))
+                    if isinstance(desc, str):
+                        # update_macro_draft has no description kwarg.
                         conn.execute(
                             "UPDATE zendesk_macro_drafts SET description=?, "
                             "updated_at=? WHERE id=?",
@@ -497,6 +830,141 @@ class ZendeskWebController(QObject):
         except Exception:  # noqa: BLE001 — a failed save must not crash the tab
             return
         self._push_revisions(self._last_filter)
+
+    def js_save_body_edit(self, target_kind, target_id, payload):
+        """Specialist body edit — articles only, v1. The ONLY page-writable
+        content path, and safe ONLY because of the recompute invariant
+        (do not weaken — this closes review finding C1's class): the payload's
+        ``body`` key (markdown/plain text) is the single honored input, and
+        ``body_html`` is ALWAYS recomputed Python-side as
+        ``sanitize_html(markdown_to_html(body))`` whenever body changes.
+        Page-supplied HTML (body_html/html/rich keys) is IGNORED, so the
+        reviewed diff (js_request_diff projects body_html when set with
+        html_to_review_text), the stored body_html, and the clipboard copy
+        can never diverge. The edit also DROPS the draft's recorded review
+        (see ``_finish_body_edit``) — content the specialist has not seen
+        cannot be copied — and the resulting draft, like every draft,
+        reaches the clipboard only behind the native confirm that displays
+        those exact bytes (module docstring, item 6).
+
+        target_kind 'draft': target_id is an article draft id; only
+        status=='pending' drafts are editable (ready/copied/pushed → silent
+        no-op + status_text explaining). target_kind 'article': target_id is
+        a mirror article id — the mirror row is NEVER modified (the baseline
+        stays hash-faithful to remote); the edit updates the open pending
+        source_ref='specialist-edit' draft targeting it, or creates one."""
+        if self._frozen():
+            return
+        target_kind = str(target_kind or "")
+        if target_kind not in _BODY_EDIT_KINDS:
+            return
+        try:
+            parsed = json.loads(str(payload or ""))
+        except (ValueError, TypeError):
+            return
+        if not isinstance(parsed, dict):
+            return
+        body = parsed.get("body")       # the ONLY honored payload key
+        if not isinstance(body, str):
+            return
+        body = body[:_BODY_CAP]
+        conn = self._db()
+        if conn is None:
+            return
+        from src.data import zendesk_store as store
+        from src.data.html_markdown import markdown_to_html
+        from src.data.html_sanitize import sanitize_html
+        # THE INVARIANT: page can never supply HTML — recompute + sanitize.
+        body_html = sanitize_html(markdown_to_html(body))
+
+        if target_kind == "draft":
+            did = self._served_draft_id("article", target_id)
+            if did is None:
+                return
+            try:
+                d = store.get_article_draft(conn, did)
+            except Exception:  # noqa: BLE001
+                return
+            if d is None:
+                return
+            if d.get("status") != _EDITABLE_DRAFT_STATUS:
+                # No DB change; explain on the trusted status surface.
+                self.set_status(
+                    f"Revision {did} is {d.get('status')} - only pending "
+                    "revisions can be edited.")
+                return
+            try:
+                res = store.update_article_draft(conn, did, body=body,
+                                                 body_html=body_html)
+                if not res.get("ok"):
+                    raise RuntimeError(res.get("error"))
+            except Exception:  # noqa: BLE001
+                self._resolve_body_edit(False, target="draft",
+                                        draft_id=did, error="store_error")
+                return
+            self._finish_body_edit(did, "draft", d.get("article_id"))
+            return
+
+        # target_kind == 'article': edits land in the revision layer only.
+        s = str(target_id or "")
+        if not _ID_RE.match(s):
+            return
+        aid = int(s)
+        if aid not in self._served_article_ids:
+            return
+        try:
+            art = store.get_article(conn, aid)
+        except Exception:  # noqa: BLE001
+            return
+        if art is None:
+            return
+        try:
+            row = conn.execute(
+                "SELECT id FROM zendesk_article_drafts WHERE article_id=? "
+                "AND status='pending' AND source_ref=? ORDER BY id LIMIT 1",
+                (aid, _SPECIALIST_REF)).fetchone()
+            if row is not None:
+                did = int(row[0])
+                res = store.update_article_draft(conn, did, body=body,
+                                                 body_html=body_html)
+                if not res.get("ok"):
+                    raise RuntimeError(res.get("error"))
+            else:
+                did = store.save_article_draft(
+                    conn, title=art.get("title") or "", body=body,
+                    article_id=aid, source_ref=_SPECIALIST_REF,
+                    rationale=_SPECIALIST_RATIONALE, body_html=body_html)
+        except Exception:  # noqa: BLE001
+            self._resolve_body_edit(False, target="article",
+                                    draft_id=None, error="store_error")
+            return
+        self._served_drafts[("article", did)] = "pending"
+        self._finish_body_edit(did, "article", aid)
+
+    def _resolve_body_edit(self, ok, *, target, draft_id, error=None):
+        self._req_seq += 1
+        self._emit(self.action_resolved, {
+            "request_id": f"a-{self._req_seq}", "action": "body_edit",
+            "ok": ok, "kind": "article", "draft_id": draft_id,
+            "target": target, "error": error})
+
+    def _finish_body_edit(self, draft_id, target, article_id):
+        """Success emissions: revisions re-push (last filter), article
+        detail re-push when the edited target is the open article, then
+        the action_resolved receipt.
+
+        Layer 3 FIRST: the draft's content just changed, so any diff still
+        on screen for it is stale. Dropping the recorded review means that
+        stale diff can no longer authorize a copy — the specialist has to
+        re-open it (which re-records the review) before the clipboard will
+        release the new bytes. Re-opening it is page-callable though, so the
+        review record is NOT what protects these bytes; the universal
+        draft-copy confirm is, and it displays them."""
+        self._reviewed.pop(("article_draft", draft_id), None)
+        self._push_revisions(self._last_filter)
+        if article_id is not None and article_id == self._open_article_id:
+            self.js_open_article(str(article_id))
+        self._resolve_body_edit(True, target=target, draft_id=draft_id)
 
     def js_mark_ready(self, kind, draft_id):
         """pending → ready only, validated against the CURRENT DB status."""
@@ -510,9 +978,18 @@ class ZendeskWebController(QObject):
     def js_copy_field(self, target, target_id, field):
         """Copy exact: re-reads the EXACT DB bytes at click time (never the
         page's copy of the text) and hands them to the Python-side clipboard.
-        Read-only — no confirm, no status change (locked decision). Every
-        successful copy is ALSO announced on the native status line via the
-        compat set_status, a surface the page cannot forge."""
+
+        MIRROR rows (content already live in Zendesk) copy under the review
+        record alone — read-only, no confirm, no status change. DRAFT rows
+        always take the native confirm that displays the exact bytes
+        (``_resolve_copy`` → ``_confirm_draft_copy``); if it is absent or
+        declined, ``_resolve_copy`` returns None and NOTHING is emitted —
+        no clipboard write and no ``copy_resolved`` receipt.
+
+        Every successful copy is ALSO announced on the native status line
+        via the compat set_status, a surface the page cannot forge —
+        including the ``_MARKUP_NOTICE`` when the released bytes carry
+        markup the preview cannot display."""
         target = str(target or "")
         fields = _COPY_FIELDS.get(target)
         if fields is None or str(field or "") not in fields:
@@ -527,7 +1004,7 @@ class ZendeskWebController(QObject):
         resolved = self._resolve_copy(conn, target, tid, field)
         if resolved is None:
             return
-        text, html, sanitized = resolved
+        text, html, sanitized, notice = resolved
         ok = False
         if self._clipboard_fn is not None:
             try:
@@ -538,12 +1015,14 @@ class ZendeskWebController(QObject):
         self._emit(self.copy_resolved, {
             "request_id": f"c-{self._req_seq}", "target": target,
             "target_id": tid, "field": field, "ok": ok,
-            "chars": len(text), "sanitized": sanitized})
+            "chars": len(text), "sanitized": sanitized, "notice": notice})
         if ok:
             note = (" (rich copy sanitized: script/iframe content removed)"
                     if sanitized else "")
+            warn = f" - WARNING: {notice}" if notice else ""
             self.set_status(
-                f"Copied {target} {tid} {field} - {len(text):,} chars{note}")
+                f"Copied {target} {tid} {field} - "
+                f"{len(text):,} chars{note}{warn}")
 
     def js_request_import(self):
         """Manual file import. The ``_pull_inflight`` claim is taken BEFORE
@@ -638,6 +1117,7 @@ class ZendeskWebController(QObject):
             self._action_inflight = False
         if ok:
             self._served_drafts.pop((kind, did), None)
+            self._reviewed.pop((_DRAFT_TARGET[kind], did), None)
             self._push_revisions(self._last_filter)
 
     def js_purge_mirror(self, scope):
@@ -683,6 +1163,10 @@ class ZendeskWebController(QObject):
         if ok:
             self._served_article_ids.clear()
             self._served_macro_ids.clear()
+            # Purge deletes pending/ready drafts and SQLite reuses rowids —
+            # a recorded review must never survive to bless a new draft that
+            # inherits a deleted one's id.
+            self._reviewed.clear()
             self._serve_data()
             self._push_revisions(self._last_filter)
 
@@ -708,14 +1192,33 @@ class ZendeskWebController(QObject):
         destructive modal OR a pull/import is inflight."""
         return self._action_inflight or self._pull_inflight
 
-    def _confirm(self, title, text) -> bool:
-        """Native confirm; absent fn or a broken dialog means NO."""
+    def _confirm(self, title, text, detail=None) -> bool:
+        """Native confirm; absent fn or a broken dialog means NO.
+
+        ``detail`` carries bytes the operator MUST see (the copy gate's
+        exact clipboard payload). A host that takes it renders it in a
+        scrollable pane (QMessageBox.setDetailedText); a host that does not
+        still gets the bytes, appended to the message — they are never
+        dropped. The arity is decided by introspection, not by catching a
+        TypeError, so a dialog can never be shown twice."""
         if self._confirm_fn is None:
             return False
         try:
-            return bool(self._confirm_fn(title, text))
+            if detail is None:
+                return bool(self._confirm_fn(title, text))
+            if self._confirm_takes_detail():
+                return bool(self._confirm_fn(title, text, detail))
+            return bool(self._confirm_fn(title, f"{text}\n\n{detail}"))
         except Exception:  # noqa: BLE001
             return False
+
+    def _confirm_takes_detail(self) -> bool:
+        import inspect
+        try:
+            inspect.signature(self._confirm_fn).bind("t", "x", "d")
+        except (TypeError, ValueError):
+            return False
+        return True
 
     def _emit(self, signal, payload: dict):
         try:
@@ -932,14 +1435,73 @@ class ZendeskWebController(QObject):
             return "", ""
         return row[0] or "", row[1] or ""
 
-    def _article_srcdoc(self, art: dict) -> str:
-        """The ONLY producer of preview HTML — EVERY path (mirror body_html,
-        legacy body, markdown fallback) passes sanitize_html."""
-        from src.data.html_sanitize import sanitize_html
+    @staticmethod
+    def _article_source(art: dict) -> str:
+        """The EXACT stored article bytes — one definition, used by the
+        preview, the review diff and the clipboard alike so the three can
+        never read different fields."""
         raw = art.get("body_html")
         if raw is None:
             raw = art.get("body") or ""
-        return sanitize_html(str(raw))
+        return str(raw)
+
+    @staticmethod
+    def _article_body_text(art: dict) -> str:
+        """The mirror body as plain/markdown text — the seed for the
+        specialist edit textarea, NOT a review surface.
+
+        Markdown (not a flat text projection) because a save round-trips it
+        back through ``sanitize_html(markdown_to_html(body))``: seeding with
+        markdown means an untouched save reproduces the article's structure
+        instead of flattening it. The stored ``body_text`` FTS projection is
+        the fallback when the converter cannot run."""
+        from src.data.html_markdown import html_to_markdown
+        try:
+            return html_to_markdown(
+                ZendeskWebController._article_source(art))
+        except Exception:  # noqa: BLE001 — a seed must never break the detail
+            return str(art.get("body_text") or "")
+
+    def _article_srcdoc(self, art: dict) -> str:
+        """The ONLY producer of preview HTML — EVERY path (mirror body_html,
+        legacy body, markdown fallback) passes a sanitizer.
+
+        The RENDERED view, and deliberately the wider ``sanitize_html_preview``
+        profile: the owner reads this to judge how an article will look to an
+        end user in Zendesk, so classes, ids, data-attributes, style and table
+        scaffolding have to survive. They are inert inside the ``sandbox=""``
+        iframe the SPA renders this in (no scripts, no navigation, no form
+        submission), and scripts / event handlers / active URL schemes are
+        still removed — what IS removed is exactly what ``markup_notice``
+        warns about.
+
+        This string is a PREVIEW ONLY. It is never a clipboard flavour and
+        never stored; those paths keep the strict ``sanitize_html``."""
+        from src.data.html_sanitize import sanitize_html_preview
+        body = sanitize_html_preview(self._article_source(art))
+        return (f"<style>{_ARTICLE_PREVIEW_CSS}</style>"
+                f'<div class="alma-hc-article">{body}</div>')
+
+    def _editable_draft_bodies(self, conn) -> dict:
+        """``(kind, draft_id) -> stored body`` for the drafts whose body the
+        specialist edit form seeds from — i.e. exactly the drafts
+        ``js_save_body_edit`` accepts (pending ARTICLE drafts, v1).
+
+        Served nowhere else on purpose: the feed carries up to 500 rows and
+        a body is capped at 200k chars, so shipping every body would be a
+        multi-megabyte push per revision refresh. Keyed off the same
+        constant the save slot validates against, so the two cannot drift
+        into "the editor opens blank again"."""
+        out: dict[tuple[str, int], str] = {}
+        try:
+            rows = conn.execute(
+                "SELECT id, body FROM zendesk_article_drafts WHERE status=?",
+                (_EDITABLE_DRAFT_STATUS,)).fetchall()
+        except Exception:  # noqa: BLE001 — a broken mirror degrades to blank
+            return out
+        for r in rows:
+            out[("article", int(r[0]))] = str(r[1] or "")[:_BODY_CAP]
+        return out
 
     def _push_revisions(self, filt: str):
         conn = self._db()
@@ -950,6 +1512,7 @@ class ZendeskWebController(QObject):
             rows = store.list_revisions(conn)
         except Exception:  # noqa: BLE001
             rows = []
+        bodies = self._editable_draft_bodies(conn)
         wanted = {"open": ("pending", "ready"),
                   "copied": ("copied", "pushed"),
                   "all": ("pending", "ready", "copied", "pushed")}[filt]
@@ -968,85 +1531,270 @@ class ZendeskWebController(QObject):
                 "target_id": r.get("target_id"),
                 "target_title": r.get("target_title"),
                 "title": r.get("title") or "", "status": r.get("status"),
+                # The seed for the draft body editor (RevisionCenter ->
+                # BodyEditForm). Empty for drafts no edit would be accepted
+                # for — the form is not offered for those.
+                "body": bodies.get((r["kind"], r["draft_id"]), ""),
                 "rationale": r.get("rationale"), "sources": sources,
+                "source_ref": r.get("source_ref"),
                 "created_display": _display_date(r.get("created_at")),
                 "copied_display": _display_date(r.get("copied_at")) or None,
                 "is_new": r.get("target_id") is None})
             self._served_drafts[(r["kind"], r["draft_id"])] = r.get("status")
         self._emit(self.revisions_data, {"filter": filt, "revisions": out})
 
-    # ── copy-exact resolution ────────────────────────────────────────
-    def _resolve_copy(self, conn, target, tid, field):
-        """(text, html|None, sanitized) for a validated copy request, or
-        None for a silent refusal. DRAFT-content copies require the CURRENT
-        DB status in ('ready','copied') — the pending→ready review step is
-        ENFORCED at the clipboard boundary, not advisory."""
+    # ── copy-exact resolution + the reviewed-bytes gate ──────────────
+    @staticmethod
+    def _html_payloads(title: str, raw: str) -> dict:
+        """Releasable payloads for an HTML-bodied row (mirror article or
+        article draft), keyed by copy field.
+
+        Each payload is ``{text, html|None, sanitized, notice}``: ``text``
+        is the plain flavour handed to the clipboard, ``html`` the
+        text/html mime flavour (None when the field pastes as text).
+        ``body_rich`` always passes the STRICT ``sanitize_html`` —
+        markdown_to_html and the byte-faithful pull both forward markup we
+        do not vouch for, so the mime flavour is defanged before it can
+        reach the live Zendesk editor as formatted paste. The clipboard
+        never sees the wider preview profile.
+
+        ``notice`` is measured against the PREVIEW profile instead: it fires
+        only when the sandboxed preview genuinely cannot display something
+        (a dropped script/style/form container, a stripped handler, a
+        refused URL scheme), not merely because the strict profile would
+        have thrown away a class attribute."""
+        from src.data.html_sanitize import sanitize_html, sanitize_html_preview
+        raw = "" if raw is None else str(raw)
+        safe = sanitize_html(raw)
+        _preview, removed = sanitize_html_preview(raw, report=True)
+        notice = _MARKUP_NOTICE if removed else ""
+        return {
+            "title": {"text": title or "", "html": None,
+                      "sanitized": False, "notice": ""},
+            # Plain-text HTML source: byte-verbatim (pastes as text).
+            "body_html": {"text": raw, "html": None,
+                          "sanitized": False, "notice": notice},
+            "body_rich": {"text": raw, "html": safe,
+                          "sanitized": safe != raw, "notice": notice},
+        }
+
+    @staticmethod
+    def _macro_payloads(name: str, actions) -> dict:
+        """Releasable payloads for a macro row/draft. Macro fields are
+        plain text on both flavours — the reply is copied as the exact
+        stored action value, which the macro editor and the source diff
+        both render verbatim.
+
+        The reply carries a ``notice`` on the same honesty rule as an
+        article body: a pull-origin macro is byte-faithful to remote
+        Zendesk, so a ``comment_value_html`` full of script/handler markup
+        is copyable verbatim and the operator is told so instead of being
+        left to spot it. Unlike an article body, a reply is frequently
+        PLAIN TEXT, where sanitize_html differs purely by entity-escaping
+        ("Billing & Claims") and nothing is hidden — hence the extra
+        tag-start requirement (``_MARKUP_TAG_RE``)."""
+        out = {"macro_name": {"text": name or "", "html": None,
+                              "sanitized": False, "notice": ""}}
+        reply = _first_reply(actions)
+        if reply is not None:
+            from src.data.html_sanitize import sanitize_html
+            notice = ""
+            if (sanitize_html(reply) != reply
+                    and _MARKUP_TAG_RE.search(reply)):
+                notice = _MACRO_MARKUP_NOTICE
+            out["macro_reply"] = {"text": reply, "html": None,
+                                  "sanitized": False, "notice": notice}
+        return out
+
+    def _copy_bundle(self, conn, target, tid):
+        """``(payloads, content_hash, row)`` for a copy target, or None when
+        the row is gone.
+
+        THE SINGLE SOURCE OF TRUTH for "what could this target put on the
+        clipboard". The review recorders and ``_resolve_copy`` both call it,
+        which is what makes reviewed bytes and copied bytes the same bytes
+        by construction rather than by two code paths agreeing."""
         from src.data import zendesk_store as store
         if target == "article":
-            art = store.get_article(conn, tid)
-            if art is None:
+            row = store.get_article(conn, tid)
+            if row is None:
                 return None
-            if field == "title":
-                return (art.get("title") or "", None, False)
-            raw = art.get("body_html")
-            if raw is None:
-                raw = art.get("body") or ""
-            raw = str(raw)
-            if field == "body_html":
-                # Plain-text HTML source: byte-verbatim for EVERY origin.
-                return (raw, None, False)
-            # body_rich: text/html mime so pasting keeps formatting. Mime
-            # laundering guard — imported bodies are stored verbatim and
-            # unsanitized, so the RICH variant passes sanitize_html before
-            # it can reach the live Zendesk editor as formatted paste.
-            html = raw
-            sanitized = False
-            if (art.get("origin") or "pull") == "import":
-                from src.data.html_sanitize import sanitize_html
-                html = sanitize_html(raw)
-                sanitized = html != raw
-            return (raw, html, sanitized)
-
+            return (self._html_payloads(row.get("title") or "",
+                                        self._article_source(row)),
+                    str(row.get("content_hash") or ""), row)
         if target == "article_draft":
-            d = store.get_article_draft(conn, tid)
-            if d is None or d.get("status") not in ("ready", "copied"):
-                return None      # an unreviewed pending draft never reaches
-            if field == "title":  # the clipboard
-                return (d.get("title") or "", None, False)
-            html = d.get("body_html")
+            row = store.get_article_draft(conn, tid)
+            if row is None:
+                return None
+            html = row.get("body_html")
             if not html:
                 # Renn drafts store markdown; render deterministically.
                 from src.data.html_markdown import markdown_to_html
-                html = markdown_to_html(d.get("body") or "")
-            html = str(html)
-            if field == "body_html":
-                # Plain-text HTML source: byte-verbatim (pastes as text).
-                return (html, None, False)
-            # body_rich: the text/html mime variant passes sanitize_html
-            # exactly like the origin='import' article path —
-            # markdown_to_html passes raw inline HTML through, so draft
-            # body_html is NOT guaranteed inert markup.
-            from src.data.html_sanitize import sanitize_html
-            safe = sanitize_html(html)
-            return (html, safe, safe != html)
-
+                html = markdown_to_html(row.get("body") or "")
+            return (self._html_payloads(row.get("title") or "", str(html)),
+                    store.draft_content_hash("article", row), row)
         if target == "macro":
-            m = store.get_macro(conn, tid)
-            if m is None:
+            row = store.get_macro(conn, tid)
+            if row is None:
                 return None
-            if field == "macro_name":
-                return (m.get("name") or "", None, False)
-            reply = _first_reply(m.get("actions"))
-            return None if reply is None else (reply, None, False)
-
-        # macro_draft
-        d = store.get_macro_draft(conn, tid)
-        if d is None or d.get("status") not in ("ready", "copied"):
+            return (self._macro_payloads(row.get("name") or "",
+                                         row.get("actions")),
+                    str(row.get("content_hash") or ""), row)
+        row = store.get_macro_draft(conn, tid)
+        if row is None:
             return None
-        if field == "macro_name":
-            return (d.get("name") or "", None, False)
-        reply = _first_reply(d.get("actions"))
-        return None if reply is None else (reply, None, False)
+        return (self._macro_payloads(row.get("name") or "",
+                                     row.get("actions")),
+                store.draft_content_hash("macro", row), row)
+
+    def _copy_confirm_text(self, target, tid, field, exact, html):
+        """(title, text, detail) for the draft-copy confirm.
+
+        The dialog must SHOW the exact bytes: short payloads inline, long
+        ones in the scrollable detail pane. When the text/html mime flavour
+        differs from the plain one, BOTH strings are shown — the clipboard
+        carries both."""
+        label = f"{target.replace('_', ' ')} {tid}"
+        head = (f"Copy the {field} of {label} to the clipboard?\n\n"
+                "This is DRAFT content: it is not in Zendesk yet, and you "
+                "are about to paste it into a public site by hand. These "
+                "are the EXACT characters that will go on the clipboard:")
+        bytes_shown = "" if exact is None else str(exact)
+        if html is not None and html != exact:
+            bytes_shown = (f"{bytes_shown}\n\n"
+                           f"----- text/html clipboard flavour -----\n{html}")
+        if len(bytes_shown) <= _CONFIRM_INLINE_CAP:
+            return ("Copy draft content", f"{head}\n\n{bytes_shown}", None)
+        return ("Copy draft content", head, bytes_shown)
+
+    def _confirm_draft_copy(self, conn, target, tid, field, payload,
+                            content_hash) -> bool:
+        """THE DRAFT-COPY GATE (module docstring, item 6). Every clipboard
+        release of draft content passes through here — no authorship
+        question is asked, because authorship is unknowable when the page
+        can drive a Python-side actor (Renn) through the shared QWebChannel.
+
+        Runs the destructive-gate discipline verbatim: freeze check →
+        single-winner claim taken BEFORE the modal's nested event loop →
+        native confirm displaying the exact bytes → re-verify that the row
+        still produces those same bytes → release. Fails closed on every
+        branch, including no ``confirm_fn`` injected."""
+        if self._frozen():
+            return False
+        exact = payload.get("text")
+        html = payload.get("html")
+        self._action_inflight = True
+        try:
+            approved = self._confirm(
+                *self._copy_confirm_text(target, tid, field, exact, html))
+        finally:
+            self._action_inflight = False
+        if not approved:
+            self.set_status(
+                "Copy cancelled - nothing was placed on the clipboard."
+                if self._confirm_fn is not None else
+                "Draft content can only be copied from the app window "
+                "- nothing was placed on the clipboard.")
+            return False
+        # Re-verify after the modal: a nested event loop ran, so the row may
+        # have moved. Byte-identical or no copy.
+        try:
+            bundle = self._copy_bundle(conn, target, tid)
+        except Exception:  # noqa: BLE001
+            bundle = None
+        fresh = None if bundle is None else bundle[0].get(field)
+        if (fresh is None or bundle[1] != content_hash
+                or fresh.get("text") != exact or fresh.get("html") != html):
+            self.set_status(
+                f"{target.replace('_', ' ')} {tid} changed while the confirm "
+                "was open - nothing was copied.")
+            return False
+        return True
+
+    def _record_review(self, target, tid, payloads, content_hash):
+        """Bind the exact strings the reviewer was JUST SHOWN to (target,
+        tid). Only these hashes can later leave through the clipboard."""
+        blobs = set()
+        for p in (payloads or {}).values():
+            blobs.add(_sha(p.get("text")))
+            if p.get("html") is not None:
+                blobs.add(_sha(p["html"]))
+        self._reviewed[(target, tid)] = {"content": content_hash,
+                                         "bytes": frozenset(blobs)}
+
+    def _review_covers(self, target, tid, payload, content_hash) -> bool:
+        """THE CLIPBOARD GATE. Fails closed on every branch.
+
+        Three independent checks, all required:
+        1. a review was recorded for this exact (target, id);
+        2. the row's content hash, RECOMPUTED from the row at click time,
+           still matches the review — so an out-of-band rewrite (Renn's MCP
+           tools, another window, a pull) invalidates it even though this
+           controller never saw the mutation;
+        3. every exact string about to be released — the plain flavour AND
+           the text/html mime flavour — hashes to something the review
+           showed. This is what makes a projection blind spot unexploitable:
+           if the reviewed material and the released bytes disagree by so
+           much as one character, there is no copy."""
+        label = f"{target.replace('_', ' ')} {tid}"
+        rec = self._reviewed.get((target, tid))
+        if rec is None:
+            self.set_status(
+                f"{label} has not been reviewed - open the source view "
+                "before copying.")
+            return False
+        if rec.get("content") != content_hash:
+            self._reviewed.pop((target, tid), None)
+            self.set_status(
+                f"{label} changed since you reviewed it - open the source "
+                "view again before copying.")
+            return False
+        blobs = rec.get("bytes") or frozenset()
+        candidates = [payload.get("text")]
+        if payload.get("html") is not None:
+            candidates.append(payload["html"])
+        for value in candidates:
+            if _sha(value) not in blobs:
+                self._reviewed.pop((target, tid), None)
+                self.set_status(
+                    f"{label} would copy bytes your review never showed - "
+                    "open the source view again before copying.")
+                return False
+        return True
+
+    def _resolve_copy(self, conn, target, tid, field):
+        """(text, html|None, sanitized, notice) for a validated copy
+        request, or None for a silent refusal.
+
+        DRAFT-content copies additionally require the CURRENT DB status in
+        ('ready','copied') — the pending→ready review step is ENFORCED at
+        the clipboard boundary, not advisory. Everything else, mirror rows
+        included, goes through ``_review_covers``: no recorded review means
+        no clipboard write, for every target.
+
+        And EVERY draft copy — article draft or macro draft, every field,
+        both mime flavours — then takes the one thing the page cannot fake:
+        a NATIVE confirm displaying those exact bytes (module docstring,
+        item 6). Mirror rows (already live in Zendesk, unmodified) keep the
+        review-record gate and the markup notice alone."""
+        bundle = self._copy_bundle(conn, target, tid)
+        if bundle is None:
+            return None
+        payloads, content_hash, row = bundle
+        payload = payloads.get(field)
+        if payload is None:
+            return None                 # e.g. a macro with no reply action
+        if target in _DRAFT_COPY_TARGETS:
+            if row.get("status") not in ("ready", "copied"):
+                return None
+        if not self._review_covers(target, tid, payload, content_hash):
+            return None
+        if target in _DRAFT_COPY_TARGETS:
+            if not self._confirm_draft_copy(
+                    conn, target, tid, field, payload, content_hash):
+                return None
+        return (payload["text"], payload["html"], payload["sanitized"],
+                payload["notice"])
 
     # ── pull / import claim machinery ────────────────────────────────
     def _pick_files(self):

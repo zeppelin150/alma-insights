@@ -1,10 +1,13 @@
 // Pure-logic contracts for the Zendesk clone's viewmodel guards.
 import { describe, expect, it } from "vitest";
 import {
-  actionFailureText, actionInputKind, articleDotClass, canCopyDraft,
-  canMarkCopied, canMarkReady, canSaveDraft, filterArticles, filterMacros,
+  BODY_EDIT_MAX, COPY_DRAFTED_FIELD, actionFailureText, actionInputKind,
+  applyDemoBodyEdit, articleDotClass, bodyEditFailureText, bodyEditPayload,
+  canCopyDraft, canEditDraftBody, canMarkCopied, canMarkReady, canSaveDraft,
+  copyFieldLabel, copyFlashText, filterArticles, filterMacros,
   filterRevisions, formatChars, groupRevisions, importFlashText, isView,
-  keyActivate, macroPath, normalizeData, revisionFilterFor, statusInfo,
+  keyActivate, macroPath, normalizeData, originInfo, revisionFilterFor,
+  statusInfo,
 } from "./shape.js";
 
 describe("normalizeData", () => {
@@ -251,6 +254,150 @@ describe("actionFailureText (approved-but-failed destructive actions)", () => {
                                approved: true, error: "draft_not_found" }))
       .toBe("Delete didn't apply — see the app status bar.");
     expect(actionFailureText({})).toBe("Action didn't apply — see the app status bar.");
+  });
+});
+
+describe("specialist body edits (articles only, v1)", () => {
+  it("bodyEditPayload carries ONLY the body key and caps at 200000 chars", () => {
+    expect(bodyEditPayload("## Hi")).toEqual({ body: "## Hi" });
+    expect(Object.keys(bodyEditPayload("x"))).toEqual(["body"]);
+    const long = "a".repeat(BODY_EDIT_MAX + 5);
+    expect(bodyEditPayload(long).body).toHaveLength(BODY_EDIT_MAX);
+    expect(bodyEditPayload(null)).toEqual({ body: "" });
+    expect(bodyEditPayload(undefined)).toEqual({ body: "" });
+  });
+
+  it("canEditDraftBody: only open pending ARTICLE drafts", () => {
+    expect(canEditDraftBody({ kind: "article", status: "pending" })).toBe(true);
+    expect(canEditDraftBody({ kind: "article", status: "ready" })).toBe(false);
+    expect(canEditDraftBody({ kind: "article", status: "copied" })).toBe(false);
+    expect(canEditDraftBody({ kind: "article", status: "pushed" })).toBe(false);
+    expect(canEditDraftBody({ kind: "macro", status: "pending" })).toBe(false);
+    expect(canEditDraftBody(null)).toBe(false);
+  });
+
+  it("originInfo: specialist-edit vs everything-else-is-Renn", () => {
+    expect(originInfo("specialist-edit"))
+      .toEqual({ label: "Specialist edit", specialist: true });
+    expect(originInfo(null)).toEqual({ label: "Renn", specialist: false });
+    expect(originInfo(undefined).label).toBe("Renn");
+    expect(originInfo("").label).toBe("Renn");
+    expect(originInfo("renn-proposal").label).toBe("Renn");
+  });
+
+  it("bodyEditFailureText surfaces the controller's error token", () => {
+    expect(bodyEditFailureText({ action: "body_edit", ok: false,
+                                 error: "article_not_found" }))
+      .toBe("Edit didn't save — article_not_found.");
+    expect(bodyEditFailureText({ action: "body_edit", ok: false }))
+      .toBe("Edit didn't save — see the app status bar.");
+    expect(bodyEditFailureText(null))
+      .toBe("Edit didn't save — see the app status bar.");
+  });
+});
+
+describe("applyDemoBodyEdit (demo-only js_save_body_edit simulation)", () => {
+  const base = [
+    { draft_id: 8, kind: "article", target_id: 106, target_title: "T",
+      title: "Submitting a claim", status: "pending", rationale: "r",
+      sources: [], source_ref: null, body: "old", created_display: "Jul 22",
+      copied_display: null, is_new: false },
+    { draft_id: 7, kind: "article", target_id: 101, target_title: "S",
+      title: "SSO", status: "ready", rationale: "r", sources: [],
+      source_ref: null, body: "sso", created_display: "Jul 23",
+      copied_display: null, is_new: false },
+    { draft_id: 10, kind: "article", target_id: 105, target_title: "Rosters",
+      title: "Rosters", status: "pending", rationale: "Edited in the workspace.",
+      sources: [], source_ref: "specialist-edit", body: "v1",
+      created_display: "Jul 25", copied_display: null, is_new: false },
+  ];
+
+  it("draft target: updates the pending draft body in place", () => {
+    const res = applyDemoBodyEdit(base, "draft", 8, "new body", null);
+    expect(res.draft_id).toBe(8);
+    expect(res.revisions.find((r) => r.draft_id === 8).body).toBe("new body");
+    // untouched rows pass through unchanged
+    expect(res.revisions.find((r) => r.draft_id === 7).body).toBe("sso");
+  });
+
+  it("draft target: ready drafts are a silent no-op (mirror of the Python gate)", () => {
+    const res = applyDemoBodyEdit(base, "draft", 7, "x", null);
+    expect(res.draft_id).toBe(null);
+    expect(res.revisions).toEqual(base);
+  });
+
+  it("article target: updates the open pending specialist-edit draft when one exists", () => {
+    const res = applyDemoBodyEdit(base, "article", 105, "v2", { title: "Rosters" });
+    expect(res.draft_id).toBe(10);
+    expect(res.revisions).toHaveLength(3);
+    expect(res.revisions.find((r) => r.draft_id === 10).body).toBe("v2");
+  });
+
+  it("article target: a Renn pending draft does NOT absorb the edit — a new " +
+     "specialist-edit draft is created instead", () => {
+    const res = applyDemoBodyEdit(base, "article", 106, "mine",
+                                  { title: "Submitting a claim" });
+    expect(res.draft_id).toBe(11);          // max(8,7,10) + 1
+    expect(res.revisions).toHaveLength(4);
+    expect(res.revisions.find((r) => r.draft_id === 8).body).toBe("old");
+    const row = res.revisions[3];
+    expect(row.source_ref).toBe("specialist-edit");
+    expect(row.status).toBe("pending");
+    expect(row.rationale).toBe("Edited in the workspace.");
+    expect(row.title).toBe("Submitting a claim");
+    expect(row.target_id).toBe(106);
+    expect(row.body).toBe("mine");
+  });
+
+  it("new rows carry exactly the revision-row contract keys", () => {
+    const res = applyDemoBodyEdit([], "article", 105, "b", { title: "T" });
+    expect(res.draft_id).toBe(1);
+    expect(Object.keys(res.revisions[0]).sort()).toEqual([
+      "body", "copied_display", "created_display", "draft_id", "is_new",
+      "kind", "rationale", "source_ref", "sources", "status", "target_id",
+      "target_title", "title",
+    ]);
+  });
+});
+
+describe("copy affordance wording (owner correction: drafted content first)", () => {
+  it("names ONE drafted-content copy field for every surface", () => {
+    expect(COPY_DRAFTED_FIELD).toBe("body_text");
+    expect(copyFieldLabel(COPY_DRAFTED_FIELD)).toBe("drafted content");
+  });
+
+  it("labels the demoted exact-byte flavours", () => {
+    expect(copyFieldLabel("body_html")).toBe("HTML source");
+    expect(copyFieldLabel("body_rich")).toBe("rich text");
+    expect(copyFieldLabel("macro_reply")).toBe("reply");
+    expect(copyFieldLabel("nonsense")).toBe("nonsense");
+    expect(copyFieldLabel(null)).toBe("content");
+  });
+
+  it("reports a RESOLVED copy with its size", () => {
+    expect(copyFlashText({ ok: true, field: "body_text", chars: 12345 }))
+      .toBe("Copied the drafted content — 12,345 chars.");
+    expect(copyFlashText({ ok: true, field: "body_rich", chars: 8,
+                           sanitized: true }))
+      .toContain("(rich copy sanitized)");
+  });
+
+  it("carries the markup notice through when the released bytes diverge", () => {
+    const text = copyFlashText({ ok: true, field: "body_html", chars: 5,
+      notice: "this content contains markup the preview does not display" });
+    expect(text).toContain("Warning: this content contains markup");
+  });
+
+  it("a CANCELLED native confirm never reads as a copy", () => {
+    const text = copyFlashText({ ok: false, approved: false, field: "body_text" });
+    expect(text).toBe("Copy cancelled — nothing was placed on the clipboard.");
+    expect(text).not.toContain("Copied");
+  });
+
+  it("a failed copy points at the native status line; junk degrades safely", () => {
+    expect(copyFlashText({ ok: false, field: "title" }))
+      .toBe("Copy didn't run — see the app status bar.");
+    expect(copyFlashText(null)).toBe("Copy didn't run — see the app status bar.");
   });
 });
 

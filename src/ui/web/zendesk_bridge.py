@@ -39,7 +39,8 @@ class ZendeskBridge(QObject):
                  status_signal=None,
                  refresh_fn=None, view_fn=None, open_article_fn=None,
                  open_macro_fn=None, search_fn=None, revisions_fn=None,
-                 diff_fn=None, save_fn=None, ready_fn=None, copied_fn=None,
+                 diff_fn=None, save_fn=None, save_body_edit_fn=None,
+                 ready_fn=None, copied_fn=None,
                  copy_fn=None, import_fn=None, import_folder_fn=None,
                  pull_fn=None, delete_fn=None, purge_fn=None, parent=None):
         super().__init__(parent)
@@ -51,6 +52,7 @@ class ZendeskBridge(QObject):
         self._revisions_fn = revisions_fn
         self._diff_fn = diff_fn
         self._save_fn = save_fn
+        self._save_body_edit_fn = save_body_edit_fn
         self._ready_fn = ready_fn
         self._copied_fn = copied_fn
         self._copy_fn = copy_fn
@@ -123,6 +125,15 @@ class ZendeskBridge(QObject):
         allowlist and the pending/ready precondition."""
         self._call(self._save_fn, kind or "", draft_id or "",
                    payload_json or "")
+
+    @Slot(str, str, str)
+    def saveBodyEdit(self, target_kind, target_id, payload):
+        """Specialist body edit (articles only). Relayed verbatim — the
+        controller honors ONLY the payload's markdown ``body`` key and
+        recomputes+sanitizes body_html Python-side, so page-supplied HTML
+        can never land."""
+        self._call(self._save_body_edit_fn, target_kind or "",
+                   target_id or "", payload or "")
 
     @Slot(str, str)
     def markReady(self, kind, draft_id):

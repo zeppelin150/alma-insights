@@ -2,9 +2,25 @@
 // Preview / Save-split chrome (decorative — the mirror is read-only), the
 // 21-button editor toolbar in the documented order, the sandboxed body
 // frame, and the right "Article settings" sidebar. The live controls are
-// the per-field Copy exact buttons (Python re-reads exact DB bytes) and the
-// open-revision links.
+// the copy affordance (primary = drafted content, overflow = the exact
+// stored bytes; Python re-reads the DB at click time either way) and the
+// open-revision links. The RENDERED body is the primary review surface —
+// the raw HTML source is a collapsed disclosure the app renders beneath it.
 import ArticleBody from "./ArticleBody.jsx";
+import BodyEditForm from "./BodyEditForm.jsx";
+import CopyControls from "./CopyControls.jsx";
+import { COPY_DRAFTED_FIELD } from "./shape.js";
+
+// Secondary copy flavours (owner correction, 2026-07-26): the exact stored
+// bytes stay one click away in the overflow, no longer co-equal with the
+// drafted-content copy people actually paste into the Zendesk editor.
+const SECONDARY_COPIES = [
+  ["title", "Copy title", "Copy the exact stored title"],
+  ["body_html", "Copy HTML source",
+   "Copy the exact stored HTML source as plain text — expand “HTML source” below to read those bytes first"],
+  ["body_rich", "Copy rich text",
+   "Copy as rich text — pasting into the Zendesk editor keeps formatting"],
+];
 
 // Toolbar buttons in the officially documented order (help center editor
 // toolbar reference) — decorative chrome on this read-only surface.
@@ -41,7 +57,10 @@ function SetRow({ label, children, muted }) {
   );
 }
 
-export default function ArticleEditor({ article, onBack, onCopy, onOpenRevision }) {
+export default function ArticleEditor({
+  article, onBack, onCopy, onOpenRevision,
+  bodyEditing, onEditBody, onCancelBodyEdit, onSaveBody, busy, copyBusy,
+}) {
   if (!article) return null;
   const revisions = Array.isArray(article.revisions) ? article.revisions : [];
   const openRevs = revisions.filter((r) => r.status === "pending" || r.status === "ready");
@@ -68,14 +87,18 @@ export default function ArticleEditor({ article, onBack, onCopy, onOpenRevision 
             <button className="zd-btn" disabled>Save</button>
             <button className="zd-btn" disabled>▾</button>
           </span>
-          <button className="zd-btn" onClick={() => onCopy("title")}
-                  title="Copy the exact stored title to the clipboard">Copy title</button>
-          <button className="zd-btn" onClick={() => onCopy("body_html")}
-                  title="Copy the exact stored HTML source (plain text)">Copy HTML</button>
-          <button className="zd-btn" onClick={() => onCopy("body_rich")}
-                  title="Copy as rich text — pasting into the Zendesk editor keeps formatting">
-            Copy rich text
-          </button>
+          {onEditBody != null && !bodyEditing && (
+            <button className="zd-btn" onClick={onEditBody}
+                    title="Edit the body as plain text — saving creates a pending revision; the mirrored article is never modified">
+              Edit content
+            </button>
+          )}
+          <CopyControls
+            primaryField={COPY_DRAFTED_FIELD} primaryLabel="Copy content"
+            primaryTitle="Copy the drafted content — the article as written, ready to paste into the Zendesk editor"
+            items={SECONDARY_COPIES.map(([field, label, title]) =>
+              ({ field, label, title }))}
+            onCopy={onCopy} pending={!!copyBusy} />
         </div>
         <input className="zd-title-input" value={article.title} readOnly />
         <div className="zd-ed-toolbar">
@@ -89,13 +112,29 @@ export default function ArticleEditor({ article, onBack, onCopy, onOpenRevision 
             </span>
           ))}
         </div>
-        <div className="zd-frame-wrap">
-          <ArticleBody srcdoc={article.body_srcdoc} />
-        </div>
-        <div className="zd-media-note">
-          Local mirror preview — embedded media and scripts are stripped for
-          safety. Copy HTML keeps the stored source byte-for-byte.
-        </div>
+        {bodyEditing ? (
+          // Specialist edit: plain textarea over the article's stored source
+          // text; Save asks Python (js_save_body_edit target_kind 'article'),
+          // which creates or updates a pending specialist-edit draft — the
+          // mirror row itself is never touched.
+          <div className="zd-body-edit-wrap">
+            <BodyEditForm seed={article.body_text || ""} label="Article body"
+                          onSave={onSaveBody} onCancel={onCancelBodyEdit}
+                          busy={busy} />
+          </div>
+        ) : (
+          <>
+            <div className="zd-frame-wrap">
+              <ArticleBody srcdoc={article.body_srcdoc} />
+            </div>
+            <div className="zd-media-note">
+              Rendered preview — how this article lands for an end user in
+              Zendesk, custom classes and all. The frame is sandboxed and
+              scripts and event handlers are removed. The exact stored bytes
+              are under “HTML source” below.
+            </div>
+          </>
+        )}
       </div>
       <aside className="zd-settings">
         <div className="zd-settings-hd">Article settings</div>

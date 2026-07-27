@@ -6,6 +6,7 @@
 // Everything is a read-only rendering of mirror bytes; the live controls
 // are Copy exact and the revision links. Placeholders render highlighted
 // but always as escaped text.
+import CopyControls from "./CopyControls.jsx";
 import { actionInputKind } from "./shape.js";
 
 // Split "Hi {{ticket.requester.first_name}}," into text + placeholder spans
@@ -47,7 +48,8 @@ function ActionValue({ action }) {
   return <div className="zd-static">{placeholderSpans(action.value)}</div>;
 }
 
-export default function MacroEditor({ macro, onBack, onCopy, onOpenRevision }) {
+export default function MacroEditor({ macro, onBack, onCopy, onOpenRevision,
+                                      copyBusy }) {
   if (!macro) return null;
   const actions = Array.isArray(macro.actions) ? macro.actions : [];
   const revisions = Array.isArray(macro.revisions) ? macro.revisions : [];
@@ -62,11 +64,15 @@ export default function MacroEditor({ macro, onBack, onCopy, onOpenRevision }) {
             ? <span className="zd-tag softgreen">Active</span>
             : <span className="zd-tag grey">Inactive</span>}
           <span className="zd-hdr-spacer" />
-          <button className="zd-btn" onClick={() => onCopy("macro_name")}
-                  title="Copy the exact stored macro name">Copy name</button>
-          <button className="zd-btn" onClick={() => onCopy("macro_reply")}
-                  disabled={!hasReply}
-                  title="Copy the exact stored Comment/Reply text">Copy reply</button>
+          {/* Primary = the drafted reply (the prose an agent sends); the
+              macro name rides the overflow. Same demotion as articles. */}
+          <CopyControls
+            primaryField="macro_reply" primaryLabel="Copy reply"
+            primaryTitle="Copy the stored Comment/Reply text — the drafted reply, ready to paste into the Zendesk macro editor"
+            items={[{ field: "macro_name", label: "Copy name",
+                      title: "Copy the exact stored macro name" }]}
+            menuTitle="Other copy formats"
+            onCopy={onCopy} disabled={!hasReply} pending={!!copyBusy} />
         </div>
         <div className="zd-form">
           <div className="zd-field">

