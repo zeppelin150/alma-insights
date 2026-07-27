@@ -23,6 +23,19 @@ re-imports so the same file updates the same mirror row instead of
 duplicating it (``source_file`` records the origin path). Real API ids are
 kept verbatim.
 
+Sanitize policy (security, load-bearing): EVERY byte this module writes
+lands through ``zendesk_store.upsert_articles`` / ``upsert_macros`` with
+``origin='import'``, and those upserts run ``sanitize_html`` on
+``body_html`` (and on HTML-bearing macro action values) at the write. A
+file is attacker-influenced input, and mirror bytes are copy-exact
+material a specialist pastes into live Zendesk by hand — storing raw file
+bytes meant ``<script src>`` / ``<form action>`` / ``<meta refresh>``
+could sit invisibly in the mirror (the preview is sanitized) and still
+reach the clipboard. ``pull_mirror`` is the ONE exception: the mirror is
+byte-faithful to remote Zendesk, so ``origin='pull'`` bytes are stored
+verbatim and made honest at review/copy time instead (see
+``src/services/zendesk_web.py``).
+
 Collision policy lives in the store upserts: an import may never replace a
 differing pull-origin baseline (the mirror is authoritative) — refused pks
 come back in ``conflict_ids`` and surface here under ``conflicts``.
@@ -254,8 +267,11 @@ def _import_json(conn, abs_path: str, report: dict) -> None:
 
 
 def _import_html(conn, abs_path: str, report: dict) -> None:
-    """A raw HTML file becomes one article: body_html is the file text
-    VERBATIM; title from <title> then <h1> then the filename."""
+    """A raw HTML file becomes one article. The file text is handed to the
+    upsert, which SANITIZES it at the store boundary (origin='import') —
+    the stored body_html is therefore the renderable allowlist subset, not
+    the raw file bytes. Title comes from the RAW text (<title> then <h1>
+    then the filename), because <head>/<title> do not survive sanitize."""
     report["kind"] = "article"
     with open(abs_path, "r", encoding="utf-8", errors="replace") as fh:
         raw = fh.read()
@@ -268,9 +284,11 @@ def _import_html(conn, abs_path: str, report: dict) -> None:
 
 def _import_document(conn, abs_path: str, report: dict) -> None:
     """doc_reader path (.docx/.md/.txt/...): document → markdown →
-    markdown_to_html → body_html; title from the first heading or the
-    filename. strict=True so binary/unreadable files become a clear
-    per-file error instead of a mojibake article."""
+    markdown_to_html → (store-boundary sanitize) → body_html; title from
+    the first heading or the filename. strict=True so binary/unreadable
+    files become a clear per-file error instead of a mojibake article.
+    markdown_to_html forwards raw HTML blocks, so the upsert's sanitize is
+    what keeps an .md file from planting script markup in the mirror."""
     from src.data.doc_reader import UnsupportedDocumentError, read_document
     from src.data.html_markdown import markdown_to_html
     report["kind"] = "article"

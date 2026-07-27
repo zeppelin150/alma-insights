@@ -1,16 +1,41 @@
 """Zendesk Help Center articles + macros store.
 
+ONE-WAY ZENDESK POLICY (locked owner decision, load-bearing): the Zendesk
+API is IMPORT/READ ONLY. Nothing in this module — or anywhere else in the
+app — may POST, PUT or DELETE against Zendesk. Content leaves the app only
+when an enablement specialist copies reviewed bytes and pastes them into
+the Zendesk editor by hand. ``publish_article_draft`` /
+``publish_macro_draft`` are kept only as LOCAL status operations (they
+still accept a ``zendesk_client`` kwarg for source compatibility and
+ignore it); no function here may reference a Zendesk client write method.
+
 Two layers share this module:
 
-* The mig-030 draft/push flow used by the native Zendesk tab — sync the
-  live articles/macros into a local cache, stage AI-drafted new/updated
-  content, and human-gated-push to Zendesk. A draft linked to a live id
-  (article_id/macro_id) UPDATES on push; otherwise it CREATES. Demo mode
-  marks pushed without an API call.
+* The mig-030 draft flow used by the native Zendesk tab — sync (GET) the
+  live articles/macros into a local cache and stage AI-drafted new/updated
+  content. The old human-gated push is retired: a reviewed draft is copied
+  to the clipboard and marked 'copied' locally, nothing is sent.
 * The mig-051 full-fidelity mirror (web Garden-clone tab + AI revisions):
   ON CONFLICT upserts with content_hash dedup and body_text/actions_text
   plain-text projections, contentless-FTS search, a unified revisions
   view, and the pending→ready→copied draft lifecycle.
+
+Store-boundary sanitize rule (load-bearing, security): HTML that enters
+the mirror from ANY lane other than the byte-faithful API pull is reduced
+to the renderable allowlist HERE, at the write, by
+``html_sanitize.sanitize_html`` — file imports (``origin='import'``) and
+macro reply HTML included. After the write, stored bytes == renderable
+bytes, so nothing can sit in the mirror that a preview would not display.
+
+The ONE documented exception is ``origin='pull'``: the mirror is meant to
+be byte-faithful to remote Zendesk, so pulled bytes are stored verbatim.
+Verbatim bytes are made HONEST downstream instead of silently rewritten —
+:mod:`src.services.zendesk_web` reviews the exact HTML SOURCE, flags any
+content whose sanitized form differs ("markup the preview does not
+display"), and releases to the clipboard only bytes the reviewer was
+shown. Draft rows are likewise NOT sanitized at this layer (a version
+restore must reproduce mirror bytes byte-exactly); the same source-review
++ reviewed-bytes clipboard gate covers them.
 
 Write-form rule (load-bearing): the mirror FTS tables are contentless and
 kept in sync by AI/AD/AU triggers, and ``INSERT OR REPLACE`` fires only the
@@ -39,6 +64,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 from src.data.connection_factory import atomic
+from src.data.html_sanitize import sanitize_html
 
 _PROMPTS = Path(__file__).resolve().parent.parent.parent / "config" / "prompts"
 _ARTICLE_PROMPT = _PROMPTS / "enablement_article_from_doc.txt"
@@ -54,6 +80,11 @@ _DRAFT_TABLES = {"article": "zendesk_article_drafts",
 # else. 'copied' and legacy 'pushed' rows are immutable here (delete only).
 _ALLOWED_TRANSITIONS = {("pending", "ready"), ("ready", "pending"),
                         ("pending", "copied"), ("ready", "copied")}
+
+# Terminal states: the draft has been handed to a human for the manual
+# paste and is done as far as this app is concerned. 'pushed' is the legacy
+# spelling written by the retired push path — still read, never written.
+_HANDLED_DRAFT_STATUSES = ("copied", "pushed")
 
 
 def _now() -> str:
@@ -105,7 +136,12 @@ class _TextExtractor(HTMLParser):
 
 
 def html_to_text(html: str) -> str:
-    """Plain-text projection of an HTML string (body_text / diff input)."""
+    """Plain-text projection of an HTML string (body_text / search input).
+
+    ATTRIBUTE-BLIND by design and by contract: only text nodes survive, so
+    href/src never enter the FTS index or a snippet. Never use this to build
+    a projection a human REVIEWS before copying bytes — use
+    :func:`html_to_review_text`."""
     if not html:
         return ""
     parser = _TextExtractor()
@@ -115,8 +151,142 @@ def html_to_text(html: str) -> str:
         raw = "".join(parser.parts)
     except Exception:  # noqa: BLE001 — a hostile fragment must not break sync
         raw = _TAG_RE.sub(" ", str(html))
-    lines = [" ".join(line.split()) for line in raw.splitlines()]
+    return _normalize_lines(raw)
+
+
+def _normalize_lines(raw: str) -> str:
+    lines = [" ".join(line.split()) for line in (raw or "").splitlines()]
     return "\n".join(line for line in lines if line).strip()
+
+
+# Attributes ``html_sanitize`` PRESERVES whose value the browser fetches or
+# navigates to — i.e. exactly the ones it scheme-checks (_SAFE_HREF /
+# _SAFE_SRC). Every one of them must be surfaced by the review projection,
+# because everything it does not show is still copied byte-verbatim. A
+# guard test cross-checks this tuple against the sanitizer's own allowlist,
+# so widening that allowlist fails loudly instead of silently reopening the
+# review-blind-spot hole.
+_URL_ATTRS = ("href", "src")
+
+
+class _ReviewTextExtractor(HTMLParser):
+    """ATTRIBUTE-VISIBLE text projection, for the human review diff.
+
+    ``_TextExtractor`` renders text nodes only, so a link's destination and
+    an image's source vanish from the projection while surviving verbatim
+    into the copied bytes — an attacker-planted phishing href or tracking
+    pixel is invisible to the reviewer yet lands in the clipboard. This
+    extractor renders every URL-bearing attribute the sanitizer preserves:
+
+    * ``<a href="X">text</a>``           → ``text (X)``
+    * ``<img src="X" alt="Y">``          → ``[image: Y (X)]``
+    * any other tag carrying one         → ``[tag attr: value]``
+    """
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self._skip = 0
+        self._anchors: list[str] = []   # destinations of the open <a> tags
+
+    @staticmethod
+    def _attrs(attrs) -> dict:
+        out = {}
+        for name, value in attrs or []:
+            name = (name or "").lower()
+            if name not in out:
+                out[name] = " ".join(str(value or "").split())
+        return out
+
+    def handle_starttag(self, tag, attrs):
+        tag = (tag or "").lower()
+        if tag in ("script", "style"):
+            self._skip += 1
+            return
+        if self._skip:
+            return
+        if tag == "br":
+            self.parts.append("\n")
+            return
+        d = self._attrs(attrs)
+        urls = {k: d[k] for k in _URL_ATTRS if d.get(k)}
+        if tag == "img":
+            src, alt = urls.pop("src", ""), d.get("alt", "")
+            inner = f"{alt} ({src})" if alt and src else (alt or src)
+            self.parts.append(f"[image: {inner}]" if inner else "[image]")
+        elif tag == "a":
+            self._anchors.append(urls.pop("href", ""))
+        for name in sorted(urls):
+            self.parts.append(f"[{tag} {name}: {urls[name]}]")
+
+    def handle_endtag(self, tag):
+        tag = (tag or "").lower()
+        if tag in ("script", "style"):
+            self._skip = max(0, self._skip - 1)
+            return
+        if self._skip:
+            return
+        if tag == "a":
+            if self._anchors:
+                href = self._anchors.pop()
+                if href:
+                    self.parts.append(f" ({href})")
+            return
+        if tag in _BLOCK_TAGS:
+            self.parts.append("\n")
+
+    def handle_data(self, data):
+        if not self._skip:
+            self.parts.append(data)
+
+    def flush(self) -> str:
+        # Unclosed <a> tags still owe their destination to the reviewer.
+        while self._anchors:
+            href = self._anchors.pop()
+            if href:
+                self.parts.append(f" ({href})")
+        return "".join(self.parts)
+
+
+def html_to_review_text(html: str) -> str:
+    """Lossless-enough plain-text projection for HUMAN REVIEW of HTML that
+    will be copied byte-verbatim (:mod:`src.services.zendesk_web`'s diff).
+
+    Unlike :func:`html_to_text` this surfaces every URL the sanitizer lets
+    through, so what the reviewer reads is a faithful projection of the
+    bytes the clipboard will deliver. A parser blow-up falls back to the RAW
+    markup (fail VISIBLE — showing more than needed, never less)."""
+    if not html:
+        return ""
+    parser = _ReviewTextExtractor()
+    try:
+        parser.feed(str(html))
+        parser.close()
+        raw = parser.flush()
+    except Exception:  # noqa: BLE001
+        raw = str(html)
+    return _normalize_lines(raw)
+
+
+# Macro action fields whose value is HTML (Zendesk's rich Comment/Reply).
+_HTML_ACTION_FIELDS = ("comment_value_html",)
+
+
+def sanitize_actions(actions):
+    """Store-boundary sanitize for a macro actions list.
+
+    HTML-bearing action values authored outside the API pull are reduced to
+    the renderable allowlist, so a mirrored macro reply can never carry
+    markup the preview does not display. Non-dict entries and non-HTML
+    fields pass through untouched (a plain ``comment_value`` is text and
+    escaping it would corrupt the reply)."""
+    out = []
+    for a in actions or []:
+        if isinstance(a, dict) and a.get("field") in _HTML_ACTION_FIELDS:
+            a = dict(a)
+            a["value"] = sanitize_html(str(a.get("value", "")))
+        out.append(a)
+    return out
 
 
 def _actions_to_text(actions) -> str:
@@ -149,6 +319,24 @@ def _article_hash(*, title, body_html, section_id, draft, outdated,
 def _macro_hash(*, name, description, active, actions_json) -> str:
     return _canonical_hash({"name": name, "description": description,
                             "active": active, "actions_json": actions_json})
+
+
+def draft_content_hash(kind: str, draft: dict) -> str:
+    """Hash of a draft row's CONTENT — what a review diff was computed from
+    and what a copy would release.
+
+    Deliberately excludes status/timestamps: marking a reviewed draft ready
+    must not invalidate the review, while ANY content change (from this
+    surface, from Renn's MCP tools, from anywhere) must."""
+    d = draft or {}
+    if kind == "macro":
+        payload = {"kind": "macro", "name": d.get("name"),
+                   "description": d.get("description"),
+                   "actions_json": d.get("actions_json")}
+    else:
+        payload = {"kind": "article", "title": d.get("title"),
+                   "body": d.get("body"), "body_html": d.get("body_html")}
+    return _canonical_hash(payload)
 
 
 def _norm_json(value, default="[]") -> str:
@@ -184,6 +372,15 @@ def upsert_articles(conn, articles: list[dict], *, origin="pull",
             body_html = a.get("body_html")
             if body_html is None:
                 body_html = a.get("body", "") or ""
+            if origin != "pull":
+                # STORE-BOUNDARY SANITIZE (see the module note). Imported
+                # file bytes are attacker-influenced and were previously
+                # stored raw, so script/form/style content that the preview
+                # deliberately never rendered still reached the clipboard.
+                # Sanitizing HERE makes stored bytes == renderable bytes;
+                # the hash below is computed over the sanitized form, so
+                # re-importing the same file stays idempotent.
+                body_html = sanitize_html(str(body_html))
             labels = a.get("label_names")
             if labels is None:
                 labels = a.get("labels")
@@ -257,6 +454,8 @@ def upsert_macros(conn, macros: list[dict], *, origin="pull",
             name = m.get("title") or m.get("name") or ""
             description = m.get("description", "") or ""
             actions = m.get("actions", []) or []
+            if origin != "pull":
+                actions = sanitize_actions(actions)   # store boundary
             actions_json = json.dumps(actions)
             active = 1 if m.get("active", True) else 0
             content_hash = _macro_hash(name=name, description=description,
@@ -584,10 +783,12 @@ def search_mirror(conn, query: str, *, kind="all", limit=25) -> dict:
 
 def list_revisions(conn, *, status=None, kind=None, limit=500) -> list[dict]:
     """Unified view over both draft tables; each row carries kind
-    'article'|'macro', target_id, target_title (joined from the mirror).
-    ``limit`` is clamped to 1..500 — the web Revision Center reads the
-    default, and the old 100 ceiling silently truncated the copied/pushed
-    audit trail (which purge deliberately retains forever)."""
+    'article'|'macro', target_id, target_title (joined from the mirror),
+    and source_ref (additive — 'specialist-edit' rows are workspace edits;
+    anything else is Renn/doc provenance). ``limit`` is clamped to 1..500 —
+    the web Revision Center reads the default, and the old 100 ceiling
+    silently truncated the copied/pushed audit trail (which purge
+    deliberately retains forever)."""
     try:
         limit = max(1, min(int(limit), 500))
     except (TypeError, ValueError):
@@ -596,7 +797,7 @@ def list_revisions(conn, *, status=None, kind=None, limit=500) -> list[dict]:
     if kind in (None, "article"):
         sql = ("SELECT d.id, d.article_id, d.title, d.status, d.rationale, "
                "d.sources_json, d.created_at, d.updated_at, d.copied_at, "
-               "a.title AS target_title "
+               "a.title AS target_title, d.source_ref "
                "FROM zendesk_article_drafts d "
                "LEFT JOIN zendesk_articles a ON a.article_id = d.article_id")
         params: list = []
@@ -608,11 +809,11 @@ def list_revisions(conn, *, status=None, kind=None, limit=500) -> list[dict]:
                         "target_title": r[9], "title": r[2], "status": r[3],
                         "rationale": r[4], "sources_json": r[5] or "[]",
                         "created_at": r[6], "updated_at": r[7],
-                        "copied_at": r[8]})
+                        "copied_at": r[8], "source_ref": r[10]})
     if kind in (None, "macro"):
         sql = ("SELECT d.id, d.macro_id, d.name, d.status, d.rationale, "
                "d.sources_json, d.created_at, d.updated_at, d.copied_at, "
-               "m.name AS target_title "
+               "m.name AS target_title, d.source_ref "
                "FROM zendesk_macro_drafts d "
                "LEFT JOIN zendesk_macros m ON m.macro_id = d.macro_id")
         params = []
@@ -624,10 +825,22 @@ def list_revisions(conn, *, status=None, kind=None, limit=500) -> list[dict]:
                         "target_title": r[9], "title": r[2], "status": r[3],
                         "rationale": r[4], "sources_json": r[5] or "[]",
                         "created_at": r[6], "updated_at": r[7],
-                        "copied_at": r[8]})
+                        "copied_at": r[8], "source_ref": r[10]})
     out.sort(key=lambda r: (r.get("created_at") or "", r["draft_id"]),
              reverse=True)
     return out[:limit]
+
+
+def iter_draft_ids(conn) -> list[tuple[str, int]]:
+    """Every revision draft id, uncapped — (kind, draft_id) pairs.
+
+    The docs-backfill full-export enumerator: list_revisions stays clamped
+    to 500 for the UI, but "export every draft" needs the whole set."""
+    out = [("article", int(r[0])) for r in conn.execute(
+        "SELECT id FROM zendesk_article_drafts ORDER BY id")]
+    out += [("macro", int(r[0])) for r in conn.execute(
+        "SELECT id FROM zendesk_macro_drafts ORDER BY id")]
+    return out
 
 
 def set_draft_status(conn, kind: str, draft_id: int, status: str, *,
@@ -782,39 +995,39 @@ def draft_article_from_document(conn, doc_id, llm_client) -> dict:
 
 def publish_article_draft(conn, draft_id, *, zendesk_client=None,
                           section_id=None, approved_by="user") -> dict:
-    """Push an article draft to Zendesk (UPDATE if linked, else CREATE).
-    Demo/no-client: marks pushed locally. Body markdown → HTML on push."""
+    """Mark an article draft handled LOCALLY. Never touches Zendesk.
+
+    One-way policy (locked owner decision): the Zendesk API is import/read
+    only. No surface in this app may POST, PUT or DELETE against Zendesk —
+    enablement staff copy the reviewed content and paste it into the Zendesk
+    editor by hand. This function therefore performs zero network activity.
+
+    ``zendesk_client`` and ``section_id`` are still accepted so existing
+    callers keep importing and running, but they are IGNORED: handing this
+    function a live client does not enable a remote write. The result dict
+    reports ``remote_write: False`` and ``result: None`` so no caller can
+    read a local status change as a publish.
+
+    The draft moves to the mirror lifecycle's terminal ``copied`` state with
+    ``copied_at`` stamped. Legacy ``pushed`` rows stay readable and count as
+    already handled.
+    """
     d = get_article_draft(conn, draft_id)
     if not d:
         return {"ok": False, "error": "draft_not_found"}
-    if d["status"] == "pushed":
-        return {"ok": True, "draft_id": draft_id, "already": True}
-
     article_id = d.get("article_id")
-    result = None
-    if zendesk_client is not None:
-        from src.data.html_markdown import markdown_to_html
-        html = markdown_to_html(d["body"])
-        try:
-            if article_id:
-                result = zendesk_client.update_article(
-                    article_id, title=d["title"], body=html, locale=d.get("locale", "en-us"))
-            else:
-                sect = section_id or d.get("section_id")
-                if not sect:
-                    return {"ok": False, "error": "section_id_required_to_create"}
-                result = zendesk_client.create_article(
-                    sect, d["title"], html, locale=d.get("locale", "en-us"))
-                article_id = result.get("id", article_id)
-        except Exception as exc:  # noqa: BLE001
-            return {"ok": False, "error": f"zendesk_push_failed: {exc}"}
+    if d["status"] in _HANDLED_DRAFT_STATUSES:
+        return {"ok": True, "draft_id": draft_id, "already": True,
+                "article_id": article_id, "status": d["status"],
+                "remote_write": False, "result": None}
 
+    now = _now()
     with _txn(conn):
         conn.execute(
-            "UPDATE zendesk_article_drafts SET status='pushed', article_id=?, "
-            "pushed_at=?, updated_at=? WHERE id=?",
-            (article_id, _now(), _now(), draft_id))
-    return {"ok": True, "draft_id": draft_id, "article_id": article_id, "result": result}
+            "UPDATE zendesk_article_drafts SET status='copied', "
+            "copied_at=?, updated_at=? WHERE id=?", (now, now, draft_id))
+    return {"ok": True, "draft_id": draft_id, "article_id": article_id,
+            "status": "copied", "remote_write": False, "result": None}
 
 
 # ── macro drafts ─────────────────────────────────────────────────────
@@ -822,6 +1035,10 @@ def publish_article_draft(conn, draft_id, *, zendesk_client=None,
 def save_macro_draft(conn, *, name, actions, description=None, macro_id=None,
                      source_ref=None, reply_html=None, rationale=None,
                      sources_json=None) -> int:
+    # Store boundary: reply_html is rendered HTML authored by an LLM or a
+    # document parser — never stored raw (see the module note).
+    if reply_html is not None:
+        reply_html = sanitize_html(str(reply_html))
     with _txn(conn):
         cur = conn.execute(
             "INSERT INTO zendesk_macro_drafts (macro_id, name, description, "
@@ -850,6 +1067,8 @@ def update_macro_draft(conn, draft_id, *, name=None, actions=None,
     d = get_macro_draft(conn, draft_id)
     if not d:
         return {"ok": False, "error": "draft_not_found"}
+    if reply_html is not None:
+        reply_html = sanitize_html(str(reply_html))   # store boundary
     with _txn(conn):
         conn.execute(
             "UPDATE zendesk_macro_drafts SET name=?, actions_json=?, "
@@ -889,30 +1108,28 @@ def draft_macro_from_document(conn, doc_id, llm_client) -> dict:
 
 
 def publish_macro_draft(conn, draft_id, *, zendesk_client=None, approved_by="user") -> dict:
+    """Mark a macro draft handled LOCALLY. Never touches Zendesk.
+
+    Same one-way policy as :func:`publish_article_draft`: no network call is
+    made, ``zendesk_client`` is accepted for source compatibility and
+    IGNORED, and the draft lands in the terminal ``copied`` state so the
+    specialist's hand-paste is the only way content reaches Zendesk.
+    """
     d = get_macro_draft(conn, draft_id)
     if not d:
         return {"ok": False, "error": "draft_not_found"}
-    if d["status"] == "pushed":
-        return {"ok": True, "draft_id": draft_id, "already": True}
     macro_id = d.get("macro_id")
-    result = None
-    if zendesk_client is not None:
-        try:
-            if macro_id:
-                result = zendesk_client.update_macro(
-                    macro_id, name=d["name"], actions=d["actions"])
-            else:
-                result = zendesk_client.create_macro(
-                    d["name"], d["actions"], description=d.get("description"))
-                macro_id = result.get("id", macro_id)
-        except Exception as exc:  # noqa: BLE001
-            return {"ok": False, "error": f"zendesk_push_failed: {exc}"}
+    if d["status"] in _HANDLED_DRAFT_STATUSES:
+        return {"ok": True, "draft_id": draft_id, "already": True,
+                "macro_id": macro_id, "status": d["status"],
+                "remote_write": False, "result": None}
+    now = _now()
     with _txn(conn):
         conn.execute(
-            "UPDATE zendesk_macro_drafts SET status='pushed', macro_id=?, "
-            "pushed_at=?, updated_at=? WHERE id=?",
-            (macro_id, _now(), _now(), draft_id))
-    return {"ok": True, "draft_id": draft_id, "macro_id": macro_id, "result": result}
+            "UPDATE zendesk_macro_drafts SET status='copied', "
+            "copied_at=?, updated_at=? WHERE id=?", (now, now, draft_id))
+    return {"ok": True, "draft_id": draft_id, "macro_id": macro_id,
+            "status": "copied", "remote_write": False, "result": None}
 
 
 def _parse_macro(text: str) -> dict:

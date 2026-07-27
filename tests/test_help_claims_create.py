@@ -697,14 +697,37 @@ def test_export_of_a_missing_deck_reports_deck_not_found(conn, tmp_path):
 # ══════════════════════════════════════════════════════════════════════
 
 class _FakeZendeskClient:
-    """Records every call so a test can prove sync never writes."""
+    """A live-looking Zendesk client that can only read.
+
+    Under the locked one-way policy the real ``ZendeskClient`` has no write
+    methods, so neither does this stand-in: any attempt to reach one fails
+    the test loudly instead of quietly recording a call that could never
+    happen. Reads are recorded so a test can prove what did happen.
+    """
+
+    #: Held as strings on purpose — naming them as code would itself be the
+    #: reference the read-only guard forbids.
+    _REMOTE_MUTATORS = ("create_article", "update_article", "delete_article",
+                        "create_macro", "update_macro", "delete_macro",
+                        "_write")
 
     def __init__(self, *, articles=None, macros=None):
         self._articles = articles or []
         self._macros = macros or []
         self.calls = []
 
-    # reads
+    def __getattr__(self, name):
+        # Only reached when normal lookup fails, i.e. for a method this
+        # read-only client does not have.
+        if name.startswith("__"):
+            raise AttributeError(name)
+        raise AssertionError(
+            f"Zendesk client attribute {name!r} was requested. The Zendesk "
+            "API is one-way by locked owner policy — the real client exposes "
+            "no write, so nothing may call one. "
+            f"(Known remote mutators: {', '.join(self._REMOTE_MUTATORS)}.)")
+
+    # reads — the entire surface
     def get_articles(self, *, locale="en-us", per_page=100):
         self.calls.append(("get_articles", locale, per_page))
         return self._articles
@@ -721,27 +744,10 @@ class _FakeZendeskClient:
         self.calls.append(("list_macros_paged", kw))
         return self._macros, len(self._macros)
 
-    # writes
-    def create_article(self, section_id, title, body, *, locale="en-us"):
-        self.calls.append(("create_article", section_id, title, body))
-        return {"id": 4242}
 
-    def update_article(self, article_id, *, title=None, body=None,
-                       locale="en-us"):
-        self.calls.append(("update_article", article_id, title, body))
-        return {"id": article_id}
-
-    def create_macro(self, name, actions, *, description=None):
-        self.calls.append(("create_macro", name, actions, description))
-        return {"id": 777}
-
-    def update_macro(self, macro_id, *, name=None, actions=None):
-        self.calls.append(("update_macro", macro_id, name, actions))
-        return {"id": macro_id}
-
-
-_WRITE_CALLS = {"create_article", "update_article", "create_macro",
-                "update_macro"}
+#: Everything the read-only client is allowed to be asked for.
+_READ_CALLS = {"get_articles", "get_articles_paged",
+               "list_macros", "list_macros_paged"}
 
 
 def test_sync_reads_and_never_writes(conn):
@@ -753,7 +759,9 @@ def test_sync_reads_and_never_writes(conn):
         macros=[{"id": 5, "title": "M", "actions": [], "updated_at": "2026-01-01"}])
     zendesk_store.sync_articles(conn, client)
     zendesk_store.sync_macros(conn, client)
-    assert not [c for c in client.calls if c[0] in _WRITE_CALLS]
+    assert client.calls, "sync made no call at all"
+    assert all(c[0] in _READ_CALLS for c in client.calls), (
+        f"sync made a non-read call: {client.calls!r}")
 
 
 def test_sync_caches_articles_and_macros_and_refreshes_existing_rows(conn):
@@ -861,104 +869,93 @@ def test_saving_an_article_draft_stores_it_locally(conn):
     assert d["status"] == "pending"
 
 
-def test_pushing_converts_the_body_to_html(conn):
-    """zendesk.md: "Pushing converts the body to HTML and sends it".\""""
-    client = _FakeZendeskClient()
-    draft_id = zendesk_store.save_article_draft(
-        conn, title="T", body="# Head\n\nSome **bold** text", article_id=17)
-    zendesk_store.publish_article_draft(conn, draft_id, zendesk_client=client)
-    sent = [c for c in client.calls if c[0] == "update_article"][0]
-    assert "<h1>Head</h1>" in sent[3]
-    assert "<strong>bold</strong>" in sent[3]
-    assert "**bold**" not in sent[3]
+def test_editing_and_saving_an_article_draft_never_contacts_zendesk(conn):
+    """zendesk.md: "Saving stores it in the app's own database. No editing step
+    contacts Zendesk.\""""
+    draft_id = zendesk_store.save_article_draft(conn, title="T", body="B")
+    page = _FakePage(conn)
+    page._zd_client = _FakeZendeskClient()
+    _page_cls()._on_zd_article_saved(page, draft_id, "T2", "# Head\n\nbody")
+    assert page._zd_client.calls == []
+    assert zendesk_store.get_article_draft(conn, draft_id)["title"] == "T2"
 
 
-def test_a_linked_draft_updates_and_an_unlinked_draft_creates(conn):
-    """zendesk.md: "a draft already linked to a live article updates that
-    article, and an unlinked draft creates a new one.\""""
+def test_finishing_a_draft_sends_nothing_even_with_a_live_client(conn):
+    """zendesk.md: "The action that used to push now only marks the draft
+    handled ... No API call is made, nothing is sent, and your Help Center is
+    unchanged." Also: "a live Zendesk connection does not change that — the
+    connection can only read.\"
+
+    The live-client case is the one that matters: handing the local
+    bookkeeping step a working client must still send nothing.
+    """
     client = _FakeZendeskClient()
     linked = zendesk_store.save_article_draft(conn, title="L", body="b",
                                               article_id=42)
-    zendesk_store.publish_article_draft(conn, linked, zendesk_client=client)
-    assert [c[0] for c in client.calls] == ["update_article"]
-    assert client.calls[0][1] == 42
+    res = zendesk_store.publish_article_draft(conn, linked,
+                                              zendesk_client=client)
+    assert res["ok"] is True
+    assert res.get("remote_write") is False
+    assert res.get("result") is None
+    assert client.calls == [], f"a live client was contacted: {client.calls!r}"
 
-    client2 = _FakeZendeskClient()
+    # An unlinked draft has nowhere to be created and still must not try.
     unlinked = zendesk_store.save_article_draft(conn, title="N", body="b",
                                                 section_id=9)
-    res = zendesk_store.publish_article_draft(conn, unlinked,
-                                              zendesk_client=client2)
-    assert [c[0] for c in client2.calls] == ["create_article"]
-    assert client2.calls[0][1] == 9
-    assert res["article_id"] == 4242      # the new id is stored back
+    res2 = zendesk_store.publish_article_draft(conn, unlinked,
+                                               zendesk_client=client)
+    assert res2["ok"] is True
+    assert res2.get("remote_write") is False
+    assert client.calls == []
 
 
-def test_pushed_drafts_leave_the_pending_list(conn):
-    """zendesk.md: "Pushed drafts leave the list, because the list only shows
-    pending ones.\""""
+def test_finishing_a_draft_marks_it_handled_and_drops_it_from_the_list(conn):
+    """zendesk.md: "it only marks the draft handled and drops it out of the
+    pending list", and ("If it doesn't") "Marking a draft handled removes it
+    from the pending list and contacts nothing.\""""
     draft_id = zendesk_store.save_article_draft(conn, title="T", body="b")
     assert [d["id"] for d in zendesk_store.list_article_drafts(conn)] == [draft_id]
-    zendesk_store.publish_article_draft(conn, draft_id, zendesk_client=None)
-    assert zendesk_store.list_article_drafts(conn) == []
 
-
-def test_creating_a_new_article_without_a_section_is_rejected(conn):
-    """zendesk.md: "An unlinked draft pushed against a live Zendesk returns an
-    error saying a section is required.\""""
-    client = _FakeZendeskClient()
-    draft_id = zendesk_store.save_article_draft(conn, title="T", body="b")
-    res = zendesk_store.publish_article_draft(conn, draft_id,
-                                              zendesk_client=client)
-    assert res == {"ok": False, "error": "section_id_required_to_create"}
-    assert client.calls == []
-    assert zendesk_store.get_article_draft(conn, draft_id)["status"] == "pending"
-
-
-def test_the_zendesk_tab_offers_no_way_to_choose_a_section(qapp):
-    """zendesk.md: "**Creating a new article needs a section**, and this tab
-    has no way to choose one.\""""
-    from src.ui.pages.enablement import zendesk_tab as zt
-    from src.ui.pages.enablement.zendesk_tab import ZendeskPage
-    from PySide6.QtWidgets import QComboBox, QLineEdit
-    tab = ZendeskPage()
-    # no combo boxes at all, and no field that asks for a section
-    assert tab.findChildren(QComboBox) == []
-    hints = " ".join(w.placeholderText()
-                     for w in tab.findChildren(QLineEdit)).lower()
-    assert "section" not in hints
-    # "section" appears in the tab only as the shared ``section_label`` helper,
-    # never as a standalone concept the user can set
-    tab_src = Path(zt.__file__).read_text(encoding="utf-8").lower()
-    assert re.search(r"\bsection\b", tab_src) is None
-    assert "section_id" not in tab_src
-    # and the page handler pushes without ever supplying one
-    push_src = _PAGE_PY.read_text(encoding="utf-8").split(
-        "def _on_zd_article_push")[1].split("    def ")[0]
-    assert "publish_article_draft" in push_src
-    assert "section" not in push_src
-
-
-def test_pushing_with_no_connection_marks_the_draft_pushed_anyway(conn):
-    """zendesk.md: "**Pushing with no Zendesk connection marks the draft pushed
-    anyway.** No API call is attempted, the draft is flagged as pushed
-    locally.\""""
-    draft_id = zendesk_store.save_article_draft(conn, title="T", body="b")
     res = zendesk_store.publish_article_draft(conn, draft_id,
                                               zendesk_client=None)
     assert res["ok"] is True
-    assert zendesk_store.get_article_draft(conn, draft_id)["status"] == "pushed"
-    assert zendesk_store.get_article_draft(conn, draft_id)["article_id"] is None
+    assert zendesk_store.list_article_drafts(conn) == []
+
+    d = zendesk_store.get_article_draft(conn, draft_id)
+    assert d["status"] != "pending"
+    # nothing was created remotely, so no article id can have appeared
+    assert d["article_id"] is None
 
 
-def test_a_pushed_article_draft_disables_the_push_button(qapp):
-    """zendesk.md: "the button disables. \"Pushed\" is therefore not proof that
-    anything reached Zendesk.\""""
-    from src.ui.pages.enablement.zendesk_tab import ZendeskPage
-    tab = ZendeskPage()
-    tab.show_article_draft({"id": 1, "title": "T", "body": "b",
-                            "status": "pushed"})
-    assert tab._a_push.text() == "Pushed"
-    assert tab._a_push.isEnabled() is False
+def test_no_surface_in_the_app_can_push_or_publish_to_zendesk(conn):
+    """zendesk.md: "You are looking for a Push or Publish button. There isn't
+    one, anywhere in the app, by design", and "there is deliberately no push,
+    no publish, and no API write anywhere in the app.\"
+
+    Article-level claim only; the exhaustive structural enforcement lives in
+    ``tests/test_zendesk_readonly_guard.py``.
+    """
+    from src.data.zendesk_client import ZendeskClient
+
+    # The client the app would push WITH has no write-shaped method at all.
+    write_shaped = [n for n in dir(ZendeskClient)
+                    if not n.startswith("_")
+                    and re.match(r"^(create|update|delete|post|put|patch|push"
+                                 r"|publish|upload)_", n)]
+    assert write_shaped == [], (
+        f"ZendeskClient exposes write-shaped method(s) {write_shaped} — "
+        "zendesk.md claims there is no push or publish anywhere in the app")
+
+    # And the two draft-finishing entry points ignore a client entirely.
+    client = _FakeZendeskClient()
+    a = zendesk_store.save_article_draft(conn, title="T", body="b",
+                                         article_id=1)
+    m = zendesk_store.save_macro_draft(
+        conn, name="M", actions=[{"field": "comment_value", "value": "r"}],
+        macro_id=2)
+    zendesk_store.publish_article_draft(conn, a, zendesk_client=client)
+    zendesk_store.publish_macro_draft(conn, m, zendesk_client=client)
+    assert client.calls == []
 
 
 def test_nothing_in_the_zendesk_tab_creates_a_new_article_draft(conn, qapp):
@@ -971,39 +968,34 @@ def test_nothing_in_the_zendesk_tab_creates_a_new_article_draft(conn, qapp):
     src = Path(zt.__file__).read_text(encoding="utf-8")
     assert "save_article_draft" not in src
     assert "new_article" not in src
-    # in-app callers of save_article_draft: the demo seeder and Renn's
-    # mirror propose tools — never the classic tab
+    # in-app callers of save_article_draft — never the classic tab:
+    #   enablement_sim.py       demo seeder
+    #   zendesk_mirror_tools.py Renn's mirror propose tools (pending only)
+    #   zendesk_store.py        the definition + draft_article_from_document
+    #   zendesk_versions.py     restore_article_version — creates a PENDING
+    #                           draft carrying a captured version's bytes;
+    #                           it never writes zendesk_articles and holds
+    #                           no Zendesk client, so a restore still rides
+    #                           the pending -> ready -> copied review
+    #                           lifecycle like every other revision
+    #   zendesk_web.py          the specialist body edit
     hits = []
     for py in (_PROJECT_ROOT / "src").rglob("*.py"):
         if "save_article_draft" in py.read_text(encoding="utf-8"):
             hits.append(py.name)
     assert sorted(hits) == [
-        "enablement_sim.py", "zendesk_mirror_tools.py", "zendesk_store.py"]
+        "enablement_sim.py", "zendesk_mirror_tools.py", "zendesk_store.py",
+        "zendesk_versions.py", "zendesk_web.py"]
 
 
 def test_syncing_without_credentials_says_to_connect_zendesk_first(conn):
     """zendesk.md ("If it doesn't"): "Syncing says to connect Zendesk first.
-    No credentials are configured.\""""
+    No credentials are configured. ... Those credentials are only ever used to
+    read.\""""
     page = _FakePage(conn)
     page._zd_client = None
     _page_cls()._on_zendesk_sync(page)
     assert page.zendesk.status == ["Connect Zendesk first (Settings)."]
-
-
-def test_a_zendesk_api_error_surfaces_as_a_push_failure(conn):
-    """zendesk.md ("If it doesn't"): "Pushing fails with a Zendesk error. The
-    API rejected it.\""""
-    class _Angry(_FakeZendeskClient):
-        def update_article(self, *a, **k):
-            raise RuntimeError("422 Unprocessable Entity")
-
-    draft_id = zendesk_store.save_article_draft(conn, title="T", body="b",
-                                                article_id=1)
-    res = zendesk_store.publish_article_draft(conn, draft_id,
-                                              zendesk_client=_Angry())
-    assert res["ok"] is False
-    assert res["error"].startswith("zendesk_push_failed")
-    assert zendesk_store.get_article_draft(conn, draft_id)["status"] == "pending"
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1110,8 +1102,8 @@ def test_saving_a_macro_keeps_the_description_which_is_not_editable(conn, qapp):
 
 
 def test_saving_a_macro_never_contacts_zendesk(conn):
-    """zendesk-macros.md: "Nothing should reach Zendesk until you push. Editing
-    and saving are local.\""""
+    """zendesk-macros.md: "Nothing should ever reach Zendesk from this editor.
+    Editing, saving and marking a draft handled are all local.\""""
     draft_id = _macro_draft(conn, [{"field": "comment_value", "value": "x"}])
     page = _FakePage(conn)
     client = _FakeZendeskClient()
@@ -1120,37 +1112,36 @@ def test_saving_a_macro_never_contacts_zendesk(conn):
     assert client.calls == []
 
 
-def test_pushing_a_linked_macro_replaces_its_whole_action_list(conn):
-    """zendesk-macros.md: "A draft linked to a live macro **replaces** that
-    macro's actions with the local list rather than merging into it.\""""
+def test_finishing_a_macro_draft_sends_nothing_even_when_linked(conn):
+    """zendesk-macros.md: "Finishing a macro draft is local bookkeeping ...
+    without contacting Zendesk. The live macro changes only when you open it in
+    Zendesk and paste the reviewed values in yourself.\"
+
+    A draft linked to a live macro is the dangerous case — a replace-the-whole-
+    action-list write is exactly what the one-way policy exists to prevent.
+    """
     client = _FakeZendeskClient()
     actions = [{"field": "comment_value", "value": "hi"},
                {"field": "set_tags", "value": "refund"}]
     draft_id = _macro_draft(conn, actions, macro_id=99)
-    zendesk_store.publish_macro_draft(conn, draft_id, zendesk_client=client)
-    call = [c for c in client.calls if c[0] == "update_macro"][0]
-    assert call[1] == 99
-    assert call[3] == actions        # the full local list, sent verbatim
-
-
-def test_pushing_an_unlinked_macro_creates_a_new_one(conn):
-    """zendesk-macros.md: "An unlinked draft creates a new macro instead.\""""
-    client = _FakeZendeskClient()
-    draft_id = _macro_draft(conn, [{"field": "comment_value", "value": "hi"}])
     res = zendesk_store.publish_macro_draft(conn, draft_id,
                                             zendesk_client=client)
-    assert [c[0] for c in client.calls] == ["create_macro"]
-    assert res["macro_id"] == 777
+    assert res["ok"] is True
+    assert res.get("remote_write") is False
+    assert res.get("result") is None
+    assert client.calls == [], f"a live client was contacted: {client.calls!r}"
+    # the local draft is untouched apart from its status
+    assert zendesk_store.get_macro_draft(conn, draft_id)["actions"] == actions
 
 
-def test_pushing_a_macro_with_no_connection_marks_it_pushed_locally(conn):
-    """zendesk-macros.md: "pushing while Zendesk is not connected marks the
-    draft pushed locally without contacting the API.\""""
+def test_finishing_a_macro_draft_marks_it_handled_locally(conn):
+    """zendesk-macros.md: "it marks the draft handled and drops it out of the
+    pending list without contacting Zendesk.\""""
     draft_id = _macro_draft(conn, [{"field": "comment_value", "value": "hi"}])
     res = zendesk_store.publish_macro_draft(conn, draft_id,
                                             zendesk_client=None)
     assert res["ok"] is True
-    assert zendesk_store.get_macro_draft(conn, draft_id)["status"] == "pushed"
+    assert zendesk_store.get_macro_draft(conn, draft_id)["status"] != "pending"
     assert zendesk_store.list_macro_drafts(conn) == []
 
 

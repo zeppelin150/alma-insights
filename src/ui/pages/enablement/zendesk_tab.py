@@ -1,15 +1,24 @@
-"""Zendesk tab — draft + human-gated push of Help Center articles and macros.
+"""Zendesk tab — draft + copy-out of Help Center articles and macros.
 
 A pure view with Articles / Macros sub-tabs. The host (EnablementPage)
 feeds synced lists + drafts via set_* and handles sync / select / save /
-push against the demo/live connection and the Zendesk client (push writes
-live only when configured; demo marks pushed). Article bodies edit in the
-shared rich-text editor (E1).
+mark-copied against the demo/live connection.
+
+ONE-WAY ZENDESK POLICY (locked owner decision): the Zendesk API is
+import/read only. This tab publishes nothing. The old "Push to Zendesk"
+affordance is replaced by the copy-and-paste model the mirror workspace
+already uses — "Copy for Zendesk" puts the reviewed content on the system
+clipboard, the specialist pastes it into the real Zendesk editor by hand,
+then "Mark as copied" records that locally. The ``article_push`` /
+``macro_push`` signal names are kept for host compatibility; they now mean
+"mark handled locally" and reach a store function that makes no network
+call. Article bodies edit in the shared rich-text editor (E1).
 """
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QMimeData, Qt, Signal
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QPlainTextEdit, QPushButton, QTabWidget, QVBoxLayout, QWidget,
@@ -21,6 +30,12 @@ from src.ui.theme import (
     ALMA_BG_ELEVATED, ALMA_BG_INSET, ALMA_BORDER, ALMA_CREAM, ALMA_GREEN_DARK,
     ALMA_TEXT_DARK, ALMA_TEXT_LIGHT, ALMA_TEXT_ON_DARK,
 )
+
+_COPY_LABEL = "Copy for Zendesk"
+_MARK_LABEL = "Mark as copied"
+# Terminal draft states. 'pushed' is the legacy spelling left behind by the
+# retired push path — still displayed, never written.
+_DONE_LABELS = {"copied": "Copied", "pushed": "Pushed"}
 
 
 def _primary(text) -> QPushButton:
@@ -41,6 +56,16 @@ def _secondary(text) -> QPushButton:
         f"border:1px solid {ALMA_BORDER}; border-radius:8px; padding:7px 14px; "
         f"font-size:12px; font-weight:600;}} QPushButton:disabled{{color:{ALMA_TEXT_LIGHT};}}")
     return b
+
+
+def _as_html(markdown: str) -> str | None:
+    """Rendered flavour for the clipboard, or None when rendering is
+    unavailable — the plain-text flavour is always copied regardless."""
+    try:
+        from src.data.html_markdown import markdown_to_html
+        return markdown_to_html(markdown or "")
+    except Exception:  # noqa: BLE001 — clipboard nicety, never fatal
+        return None
 
 
 def _line(placeholder, *, bold=False) -> QLineEdit:
@@ -87,6 +112,16 @@ class ZendeskPage(QWidget):
         head.addWidget(sync)
         outer.addLayout(head)
 
+        notice = QLabel(
+            "Read-only connection: this app imports from Zendesk and never "
+            "writes to it. Copy a reviewed draft, paste it into Zendesk "
+            "yourself, then mark it copied.")
+        notice.setWordWrap(True)
+        notice.setStyleSheet(
+            f"color:{ALMA_TEXT_LIGHT}; font-size:11px; border:none; "
+            "background:transparent;")
+        outer.addWidget(notice)
+
         self._tabs = QTabWidget()
         self._tabs.setObjectName("AnalysisTab")
         self._tabs.addTab(self._articles_tab(), "Articles")
@@ -123,7 +158,12 @@ class ZendeskPage(QWidget):
         self._a_save = _secondary("Save draft")
         self._a_save.clicked.connect(self._on_article_save)
         arow.addWidget(self._a_save)
-        self._a_push = _primary("Push to Zendesk")
+        self._a_copy = _secondary(_COPY_LABEL)
+        self._a_copy.clicked.connect(self._on_article_copy)
+        arow.addWidget(self._a_copy)
+        # legacy attribute name (_a_push) kept so host wiring and existing
+        # assertions keep resolving; the affordance is local-only now.
+        self._a_push = _primary(_MARK_LABEL)
         self._a_push.clicked.connect(self._on_article_push)
         arow.addWidget(self._a_push)
         v.addLayout(arow)
@@ -133,7 +173,8 @@ class ZendeskPage(QWidget):
         return w
 
     def _set_article_enabled(self, on):
-        for x in (self._a_title, self._a_body, self._a_save, self._a_push):
+        for x in (self._a_title, self._a_body, self._a_save, self._a_copy,
+                  self._a_push):
             x.setEnabled(on)
 
     def set_articles(self, synced_count: int, drafts: list[dict]):
@@ -150,18 +191,24 @@ class ZendeskPage(QWidget):
         self._a_title.setText(draft.get("title", ""))
         self._a_body.set_markdown(draft.get("body", ""))
         self._set_article_enabled(True)
-        if draft.get("status") == "pushed":
-            self._a_push.setText("Pushed")
-            self._a_push.setEnabled(False)
-        else:
-            self._a_push.setText("Push to Zendesk")
+        done = _DONE_LABELS.get(draft.get("status"))
+        self._a_push.setText(done or _MARK_LABEL)
+        self._a_push.setEnabled(done is None)
 
     def _on_article_save(self):
         if self._active_article is not None:
             self.article_saved.emit(int(self._active_article),
                                     self._a_title.text(), self._a_body.to_markdown())
 
+    def _on_article_copy(self):
+        """Put the reviewed article on the clipboard. Local only — the
+        specialist pastes it into the Zendesk editor by hand."""
+        md = self._a_body.to_markdown()
+        self._to_clipboard(md, _as_html(md))
+        self.set_status("Article copied — paste it into the Zendesk editor.")
+
     def _on_article_push(self):
+        """Record locally that the article was pasted into Zendesk."""
         if self._active_article is not None:
             self.article_push.emit(int(self._active_article))
 
@@ -202,7 +249,11 @@ class ZendeskPage(QWidget):
         self._m_save = _secondary("Save draft")
         self._m_save.clicked.connect(self._on_macro_save)
         mrow.addWidget(self._m_save)
-        self._m_push = _primary("Push to Zendesk")
+        self._m_copy = _secondary(_COPY_LABEL)
+        self._m_copy.clicked.connect(self._on_macro_copy)
+        mrow.addWidget(self._m_copy)
+        # legacy attribute name (_m_push) — local-only affordance, see header.
+        self._m_push = _primary(_MARK_LABEL)
         self._m_push.clicked.connect(self._on_macro_push)
         mrow.addWidget(self._m_push)
         v.addLayout(mrow)
@@ -212,7 +263,8 @@ class ZendeskPage(QWidget):
         return w
 
     def _set_macro_enabled(self, on):
-        for x in (self._m_name, self._m_reply, self._m_save, self._m_push):
+        for x in (self._m_name, self._m_reply, self._m_save, self._m_copy,
+                  self._m_push):
             x.setEnabled(on)
 
     def set_macros(self, synced_count: int, drafts: list[dict]):
@@ -234,22 +286,44 @@ class ZendeskPage(QWidget):
                 break
         self._m_reply.setPlainText(reply)
         self._set_macro_enabled(True)
-        if draft.get("status") == "pushed":
-            self._m_push.setText("Pushed")
-            self._m_push.setEnabled(False)
-        else:
-            self._m_push.setText("Push to Zendesk")
+        done = _DONE_LABELS.get(draft.get("status"))
+        self._m_push.setText(done or _MARK_LABEL)
+        self._m_push.setEnabled(done is None)
 
     def _on_macro_save(self):
         if self._active_macro is not None:
             self.macro_saved.emit(int(self._active_macro),
                                   self._m_name.text(), self._m_reply.toPlainText())
 
+    def _on_macro_copy(self):
+        """Put the macro's public reply on the clipboard, verbatim. Macro
+        replies are plain text on both flavours in the mirror workspace, so
+        no HTML flavour is offered here either."""
+        self._to_clipboard(self._m_reply.toPlainText())
+        self.set_status("Macro reply copied — paste it into the Zendesk editor.")
+
     def _on_macro_push(self):
+        """Record locally that the macro was pasted into Zendesk."""
         if self._active_macro is not None:
             self.macro_push.emit(int(self._active_macro))
 
     # ── shared ──────────────────────────────────────────────────────
+    @staticmethod
+    def _to_clipboard(text: str, html: str | None = None) -> None:
+        """Copy out is the ONLY way content leaves this tab. Both flavours
+        are offered when we have them so a paste into the Zendesk WYSIWYG
+        keeps its formatting."""
+        cb = QGuiApplication.clipboard()
+        if cb is None:                      # offscreen / headless
+            return
+        if html:
+            data = QMimeData()
+            data.setText(text or "")
+            data.setHtml(html)
+            cb.setMimeData(data)
+        else:
+            cb.setText(text or "")
+
     def _list_style(self) -> str:
         return (f"QListWidget{{background:{ALMA_BG_ELEVATED}; border:1px solid {ALMA_BORDER}; "
                 f"border-radius:8px; font-size:12.5px; color:{ALMA_TEXT_DARK};}}")

@@ -8,7 +8,7 @@ order: 3
 status: available
 features: [en_settings, en_workbench, en_calendar]
 summary: Most empty screens are a missing connection rather than a fault — how to tell the difference.
-last_verified: 2026-07-24
+last_verified: 2026-07-26
 ---
 
 The most common "something is broken" report is a screen with nothing on it.
@@ -33,7 +33,9 @@ The usual causes, roughly in order of frequency:
 - **The Zendesk mirror is empty.** The Zendesk workspace and Renn's Zendesk
   tools read a local mirror, not the live API — until you pull or import
   content, they report an empty mirror rather than a connection problem. Only
-  the pull itself needs Zendesk credentials.
+  the pull itself needs Zendesk credentials, and it only ever reads with them:
+  the Zendesk connection is one-way, so no connection state anywhere in the
+  app can change your Help Center.
 - **Nothing has been scanned yet.** Sources are pulled on a scan or a monitor
   tick, not continuously.
 

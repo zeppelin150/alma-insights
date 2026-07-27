@@ -19,6 +19,19 @@ import sys
 
 logger = logging.getLogger("alma.chat_mcp")
 
+# OWNER POLICY (locked, 2026-07-26): Zendesk is READ-ONLY. The API is
+# one-way — content is pulled/imported IN, nothing is ever written OUT.
+# Every Zendesk tool advertised here must carry this sentence so the model
+# is TOLD, not merely prevented; tests/test_zendesk_mirror_tools.py
+# enumerates TOOL_SCHEMAS and fails if a zendesk tool drops it or if a new
+# zendesk tool appears. (Guru/Asana confirm-gated writes are unaffected.)
+_ZENDESK_READ_ONLY_NOTE = (
+    "ZENDESK IS READ-ONLY in this app: no tool on any path can publish, "
+    "push, create, update or delete anything in the live Zendesk instance. "
+    "A human enablement specialist copies approved content into the Zendesk "
+    "editor by hand. Never offer to publish to Zendesk or claim you will."
+)
+
 TOOL_SCHEMAS = [
     {
         "name": "query_issues",
@@ -727,7 +740,8 @@ TOOL_SCHEMAS = [
             "the local mirror (no network). To ENUMERATE the mirror completely, use "
             "list_zendesk_articles. Returns articles [{id, title, html_url, section, "
             "snippet, score}]. Returns zendesk_mirror_empty when nothing has been "
-            "pulled or imported yet."
+            "pulled or imported yet. "
+            + _ZENDESK_READ_ONLY_NOTE
         ),
         "inputSchema": {
             "type": "object",
@@ -746,7 +760,8 @@ TOOL_SCHEMAS = [
             "DETERMINISTIC and COMPLETE over the LOCAL mirror. THE tool that answers "
             "'what articles are in the Help Center'. Reports the total count plus a "
             "limit/offset window of articles [{id, title, html_url, section}]. "
-            "Returns zendesk_mirror_empty when nothing has been pulled or imported."
+            "Returns zendesk_mirror_empty when nothing has been pulled or imported. "
+            + _ZENDESK_READ_ONLY_NOTE
         ),
         "inputSchema": {
             "type": "object",
@@ -763,7 +778,8 @@ TOOL_SCHEMAS = [
         "description": (
             "LIST the mirrored Zendesk macros (id, title, active) — DETERMINISTIC "
             "over the LOCAL mirror. Returns zendesk_mirror_empty when nothing has "
-            "been pulled or imported."
+            "been pulled or imported. "
+            + _ZENDESK_READ_ONLY_NOTE
         ),
         "inputSchema": {
             "type": "object",
@@ -783,7 +799,8 @@ TOOL_SCHEMAS = [
             "the live API. To ENUMERATE completely use list_zendesk_articles / "
             "list_zendesk_macros. Returns articles [{id, title, section, snippet, "
             "score}] + macros [{id, name, description, snippet, score}] + counts. "
-            "Returns zendesk_mirror_empty when the mirror has no content yet."
+            "Returns zendesk_mirror_empty when the mirror has no content yet. "
+            + _ZENDESK_READ_ONLY_NOTE
         ),
         "inputSchema": {
             "type": "object",
@@ -803,7 +820,8 @@ TOOL_SCHEMAS = [
             "Read ONE mirrored Help Center article in full from the LOCAL mirror: "
             "title, section/category, labels, plain body text (capped), html_url, "
             "origin, and how many open revisions target it. Ids come from "
-            "search_zendesk_mirror or list_zendesk_articles."
+            "search_zendesk_mirror or list_zendesk_articles. "
+            + _ZENDESK_READ_ONLY_NOTE
         ),
         "inputSchema": {
             "type": "object",
@@ -819,7 +837,8 @@ TOOL_SCHEMAS = [
         "description": (
             "Read ONE mirrored Zendesk macro in full from the LOCAL mirror: name, "
             "description, active flag, and the decoded actions list. Ids come from "
-            "search_zendesk_mirror or list_zendesk_macros."
+            "search_zendesk_mirror or list_zendesk_macros. "
+            + _ZENDESK_READ_ONLY_NOTE
         ),
         "inputSchema": {
             "type": "object",
@@ -840,7 +859,8 @@ TOOL_SCHEMAS = [
             "change is needed; pass sources for the evidence you used. This does "
             "NOT touch real Zendesk and you CANNOT publish a draft or change its "
             "status — the specialist reviews the diff and copies the approved text "
-            "into Zendesk by hand."
+            "into Zendesk by hand. "
+            + _ZENDESK_READ_ONLY_NOTE
         ),
         "inputSchema": {
             "type": "object",
@@ -868,7 +888,8 @@ TOOL_SCHEMAS = [
             "non-comment actions are preserved and any existing comment action is "
             "replaced, never duplicated. rationale is MANDATORY. This does NOT "
             "touch real Zendesk and you CANNOT publish a draft or change its "
-            "status — the specialist copies the approved text by hand."
+            "status — the specialist copies the approved text by hand. "
+            + _ZENDESK_READ_ONLY_NOTE
         ),
         "inputSchema": {
             "type": "object",
@@ -894,7 +915,10 @@ TOOL_SCHEMAS = [
             "one unified view (kind, draft_id, target_id, target_title, title, "
             "status, rationale, timestamps). Filter by status (pending | ready | "
             "copied | pushed) and/or kind (article | macro). Use this to report "
-            "what has been proposed and where each proposal stands."
+            "what has been proposed and where each proposal stands. The 'pushed' "
+            "status is legacy — it predates the read-only lockout and can no "
+            "longer be produced. "
+            + _ZENDESK_READ_ONLY_NOTE
         ),
         "inputSchema": {
             "type": "object",

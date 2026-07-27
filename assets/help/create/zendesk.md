@@ -7,12 +7,19 @@ section_order: 5
 order: 3
 status: partial
 features: [en_zendesk]
-summary: Sync pulls your Help Center into a local cache and writes nothing back; the article list shows drafts, and the web workspace works entirely out of a local mirror that Renn can propose updates into.
-last_verified: 2026-07-24
+summary: The Zendesk connection is one-way — the app reads your Help Center and can never write to it; drafts are edited locally and reach Zendesk only when a person copies them into the Zendesk editor.
+last_verified: 2026-07-26
 ---
 
-The Zendesk tab has two halves: a one-way sync that reads your Help Center, and
-a draft-and-push flow for articles. The two are less connected than they look.
+The Zendesk connection is **one-way**. Everything in this app reads from
+Zendesk; nothing in it can write to Zendesk. That is a deliberate decision,
+not a missing feature: a Help Center is a public site and its content is not
+restorable the way Guru and Asana content is, so the app is not allowed to
+touch it. Approved content gets there when **you** copy it and paste it into
+Zendesk's own editor.
+
+The tab has two halves: a sync that reads your Help Center, and a local
+drafting flow for articles. The two are less connected than they look.
 
 There is also a newer, flag-gated **web workspace** (see *The web workspace and
 the local mirror* below) that replaces this tab with a high-fidelity replica of
@@ -34,29 +41,28 @@ comes from the cache; the list below it comes from pending drafts. Those are
 different things, which is why a sync can report a healthy article count and
 leave the list empty. That is the current behaviour, not a failure.
 
-**Drafts are edited and pushed.** Selecting a draft loads its title and body
-into the editor. Saving stores it locally. Pushing converts the body to HTML and
-sends it: a draft already linked to a live article updates that article, and an
-unlinked draft creates a new one. Pushed drafts leave the list, because the list
-only shows pending ones.
+**Drafts are edited and saved locally.** Selecting a draft loads its title and
+body into the editor. Saving stores it in the app's own database. No editing
+step contacts Zendesk.
 
-Two limits are worth knowing before you rely on this:
+**Finishing a draft is a local bookkeeping step.** The action that used to push
+now only marks the draft handled and drops it out of the pending list. No API
+call is made, nothing is sent, and your Help Center is unchanged. It records
+that you have dealt with the draft — usually because you copied it into
+Zendesk yourself.
 
-- **Creating a new article needs a section**, and this tab has no way to choose
-  one. An unlinked draft pushed against a live Zendesk returns an error saying a
-  section is required.
-- **Pushing with no Zendesk connection marks the draft pushed anyway.** No API
-  call is attempted, the draft is flagged as pushed locally, and the button
-  disables. "Pushed" is therefore not proof that anything reached Zendesk.
+**Copy and paste is the only route to Zendesk.** To publish, open the article
+in Zendesk, paste in the reviewed title and body, and save it there. The app
+deliberately has no button that does this for you.
 
 ## How it should work
 
 Syncing should be safe to run at any time. It is read-only, so it cannot damage
 your Help Center, and re-running it just refreshes the cache.
 
-Pushing should be the only action that leaves the app, and it should reflect
-reality. When it says an article was pushed, that article should exist in
-Zendesk with your title and body.
+Nothing you do in this tab should ever change your live Help Center. Editing,
+saving and marking a draft handled are all local, and a live Zendesk connection
+does not change that — the connection can only read.
 
 ## If it doesn't
 
@@ -70,22 +76,18 @@ update and the draft lands in the local mirror with a rationale attached, ready
 for review in the web workspace's Revision Center.
 
 **Syncing says to connect Zendesk first.** No credentials are configured. Set
-them up in settings, then sync again.
+them up in settings, then sync again. Those credentials are only ever used to
+read.
 
 **Your Help Center has more articles than the count shown.** Expected — sync
 takes the first page only. Flag it if the missing articles matter to you.
 
-**Pushing fails saying a section is required.** The draft is not linked to an
-existing article, so Zendesk needs to know where to file the new one. Create the
-article in Zendesk first, or push against a draft that is already linked.
+**A draft disappeared and Zendesk is unchanged.** Expected. Marking a draft
+handled removes it from the pending list and contacts nothing. If you have not
+pasted the content into Zendesk yet, the article there is still the old one.
 
-**Pushing fails with a Zendesk error.** The API rejected it. Check your
-credentials and permissions, then flag it with the error text.
-
-**The draft says pushed but Zendesk is unchanged.** Check whether Zendesk is
-actually connected — a push with no connection marks the draft locally and
-stops. If it is connected and the article still is not there, that is a real
-bug; flag it with the draft title.
+**You are looking for a Push or Publish button.** There isn't one, anywhere in
+the app, by design. If something appears to offer one, that is worth flagging.
 
 ## The web workspace and the local mirror
 
@@ -115,5 +117,5 @@ yourself, and mark the revision copied.
 
 **Nothing writes back.** Neither the web workspace nor Renn can touch your
 Zendesk instance — there is deliberately no push, no publish, and no API write
-anywhere in this surface. The specialist's copy-and-paste is the only path from
+anywhere in the app. The specialist's copy-and-paste is the only path from
 mirror to live, which is the point.

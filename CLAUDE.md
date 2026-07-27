@@ -176,6 +176,43 @@ run test` (vitest). Full plan + per-milestone build log:
 
 ## Zendesk Mirror + Web Workspace (2026-07-24)
 
+### ZENDESK IS READ-ONLY — one-way API (locked owner decision, 2026-07-26)
+
+**The Zendesk API is import-only. No code in this repo may POST, PUT, PATCH or
+DELETE to Zendesk — ever, on any surface, under any flag.** The app pulls
+articles/sections/categories/macros into the local mirror over GET and stops
+there. Approved content reaches Zendesk when an enablement specialist **copies
+it out of the mirror and pastes it into the Zendesk editor by hand**. Renn must
+have no tool, and no helper in any module a tool executes inside of, that can
+reach a Zendesk write.
+
+Why Zendesk specifically: Guru and Asana are slim attack surfaces —
+production-locked behind domain + Zscaler restrictions, and content deleted
+there is restorable. A Zendesk Guide instance is a **public domain** and its
+content is **not restorable** the same way. **Guru and Asana write paths are
+out of scope and must not be touched by this policy.**
+
+Enforcement: [`tests/test_zendesk_readonly_guard.py`](tests/test_zendesk_readonly_guard.py)
+scans every module under `src/` (AST identifiers, so names held as strings by
+the runtime fence do not count as references) and fails if anyone re-adds a
+Zendesk REST write method, a `_write` transport helper, a non-GET HTTP call
+site in a Zendesk-capable module, a write-shaped `ZendeskClient` method, or a
+write-shaped Renn Zendesk tool. It also asserts the GET lanes still exist —
+read-only is not read-nothing. **If it fails, remove the write; do not relax
+the guard.**
+
+Consequences already in the tree:
+- `ZendeskClient` funnels every request through one `_build_request` choke
+  point that raises `ZendeskWriteBlocked` on anything but GET. It carries no
+  request body, so there is nothing for a write to send.
+- `publish_article_draft` / `publish_macro_draft` keep their signatures
+  (including the `zendesk_client` kwarg) for source compatibility but **ignore
+  the client**: they are local bookkeeping that moves a draft to `copied` and
+  report `remote_write: False`. The classic tab's "push" is now a local mark.
+- Unaffected and must keep working: ticket ingestion (`fetch_incremental` /
+  `fetch_view_tickets` / `fetch_ticket_fields`, product-mode Source Monitor)
+  and the mirror pull — both GET-only.
+
 The enablement Zendesk tab has a web implementation on `#/zendesk`
 (`enablement.web_tabs` = `zendesk` | `all`) that replicates Zendesk's Guide
 article editor + Admin Center macro editor (Garden v8 tokens, dossier at
@@ -202,11 +239,17 @@ the workspace never touch the live Zendesk instance.
   `pending` drafts (rationale + sources mandatory); the specialist reviews the
   word-diff, marks ready, copies exact content, pastes into real Zendesk by
   hand, marks copied (`pending → ready → copied`; `copied`/`pushed`
-  immutable). **No new surface or tool may call a ZendeskClient write method**
-  — structurally tested in `tests/test_zendesk_bridge.py`.
-- The classic tab (`zendesk_tab.py`, human-gated push) is unchanged and stays
-  the default; its locked contracts in `tests/test_zendesk_content.py` must
-  keep passing. Plan: `~/.claude/plans/zendesk-clone-web.md`.
+  immutable). **No surface or tool may call a Zendesk write method — there are
+  none left to call** (see the read-only policy above); structurally tested in
+  `tests/test_zendesk_bridge.py` and `tests/test_zendesk_readonly_guard.py`.
+- The classic tab (`zendesk_tab.py`) stays the default; its former push is now
+  a local "handled" mark, and its locked contracts in
+  `tests/test_zendesk_content.py` must keep passing. Plan:
+  `~/.claude/plans/zendesk-clone-web.md`.
+- User-facing docs for the policy: `assets/help/create/zendesk.md`,
+  `assets/help/create/zendesk-macros.md`,
+  `assets/help/troubleshooting/connect-first.md` (claims locked by
+  `tests/test_help_claims_create.py` / `tests/test_help_claims_troubleshooting.py`).
 
 ## Bug Bash Protocol (MANDATORY)
 

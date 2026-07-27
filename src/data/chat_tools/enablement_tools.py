@@ -2019,6 +2019,14 @@ def handle_list_guru_folder_items(conn, args, session_filters) -> dict:
 # {ok:False, error:'zendesk_mirror_empty', hint} when the mirror has no rows
 # for the family. The mirror-tool family proper (search_zendesk_mirror,
 # get_zendesk_article, propose_*, ...) lives in zendesk_mirror_tools.py.
+#
+# OWNER POLICY (locked, 2026-07-26): Zendesk is READ-ONLY. The API is
+# one-way — content comes IN only. No tool here, on either dispatch path,
+# can publish/push/create/update/delete anything in the live Zendesk
+# instance; a human specialist copies approved content in by hand. Each
+# impl runs zendesk_mirror_tools.write_reach_refusal first as the runtime
+# fence behind that structural guarantee. (Guru and Asana keep their
+# existing operator-confirmed write paths — this applies to Zendesk only.)
 
 
 def _search_zendesk_articles_impl(conn, query, *, limit=25) -> dict:
@@ -2027,9 +2035,14 @@ def _search_zendesk_articles_impl(conn, query, *, limit=25) -> dict:
     ``list_zendesk_articles``. Empty mirror →
     ``{ok:False, error:'zendesk_mirror_empty', hint}``. Returns
     ``{ok, count, articles:[{id, title, html_url, section, snippet, score}]}``.
+    Read-only: mirror bytes, no network, no way to write back to Zendesk.
     """
     from src.data import zendesk_store
-    from src.data.chat_tools.zendesk_mirror_tools import mirror_empty
+    from src.data.chat_tools.zendesk_mirror_tools import (
+        mirror_empty, write_reach_refusal)
+    blocked = write_reach_refusal(conn)
+    if blocked is not None:
+        return blocked
     empty = mirror_empty(conn, "articles")
     if empty is not None:
         return empty
@@ -2063,9 +2076,14 @@ def _list_zendesk_articles_impl(conn, *, limit=100, offset=0) -> dict:
     ``total`` plus a ``limit``/``offset`` window. Empty mirror →
     ``{ok:False, error:'zendesk_mirror_empty', hint}``. Returns
     ``{ok, count, total, offset, articles:[{id, title, html_url, section}]}``.
+    Read-only: mirror bytes, no network, no way to write back to Zendesk.
     """
     from src.data import zendesk_store
-    from src.data.chat_tools.zendesk_mirror_tools import mirror_empty
+    from src.data.chat_tools.zendesk_mirror_tools import (
+        mirror_empty, write_reach_refusal)
+    blocked = write_reach_refusal(conn)
+    if blocked is not None:
+        return blocked
     empty = mirror_empty(conn, "articles")
     if empty is not None:
         return empty
@@ -2099,8 +2117,13 @@ def _list_zendesk_macros_impl(conn, *, limit=100) -> dict:
     flag the historical result shape carries). Empty mirror →
     ``{ok:False, error:'zendesk_mirror_empty', hint}``. Returns
     ``{ok, count, total, macros:[{id, title, active}]}``.
+    Read-only: mirror bytes, no network, no way to write back to Zendesk.
     """
-    from src.data.chat_tools.zendesk_mirror_tools import mirror_empty
+    from src.data.chat_tools.zendesk_mirror_tools import (
+        mirror_empty, write_reach_refusal)
+    blocked = write_reach_refusal(conn)
+    if blocked is not None:
+        return blocked
     empty = mirror_empty(conn, "macros")
     if empty is not None:
         return empty

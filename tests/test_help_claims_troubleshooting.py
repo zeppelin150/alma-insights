@@ -427,6 +427,36 @@ def test_a_disconnected_source_is_reported_not_raised(empty_db, tool_registry, m
     assert result.get("hint"), "the empty-mirror report should carry a hint"
 
 
+def test_zendesk_credentials_can_only_ever_read(empty_db):
+    """connect-first.md: "Only the pull itself needs Zendesk credentials, and
+    it only ever reads with them: the Zendesk connection is one-way, so no
+    connection state anywhere in the app can change your Help Center."
+
+    Locked owner policy. The exhaustive structural enforcement lives in
+    ``tests/test_zendesk_readonly_guard.py``; this settles the article's claim
+    that being connected never grants a write.
+    """
+    from src.data import zendesk_client as zc
+
+    write_shaped = [
+        n for n in dir(zc.ZendeskClient)
+        if not n.startswith("_")
+        and re.match(r"^(create|update|delete|post|put|patch|push|publish"
+                     r"|upload)_", n)
+    ]
+    assert write_shaped == [], (
+        f"a connected Zendesk client could write via {write_shaped} — "
+        "connect-first.md claims the connection is one-way")
+
+    # A fully configured client still refuses anything but a GET.
+    client = zc.ZendeskClient("acme", "user@example.com", "token")
+    assert client.is_configured is True
+    for method in ("POST", "PUT", "PATCH", "DELETE"):
+        with pytest.raises(zc.ZendeskWriteBlocked):
+            client._build_request("/help_center/en-us/articles.json",
+                                  method=method)
+
+
 def test_test_connections_button_does_nothing(qapp):
     """connect-first.md: "the Test connections button does nothing at present,
     so a lack of result there is not evidence either way."

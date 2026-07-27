@@ -1,9 +1,34 @@
 """
-Alma Insights — Zendesk Client (Phase 3)
+Alma Insights — Zendesk Client (READ-ONLY / one-way transport)
 
-Incremental ticket export via Zendesk API v2.  Supports cursor-based
-pagination for efficient polling.  Cursor is persisted in the credentials
-store so it survives restarts.
+Incremental ticket export and Help-Center/macro reads via Zendesk API v2.
+Supports cursor-based pagination for efficient polling.  Cursor is
+persisted in the credentials store so it survives restarts.
+
+ONE-WAY POLICY (locked product decision — do not relax)
+-------------------------------------------------------
+This client is **import-only**.  It can GET and nothing else.  There is no
+create/update/delete method, no request body, and no code path that can
+issue POST/PUT/PATCH/DELETE: every outbound request is built by the single
+``_build_request`` choke point, which raises :class:`ZendeskWriteBlocked`
+on any method other than GET.
+
+Why Zendesk specifically:
+  * The Zendesk Guide instance is a **public** domain — a bad write is
+    publicly visible the moment it lands.
+  * Zendesk content is **not restorable** the way the internal tools
+    (Asana, Guru) are; those live behind domain + Zscaler restrictions
+    and their deletions can be undone.  A wrong article body or macro
+    push here has no equivalent undo.
+
+Content therefore flows Zendesk → Alma only.  Changes go back the other
+way by a human physically copying approved text out of the local mirror
+and pasting it into the real Zendesk editor.  The AI (Renn) has no tool
+that reaches this module, and no new surface may add one.
+
+If a future change needs a write, it does not belong here — it belongs in
+a human copy/paste step.  Deleting or weakening the guard below is a
+policy violation, not a refactor.
 
 Auth: Basic ``base64(email/token:{api_key})``.
 
@@ -36,6 +61,37 @@ class ZendeskRateLimitError(Exception):
     def __init__(self, retry_after: int = 60):
         self.retry_after = retry_after
         super().__init__(f"Rate limited — retry after {retry_after}s")
+
+
+class ZendeskWriteBlocked(RuntimeError):
+    """A non-GET request was attempted against Zendesk.
+
+    Raised by the transport choke point.  Zendesk is import-only by locked
+    policy: the Guide instance is a public domain and its content is not
+    restorable, so nothing in this app may POST/PUT/PATCH/DELETE to it.
+    Approved content reaches Zendesk by a human copying it from the local
+    mirror into the Zendesk editor.
+
+    Seeing this exception means code tried to write — fix the caller, do
+    not relax the guard.
+    """
+
+    def __init__(self, method: str, url: str = ""):
+        self.method = str(method).upper()
+        self.url = url
+        host = ""
+        if url:
+            try:
+                from urllib.parse import urlsplit
+                host = urlsplit(url).netloc
+            except Exception:
+                host = ""
+        target = f" to {host}" if host else ""
+        super().__init__(
+            f"Zendesk transport is read-only: refused {self.method}{target}. "
+            f"Only GET is permitted — content must be copied into Zendesk "
+            f"by hand, never pushed by the app."
+        )
 
 
 class ZendeskClient(SourceClient):
@@ -266,12 +322,22 @@ class ZendeskClient(SourceClient):
 
     # ── internal ────────────────────────────────────────────
 
-    def _get(self, url_or_path: str) -> dict:
-        """Perform an authenticated GET request."""
-        if url_or_path.startswith("http"):
-            url = url_or_path
-        else:
-            url = f"{self._base}{url_or_path}"
+    def _build_request(self, url_or_path: str, *,
+                       method: str = "GET") -> urllib.request.Request:
+        """THE transport choke point — the only place a request is built.
+
+        Every outbound Zendesk request in the app passes through here, and
+        anything that is not a GET raises :class:`ZendeskWriteBlocked`.
+        That makes a future edit which tries to POST fail loudly at runtime
+        instead of quietly mutating a public, non-restorable Zendesk
+        instance.  The request carries no body, so there is nothing for a
+        write to send even if the method check were bypassed.
+        """
+        url = url_or_path if url_or_path.startswith("http") \
+            else f"{self._base}{url_or_path}"
+
+        if str(method).upper() != "GET":
+            raise ZendeskWriteBlocked(method, url)
 
         # Basic auth: email/token:{api_key}
         auth_str = f"{self._email}/token:{self._api_key}"
@@ -279,12 +345,23 @@ class ZendeskClient(SourceClient):
 
         req = urllib.request.Request(
             url,
+            method="GET",
             headers={
                 "Authorization": f"Basic {auth_b64}",
                 "Accept": "application/json",
                 "User-Agent": "AlmaInsights/1.0",
             },
         )
+
+        # Belt and braces: urllib infers POST from a non-None body, so a
+        # request that somehow acquired data would stop being a GET.
+        if req.get_method() != "GET" or req.data is not None:
+            raise ZendeskWriteBlocked(req.get_method(), url)
+        return req
+
+    def _get(self, url_or_path: str) -> dict:
+        """Perform an authenticated GET request (the only request kind)."""
+        req = self._build_request(url_or_path, method="GET")
 
         try:
             with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT) as resp:
@@ -322,34 +399,12 @@ class ZendeskClient(SourceClient):
                 break
         return items, (total if total is not None else len(items))
 
-    def _write(self, method: str, path: str, body: dict) -> dict:
-        """Authenticated POST/PUT with a JSON body (Help Center + macros)."""
-        url = f"{self._base}{path}"
-        auth_str = f"{self._email}/token:{self._api_key}"
-        auth_b64 = base64.b64encode(auth_str.encode()).decode()
-        data = json.dumps(body).encode("utf-8")
-        req = urllib.request.Request(
-            url, data=data, method=method,
-            headers={
-                "Authorization": f"Basic {auth_b64}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-                "User-Agent": "AlmaInsights/1.0",
-            },
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT) as resp:
-                raw = resp.read().decode("utf-8")
-                return json.loads(raw) if raw.strip() else {}
-        except urllib.error.HTTPError as exc:
-            if exc.code == 401:
-                raise ZendeskAuthError("Invalid Zendesk credentials") from exc
-            if exc.code == 429:
-                retry = int(exc.headers.get("Retry-After", "60"))
-                raise ZendeskRateLimitError(retry) from exc
-            raise
+    # NOTE: there is deliberately no write helper here.  A ``_write`` method
+    # and the create/update article + macro methods were removed under the
+    # one-way policy documented at the top of this module.  Do not add them
+    # back — Zendesk edits are made by a human in the Zendesk editor.
 
-    # ── Help Center articles ────────────────────────────────
+    # ── Help Center articles (read-only) ────────────────────
     # Base path under self._base (…/api/v2): /help_center/...
 
     def get_articles(self, *, locale: str = "en-us", per_page: int = 100) -> list[dict]:
@@ -396,26 +451,7 @@ class ZendeskClient(SourceClient):
             "categories", f"/help_center/{locale}/categories.json?per_page={per_page}",
             max_pages=max_pages)
 
-    def create_article(self, section_id, title: str, body: str, *,
-                       locale: str = "en-us") -> dict:
-        data = self._write(
-            "POST", f"/help_center/{locale}/sections/{section_id}/articles.json",
-            {"article": {"title": title, "body": body, "locale": locale}})
-        return data.get("article", {}) if isinstance(data, dict) else {}
-
-    def update_article(self, article_id, *, title: str | None = None,
-                       body: str | None = None, locale: str = "en-us") -> dict:
-        translation = {}
-        if title is not None:
-            translation["title"] = title
-        if body is not None:
-            translation["body"] = body
-        data = self._write(
-            "PUT", f"/help_center/articles/{article_id}/translations/{locale}.json",
-            {"translation": translation})
-        return data.get("translation", {}) if isinstance(data, dict) else {}
-
-    # ── Macros ──────────────────────────────────────────────
+    # ── Macros (read-only) ──────────────────────────────────
 
     def list_macros(self, *, per_page: int = 100) -> list[dict]:
         data = self._get(f"/macros.json?per_page={per_page}")
@@ -429,24 +465,6 @@ class ZendeskClient(SourceClient):
 
     def get_macro(self, macro_id) -> dict:
         data = self._get(f"/macros/{macro_id}.json")
-        return data.get("macro", {}) if isinstance(data, dict) else {}
-
-    def create_macro(self, name: str, actions: list[dict], *,
-                     description: str | None = None) -> dict:
-        macro = {"title": name, "actions": actions}
-        if description:
-            macro["description"] = description
-        data = self._write("POST", "/macros.json", {"macro": macro})
-        return data.get("macro", {}) if isinstance(data, dict) else {}
-
-    def update_macro(self, macro_id, *, name: str | None = None,
-                     actions: list[dict] | None = None) -> dict:
-        macro = {}
-        if name is not None:
-            macro["title"] = name
-        if actions is not None:
-            macro["actions"] = actions
-        data = self._write("PUT", f"/macros/{macro_id}.json", {"macro": macro})
         return data.get("macro", {}) if isinstance(data, dict) else {}
 
     @staticmethod
