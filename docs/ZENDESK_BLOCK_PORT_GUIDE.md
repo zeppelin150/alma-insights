@@ -720,14 +720,36 @@ Only after §17 acceptance is fully green. This step delivers **no code** — th
 cd <the alma-insights checkout>
 git status --porcelain > ~/alma_port_backup_2026-07-28/pre_reconcile_status.txt
 git fetch origin enablement-content-tabs
-git checkout enablement-content-tabs
+git reset --mixed FETCH_HEAD
 git status --porcelain
 git log --oneline -3
 ```
 
-**Expect:** `git status` is **clean apart from pre-existing Mac-local strays** and anything gitignored; `data/` never appears. Every one of the 85 files is now tracked at the branch tip — including `src/data/app_paths.py`, which used to appear here as a `??` line and no longer does. `git log` tip matches the zip's commit (`a8ead66`, or the descendant you authenticated structurally in §4.1).
+**Why `reset --mixed FETCH_HEAD` and not `checkout`.** `git fetch origin <branch>`
+moves `FETCH_HEAD` and the remote-tracking ref **only** — it does not move your
+local branch. So a `git checkout enablement-content-tabs` here is a **no-op**
+when the Mac already has that local branch at the `d27eb3e` baseline (the
+expected state per P1): HEAD would stay at the baseline and `git status` would
+show all 85 files as changes, looking like a catastrophic failure at the very
+last step of a successful port. And if no local branch exists, the DWIM
+checkout has to replace 42 untracked files and can abort outright.
 
-**If `git checkout` reports it would overwrite local files, STOP.** The tree is NOT identical to the snapshot and the post-sync compare in 4.5 was wrong. Do not force anything.
+`git reset --mixed FETCH_HEAD` moves the branch pointer **and the index** to the
+fetched tip **without touching a single working-tree byte**. That is exactly
+right here: §4.5 already proved the bytes are correct, so this step is pure
+bookkeeping — it tells git what you already know.
+
+**Expect:** `git status` is **clean apart from pre-existing Mac-local strays**
+and anything gitignored; `data/` never appears. Every one of the 85 files is now
+tracked at the branch tip — including `src/data/app_paths.py`, which used to
+appear here as a `??` line and no longer does. `git log` tip matches the zip's
+commit (the branch tip you downloaded in §3).
+
+**If `git status` is NOT clean — if it lists modified tracked files under `src/`,
+`web/` or `tests/` — STOP.** The tree is not identical to the snapshot and the
+post-sync compare in 4.5 missed something. Do not force anything, do not commit,
+and do not `git checkout -- .`: report the list. (Untracked `??` strays that were
+already on the Mac before the port are fine and expected.)
 
 Leave the `pre-zendesk-port-2026-07-28` branch in place — it is the audit trail. **Never force-push anything from the Mac.**
 
