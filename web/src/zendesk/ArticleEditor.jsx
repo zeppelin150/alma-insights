@@ -5,7 +5,11 @@
 // the copy affordance (primary = drafted content, overflow = the exact
 // stored bytes; Python re-reads the DB at click time either way) and the
 // open-revision links. The RENDERED body is the primary review surface —
-// the raw HTML source is a collapsed disclosure the app renders beneath it.
+// the raw HTML source is a collapsed disclosure the app renders beneath it,
+// reachable at any time from the "View exact source" control that sits in
+// this top bar beside the copy buttons (F5: reaching the exact bytes must
+// not depend on the markup notice, which is silent for content-HIDING
+// markup — it reports what was removed, never what was kept but unpainted).
 import ArticleBody from "./ArticleBody.jsx";
 import BodyEditForm from "./BodyEditForm.jsx";
 import CopyControls from "./CopyControls.jsx";
@@ -17,7 +21,7 @@ import { COPY_DRAFTED_FIELD } from "./shape.js";
 const SECONDARY_COPIES = [
   ["title", "Copy title", "Copy the exact stored title"],
   ["body_html", "Copy HTML source",
-   "Copy the exact stored HTML source as plain text — expand “HTML source” below to read those bytes first"],
+   "Copy the exact stored HTML source as plain text — use “View exact source” to read those bytes first"],
   ["body_rich", "Copy rich text",
    "Copy as rich text — pasting into the Zendesk editor keeps formatting"],
 ];
@@ -60,6 +64,7 @@ function SetRow({ label, children, muted }) {
 export default function ArticleEditor({
   article, onBack, onCopy, onOpenRevision,
   bodyEditing, onEditBody, onCancelBodyEdit, onSaveBody, busy, copyBusy,
+  onShowSource, sourceOpen,
 }) {
   if (!article) return null;
   const revisions = Array.isArray(article.revisions) ? article.revisions : [];
@@ -98,7 +103,8 @@ export default function ArticleEditor({
             primaryTitle="Copy the drafted content — the article as written, ready to paste into the Zendesk editor"
             items={SECONDARY_COPIES.map(([field, label, title]) =>
               ({ field, label, title }))}
-            onCopy={onCopy} pending={!!copyBusy} />
+            onCopy={onCopy} pending={!!copyBusy}
+            onShowSource={onShowSource} sourceOpen={!!sourceOpen} />
         </div>
         <input className="zd-title-input" value={article.title} readOnly />
         <div className="zd-ed-toolbar">
@@ -130,8 +136,10 @@ export default function ArticleEditor({
             <div className="zd-media-note">
               Rendered preview — how this article lands for an end user in
               Zendesk, custom classes and all. The frame is sandboxed and
-              scripts and event handlers are removed. The exact stored bytes
-              are under “HTML source” below.
+              scripts and event handlers are removed. Anything the stored
+              markup hides from a reader is marked in the preview, but a
+              preview is never the authority: use “View exact source” for
+              every character, and read it before you copy.
             </div>
           </>
         )}

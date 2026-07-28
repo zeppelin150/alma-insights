@@ -18,6 +18,444 @@ from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
 logger = logging.getLogger("alma.agent_chat")
 
 
+# ── review-honesty helpers (the in-chat approval panel) ──────────────
+#
+# The panel diffs TEXT, but publish ships ``enablement_store.publish_body``
+# (HTML). When a draft carries ``content_html`` the reviewed text is a
+# down-conversion of those bytes (``enablement_store.review_text``) and the
+# down-conversion is LOSSY: ``html_to_markdown`` drops script/style bodies and
+# every attribute except href. Before 2026-07-26 the panel diffed the markdown
+# COLUMN instead, so an imported card's hostile ``content_html`` (a <script>
+# block, an onerror handler pointing at evil.example) was invisible on the only
+# surface gating the push, yet went out over the wire verbatim.
+#
+# The rule this encodes: the reviewed representation must be complete with
+# respect to what is sent, or the incompleteness must be NAMED on screen. These
+# helpers compute that name.
+#
+# 2026-07-27 — THE SECOND FIX, and the more important one. The first version of
+# this scanner DROPPED a finding whose every word already appeared in the
+# reviewed text ("it was accounted for"). The draft author writes the prose AND
+# the payload, so seeding the prose with the payload's own tokens
+# (``<p>fetch https evil.example/x document.cookie</p>``) emptied the finding
+# list and the notice went silent while the <script> still shipped. A heuristic
+# that decides FOR the human what they do not need to see, over inputs the
+# adversary controls, is not a control at all.
+#
+# The predicate that replaced it is PROVABLE and author-independent:
+# ``is_exact_preimage`` re-runs ``publish_body`` over the reviewed text and
+# compares bytes. Either the shipped bytes ARE a pure function of what was on
+# screen (nothing can hide) or they are not (say so — always). The gap list
+# below is now DETAIL ONLY: it enriches a notice whose presence it can never
+# decide, and no listing rule may suppress anything.
+
+_OPAQUE_TAGS = frozenset({
+    "script", "style", "noscript", "template", "head",
+    "iframe", "frame", "frameset", "object", "embed", "applet",
+    "svg", "math", "form", "meta", "link", "base",
+})
+
+# Attributes whose value is a payload (code / a fetched URL) rather than prose.
+# ``html_to_markdown`` keeps NONE of these except ``href``.
+_PAYLOAD_ATTRS = frozenset({
+    "src", "srcdoc", "srcset", "data", "action", "formaction", "poster",
+    "background", "xlink:href", "href", "style", "content", "value",
+})
+
+# Attributes that carry prose a human is meant to read. The projection drops
+# them like any other attribute, so hidden text can ride in one. Machine
+# identifiers (class / id / data-*) are deliberately NOT here: expand_blocks
+# generates them by the dozen and naming them would bury the real findings.
+_TEXT_ATTRS = frozenset({"title", "alt", "aria-label", "placeholder", "summary"})
+
+_WORD_RE = None      # lazily compiled (module import stays import-light)
+_ACTIVE_CSS = None   # ditto — CSS that can fetch or execute, not just style
+_GAP_LIMIT = 6       # how many distinct gaps we name before "+N more"
+_SNIPPET = 90        # per-gap payload budget, characters
+
+
+def _words(text: str) -> set:
+    """Lowercased word-ish tokens (>=3 chars).
+
+    Used ONLY to ADD a finding (visible text of the body that never reached the
+    reviewed text). It must never be used to remove one — that was the forgeable
+    heuristic this module was rebuilt to delete.
+    """
+    global _WORD_RE
+    if _WORD_RE is None:
+        import re
+        _WORD_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._'/-]{2,}")
+    return {t.lower().strip("._'-/") for t in _WORD_RE.findall(text or "")}
+
+
+def _is_active_css(value: str) -> bool:
+    """True for inline CSS that can fetch or execute — not merely decorate."""
+    global _ACTIVE_CSS
+    if _ACTIVE_CSS is None:
+        import re
+        _ACTIVE_CSS = re.compile(
+            r"url\s*\(|expression\s*\(|javascript\s*:|@import|behavior\s*:", re.I)
+    return bool(_ACTIVE_CSS.search(value or ""))
+
+
+def _clip(value: str, limit: int = _SNIPPET) -> str:
+    """One-line, length-capped rendering of a payload for the notice."""
+    flat = " ".join((value or "").split())
+    return flat if len(flat) <= limit else flat[: limit - 1] + "…"
+
+
+class _PublishScan:
+    """Collects the parts of a publish body a markdown projection cannot show.
+
+    Not a sanitizer and not a security control — it never edits the bytes. It
+    only answers "what is in here that the reviewer will not see", so the panel
+    can say so out loud.
+    """
+
+    def __init__(self):
+        self.findings: list[tuple[str, str]] = []   # (label, payload) — material
+        self.styling: list[tuple[str, str]] = []    # presentational-only drops
+        self.text_words: set = set()                # visible (non-opaque) text
+        self._opaque: list[str] = []
+        self._opaque_text: list[str] = []
+
+    def scan(self, html: str) -> None:
+        from html.parser import HTMLParser
+
+        outer = self
+
+        class _P(HTMLParser):
+            def handle_starttag(self, tag, attrs):
+                outer._starttag(tag, attrs)
+
+            def handle_startendtag(self, tag, attrs):
+                outer._starttag(tag, attrs, self_closing=True)
+
+            def handle_endtag(self, tag):
+                outer._endtag(tag)
+
+            def handle_data(self, data):
+                outer._data(data)
+
+        p = _P(convert_charrefs=True)
+        p.feed(html or "")
+        p.close()
+        outer._flush_opaque()
+
+    # ── parser hooks ────────────────────────────────────────────────
+
+    def _starttag(self, tag, attrs, self_closing: bool = False) -> None:
+        tag = (tag or "").lower()
+        for raw_name, raw_value in attrs or []:
+            name = (raw_name or "").lower()
+            value = raw_value or ""
+            if name.startswith("on"):
+                self.findings.append((f"<{tag} {name}> handler", value))
+            elif name == "style" and value.strip():
+                # Inline CSS is presentational UNLESS it can fetch or execute.
+                bucket = (self.findings if _is_active_css(value)
+                          else self.styling)
+                bucket.append((f"<{tag} style>", value))
+            elif name in _PAYLOAD_ATTRS or name in _TEXT_ATTRS:
+                if value.strip():
+                    self.findings.append((f"<{tag} {name}>", value))
+        if tag in _OPAQUE_TAGS:
+            if self_closing or tag in ("meta", "link", "base"):
+                self.findings.append((f"<{tag}> element", ""))
+            else:
+                self._flush_opaque()
+                self._opaque.append(tag)
+
+    def _endtag(self, tag) -> None:
+        tag = (tag or "").lower()
+        if self._opaque and self._opaque[-1] == tag:
+            self._flush_opaque()
+
+    def _data(self, data) -> None:
+        if self._opaque:
+            self._opaque_text.append(data or "")
+        else:
+            self.text_words |= _words(data)
+
+    def _flush_opaque(self) -> None:
+        if not self._opaque:
+            return
+        tag = self._opaque.pop()
+        body = "".join(self._opaque_text)
+        self._opaque_text = []
+        self.findings.append((f"<{tag}> content", body))
+
+
+def is_exact_preimage(reviewed: str, body: str) -> bool:
+    """True when ``body`` is exactly what publishing ``reviewed`` would produce.
+
+    Verification, not a flag: when the shipped bytes are a pure function of the
+    text on screen, the operator has seen everything that can ship — nothing can
+    hide in markup the composition generates deterministically from their own
+    words. Only when this is False does the projection have room to drop things.
+    """
+    try:
+        from src.data.enablement_store import publish_body
+        return publish_body({"content": reviewed or ""}) == (body or "")
+    except Exception:  # noqa: BLE001 — cannot prove it → treat as lossy
+        return False
+
+
+def is_projection_lossy(reviewed: str, body: str) -> bool:
+    """THE predicate the notice fires on. Provable, and author-independent.
+
+    True when there are bytes to send and they are NOT provably reconstructible
+    from the text the operator reviewed. Its only inputs are the two byte
+    strings and ``publish_body`` itself; nothing a draft author can write into
+    the prose changes the answer, which is exactly what the deleted word-token
+    heuristic could not say for itself.
+    """
+    if not (body or "").strip():
+        return False
+    return not is_exact_preimage(reviewed, body)
+
+
+def publish_gaps(reviewed: str, body: str) -> tuple[list[str], list[str]]:
+    """What ``body`` (the shipped bytes) carries that ``reviewed`` omits.
+
+    Returns ``(material, presentational)`` phrase lists — material is anything
+    that fetches, executes, or is readable content the reviewer never saw;
+    presentational is inline styling that only changes how the card looks.
+
+    DETAIL ONLY. This list makes a notice specific; it does NOT decide whether
+    one appears (see :func:`is_projection_lossy`), and it drops nothing. The
+    previous version skipped a finding whose words already appeared in the
+    reviewed text, which let an author who controls both the prose and the
+    payload empty this list on demand. An extra ``<a href>`` line is noise; a
+    missing ``<script>`` line was an exploit.
+    """
+    if not is_projection_lossy(reviewed, body):
+        return [], []
+    scan = _PublishScan()
+    try:
+        scan.scan(body)
+    except Exception:  # noqa: BLE001 — an unparsable body is itself unreviewed
+        return (["the HTML that will be sent could not be parsed for review, "
+                 "so the text above may not represent it"], [])
+    material: list[str] = []
+    for label, payload in scan.findings:
+        flat = " ".join((payload or "").split())
+        material.append(f"{label} {_clip(flat)}" if flat else label)
+    # Additive only: visible text of the shipped body that never reached the
+    # reviewed text. Seeding the prose can empty THIS line and nothing else.
+    missing = sorted(scan.text_words - _words(reviewed))
+    if missing:
+        material.append("text not shown above: " + _clip(", ".join(missing)))
+    styling = [f"{label} {_clip(payload)}" for label, payload in scan.styling]
+    return _dedupe(material), _dedupe(styling)
+
+
+def _dedupe(items: list[str]) -> list[str]:
+    """Order-preserving de-duplication."""
+    out, seen = [], set()
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            out.append(item)
+    return out
+
+
+def _listed(items: list[str]) -> str:
+    """Up to ``_GAP_LIMIT`` phrases, with an honest '+N more' tail."""
+    shown = items[:_GAP_LIMIT]
+    more = len(items) - len(shown)
+    return "; ".join(shown) + (f" (+{more} more)" if more > 0 else "")
+
+
+LOSSY_NOTICE = (
+    "The text above is a DOWN-CONVERSION of the HTML that will be sent, not "
+    "the bytes themselves, and it is not provably complete: republishing the "
+    "text above would not reproduce what ships. Open \"Exact bytes that will "
+    "be sent\" below and read them before approving.")
+
+
+def review_notice(reviewed: str, body: str, *, card_id: str = "",
+                  has_baseline: bool = True) -> str:
+    """The panel's honesty line — '' only when the diff above needs no caveat.
+
+    The FIRST caveat is unconditional and carries the whole guarantee: whenever
+    ``is_projection_lossy`` holds, ``LOSSY_NOTICE`` is emitted, full stop. No
+    scanner result, no wording in the draft, and no author-supplied prose can
+    suppress it — the only thing that silences this notice is
+    ``is_exact_preimage`` being PROVED, i.e. the bytes really are a pure
+    function of the reviewed text. (Before 2026-07-27 the notice's existence
+    depended on the gap list being non-empty, and the gap list was forgeable.)
+
+    The rest are refinements that make the caveat specific:
+
+    * what the projection dropped — script bodies, handlers, attribute
+      payloads, unseen text (the loud list; this is what hid a <script> and an
+      evil.example fetch);
+    * styling that ships and the text cannot show (quiet, but not silent);
+    * the draft replaces a live card but no local copy of that card exists, so
+      the diff renders a replacement as pure additions. (The missing baseline
+      is a known, owner-DEFERRED audit finding — not fixed here, but not
+      allowed to look fixed either.)
+    """
+    parts = []
+    if is_projection_lossy(reviewed, body):
+        parts.append(LOSSY_NOTICE)
+    material, styling = publish_gaps(reviewed, body)
+    if material:
+        parts.append(
+            "NOT SHOWN ABOVE but WILL be sent to Guru — " + _listed(material)
+            + ". The review text is a markdown down-conversion of the HTML "
+              "that ships; anything listed here has no representation in it.")
+    if styling:
+        parts.append("Inline styling also ships and the text cannot show it: "
+                     + _listed(styling) + ".")
+    if card_id and not has_baseline:
+        parts.append(
+            f"No local copy of live card {card_id} is available, so this diff "
+            "shows additions only — it is not a true before/after of the "
+            "card this publish will REPLACE.")
+    return " ".join(parts)
+
+
+# ── the approval binding (TIME-OF-CHECK / TIME-OF-USE) ───────────────
+#
+# 2026-07-27 — THE THIRD FIX, and the one the previous two made visible.
+#
+# Rounds one and two made the panel tell the truth about the bytes it was
+# rendering. Both were verified. Neither was load-bearing, because THE
+# APPROVAL WAS BOUND TO A DRAFT ID, NOT TO THE BYTES. Traced end to end with
+# a spy Guru client: the panel rendered
+# ``<p>Q3 billing runbook. Escalate to the RCM lead.</p>`` with an empty
+# notice and one diff row; ``enablement_store.update_draft_content`` — exactly
+# what the ``revise_draft`` chat tool calls — then mutated the row with no
+# lock, no gate and no status change even though the draft had a pending
+# push; the operator's click published the NEW bytes. They approved what the
+# panel showed and something else shipped.
+#
+# It is REACHABLE by the model: ``revise_draft`` is a registered chat tool, so
+# a prompt-injected Renn (source docs, ticket exports, Asana comments and Guru
+# cards are all in the threat model) can revise a draft after the human has
+# read the panel.
+#
+# The design is the Zendesk lane's, not a new one: ``zendesk_web``'s
+# ``_record_review`` / ``_review_covers`` bind a clipboard release to a
+# recompute-from-row content hash and refuse when the row moved under the
+# operator. Here the same shape guards a live WRITE:
+#
+#   * ``pending_drafts`` renders a draft  -> record the fingerprint of exactly
+#     what it put on screen;
+#   * ``approve_draft`` -> RECOMPUTE the fingerprint FROM THE ROW and refuse
+#     unless it still matches.
+#
+# The recompute is the whole point. A client-supplied hash would only move the
+# forgery to the QWebChannel, where any page script can call any slot.
+#
+# Fail closed on every branch: no recorded review, a publish body that cannot
+# be produced, a vanished row, or any mismatch means NOTHING is published AND
+# no sign-off is recorded — the refusal happens BEFORE
+# ``enablement_store.approve_draft``, because recording a sign-off and then
+# refusing would leave ``approved_at`` set and the very next
+# ``_push_guru_draft_impl`` from the model would sail through the M5 gate.
+
+STALE_REVIEW_REFUSAL = (
+    "This draft changed after you reviewed it — nothing was published. "
+    "Re-open the review panel and read the new content before approving.")
+
+NO_REVIEW_REFUSAL = (
+    "This draft has not been reviewed on this panel — nothing was published. "
+    "Open the review panel and read what will be sent before approving.")
+
+UNREADABLE_BODY_REFUSAL = (
+    "This draft's publish body could not be read, so what would be sent "
+    "cannot be verified — nothing was published.")
+
+MISSING_DRAFT_REFUSAL = (
+    "This draft no longer exists — nothing was published.")
+
+# ── the native confirm, and the one-successful-publish rule ──────────
+#
+# 2026-07-27 — THE FOURTH AND FIFTH FIXES.
+#
+# (4) THERE WAS NO NATIVE CONFIRM ON THIS PATH AT ALL. ``refreshDrafts()`` and
+#     ``approveDraft()`` are both page-callable QWebChannel slots, and the
+#     QWebChannel is the trust boundary: a probe published hostile bytes to the
+#     LIVE Guru instance from those two calls alone, with every signal
+#     discarded. The Zendesk lane documented this exact defect class and closed
+#     it with a native dialog that displays the exact bytes; that lane only
+#     writes to the CLIPBOARD. This one performs the real remote write, and it
+#     had nothing. A Qt dialog is the only channel Python can prove a human
+#     perceived, so the publish now takes one — showing the bytes UNCOLLAPSED
+#     and the resolved TARGET, defaulting to Cancel — and FAILS CLOSED when no
+#     dialog host was injected.
+#
+# (5) A FAILED PUBLISH LEFT A PERMANENT PRE-AUTHORIZATION. ``approved_at`` was
+#     written before the push and never rolled back, and ``clear_push_request``
+#     ran unconditionally afterwards, so a transient 401 left the gate open AND
+#     removed the draft from the review panel. The sign-off is now scoped and
+#     single-use (``enablement_store.record_approval`` /
+#     ``approval_open`` / ``revoke_approval``) and is spent ONLY by a publish
+#     that actually succeeded; anything else re-arms the review request with the
+#     failure reason attached.
+
+NO_CONFIRM_HOST_REFUSAL = (
+    "This build cannot show the native publish confirmation, so nothing was "
+    "published. Publishing to Guru requires the confirmation dialog — use the "
+    "Workbench, or restart the app.")
+
+DECLINED_REFUSAL = (
+    "You cancelled the publish confirmation — nothing was published.")
+
+PUBLISH_FAILED_REFUSAL = (
+    "The publish did not succeed, so your sign-off was NOT used and nothing "
+    "reached Guru. The draft is back in this panel awaiting approval. Reason: "
+    "{reason}")
+
+
+def _target_label(card_id, target) -> str:
+    """One human sentence naming WHERE this publish lands.
+
+    On the panel and in the native confirm, because ``publish_draft``'s branch
+    is decided entirely by these three ids and none of them were previously
+    visible on any approval surface: a non-empty ``card_id`` OVERWRITES that
+    live card, an empty one CREATES a card in that collection (and folder, if
+    one is set).
+    """
+    t = target or {}
+    collection = str(t.get("collection_id") or "").strip()
+    folder = str(t.get("folder_id") or "").strip()
+    if str(card_id or "").strip():
+        return f"OVERWRITE the live Guru card {str(card_id).strip()}"
+    where = f"collection {collection}" if collection else "the default collection"
+    if folder:
+        where += f", folder {folder}"
+    return f"CREATE a new Guru card in {where}"
+
+
+def approval_fingerprint(title, card_id, body, target=None) -> str:
+    """Identity of everything ONE approval commits to — bytes AND destination.
+
+    Thin re-export of :func:`src.data.enablement_store.approval_fingerprint`.
+    The math lives in the data layer because the M5 gate
+    (``_push_guru_draft_impl``) has to verify the same identity and must not
+    import a service; a second definition here is exactly the drift that let
+    the publish body and the previewed body disagree for months. Imported
+    lazily so this module stays import-light.
+    """
+    from src.data.enablement_store import approval_fingerprint as _fp
+    return _fp(title, card_id, body, target)
+
+
+def draft_fingerprint(draft, *, collection_id=None, folder_id=None) -> str | None:
+    """``approval_fingerprint`` RECOMPUTED FROM A DRAFT ROW (re-export).
+
+    ``None`` when the publish body cannot be produced — an unreadable body is
+    never approvable, and ``None`` never compares equal to a recorded
+    fingerprint, so every caller fails closed without a special case.
+    """
+    from src.data.enablement_store import draft_fingerprint as _fp
+    return _fp(draft, collection_id=collection_id, folder_id=folder_id)
+
+
 class DriveListWorker(QThread):
     """Off-thread Drive folder lister for the M3 picker (the GoogleOAuthWorker
     pattern). DriveReader's HTTP calls block, so they MUST NOT run inside the
@@ -439,10 +877,19 @@ class AgentChatController(QObject):
     # They still load in-process into React for the picker confirmation.
     guruTargetsListed = Signal(str)
 
-    def __init__(self, db=None, demo: bool = False, parent=None):
+    def __init__(self, db=None, demo: bool = False, parent=None,
+                 confirm_host=None):
         super().__init__(parent)
         self.db = db
         self.demo = demo
+        # THE NATIVE PUBLISH GATE. Duck-typed: an object with
+        # ``confirm_publish(payload) -> bool`` that opens a real Qt dialog
+        # showing the exact bytes and the resolved target (see
+        # ``src.ui.web.chat_bridge.PublishConfirmHost``). Injected from the UI
+        # layer because src/services must not import src/ui — and ABSENT MEANS
+        # NO PUBLISH: approve_draft refuses rather than writing to Guru through
+        # a channel no human was proved to have seen.
+        self._confirm_host = confirm_host
         self._engine = None
         self._warm_bridge = None
         self._claude_client = None
@@ -477,6 +924,12 @@ class AgentChatController(QObject):
         # idle, else appends here; one is drained on each ``busy_changed(False)``.
         # (Infra for the M3 picker→resolve path; landed + unit-tested now.)
         self._pending_triggers: list[str] = []
+        # THE APPROVAL LEDGER — draft_id -> the ``approval_fingerprint`` of
+        # exactly what ``pending_drafts`` last put on screen for it. Written
+        # ONLY by pending_drafts (the render), read ONLY by approve_draft (the
+        # click), and consumed there so one review authorizes one publish. A
+        # draft id is not an authorization; this is.
+        self._draft_reviews: dict[int, str] = {}
         # M5 one-shot "here's your day" greeting, ported to the Agent surface
         # (the surface the operator actually chats on).
         self._greeting_sent = False
@@ -489,6 +942,13 @@ class AgentChatController(QObject):
     @property
     def engine(self):
         return self._engine
+
+    def set_confirm_host(self, host) -> None:
+        """Inject the native publish-confirmation host (UI layer, main thread).
+
+        Called once from ``MainWindow`` after the page exists. Until then — and
+        in any build where it never happens — ``approve_draft`` fails closed."""
+        self._confirm_host = host
 
     @property
     def voice(self):
@@ -1370,10 +1830,47 @@ class AgentChatController(QObject):
 
     # ── tool-edit review / sign-off (M5) ────────────────────────────
 
-    def pending_drafts(self) -> list[dict]:
+    def pending_drafts(self, *, bind: bool = True) -> list[dict]:
         """Card drafts awaiting human sign-off before publishing to Guru (M5),
         each with a precomputed red/green diff + offline pre-flight checks for the
-        in-thread review panel. Best-effort, read-only."""
+        in-thread review panel. Best-effort, read-only.
+
+        The reviewed payload is derived from the PUBLISH BODY, never from the
+        markdown column: ``enablement_store.review_text(draft)`` is the diff
+        input (the reviewer-facing projection of ``publish_body(draft)``, which
+        is the exact byte string ``publish_draft`` sends). Where that projection
+        is lossy — script bodies, event handlers, attribute payloads — the item
+        carries a ``notice`` naming what ships unseen, because this panel is the
+        gate: ``require_approval`` defaults to 1 for every draft, so every
+        chat-initiated push passes through here.
+
+        Every item ALSO carries ``publish_body``: the exact byte string that
+        will be sent, unconditionally, for every draft shape. The panel renders
+        it as escaped text behind an always-present disclosure. No detector
+        decides whether the operator may read what they are about to publish —
+        the notice tells them they should, the bytes are there either way.
+
+        RENDERING A DRAFT FOR A HUMAN ALSO BINDS ITS APPROVAL (2026-07-27).
+        What this call puts on screen is fingerprinted into
+        ``self._draft_reviews``, and ``approve_draft`` refuses to publish
+        anything whose fingerprint, recomputed from the row at click time, no
+        longer matches. A draft whose publish body could not be read has its
+        binding DROPPED rather than recorded, so it cannot be approved at all.
+
+        ``bind=False`` IS WHAT MAKES THAT BINDING REAL (the same day, hours
+        later). ``ChatBridge._on_busy`` calls the draft poll on every
+        ``busy_changed(False)`` — i.e. at the end of EVERY Renn turn — and the
+        poll called this method, which silently RE-MINTED the fingerprint. Since
+        ``revise_draft`` runs inside a turn, the very TOCTOU this binding exists
+        to refuse was guaranteed to be re-authorized instead: traced, the
+        operator's approve then shipped ``<script>``-bearing bytes they never
+        saw, and removing only the poll turned the same run into
+        ``draft_changed_after_review`` with nothing sent. So the background poll
+        passes ``bind=False``: it refreshes the LIST, and an existing binding is
+        never silently replaced. A draft whose bytes moved comes back with
+        ``review_state='changed'`` — the panel says so and disables approval
+        until a human re-opens the review.
+        """
         conn = self._open_conn(readonly=True)
         if conn is None:
             return []
@@ -1382,45 +1879,289 @@ class AgentChatController(QObject):
             from src.data.text_diff import diff_rows, change_count
             out = []
             for d in store.list_pending_approvals(conn):
-                proposed = d.get("content") or ""
-                rows = diff_rows(self._current_card_md(conn, d.get("card_id") or ""), proposed)
-                out.append({
-                    "draft_id": d.get("id"), "title": d.get("title") or "Untitled",
-                    "card_id": d.get("card_id") or "", "status": d.get("status"),
-                    "diff": rows, "change_count": change_count(rows),
-                    "checks": self._draft_checks(proposed, d.get("card_id") or ""),
-                })
+                card_id = d.get("card_id") or ""
+                target = store.push_target(d)
+                item = {"draft_id": d.get("id"),
+                        "title": d.get("title") or "Untitled",
+                        "card_id": card_id, "status": d.get("status"),
+                        # WHERE THIS GOES, on the panel. The approval binds the
+                        # target, so the operator has to be able to see it: a
+                        # re-requested push at ATTACKER_COLL/ATTACKER_FOLD used
+                        # to be invisible here while remaining approvable.
+                        "target": dict(target, card_id=card_id),
+                        "target_label": _target_label(card_id, target),
+                        # Why this draft came back, when a publish failed.
+                        "failure": store.push_failure(d)}
+                # The exact bytes FIRST and on their own, so the operator's
+                # access to what will be sent survives a failure of everything
+                # downstream (projection, diff, checks, scanner).
+                try:
+                    body = store.publish_body(d)      # the exact bytes that ship
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("draft %s: publish body unavailable: %s",
+                                   d.get("id"), exc)
+                    body = None
+                item["publish_body"] = body or ""
+                item["publish_body_available"] = body is not None
+                # BIND THE APPROVAL TO THIS WHOLE ACT, before anything that can
+                # fail. Bound to what was rendered — title, target card,
+                # collection/folder and the exact publish body — not to the
+                # draft id, and never re-minted by a background refresh.
+                item["review_state"] = self._bind_review(d, body, bind=bind)
+                try:
+                    if body is None:
+                        raise RuntimeError("publish body unavailable")
+                    reviewed = store.review_text(d)   # their reviewer-facing text
+                    baseline, has_baseline = self._current_card_baseline(conn, card_id)
+                    rows = diff_rows(baseline, reviewed)
+                    item.update({
+                        "diff": rows, "change_count": change_count(rows),
+                        "checks": self._draft_checks(reviewed, card_id,
+                                                     publish_body=body),
+                        "notice": review_notice(reviewed, body, card_id=card_id,
+                                                has_baseline=has_baseline),
+                    })
+                except Exception as exc:  # noqa: BLE001
+                    # One draft that cannot be projected must not blank the whole
+                    # panel (that would hide pending pushes), and must never look
+                    # like a clean, reviewed draft either.
+                    logger.warning("draft %s could not be prepared for review: %s",
+                                   d.get("id"), exc)
+                    item.update({
+                        "diff": [], "change_count": 0, "checks": [],
+                        "notice": "This draft could NOT be prepared for review — "
+                                  "nothing below represents what would be sent. "
+                                  "Do not approve it; open it in the Workbench.",
+                    })
+                out.append(item)
             return out
         except Exception:  # noqa: BLE001 — best-effort, never fatal
             return []
         finally:
             conn.close()
 
+    def _bind_review(self, draft, body, *, bind: bool = True) -> str:
+        """Record what ``pending_drafts`` just rendered — and say what state the
+        review is in. Returns one of:
+
+        ``bound``       a live binding matches exactly what is on screen;
+        ``changed``     a binding existed and the row has since moved, so this
+                        render is NOT authorized — approval is refused until a
+                        human re-opens the review (``bind=True``);
+        ``unreviewed``  no binding (a background refresh never mints one);
+        ``unavailable`` the publish body could not be produced.
+
+        ``body is None`` DROPS any existing binding instead of recording one: a
+        draft whose bytes cannot be shown must not be approvable, and dropping
+        can only ever make an approval harder.
+
+        AN EXISTING BINDING IS NEVER SILENTLY REPLACED. That was the whole
+        defect: the end-of-turn poll re-minted, so a revision made INSIDE the
+        turn — by a prompt-injected Renn calling ``revise_draft`` — was
+        re-authorized before the operator's finger came off the button. When
+        the bytes moved, the old binding is dropped (never spendable) and the
+        panel is told ``changed``; only a human-initiated re-open mints again.
+        """
+        try:
+            did = int(draft.get("id"))
+        except (TypeError, ValueError):
+            return "unavailable"
+        if body is None:
+            self._draft_reviews.pop(did, None)
+            return "unavailable"
+        from src.data.enablement_store import push_target
+        current = approval_fingerprint(
+            draft.get("title") or "", draft.get("card_id") or "", body,
+            push_target(draft))
+        previous = self._draft_reviews.get(did)
+        if previous == current:
+            return "bound"
+        if previous is not None:
+            if not bind:
+                # OBSERVE, DO NOT TOUCH. A background refresh neither mints a
+                # binding nor spends one: it reports that the row moved, and
+                # ``approve_draft`` — which recomputes from the row itself —
+                # refuses with the specific ``draft_changed_after_review``
+                # rather than the generic "you never reviewed this".
+                return "changed"
+            # A human re-opened the review, so they ARE looking at these bytes
+            # now — replace the binding, and still say it moved since last time.
+            self._draft_reviews[did] = current
+            return "rebound"
+        if not bind:
+            return "unreviewed"
+        self._draft_reviews[did] = current
+        return "bound"
+
+    def _refuse_approval(self, draft_id, error: str, message: str) -> dict:
+        """One refusal shape. ``published`` is stated explicitly so no caller
+        can read a missing key as success."""
+        logger.warning("approve_draft refused for draft %s: %s", draft_id, error)
+        return {"ok": False, "draft_id": draft_id, "error": error,
+                "message": message, "published": False, "refused": True}
+
     def approve_draft(self, draft_id) -> dict:
-        """Record the operator's sign-off, then complete the (now-gated-open) push
-        to Guru using the stored target. Returns the push result."""
+        """Publish the draft the operator reviewed — or refuse, and publish
+        nothing.
+
+        THE BINDING IS CHECKED FIRST, AND IT IS RECOMPUTED FROM THE ROW.
+        ``pending_drafts`` fingerprinted exactly what it rendered; this reads
+        the row as it stands NOW, fingerprints it again, and requires the two
+        to match. Anything that moved the draft in between — most concretely
+        ``update_draft_content``, which the ``revise_draft`` chat tool calls
+        with no lock, no gate and no status change — refuses here. Nothing
+        client-supplied enters the comparison, so there is no value a page
+        script or a prompt-injected Renn can forge to satisfy it.
+
+        The check runs BEFORE any sign-off is recorded. Recording it first and
+        refusing afterwards would leave ``approved_at`` set, and the M5 gate in
+        ``_push_guru_draft_impl`` would then let the model's own next push
+        through unattended.
+
+        THEN THE NATIVE CONFIRM. The binding proves the bytes did not move; it
+        cannot prove a human was ever there, because ``approveDraft`` is a
+        page-callable QWebChannel slot and a page script can call it (and
+        ``refreshDrafts`` to mint the binding first). A Qt dialog — unreachable
+        from Chromium — showing the exact bytes and the resolved target is the
+        only channel that proves perception, so it runs before any state
+        changes, defaults to Cancel, and its absence REFUSES.
+
+        THEN, AND ONLY THEN, THE SIGN-OFF — and it is spent by a publish that
+        SUCCEEDED, or not at all. Every other outcome (the Guru client raising,
+        an ``ok:false`` result, ``publish_draft`` itself blowing up) calls
+        ``revoke_approval``: ``approved_at`` goes back to NULL, the claim is
+        destroyed, the push request is re-armed with the failure reason, and the
+        draft reappears on this panel. Before that, a single transient 401 left
+        a permanent pre-authorization AND deleted the draft from the panel, so
+        the model's own next push sailed through the M5 gate unattended.
+
+        A successful check CONSUMES the binding: one review authorizes one
+        publish. The bridge refreshes the panel after every approve, so a
+        legitimate retry simply re-renders and re-binds.
+        """
+        try:
+            did = int(draft_id)
+        except (TypeError, ValueError):
+            return self._refuse_approval(draft_id, "draft_id_required",
+                                         NO_REVIEW_REFUSAL)
         conn = self._open_conn(readonly=False)
         if conn is None:
-            return {"ok": False, "error": "no_db"}
+            return {"ok": False, "draft_id": did, "error": "no_db",
+                    "message": UNREADABLE_BODY_REFUSAL, "published": False,
+                    "refused": True}
         try:
-            import json
             from src.data import enablement_store as store
             from src.data.chat_tools.enablement_tools import _push_guru_draft_impl
-            did = int(draft_id)
-            store.approve_draft(conn, did, approved_by=self._approver_identity())
-            draft = store.get_draft(conn, did) or {}
+
+            # ── the time-of-use check ───────────────────────────────
+            reviewed = self._draft_reviews.get(did)
+            if reviewed is None:
+                return self._refuse_approval(did, "not_reviewed",
+                                             NO_REVIEW_REFUSAL)
+            draft = store.get_draft(conn, did)
+            if draft is None:
+                self._draft_reviews.pop(did, None)
+                return self._refuse_approval(did, "draft_not_found",
+                                             MISSING_DRAFT_REFUSAL)
+            current = draft_fingerprint(draft)   # RECOMPUTED FROM THE ROW
+            if current is None:
+                self._draft_reviews.pop(did, None)
+                return self._refuse_approval(did, "publish_body_unavailable",
+                                             UNREADABLE_BODY_REFUSAL)
+            if current != reviewed:
+                # The row moved under the operator. Drop the binding so a
+                # second click cannot retry against a stale review either —
+                # only a fresh render re-authorizes.
+                self._draft_reviews.pop(did, None)
+                return self._refuse_approval(did, "draft_changed_after_review",
+                                             STALE_REVIEW_REFUSAL)
+
+            # ── the native confirm (the only proof of a human) ──────
+            target = store.push_target(draft)
+            confirmed, why = self._confirm_publish(draft, target)
+            if not confirmed:
+                self._draft_reviews.pop(did, None)   # a decision, not a retry
+                return self._refuse_approval(
+                    did, why,
+                    NO_CONFIRM_HOST_REFUSAL if why == "no_confirm_host"
+                    else DECLINED_REFUSAL)
+            self._draft_reviews.pop(did, None)   # one review, one publish
+
+            # ── the sign-off, scoped to exactly this act ────────────
+            claim = store.record_approval(
+                conn, did, approved_by=self._approver_identity(),
+                fingerprint=current)
             try:
-                target = json.loads(draft.get("pending_push_json") or "{}")
-            except Exception:  # noqa: BLE001
-                target = {}
-            result = _push_guru_draft_impl(
-                conn, did, target.get("collection_id"), target.get("folder_id"))
-            store.clear_push_request(conn, did)
-            return {"ok": bool(result.get("ok")), "draft_id": did, "result": result}
+                result = _push_guru_draft_impl(
+                    conn, did, target.get("collection_id") or None,
+                    target.get("folder_id") or None, approval_claim=claim)
+            except Exception as exc:  # noqa: BLE001 — a raise is a failed publish
+                logger.warning("publish raised for draft %s: %s", did, exc)
+                result = {"ok": False, "error": f"publish_failed: {exc}"}
+            result = result if isinstance(result, dict) else {"ok": False}
+            if result.get("ok"):
+                # The sign-off is SPENT — by a publish that succeeded, and only
+                # by that. Clearing the push request destroys the claim with it.
+                store.clear_push_request(conn, did)
+                return {"ok": True, "draft_id": did, "result": result,
+                        "published": True}
+            reason = str(result.get("error") or result.get("message")
+                         or "the publish did not complete")[:300]
+            store.revoke_approval(conn, did, reason=reason)
+            logger.warning("publish failed for draft %s; sign-off rolled back: %s",
+                           did, reason)
+            return {"ok": False, "draft_id": did, "result": result,
+                    "published": False, "refused": True,
+                    "error": result.get("error") or "publish_failed",
+                    "message": PUBLISH_FAILED_REFUSAL.format(reason=reason)}
         except Exception as exc:  # noqa: BLE001
-            return {"ok": False, "error": str(exc)}
+            return {"ok": False, "draft_id": did, "error": str(exc),
+                    "published": False}
         finally:
             conn.close()
+
+    def _confirm_publish(self, draft, target) -> tuple[bool, str]:
+        """Take the operator's NATIVE confirmation for this publish.
+
+        Returns ``(confirmed, reason)``. Fails closed on every branch that is
+        not an explicit accept:
+
+        * no host injected (``no_confirm_host``) — a build that cannot show the
+          dialog cannot publish. This is not degradation-tolerance: the dialog
+          IS the human, and without it ``approveDraft`` is a page-callable slot
+          with a live Guru token behind it;
+        * the host raising (``confirm_failed``) — an exception is not a yes;
+        * the operator choosing Cancel (``declined_at_confirm``).
+
+        The payload carries the EXACT publish bytes (never a projection) and
+        the resolved target, because those two are what the sign-off commits to.
+        """
+        host = self._confirm_host
+        if host is None or not hasattr(host, "confirm_publish"):
+            logger.warning("publish refused: no native confirmation host")
+            return False, "no_confirm_host"
+        try:
+            from src.data.enablement_store import publish_body
+            body = publish_body(draft)
+        except Exception as exc:  # noqa: BLE001 — no bytes to show → no publish
+            logger.warning("publish refused: body unavailable at confirm: %s", exc)
+            return False, "confirm_failed"
+        card_id = (draft.get("card_id") or "") if hasattr(draft, "get") else ""
+        payload = {
+            "draft_id": draft.get("id") if hasattr(draft, "get") else None,
+            "title": (draft.get("title") or "") if hasattr(draft, "get") else "",
+            "publish_body": body or "",
+            "card_id": card_id,
+            "collection_id": (target or {}).get("collection_id") or "",
+            "folder_id": (target or {}).get("folder_id") or "",
+            "target_label": _target_label(card_id, target),
+        }
+        try:
+            accepted = bool(host.confirm_publish(payload))
+        except Exception as exc:  # noqa: BLE001 — a raise is never consent
+            logger.warning("publish confirmation failed: %s", exc)
+            return False, "confirm_failed"
+        return (True, "confirmed") if accepted else (False, "declined_at_confirm")
 
     def reject_draft(self, draft_id) -> dict:
         """Decline a pending publish: drop the push request (the draft stays
@@ -1432,6 +2173,8 @@ class AgentChatController(QObject):
             from src.data import enablement_store as store
             did = int(draft_id)
             store.clear_push_request(conn, did)
+            # A declined review is spent: it must not authorize a later click.
+            self._draft_reviews.pop(did, None)
             return {"ok": True, "draft_id": did, "rejected": True}
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": str(exc)}
@@ -1439,24 +2182,53 @@ class AgentChatController(QObject):
             conn.close()
 
     def _current_card_md(self, conn, card_id: str) -> str:
+        return self._current_card_baseline(conn, card_id)[0]
+
+    def _current_card_baseline(self, conn, card_id: str) -> tuple[str, bool]:
+        """(diff baseline, whether it is a REAL baseline).
+
+        The flag is what the panel needs: a draft with no ``card_id`` creates a
+        new card, so an all-additions diff is the truth; a draft that REPLACES a
+        live card and has no local copy renders the same way while meaning
+        something completely different, and the operator has to be told which
+        one they are looking at. (The missing local cache — ``guru_cards`` may
+        not exist at all — is a deferred audit finding; this only stops it from
+        masquerading as a clean diff.)
+        """
         if not card_id:
-            return ""   # a new card → diff is all-additions
+            return "", True   # a new card → all-additions IS the change
         try:
             row = conn.execute(
                 "SELECT content FROM guru_cards WHERE card_id = ?", (card_id,)).fetchone()
-        except Exception:  # noqa: BLE001 — no local cache → all-additions
-            return ""
+        except Exception:  # noqa: BLE001 — no local cache → no baseline
+            return "", False
         if row is None:
-            return ""
+            return "", False
         try:
-            return (row["content"] if hasattr(row, "keys") else row[0]) or ""
+            return (row["content"] if hasattr(row, "keys") else row[0]) or "", True
         except Exception:  # noqa: BLE001
-            return ""
+            return "", False
 
-    def _draft_checks(self, text: str, card_id: str) -> list[dict]:
+    def _draft_checks(self, text: str, card_id: str,
+                      publish_body: str | None = None) -> list[dict]:
+        """Pre-flight checks for the panel.
+
+        ``text`` is the reviewed text (the publish body's projection), so the
+        format/readability/style checks run on what ships rather than on the
+        markdown column. ``publish_body`` adds one pass over the raw shipped
+        bytes: only ``pii_scan`` is meaningful there (its patterns are
+        text-level, so it catches a leak parked in an attribute or a script
+        body that the projection drops); the markdown-shaped checks would just
+        misread markup.
+        """
         try:
-            from src.data.enablement_checks import run_checks
-            return run_checks(text, card_id=card_id)
+            from src.data.enablement_checks import pii_scan, run_checks
+            rows = run_checks(text, card_id=card_id)
+            if publish_body is not None and publish_body != text:
+                raw = dict(pii_scan(publish_body))
+                raw["check"] = "pii_scan (bytes sent)"
+                rows.append(raw)
+            return rows
         except Exception:  # noqa: BLE001 — checks are advisory
             return []
 

@@ -453,7 +453,7 @@ class WorkbenchPage(QWidget):
             self._rich.set_markdown(self._current_md)
             self._body_stack.setCurrentWidget(self._rich)
         elif mode == "diff":
-            self._diff.set_diff(self._linked_card_md, self._current_md)
+            self._diff.set_diff(self._linked_card_md, self._review_text())
             self._body_stack.setCurrentWidget(self._diff)
         else:
             self._render_body()
@@ -464,11 +464,23 @@ class WorkbenchPage(QWidget):
         self._style_view_btn(self._diff_btn, active=mode == "diff")
 
     def _render_body(self):
+        """Render the Guru preview from the PUBLISH BODY (markdown + any
+        content_html), so the canvas shows the bytes a push would send."""
         try:
             from src.ui.pages.enablement.guru_preview import render_preview
-            render_preview(self._body, self._current_md)
+            render_preview(self._body, self._current_md, self._current_html)
         except Exception:
             self._body.setMarkdown(self._current_md)
+
+    def _review_text(self) -> str:
+        """The Review-changes input: the reviewer-facing text of the publish
+        body (the markdown itself when nothing but markdown ships)."""
+        try:
+            from src.data.enablement_store import review_text
+            return review_text({"content": self._current_md,
+                                "content_html": self._current_html})
+        except Exception:
+            return self._current_md
 
     # ── expand / focus overlay ────────────────────────────────────
     def set_overlay_host(self, widget):
@@ -484,7 +496,10 @@ class WorkbenchPage(QWidget):
             from src.ui.pages.enablement.expand_overlay import ExpandOverlay
             self._overlay = ExpandOverlay(self._overlay_host or self.window())
             self._overlay.committed.connect(self._on_expand_committed)
-        self._overlay.load(self._current_md, self._active_draft_id, self._title.text())
+        # Hand the overlay the content_html too, or its preview would render a
+        # markdown-derived body while a push sends the stored HTML.
+        self._overlay.load(self._current_md, self._active_draft_id, self._title.text(),
+                           content_html=self._current_html)
         self._overlay.present()
 
     def _on_expand_committed(self, draft_id: int, md: str, html=None):
@@ -654,7 +669,7 @@ class WorkbenchPage(QWidget):
         If the diff view is showing, re-render it against the new baseline."""
         self._linked_card_md = md or ""
         if self._body_stack.currentWidget() is self._diff:
-            self._diff.set_diff(self._linked_card_md, self._current_md)
+            self._diff.set_diff(self._linked_card_md, self._review_text())
 
     def set_active_draft(self, draft_id):
         self.set_pending_drafts(self._current_drafts, active_id=draft_id)

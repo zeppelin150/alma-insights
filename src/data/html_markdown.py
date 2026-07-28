@@ -172,7 +172,12 @@ def html_to_markdown(html: str) -> str:
         return ""
     try:
         from PySide6.QtGui import QGuiApplication, QTextDocument
-        if QGuiApplication.instance() is not None:
+        # isinstance, NOT `is not None`: QGuiApplication.instance() returns the
+        # QCoreApplication singleton in a console/headless process, and
+        # constructing a QTextDocument without a GUI application ABORTS the
+        # process (no Python exception to catch). Only take the Qt path when a
+        # real QGuiApplication is up.
+        if isinstance(QGuiApplication.instance(), QGuiApplication):
             doc = QTextDocument()
             doc.setHtml(html)
             return doc.toMarkdown(

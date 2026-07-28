@@ -27,15 +27,26 @@ Load-bearing invariants locked here:
   bytes is a surfaced warning; and every content mutation (including an
   out-of-band one) drops the record. The six confirmed exploit variants
   each have a dedicated end-to-end regression below;
-* THE UNIVERSAL DRAFT-COPY CONFIRM — every clipboard release of DRAFT
-  content (article draft or macro draft, every field, both mime flavours)
-  takes a NATIVE confirm that DISPLAYS THE EXACT BYTES; absent, declined,
-  or bytes that moved under the dialog ⇒ no clipboard write and no
-  copy_resolved receipt. MIRROR rows keep the review-record gate alone.
-  This REPLACED a provenance ledger that tried to gate only page-authored
-  bytes; E1 (a partial macro write losing the stamp) and E2 (authorship
-  laundering — the page drives Renn through the co-registered chat bridge)
-  both have regressions below, as does the ledger's absence;
+* THE UNIVERSAL COPY CONFIRM — every clipboard release of MARKUP
+  (body_html / body_rich / macro_reply, on MIRROR rows and drafts alike)
+  and every release of DRAFT content whatever it carries takes a NATIVE
+  confirm that DISPLAYS THE EXACT BYTES; absent, declined, or bytes that
+  moved under the dialog ⇒ no clipboard write and no copy_resolved
+  receipt. Only mirror titles / macro names self-serve. This REPLACED a
+  provenance ledger that tried to gate only page-authored bytes; E1 (a
+  partial macro write losing the stamp) and E2 (authorship laundering —
+  the page drives Renn through the co-registered chat bridge) both have
+  regressions below, as does the ledger's absence. The mirror exemption
+  was REVERSED on 2026-07-27 (test_mirror_markup_copies_now_take_the_
+  confirm_too) because the preview + markup-notice chain it relied on is
+  the chain G1/G2/G3 walked;
+* THE PREVIEW IS NOT A DISCLOSURE SURFACE. The ONLY disclosure surface for
+  markup is the native dialog. The round-8 block near the end of this file
+  (G1 presentational colour attributes, G2 non-painting tags, G3 the report
+  as an injection vector into the dialog) is why: eight rounds of hardening
+  a projection, eight defeats by whoever writes the content. The CSS
+  policy, the sanitizer report and the markup notice are HONESTY about
+  render fidelity now, not gates;
 * the PREVIEW sanitize profile is additive and rendering-only: the preview
   keeps presentational markup so pulled articles render faithfully and the
   markup notice stays rare, while the clipboard and stored content keep the
@@ -67,6 +78,7 @@ import pytest
 from PySide6.QtWidgets import QApplication
 
 import src.services.zendesk_web as zendesk_web
+from src.data import html_sanitize as _hs
 from src.data import zendesk_store
 from src.data.html_sanitize import sanitize_html
 from src.services.zendesk_web import ZendeskWebController
@@ -167,29 +179,54 @@ def _review_macro(ctrl, mid):
     ctrl.js_open_macro(str(mid))
 
 
-def _gated(db, *, answer=True, **kw):
+def _gated(db, *, answer=True, clock=None, **kw):
     """A controller behind a fake NATIVE confirm, page.py-shaped: the real
-    _web_zendesk_confirm takes an optional third `detail` argument (the
-    scrollable QMessageBox detail pane the copy gate puts the exact
-    clipboard bytes in), so the fake must too.
+    _web_zendesk_confirm takes an optional third `content` argument — the
+    exact clipboard bytes, which page.py renders in a VISIBLE scrollable
+    read-only view (never a collapsed pane) — so the fake must too, and must
+    use the same parameter NAME, because the controller checks names.
+
+    `clock` pins the controller's clock so the per-target copy-confirm
+    cooldown (F3) is deterministic; pass a dict like {"t": 1000.0} and
+    advance clock["t"] between attempts.
 
     Every DRAFT copy goes through this dialog, so draft-copy tests build
     their controller here rather than with the bare `_controller`."""
     confirms = []
-    def confirm(title, text, detail=None):
-        confirms.append((title, text, detail))
+    def confirm(title, text, content=None):
+        confirms.append((title, text, content))
         if callable(answer):
             return answer()
         return answer
+    if clock is not None:
+        kw.setdefault("now_fn", lambda: clock["t"])
     ctrl, seen = _controller(db, confirm_fn=confirm, **kw)
     return ctrl, seen, confirms
 
 
-def _confirm_blob(confirms):
-    """Everything the native confirm actually PUT IN FRONT OF THE OPERATOR —
-    title + message + detail pane. The copy gate's contract is that the exact
-    clipboard bytes are in here."""
+def _confirm_visible(confirms):
+    """Everything the native confirm actually PUT IN FRONT OF THE OPERATOR,
+    with NOTHING hidden behind a click.
+
+    All three parts qualify: the window title, the heading, and the
+    `content` argument — which page.py renders in an always-visible,
+    scrollable, read-only text view (locked by
+    tests/test_zendesk_web_tab.py::test_copy_confirm_shows_the_bytes_visibly,
+    and by the grep guard that setDetailedText is used nowhere in page.py).
+
+    THE PREDECESSOR OF THIS HELPER WAS A LIE. It joined title + text +
+    `detail`, where `detail` went to QMessageBox.setDetailedText — Qt
+    COLLAPSES that behind a "Show Details…" button, and nothing in src/ ever
+    expanded it. Every payload over 400 chars — i.e. every real article body
+    — was asserted "in front of the operator" while being invisible. Keep
+    the visible/hidden distinction in the helper, not in the reader's head.
+    """
     return "\n".join(str(part) for call in confirms for part in call)
+
+
+def _confirm_content(confirms):
+    """Just the exact-bytes pane of the last confirm (the third argument)."""
+    return "" if not confirms else str(confirms[-1][2] or "")
 
 
 # ── viewmodel shapes ─────────────────────────────────────────────────
@@ -710,7 +747,7 @@ def test_body_edit_diff_reflects_clipboard_projection(empty_db):
     stored = zendesk_store.get_article_draft(conn, did)["body_html"]
     assert calls[-1][0] == stored
     assert stored == _rendered("Completely fresh wording here")
-    assert stored in _confirm_blob(confirms)
+    assert stored in _confirm_visible(confirms)
 
 
 def test_body_edit_nonpending_draft_refused_with_status_text(empty_db):
@@ -870,12 +907,16 @@ def _clipboard(calls):
 def test_copy_article_reads_exact_db_bytes_and_announces(empty_db):
     _seed_mirror(empty_db.conn)
     calls = []
-    ctrl, seen = _controller(empty_db, clipboard_fn=_clipboard(calls))
+    # body_html is MARKUP, so it takes the native confirm now — mirror rows
+    # included (2026-07-27; see test_every_html_copy_target_takes_the_confirm)
+    ctrl, seen, confirms = _gated(empty_db, answer=True,
+                                  clipboard_fn=_clipboard(calls))
     ctrl.js_refresh()                              # serves article ids
     _review_article(ctrl, 101)                     # records the review
     ctrl.js_copy_field("article", "101", "body_html")
     raw = "<h2>Steps</h2><p>Log into the admin console.</p>"
     assert calls == [(raw, None)]
+    assert len(confirms) == 1 and raw in str(confirms[0][2])
     res = seen["copies"][-1]
     assert res["ok"] is True and res["chars"] == len(raw)
     assert res["target"] == "article" and res["field"] == "body_html"
@@ -909,7 +950,7 @@ def test_copy_target_kind_disambiguation(empty_db):
     assert calls == [("Mirror article", None), ("Draft one", None)]
     # ...and only the DRAFT one took a confirm (mirror rows keep the
     # review-record gate alone)
-    assert len(confirms) == 1 and "Draft one" in _confirm_blob(confirms)
+    assert len(confirms) == 1 and "Draft one" in _confirm_visible(confirms)
 
 
 def test_copy_pending_draft_refused_ready_allowed(empty_db):
@@ -948,7 +989,8 @@ def test_import_origin_stores_sanitized_bytes(empty_db):
     assert "javascript:" not in stored.lower()
     assert stored == sanitize_html(stored)         # fixed point
     calls = []
-    ctrl, seen = _controller(empty_db, clipboard_fn=_clipboard(calls))
+    ctrl, seen, _confirms = _gated(empty_db, answer=True,
+                                   clipboard_fn=_clipboard(calls))
     ctrl.js_refresh()
     _review_article(ctrl, 301)
     assert seen["article"][-1]["markup_notice"] == ""
@@ -964,7 +1006,8 @@ def test_copy_pull_origin_body_rich_verbatim(empty_db):
     rich mime flavour still passes sanitize_html (mime-laundering guard)."""
     _seed_mirror(empty_db.conn)
     calls = []
-    ctrl, seen = _controller(empty_db, clipboard_fn=_clipboard(calls))
+    ctrl, seen, _confirms = _gated(empty_db, answer=True,
+                                   clipboard_fn=_clipboard(calls))
     ctrl.js_refresh()
     _review_article(ctrl, 101)
     ctrl.js_copy_field("article", "101", "body_rich")
@@ -984,7 +1027,8 @@ def test_pull_origin_hostile_bytes_are_flagged_not_hidden(empty_db):
          "updated_at": "2026-07-01T00:00:00Z"}], origin="pull")
     assert zendesk_store.get_article(conn, 401)["body_html"] == HOSTILE_HTML
     calls = []
-    ctrl, seen = _controller(empty_db, clipboard_fn=_clipboard(calls))
+    ctrl, seen, _confirms = _gated(empty_db, answer=True,
+                                   clipboard_fn=_clipboard(calls))
     ctrl.js_refresh()
     _review_article(ctrl, 401)
     detail = seen["article"][-1]
@@ -1050,7 +1094,8 @@ def test_copy_clean_draft_body_rich_unflagged(empty_db):
 def test_copy_macro_reply_from_either_comment_field(empty_db):
     _seed_mirror(empty_db.conn)
     calls = []
-    ctrl, seen = _controller(empty_db, clipboard_fn=_clipboard(calls))
+    ctrl, seen, _confirms = _gated(empty_db, answer=True,
+                                   clipboard_fn=_clipboard(calls))
     ctrl.js_refresh()
     _review_macro(ctrl, 201)
     _review_macro(ctrl, 202)
@@ -1203,7 +1248,7 @@ def test_phishing_url_smuggled_past_the_review_is_now_visible(empty_db):
     # through verbatim — and the confirm carried the exact phishing bytes.
     ctrl.js_copy_field("article_draft", str(did), "body_html")
     assert calls[-1] == (stored, None)
-    blob = _confirm_blob(confirms)
+    blob = _confirm_visible(confirms)
     assert stored in blob and PHISH_HREF in blob and PHISH_SRC in blob
 
 
@@ -1293,7 +1338,7 @@ def test_copy_refused_after_the_draft_changes_under_the_review(empty_db):
     # ...and those are RENN's bytes, which changes nothing: E2 proved the
     # page can drive Renn, so a draft copy is a draft copy.
     assert len(confirms) == 3
-    assert 'href="https://evil.example"' in _confirm_blob(confirms)
+    assert 'href="https://evil.example"' in _confirm_visible(confirms)
 
 
 def test_macro_draft_copy_requires_a_current_review(empty_db):
@@ -1326,26 +1371,35 @@ def test_mirror_copy_now_requires_a_review_too(empty_db):
     ids and nothing else — no view of the bytes — yet every mirror field
     copied. Now the gate covers mirror rows exactly like drafts: refused
     until the detail (which carries body_source / the verbatim action
-    values) has been served, then released."""
+    values) has been served, then released.
+
+    The review record runs BEFORE the native confirm, so an unreviewed row
+    still reports the specific 'open the source view' refusal rather than
+    summoning a dialog."""
     _seed_mirror(empty_db.conn)
     calls = []
-    ctrl, seen = _controller(empty_db, clipboard_fn=_clipboard(calls))
+    ctrl, seen, confirms = _gated(empty_db, answer=True,
+                                  clipboard_fn=_clipboard(calls))
     ctrl.js_refresh()                      # ids served, bytes NEVER shown
     ctrl.js_copy_field("article", "101", "body_html")
     ctrl.js_copy_field("article", "101", "title")
     ctrl.js_copy_field("article", "101", "body_rich")
     ctrl.js_copy_field("macro", "201", "macro_reply")
     assert calls == [] and seen["copies"] == []
+    assert confirms == []                  # no review ⇒ no dialog either
     assert "has not been reviewed" in seen["status"][-1]
 
     _review_article(ctrl, 101)
     _review_macro(ctrl, 201)
-    ctrl.js_copy_field("article", "101", "body_html")
+    # the un-gated title first: an approved MARKUP release then holds the
+    # clipboard for _COPY_HOLD_S, which is exactly what refuses it after
     ctrl.js_copy_field("article", "101", "title")
+    ctrl.js_copy_field("article", "101", "body_html")
     ctrl.js_copy_field("article", "101", "body_rich")
     ctrl.js_copy_field("macro", "201", "macro_reply")
     assert len(calls) == 4
     assert all(c["ok"] for c in seen["copies"])
+    assert len(confirms) == 3              # one per markup field, none for title
 
 
 def test_mirror_review_invalidated_when_the_row_changes(empty_db):
@@ -1355,7 +1409,8 @@ def test_mirror_review_invalidated_when_the_row_changes(empty_db):
     _seed_mirror(empty_db.conn)
     conn = empty_db.conn
     calls = []
-    ctrl, seen = _controller(empty_db, clipboard_fn=_clipboard(calls))
+    ctrl, seen, _confirms = _gated(empty_db, answer=True,
+                                   clipboard_fn=_clipboard(calls))
     ctrl.js_refresh()
     _review_article(ctrl, 101)
     zendesk_store.upsert_articles(conn, [
@@ -1560,7 +1615,8 @@ def test_variant3_mirror_article_source_is_shown_before_any_copy(empty_db):
         {"id": 502, "title": "Pulled", "body_html": raw,
          "updated_at": "2026-07-01T00:00:00Z"}], origin="pull")
     calls = []
-    ctrl, seen = _controller(empty_db, clipboard_fn=_clipboard(calls))
+    ctrl, seen, _confirms = _gated(empty_db, answer=True,
+                                   clipboard_fn=_clipboard(calls))
     ctrl.js_refresh()
     # no detail served yet → both copies refused (this is the missing gate)
     ctrl.js_copy_field("article", "501", "body_html")
@@ -1766,6 +1822,7 @@ def test_every_recorded_hash_is_shown_or_derived_from_shown_bytes(empty_db):
     assert payloads["body_rich"]["html"] != detail["body_srcdoc"]
     assert "alma-hc-article" in detail["body_srcdoc"]
 
+    from src.data.html_sanitize import sanitize_html_preview
     for html in ("<h2>Clean</h2><p>Fine.</p>", HOSTILE_HTML,
                  '<p><span style="font-size: 0">hidden</span></p>'):
         did = _ready_draft(conn, ctrl, title="T", body="x", body_html=html)
@@ -1780,12 +1837,20 @@ def test_every_recorded_hash_is_shown_or_derived_from_shown_bytes(empty_db):
         # sanitizing again changes nothing (removal-only, idempotent)
         assert rich == sanitize_html(shown)
         assert sanitize_html(rich) == rich
-        # and whenever they differ the reviewer is told, in the diff and
-        # again on the status line at copy time
-        if rich != shown:
+        # The notice tracks the PREVIEW report — everything the preview
+        # drops AND everything it un-hides — not "the strict profile would
+        # have changed something". `font-size: 0` survives sanitize_html
+        # untouched (rich == shown) yet hides the text from a reader, which
+        # is exactly the case the old rich!=shown rule stayed silent for.
+        _preview, report = sanitize_html_preview(shown, report=True)
+        if report:
             assert "preview does not display" in diff["markup_notice"]
+            assert diff["markup_report"] == report
         else:
-            assert diff["markup_notice"] == ""
+            assert diff["markup_notice"] == "" and diff["markup_report"] == []
+    assert sanitize_html_preview(
+        '<p><span style="font-size: 0">hidden</span></p>',
+        report=True)[1] == ["font-size:0"]
 
 
 def test_zero_change_with_differing_bytes_is_surfaced_as_a_warning(empty_db):
@@ -1954,16 +2019,24 @@ def test_macro_reply_markup_is_announced_not_hidden(empty_db):
          "updated_at": "2026-07-01T00:00:00Z",
          "actions": [{"field": "comment_value_html", "value": hostile}]}])
     calls = []
-    ctrl, seen = _controller(empty_db, clipboard_fn=_clipboard(calls))
+    clock = {"t": 1000.0}
+    ctrl, seen, confirms = _gated(empty_db, answer=True, clock=clock,
+                                  clipboard_fn=_clipboard(calls))
     ctrl.js_refresh()
     _review_macro(ctrl, 301)
     ctrl.js_copy_field("macro", "301", "macro_reply")
     assert calls[-1] == (hostile, None)                # still byte-verbatim
     assert seen["copies"][-1]["notice"] == zendesk_web._MACRO_MARKUP_NOTICE
     assert "active markup" in seen["status"][-1]       # unforgeable surface
-    # the macro NAME is plain text and carries no notice
+    # ...and the reply is MARKUP, so the release was disclosed in the native
+    # dialog too — the notice is a heads-up, the dialog is the disclosure
+    assert len(confirms) == 1 and hostile in str(confirms[-1][2])
+    # the macro NAME is plain text: no notice, and no confirm (the approved
+    # reply holds the clipboard for _COPY_HOLD_S, so step past it first)
+    clock["t"] += zendesk_web._COPY_HOLD_S + 1
     ctrl.js_copy_field("macro", "301", "macro_name")
     assert seen["copies"][-1]["notice"] == ""
+    assert len(confirms) == 1
 
 
 def test_macro_reply_plain_text_is_not_falsely_flagged(empty_db):
@@ -1979,7 +2052,8 @@ def test_macro_reply_plain_text_is_not_falsely_flagged(empty_db):
     from src.data.html_sanitize import sanitize_html
     assert sanitize_html(plain) != plain               # escaping-only delta
     calls = []
-    ctrl, seen = _controller(empty_db, clipboard_fn=_clipboard(calls))
+    ctrl, seen, _confirms = _gated(empty_db, answer=True,
+                                   clipboard_fn=_clipboard(calls))
     ctrl.js_refresh()
     _review_macro(ctrl, 302)
     ctrl.js_copy_field("macro", "302", "macro_reply")
@@ -2065,7 +2139,10 @@ def test_draft_copy_without_a_confirm_fn_fails_closed(empty_db):
     ctrl.js_mark_ready("article", str(did))
     ctrl.js_copy_field("article_draft", str(did), "title")
     assert calls == [] and seen["copies"] == []
-    assert "only be copied from the app window" in seen["status"][-1]
+    # ...and the refusal says NOTHING a page could learn from: the absence
+    # of a dialog host reads exactly like a human decline (F3 — the old
+    # "can only be copied from the app window" was a decline oracle).
+    assert seen["status"][-1] == zendesk_web._COPY_REFUSED
     # the DB write itself is allowed (renaming a draft is legitimate); it is
     # the CLIPBOARD that is gated
     assert zendesk_store.get_article_draft(conn, did)["title"] == PAGE_PHISH_TITLE
@@ -2073,13 +2150,15 @@ def test_draft_copy_without_a_confirm_fn_fails_closed(empty_db):
 
 def test_draft_copy_confirm_shows_the_exact_bytes(empty_db):
     """Declining writes nothing and issues no receipt; approving copies —
-    and either way the confirm was handed the EXACT bytes."""
+    and either way the confirm was handed the EXACT bytes, in the VISIBLE
+    content pane (never a collapsed one)."""
     _seed_mirror(empty_db.conn)
     conn = empty_db.conn
     calls = []
     answers = [False, True]
+    clock = {"t": 1000.0}
     ctrl, seen, confirms = _gated(
-        empty_db, answer=lambda: answers.pop(0),
+        empty_db, answer=lambda: answers.pop(0), clock=clock,
         clipboard_fn=_clipboard(calls))
     did = _served_article_draft(conn, ctrl)
     ctrl.js_save_draft("article", str(did),
@@ -2089,10 +2168,17 @@ def test_draft_copy_confirm_shows_the_exact_bytes(empty_db):
 
     ctrl.js_copy_field("article_draft", str(did), "title")     # declined
     assert len(confirms) == 1
-    assert PAGE_PHISH_TITLE in _confirm_blob(confirms)         # bytes SHOWN
+    assert PAGE_PHISH_TITLE in _confirm_content(confirms)      # bytes SHOWN
     assert calls == [] and seen["copies"] == []                # no receipt
-    assert "Copy cancelled" in seen["status"][-1]
+    # generic refusal: a decline is indistinguishable from any other refusal
+    assert seen["status"][-1] == zendesk_web._COPY_REFUSED
 
+    # a decline arms the per-target cooldown, so the immediate retry the
+    # exploit relied on never reaches a second dialog
+    ctrl.js_copy_field("article_draft", str(did), "title")
+    assert len(confirms) == 1 and calls == []
+
+    clock["t"] += zendesk_web._COPY_CONFIRM_COOLDOWN_S + 1
     ctrl.js_copy_field("article_draft", str(did), "title")     # approved
     assert len(confirms) == 2
     assert calls == [(PAGE_PHISH_TITLE, None)]
@@ -2105,7 +2191,8 @@ def test_macro_draft_copy_needs_the_confirm_on_every_field(empty_db):
     _seed_mirror(empty_db.conn)
     conn = empty_db.conn
     calls = []
-    ctrl, seen, confirms = _gated(empty_db, answer=False,
+    clock = {"t": 1000.0}
+    ctrl, seen, confirms = _gated(empty_db, answer=False, clock=clock,
                                   clipboard_fn=_clipboard(calls))
     did = zendesk_store.save_macro_draft(
         conn, name="Refund apology", macro_id=201, rationale="r",
@@ -2116,11 +2203,14 @@ def test_macro_draft_copy_needs_the_confirm_on_every_field(empty_db):
     ctrl.js_request_diff("macro", str(did))
     ctrl.js_mark_ready("macro", str(did))
     ctrl.js_copy_field("macro_draft", str(did), "macro_name")
+    # the decline above cools this target down (F3), so the second field is
+    # asked for after the window rather than back-to-back
+    clock["t"] += zendesk_web._COPY_CONFIRM_COOLDOWN_S + 1
     ctrl.js_copy_field("macro_draft", str(did), "macro_reply")
     assert calls == [] and seen["copies"] == []
     assert len(confirms) == 2                       # one per attempted field
-    blob = _confirm_blob(confirms)
-    assert PAGE_PHISH_TITLE in blob and "Hi there" in blob
+    assert PAGE_PHISH_TITLE in str(confirms[0][2])
+    assert "Hi there" in str(confirms[1][2])        # both in the VISIBLE pane
 
 
 def test_draft_body_copy_shows_both_clipboard_flavours(empty_db):
@@ -2156,7 +2246,7 @@ def test_draft_body_copy_shows_both_clipboard_flavours(empty_db):
     ctrl2.js_copy_field("article_draft", str(did2), "body_rich")
     assert len(confirms) == 2                          # one per released field
     stored = zendesk_store.get_article_draft(conn, did2)["body_html"]
-    blob = _confirm_blob(confirms)
+    blob = _confirm_visible(confirms)
     assert PAGE_PHISH_TITLE in blob and stored in blob
     assert calls2[0] == (stored, None)
     text, html = calls2[1]
@@ -2172,7 +2262,8 @@ def test_article_target_body_edit_draft_is_gated_on_every_field(empty_db):
     _seed_mirror(empty_db.conn)
     conn = empty_db.conn
     calls = []
-    ctrl, seen, confirms = _gated(empty_db, answer=False,
+    clock = {"t": 1000.0}
+    ctrl, seen, confirms = _gated(empty_db, answer=False, clock=clock,
                                   clipboard_fn=_clipboard(calls))
     ctrl.js_open_article("101")
     ctrl.js_save_body_edit("article", "101",
@@ -2181,10 +2272,11 @@ def test_article_target_body_edit_draft_is_gated_on_every_field(empty_db):
     ctrl.js_request_diff("article", str(did))
     ctrl.js_mark_ready("article", str(did))
     ctrl.js_copy_field("article_draft", str(did), "body_html")
+    clock["t"] += zendesk_web._COPY_CONFIRM_COOLDOWN_S + 1   # past the backoff
     ctrl.js_copy_field("article_draft", str(did), "title")
     assert calls == [] and seen["copies"] == []
     assert len(confirms) == 2
-    blob = _confirm_blob(confirms)
+    blob = _confirm_visible(confirms)
     assert PAGE_PHISH_TITLE in blob and "Setting up SSO" in blob
     # the MIRROR article the draft targets is unaffected: no confirm there
     ctrl.js_copy_field("article", "101", "title")
@@ -2192,11 +2284,25 @@ def test_article_target_body_edit_draft_is_gated_on_every_field(empty_db):
     assert len(confirms) == 2
 
 
-def test_mirror_copies_stay_confirm_free(empty_db):
-    """The other half of the rule, and the reason it is not just "confirm
-    everything": content ALREADY LIVE in Zendesk — pulled articles, imported
-    articles, mirror macros — copies under the recorded review alone. The
-    ergonomics of browsing the mirror must not pay for the draft gate."""
+def test_mirror_markup_copies_now_take_the_confirm_too(empty_db):
+    """THE CONTRACT THIS FILE USED TO LOCK, DELIBERATELY REVERSED
+    (2026-07-27). It read: content ALREADY LIVE in Zendesk — pulled
+    articles, imported articles, mirror macros — copies under the recorded
+    review alone, because "the ergonomics of browsing the mirror must not
+    pay for the draft gate".
+
+    That exemption made the sandboxed preview plus the markup notice the
+    entire disclosure for mirror rows, and that is precisely the chain the
+    round-8 attackers walked: a presentational ``<font color>`` the CSS
+    policy never inspected, an ``<iframe>`` whose children Chromium never
+    paints, and a sanitizer report that could forge the confirm's own lines.
+    A mirror row is a row an IMPORT can write and a PULL copies verbatim
+    from a remote instance, so "already live in Zendesk" was never a
+    statement about who wrote the bytes.
+
+    So: every MARKUP field confirms, on every target. Titles and macro names
+    are not markup and still self-serve. Coverage of the old contract is
+    kept, inverted — declining now means NOTHING is copied."""
     conn = empty_db.conn
     _seed_mirror(conn)                                  # 101/201 = pull origin
     zendesk_store.upsert_articles(conn, [
@@ -2204,24 +2310,44 @@ def test_mirror_copies_stay_confirm_free(empty_db):
          "updated_at": "2026-07-01T00:00:00Z"}], origin="import",
         source_file="C:/tmp/x.html")
     calls = []
-    ctrl, seen, confirms = _gated(empty_db, answer=False,   # any confirm = fail
-                                  clipboard_fn=_clipboard(calls))
+    clock = {"t": 1000.0}
+    ctrl, seen, confirms = _gated(empty_db, answer=False,   # every one DECLINED
+                                  clock=clock, clipboard_fn=_clipboard(calls))
     ctrl.js_refresh()
     _review_article(ctrl, 101)                          # pull origin
     _review_article(ctrl, 701)                          # import origin
     _review_macro(ctrl, 201)
     ctrl.js_copy_field("article", "101", "body_html")
     ctrl.js_copy_field("article", "701", "body_html")
-    ctrl.js_copy_field("article", "101", "body_rich")
     ctrl.js_copy_field("macro", "201", "macro_reply")
+    # one dialog per markup release, and a decline releases NOTHING
+    assert len(confirms) == 3
+    assert calls == [] and seen["copies"] == []
+    assert seen["status"][-1] == zendesk_web._COPY_REFUSED
+    # the exact mirror bytes were in each dialog's visible pane
+    blob = _confirm_visible(confirms)
+    assert zendesk_store.get_article(conn, 101)["body_html"] in blob
+    assert zendesk_store.get_article(conn, 701)["body_html"] in blob
+    assert "Hi there" in blob
+
+    # ...and the plain-text fields keep the old ergonomics: review record
+    # only, no dialog. (No approved release has armed the clipboard hold —
+    # every attempt above was refused.)
+    ctrl.js_copy_field("article", "101", "title")
     ctrl.js_copy_field("macro", "201", "macro_name")
-    assert confirms == []                               # no dialog anywhere
-    assert [c[0] for c in calls] == [
-        zendesk_store.get_article(conn, 101)["body_html"],
-        zendesk_store.get_article(conn, 701)["body_html"],
-        zendesk_store.get_article(conn, 101)["body_html"],
-        "Hi there",
-        "Refund apology"]
+    assert len(confirms) == 3
+    assert [c[0] for c in calls] == ["Setting up SSO", "Refund apology"]
+
+    # approving instead releases the same bytes the dialog showed
+    calls2 = []
+    ctrl2, _s2, confirms2 = _gated(empty_db, answer=True,
+                                   clipboard_fn=_clipboard(calls2))
+    ctrl2.js_refresh()
+    _review_article(ctrl2, 101)
+    ctrl2.js_copy_field("article", "101", "body_html")
+    assert len(confirms2) == 1
+    assert calls2 == [(zendesk_store.get_article(conn, 101)["body_html"],
+                       None)]
 
 
 def test_e2_renn_written_draft_still_demands_a_confirm(empty_db):
@@ -2259,7 +2385,7 @@ def test_e2_renn_written_draft_still_demands_a_confirm(empty_db):
     for field in ("title", "body_html", "body_rich"):
         ctrl.js_copy_field("article_draft", str(did), field)
     assert calls == [] and seen["copies"] == []
-    assert "only be copied from the app window" in seen["status"][-1]
+    assert seen["status"][-1] == zendesk_web._COPY_REFUSED
 
     # and with a confirm wired, the human is shown the phishing body itself
     calls2 = []
@@ -2269,7 +2395,7 @@ def test_e2_renn_written_draft_still_demands_a_confirm(empty_db):
     ctrl2.js_request_diff("article", str(did))
     ctrl2.js_copy_field("article_draft", str(did), "body_html")
     assert calls2 == [] and seen2["copies"] == []
-    blob = _confirm_blob(confirms)
+    blob = _confirm_visible(confirms)
     assert "SSN" in blob and "1-555-0142" in blob
 
 
@@ -2389,7 +2515,9 @@ def test_draft_copy_confirm_runs_the_destructive_gate_discipline(empty_db):
     ctrl3.js_request_diff("article", str(did))
     ctrl3.js_copy_field("article_draft", str(did), "title")
     assert len(calls) == n
-    assert "changed while the confirm was open" in seen3["status"][-1]
+    # ...and reported with the one generic refusal string, like every other
+    # refusal, so "did the bytes move?" is not answerable from the page
+    assert seen3["status"][-1] == zendesk_web._COPY_REFUSED
 
 
 def test_confirm_bytes_survive_a_legacy_two_arg_confirm(empty_db):
@@ -2419,33 +2547,315 @@ def test_confirm_bytes_survive_a_legacy_two_arg_confirm(empty_db):
     assert calls == [(stored, None)]
 
 
-def test_short_bytes_go_inline_long_bytes_go_to_the_detail_pane(empty_db):
-    """Presentation contract of the confirm: short payloads are in the
-    message itself, long ones ride the scrollable detail pane — never
-    truncated, never absent."""
+def test_a_third_parameter_that_is_not_content_never_gets_the_bytes(empty_db):
+    """LATENT HAZARD, closed. `_confirm_takes_detail` accepted ANY
+    three-positional callable, so a host whose third parameter meant
+    something else — `(title, text, parent=None)` is the obvious one, and a
+    plausible refactor of page.py — would have been handed the clipboard
+    payload as a PARENT WIDGET and shown the operator nothing at all.
+
+    The check now reads parameter NAMES: an unrecognised third parameter
+    falls back to the two-argument form, where the bytes are appended to the
+    message and are still visible."""
     _seed_mirror(empty_db.conn)
     conn = empty_db.conn
-    calls = []
-    ctrl, seen, confirms = _gated(empty_db, answer=True,
-                                  clipboard_fn=_clipboard(calls))
-    did = _served_article_draft(conn, ctrl)
-    ctrl.js_save_draft("article", str(did), json.dumps({"title": "Short one"}))
-    ctrl.js_request_diff("article", str(did))
-    ctrl.js_mark_ready("article", str(did))
-    ctrl.js_copy_field("article_draft", str(did), "title")
-    title, text, detail = confirms[-1]
-    assert detail is None and "Short one" in text
+    calls, seen_args = [], []
 
-    zendesk_store.set_draft_status(conn, "article", did, "pending")
-    long_body = "L" * 5000
-    ctrl.js_save_body_edit("draft", str(did), json.dumps({"body": long_body}))
+    def parent_taking_confirm(title, text, parent=None):
+        seen_args.append((title, text, parent))
+        return True
+
+    ctrl, _seen = _controller(empty_db, confirm_fn=parent_taking_confirm,
+                              clipboard_fn=_clipboard(calls))
+    assert ctrl._confirm_shows_content() is False
+    did = _served_article_draft(conn, ctrl)
+    ctrl.js_save_body_edit("draft", str(did),
+                           json.dumps({"body": PHISH_611}))
     ctrl.js_request_diff("article", str(did))
     ctrl.js_mark_ready("article", str(did))
     ctrl.js_copy_field("article_draft", str(did), "body_html")
-    title, text, detail = confirms[-1]
     stored = zendesk_store.get_article_draft(conn, did)["body_html"]
-    assert detail is not None and stored in detail
-    assert long_body[:200] not in text          # the bytes are NOT in the head
+    assert len(seen_args) == 1
+    _title, text, parent = seen_args[0]
+    assert parent is None                    # never smuggled into `parent`
+    assert stored in text                    # ...and still displayed
+    assert calls == [(stored, None)]
+
+    # a *args host cannot be introspected by name either → same fallback
+    star = []
+    ctrl2, _s2 = _controller(empty_db,
+                             confirm_fn=lambda *a: star.append(a) or True)
+    assert ctrl2._confirm_shows_content() is False
+    # ...while page.py's real signature IS the content-showing contract
+    import inspect
+
+    import src.ui.pages.enablement.page as pg
+    params = list(inspect.signature(
+        pg.EnablementPage._web_zendesk_confirm).parameters)
+    assert params[3] in zendesk_web._CONFIRM_CONTENT_PARAMS
+
+
+# ── D2: the gate governs the CLIPBOARD, not just the release ─────────
+
+def test_d2_no_ungated_copy_can_substitute_the_approved_bytes(empty_db):
+    """D2, as executed: TWO clipboard writes for ONE confirm.
+
+    A mirror copy took no confirm by design (review-record only), and the
+    page self-serves that record with openArticle. So the moment the human
+    approved a draft release, the page called copyField on a mirror row and
+    the clipboard held DIFFERENT bytes by the time they pasted. The gate
+    governed which bytes were RELEASED, not what was on the clipboard.
+
+    Now an approved release HOLDS the clipboard: for _COPY_HOLD_S no copy
+    that carries no gate of its own may overwrite it. Since 2026-07-27 the
+    un-gated set is only the plain-text fields — a mirror MARKUP copy pays
+    for its own dialog, so the substitution is disclosed rather than
+    blocked, which is the stronger outcome. Both halves are asserted."""
+    _seed_mirror(empty_db.conn)
+    conn = empty_db.conn
+    calls = []
+    clock = {"t": 1000.0}
+    ctrl, seen, confirms = _gated(empty_db, answer=True, clock=clock,
+                                  clipboard_fn=_clipboard(calls))
+    ctrl.js_refresh()
+    _review_article(ctrl, 101)                  # the page mints its own record
+    did = _served_article_draft(conn, ctrl)
+    ctrl.js_save_body_edit("draft", str(did), json.dumps({"body": "approved"}))
+    ctrl.js_request_diff("article", str(did))
+    ctrl.js_mark_ready("article", str(did))
+
+    ctrl.js_copy_field("article_draft", str(did), "body_html")
+    approved = zendesk_store.get_article_draft(conn, did)["body_html"]
+    assert calls == [(approved, None)] and len(confirms) == 1
+
+    # THE SUBSTITUTION, immediately after the approval: the plain-text
+    # fields are the only ones that carry no gate, and the hold refuses them
+    ctrl.js_copy_field("article", "101", "title")
+    ctrl.js_copy_field("macro", "201", "macro_name")
+    assert calls == [(approved, None)]           # ONE write, still
+    assert seen["status"][-1] == zendesk_web._COPY_REFUSED
+    assert len(confirms) == 1                    # and no extra dialog either
+
+    # the MARKUP substitution is not silently refused — it opens its own
+    # dialog showing the mirror bytes, so a human sees the swap happen
+    mirror = zendesk_store.get_article(conn, 101)["body_html"]
+    ctrl.js_copy_field("article", "101", "body_html")
+    assert len(confirms) == 2 and mirror in str(confirms[-1][2])
+    assert calls[-1] == (mirror, None)
+
+    # the hold is short and specific: plain-text browsing works again after it
+    clock["t"] += zendesk_web._COPY_HOLD_S + 1
+    ctrl.js_copy_field("article", "101", "title")
+    assert calls[-1] == ("Setting up SSO", None)
+
+
+def test_d2_no_clipboard_write_while_the_native_modal_is_open(empty_db):
+    """The other half of D2: the un-gated mirror write fired DURING the open
+    native dialog (the confirm spins a nested event loop, and every bridge
+    slot is callable from inside it). js_copy_field is freeze-checked now,
+    so the clipboard cannot move under an open modal — the same discipline
+    every other mutating slot has had."""
+    _seed_mirror(empty_db.conn)
+    conn = empty_db.conn
+    calls = []
+    holder, states = {}, []
+
+    def approve_but_first_swap():
+        c = holder["c"]
+        states.append(c._action_inflight)
+        c.js_copy_field("article", "101", "body_html")   # from inside the modal
+        c.js_copy_field("article", "101", "title")
+        return True
+
+    ctrl, seen, confirms = _gated(empty_db, answer=approve_but_first_swap,
+                                  clipboard_fn=_clipboard(calls))
+    holder["c"] = ctrl
+    ctrl.js_refresh()
+    _review_article(ctrl, 101)
+    did = _served_article_draft(conn, ctrl)
+    ctrl.js_save_body_edit("draft", str(did), json.dumps({"body": "approved"}))
+    ctrl.js_request_diff("article", str(did))
+    ctrl.js_mark_ready("article", str(did))
+    ctrl.js_copy_field("article_draft", str(did), "body_html")
+
+    approved = zendesk_store.get_article_draft(conn, did)["body_html"]
+    assert states == [True]                       # claim held under the modal
+    assert calls == [(approved, None)]            # the re-entrant writes lost
+    assert ctrl._action_inflight is False
+
+
+# ── D3: no decline oracle, no grinding ───────────────────────────────
+
+def test_d3_five_declines_do_not_produce_five_modals(empty_db):
+    """D3, as executed: the page re-invoked copyField on each declined
+    status and produced FIVE native modals from one page action, with the
+    clipboard written on the fifth.
+
+    Two independent fixes, both asserted: the refusal status is the same
+    string for every branch (so re-invoking on 'Copy cancelled' is not a
+    strategy), and each refusal arms an escalating per-target cooldown."""
+    _seed_mirror(empty_db.conn)
+    conn = empty_db.conn
+    calls = []
+    clock = {"t": 1000.0}
+    answers = [False, False, False, False, True]
+    ctrl, seen, confirms = _gated(empty_db, answer=lambda: answers.pop(0),
+                                  clock=clock, clipboard_fn=_clipboard(calls))
+    did = _served_article_draft(conn, ctrl)
+    ctrl.js_save_draft("article", str(did),
+                       json.dumps({"title": PAGE_PHISH_TITLE}))
+    ctrl.js_request_diff("article", str(did))
+    ctrl.js_mark_ready("article", str(did))
+
+    for _ in range(5):                            # the grinding loop, verbatim
+        ctrl.js_copy_field("article_draft", str(did), "title")
+    assert len(confirms) == 1                     # ONE modal, not five
+    assert calls == [] and seen["copies"] == []
+    assert len(answers) == 4                      # the approving answer unused
+    # every page-visible outcome is the same string
+    assert set(seen["status"][-5:]) == {zendesk_web._COPY_REFUSED}
+
+    # ...and grinding past the short cooldown escalates to the long lockout
+    for _ in range(zendesk_web._COPY_CONFIRM_MAX_ATTEMPTS):
+        clock["t"] += zendesk_web._COPY_CONFIRM_COOLDOWN_S + 1
+        ctrl.js_copy_field("article_draft", str(did), "title")
+    n = len(confirms)
+    clock["t"] += zendesk_web._COPY_CONFIRM_COOLDOWN_S + 1
+    ctrl.js_copy_field("article_draft", str(did), "title")
+    assert len(confirms) == n                     # locked out, no new dialog
+    assert calls == []
+
+
+def test_d3_decline_and_no_dialog_host_are_indistinguishable(empty_db):
+    """The oracle itself: a page could tell 'a human said no' from 'there is
+    no dialog here' and branch on it. Both now report the identical string,
+    on the same trusted status surface, with no receipt either way."""
+    _seed_mirror(empty_db.conn)
+    conn = empty_db.conn
+
+    def chain(ctrl, seen):
+        did = _served_article_draft(conn, ctrl)
+        ctrl.js_request_diff("article", str(did))
+        ctrl.js_mark_ready("article", str(did))
+        ctrl.js_copy_field("article_draft", str(did), "body_html")
+        return seen["status"][-1], seen["copies"]
+
+    declined = chain(*_gated(empty_db, answer=False,
+                             clipboard_fn=_clipboard([]))[:2])
+    hostless = chain(*_controller(empty_db, clipboard_fn=_clipboard([])))
+    assert declined == hostless
+    assert declined[0] == zendesk_web._COPY_REFUSED and declined[1] == []
+
+
+PHISH_611 = (
+    "Action required - provider credential re-verification.\n"
+    "Our records show your Alma Health provider credentials expire this "
+    "week. To keep claims flowing without interruption, confirm your "
+    "identity at https://alma-health-verify.example/sso using your NPI, "
+    "the last four digits of your SSN and the security code we texted "
+    "you. Members who do not re-verify by Friday will be moved to "
+    "out-of-network status and their pending claims will be reprocessed "
+    "at the out-of-network rate. If you cannot access the portal, call "
+    "1-555-0142 and a verification specialist will collect the details "
+    "over the phone instead.")
+
+
+def test_d1_long_payloads_are_shown_not_collapsed(empty_db):
+    """D1, THE HEADLINE DEFECT, as a regression.
+
+    OBSERVED: a 611-character phishing body was copied while the dialog's
+    only visible text was 225 characters of boilerplate ending "These are
+    the EXACT characters that will go on the clipboard:" followed by
+    nothing. Anything over _CONFIRM_INLINE_CAP=400 was routed into
+    QMessageBox.setDetailedText — collapsed behind "Show Details…", never
+    expanded anywhere in src/ — and EVERY realistic article body and every
+    body_rich flavour exceeds 400 characters, so the gate failed in exactly
+    the case it exists for.
+
+    Now: no size routing exists at all. The bytes ride `content`, which
+    page.py renders in an always-visible scrollable read-only view (locked
+    in tests/test_zendesk_web_tab.py), for payloads of every length."""
+    assert len(PHISH_611) > 400
+    _seed_mirror(empty_db.conn)
+    conn = empty_db.conn
+    calls = []
+    clock = {"t": 1000.0}
+    ctrl, seen, confirms = _gated(empty_db, answer=True, clock=clock,
+                                  clipboard_fn=_clipboard(calls))
+    did = _served_article_draft(conn, ctrl)
+    ctrl.js_save_body_edit("draft", str(did), json.dumps({"body": PHISH_611}))
+    ctrl.js_request_diff("article", str(did))
+    ctrl.js_mark_ready("article", str(did))
+    ctrl.js_copy_field("article_draft", str(did), "body_html")
+
+    stored = zendesk_store.get_article_draft(conn, did)["body_html"]
+    assert len(stored) > 400 and calls == [(stored, None)]
+    _title, head, content = confirms[-1]
+    # THE ASSERTION THAT FAILED BEFORE: the bytes are in the VISIBLE pane
+    assert content is not None and stored in content
+    assert "1-555-0142" in content and "SSN" in content
+    # and the heading names what is being approved instead of "article
+    # draft 1" with no content signal
+    assert "Setting up SSO" in head and "body_html" in head
+    assert f"{len(stored):,} characters" in head
+
+    # ...and when the bytes HIDE something, the dialog says so too — the one
+    # disclosure point Python can prove a human saw must not depend on the
+    # page having rendered the markup alert (F5's guarantee). A draft row is
+    # never rewritten by the store, so it can carry hiding markup even
+    # though js_save_body_edit's recompute could not have produced it.
+    clock["t"] += zendesk_web._COPY_CONFIRM_COOLDOWN_S + 1
+    hidden = zendesk_store.save_article_draft(
+        conn, title="Setting up SSO", body="x", article_id=101, rationale="r",
+        body_html=f'<p>Steps</p><div style="display:none">{PHISH_611}</div>')
+    zendesk_store.set_draft_status(conn, "article", hidden, "ready")
+    _serve_revisions(ctrl)
+    ctrl.js_request_diff("article", str(hidden))
+    ctrl.js_copy_field("article_draft", str(hidden), "body_html")
+    _title, head, content = confirms[-1]
+    assert "display:none" in head
+    assert "preview does not display faithfully" in head
+    assert PHISH_611 in content
+
+    # short payloads take the SAME shape — no branch remains that could
+    # route content anywhere else
+    clock["t"] += zendesk_web._COPY_CONFIRM_COOLDOWN_S + 1
+    ctrl.js_copy_field("article_draft", str(did), "title")
+    _title, head, content = confirms[-1]
+    assert content == "Setting up SSO"
+
+    # structurally: the size threshold is gone from the module
+    src = (REPO / "src" / "services" / "zendesk_web.py").read_text(
+        encoding="utf-8")
+    assert "_CONFIRM_INLINE_CAP" not in src
+    assert not hasattr(zendesk_web, "_CONFIRM_INLINE_CAP")
+
+
+def test_d1_no_copy_confirm_ever_hides_content_from_the_head(empty_db):
+    """The property behind the fix, stated for EVERY draft field and both
+    mime flavours: `content` is never None and always carries the exact
+    released bytes. If a future change reintroduces size-based routing (or
+    any 'only show it if it is short' rule), this fails."""
+    _seed_mirror(empty_db.conn)
+    conn = empty_db.conn
+    calls = []
+    clock = {"t": 1000.0}
+    ctrl, seen, confirms = _gated(empty_db, answer=True, clock=clock,
+                                  clipboard_fn=_clipboard(calls))
+    did = _served_article_draft(conn, ctrl)
+    ctrl.js_save_body_edit("draft", str(did),
+                           json.dumps({"body": "L" * 5000}))
+    ctrl.js_request_diff("article", str(did))
+    ctrl.js_mark_ready("article", str(did))
+    for field in ("title", "body_html", "body_rich"):
+        clock["t"] += zendesk_web._COPY_CONFIRM_COOLDOWN_S + 1
+        ctrl.js_copy_field("article_draft", str(did), field)
+        text, html = calls[-1]
+        _t, _head, content = confirms[-1]
+        assert content is not None
+        assert text in content, field
+        if html is not None:
+            assert html in content, field       # both clipboard flavours
 
 
 # ── (c) RENDER FIDELITY: the preview profile vs the clipboard ────────
@@ -2492,8 +2902,17 @@ def test_pulled_article_preview_keeps_presentational_markup(empty_db):
         assert kept in doc, kept
     # Help Center article CSS ships in the srcdoc
     assert "<style>" in doc and ".alma-hc-article" in doc
-    # nothing was lost, so no warning
-    assert detail["markup_notice"] == ""
+    # ...but the <iframe> is UNWRAPPED now (G2: its children are never
+    # painted, so it was a free hiding place). It is named — target and all —
+    # instead of rendered as a blank sandboxed box, and that is a divergence
+    # from the real render, so it is announced rather than passed off as
+    # faithful. Everything else in this realistic article still raises
+    # nothing.
+    assert "<iframe" not in doc
+    assert detail["markup_report"] == [
+        "<iframe> content is not painted in a real render "
+        "(src https://player.vimeo.com/video/1)"]
+    assert detail["markup_notice"]
     # the STRICT profile would have thrown most of it away — the two
     # profiles are genuinely different, and only the preview widened
     assert 'data-theme="copenhagen"' not in sanitize_html(PULLED_ZENDESK_HTML)
@@ -2530,7 +2949,8 @@ def test_clipboard_never_uses_the_preview_profile(empty_db):
         {"id": 803, "title": "Pulled", "body_html": PULLED_ZENDESK_HTML,
          "updated_at": "2026-07-01T00:00:00Z"}], origin="pull")
     calls = []
-    ctrl, seen = _controller(empty_db, clipboard_fn=_clipboard(calls))
+    ctrl, seen, _confirms = _gated(empty_db, answer=True,
+                                   clipboard_fn=_clipboard(calls))
     ctrl.js_refresh()
     _review_article(ctrl, 803)
     ctrl.js_copy_field("article", "803", "body_rich")
@@ -2547,12 +2967,696 @@ def test_preview_profile_is_additive_strict_is_untouched():
     and clipboard paths."""
     from src.data import html_sanitize as hs
     assert hs.PREVIEW_ALLOWED_TAGS > hs.ALLOWED_TAGS     # strict superset
-    assert "iframe" in hs.PREVIEW_ALLOWED_TAGS
     assert "iframe" in hs.DROP_WITH_CONTENT              # strict: dropped
     assert "script" in hs.PREVIEW_DROP_WITH_CONTENT
+    # G2: iframe/rp left the preview allowlist — their children are never
+    # painted, so allowing them was a hiding place, not fidelity.
+    assert not (hs.PREVIEW_ALLOWED_TAGS & hs.PREVIEW_NON_PAINTING_TAGS)
+    assert {"iframe", "rp"} <= hs.PREVIEW_NON_PAINTING_TAGS
     # the strict profile still refuses everything it always refused
     assert sanitize_html('<p class="x" id="y" data-z="1">hi</p>') == \
         '<p class="x">hi</p>'
+
+
+# ── D4/D5/D6: the preview must not be able to HIDE content ───────────
+#
+# The notice used to be computed from the sanitizer's `removed` report,
+# which measures what was REMOVED and never what was KEPT-BUT-INVISIBLE.
+# The first twelve constructs below were confirmed SILENT (removed == [] ->
+# notice ''): the reviewer saw an innocent preview, the app affirmatively
+# signalled the preview was faithful, and the clipboard got the raw bytes.
+# Because the SPA's source panel is a collapsed <details> auto-expanded ONLY
+# by the markup alert, a silent notice also meant the exact bytes stayed
+# hidden.
+#
+# D5/D6 then showed the FIX was the same mistake one level up: the detector
+# enumerated exactly those twelve constructs and THIS CORPUS MIRRORED THE
+# ENUMERATION, so no test could ever find a vector the implementation had
+# not been told about. `transform:scale(0)` — a property the preview
+# allowlist happily admitted and the detector never inspected — went
+# straight through with an EMPTY report.
+#
+# So the corpus deliberately contains vectors NOBODY ENUMERATED, including
+# CSS features invented after the detector was written (content-visibility,
+# the independent `scale` property, -webkit-text-security, contain). They
+# pass because the CSS policy is a CLOSED ALLOWLIST — an unknown property is
+# dropped by default — not because each one was added to a list. A new entry
+# here should require NO change in html_sanitize.py; if it ever does, the
+# allowlist has been widened and that is the bug.
+
+HIDDEN_TEXT = "Wire funds to acct 9910-2231 before releasing the claim."
+
+HIDING_CORPUS = [
+    # — the twelve the detector knew about —
+    ("display:none", f'<div style="display:none">{HIDDEN_TEXT}</div>'),
+    ("visibility:hidden",
+     f'<div style="visibility:hidden">{HIDDEN_TEXT}</div>'),
+    ("opacity:0", f'<span style="opacity:0">{HIDDEN_TEXT}</span>'),
+    ("font-size:0", f'<span style="font-size:0">{HIDDEN_TEXT}</span>'),
+    ("white-on-white", f'<span style="color:#ffffff">{HIDDEN_TEXT}</span>'),
+    ("white-on-declared-white",
+     '<span style="color:white;background-color:#fff">'
+     f"{HIDDEN_TEXT}</span>"),
+    ("off-screen",
+     f'<div style="position:absolute;left:-9999px">{HIDDEN_TEXT}</div>'),
+    ("zero-box",
+     f'<div style="max-height:0;overflow:hidden">{HIDDEN_TEXT}</div>'),
+    ("text-indent",
+     f'<p style="text-indent:-9999px">{HIDDEN_TEXT}</p>'),
+    ("transparent-text",
+     f'<span style="color:transparent">{HIDDEN_TEXT}</span>'),
+    ("html-comment", f"<!-- {HIDDEN_TEXT} --><p>Standard steps apply.</p>"),
+    ("hidden-attribute", f"<div hidden>{HIDDEN_TEXT}</div>"),
+    # — D5, live-confirmed silent under the enumerating detector —
+    ("transform-scale-0",
+     f'<p style="transform:scale(0)">{HIDDEN_TEXT}</p>'),
+    ("transform-translate-offscreen",
+     f'<p style="transform:translateX(-9999px)">{HIDDEN_TEXT}</p>'),
+    ("clip-path-inset",
+     f'<div style="clip-path:inset(100%)">{HIDDEN_TEXT}</div>'),
+    ("filter-opacity",
+     f'<span style="filter:opacity(0)">{HIDDEN_TEXT}</span>'),
+    ("mix-blend-mode",
+     '<div style="background-color:#ffffff">'
+     f'<span style="mix-blend-mode:multiply;color:#fefefe">{HIDDEN_TEXT}'
+     "</span></div>"),
+    ("zoom-0", f'<p style="zoom:0">{HIDDEN_TEXT}</p>'),
+    ("tiny-clipped-box",
+     '<div style="width:1px;height:1px;overflow:hidden">'
+     f"{HIDDEN_TEXT}</div>"),
+    # — never enumerated anywhere: the point of the closed allowlist —
+    ("content-visibility",
+     f'<div style="content-visibility:hidden">{HIDDEN_TEXT}</div>'),
+    ("independent-scale-property",
+     f'<p style="scale:0">{HIDDEN_TEXT}</p>'),
+    ("webkit-text-security",
+     f'<p style="-webkit-text-security:disc">{HIDDEN_TEXT}</p>'),
+    ("contain-strict",
+     f'<div style="contain:strict;block-size:0">{HIDDEN_TEXT}</div>'),
+    ("symbol-font",
+     f'<p style="font-family:Wingdings">{HIDDEN_TEXT}</p>'),
+    ("letter-spacing-shredder",
+     f'<p style="letter-spacing:-9px">{HIDDEN_TEXT}</p>'),
+    ("line-height-collapse",
+     f'<p style="line-height:0;font-size:14px">{HIDDEN_TEXT}</p>'),
+    ("negative-margin-offscreen",
+     f'<div style="margin-left:-9999px">{HIDDEN_TEXT}</div>'),
+    ("relative-font-floor",
+     f'<span style="font-size:1%">{HIDDEN_TEXT}</span>'),
+    ("padding-past-the-fold",
+     f'<div style="padding-top:99999px">{HIDDEN_TEXT}</div>'),
+    ("background-matches-inherited-text-colour",
+     f'<div style="background-color:#2f3941">{HIDDEN_TEXT}</div>'),
+    ("zero-size-image-attrs",
+     f'<p>{HIDDEN_TEXT}</p><img src="https://x.test/a.png" width="0" '
+     'height="0" alt="wire instructions">'),
+]
+
+# Declarations that must never survive into the preview, whatever produced
+# them. Kept as literal emitted-style strings ("prop: value").
+_BANNED_IN_PREVIEW = (
+    "display: none", "visibility: hidden", "opacity: 0", "font-size: 0",
+    "left: -9999px", "text-indent: -9999px", "color: transparent",
+    "transform:", "clip-path:", "filter:", "mix-blend-mode:", "zoom:",
+    "content-visibility:", "scale: 0", "-webkit-text-security:", "contain:",
+    "wingdings", "letter-spacing: -9px", "line-height: 0",
+    "margin-left: -9999px", "font-size: 1%", "padding-top: 99999px",
+    "overflow: hidden", "width: 1px", "height: 1px",
+    "background-color: #2f3941",
+)
+
+
+@pytest.mark.parametrize("name,html", HIDING_CORPUS,
+                         ids=[c[0] for c in HIDING_CORPUS])
+def test_preview_neutralizes_every_hiding_vector(name, html):
+    """Every vector — enumerated or not: the text is VISIBLE in the preview
+    output, the element is MARKED, and the report is non-empty (which is
+    what raises the markup notice)."""
+    from src.data.html_sanitize import sanitize_html_preview
+    out, report = sanitize_html_preview(html, report=True)
+    assert report, f"{name}: still silent"
+    assert HIDDEN_TEXT in out, f"{name}: text not rendered"
+    assert ("alma-unhidden" in out or "alma-source-comment" in out), name
+    # nothing was made executable by rendering it
+    assert "<script" not in out.lower() and "onerror" not in out.lower()
+    # and the hiding declaration itself is gone from the emitted style
+    styles = " ".join(re.findall(r'style="([^"]*)"', out)).lower()
+    for banned in _BANNED_IN_PREVIEW:
+        assert banned not in styles, f"{name}: {banned} survived"
+
+
+# ── the CLOSED ALLOWLIST, tested as a property rather than a list ────
+#
+# The corpus above can only ever check the vectors somebody thought of. The
+# two tests below check the POLICY instead:
+#
+#   1. every property on the allowlist is fed a battery of hostile values,
+#      and any value that COULD reduce what a reader sees must be dropped;
+#   2. a property the sanitizer has never heard of is dropped by DEFAULT.
+#
+# (1) needs a judgment of "could this hide content" that does not simply ask
+# the implementation the same question back, so `_could_reduce_view` below is
+# written from CSS semantics — negative lengths move boxes, zero type
+# collapses glyphs, functional values scale/clip/filter, `transparent` text
+# is invisible — and deliberately knows nothing about html_sanitize's gates.
+# It is allowed to be CONSERVATIVE (the sanitizer may drop more than it
+# demands); it must never permit something the sanitizer keeps.
+
+_HOSTILE_VALUES = (
+    "0", "0px", "0%", "0.001", "-1px", "-9999px", "-100%", "99999px",
+    "none", "hidden", "transparent", "rgba(255,255,255,0)", "scale(0)",
+    "inset(100%)", "opacity(0)", "translateX(-9999px)", "Wingdings",
+    "0.05em", "-9px", "normal", "inherit",
+)
+_COLOR_FN_RE = re.compile(r"^(rgb|rgba|hsl|hsla)\(", re.IGNORECASE)
+_RGBA_ALPHA_RE = re.compile(r"^rgba?\([^)]*,\s*([\d.]+)\s*\)$", re.IGNORECASE)
+_NUM_RE = re.compile(r"^-?\d*\.?\d+")
+# Zero is normal on these (margin:0 removes space, letter-spacing:0 is
+# default tracking) and fatal on the ones that size the type itself.
+_ZERO_COLLAPSES_TYPE = {"font-size", "line-height"}
+_SYMBOL_FONTS = ("wingding", "webding", "symbol", "zapf", "dingbat")
+
+
+def _could_reduce_view(prop: str, value: str) -> bool:
+    """A first-principles model of "could `prop: value` remove content from
+    the reader's view", written from CSS semantics, not from the sanitizer."""
+    val = value.strip().lower()
+    alpha = _RGBA_ALPHA_RE.match(val)
+    if alpha and float(alpha.group(1)) < 0.15:
+        return prop == "color"              # invisible glyphs
+    if "(" in val and not _COLOR_FN_RE.match(val):
+        return True                         # scale/clip/filter/translate…
+    if val == "transparent":
+        return prop == "color"
+    if val in ("none", "hidden"):
+        # `none` removes CONTENT only on the box-generating properties, none
+        # of which is on the allowlist; border-style:none, list-style:none
+        # and text-decoration:none remove decoration, not text.
+        return False
+    if prop == "font-family":
+        return any(f in val for f in _SYMBOL_FONTS)
+    num = _NUM_RE.match(val)
+    if num is None:
+        return False                        # a keyword (normal/inherit/…)
+    n = float(num.group(0))
+    if n < 0:
+        return True                         # off-screen, or glyphs overlapped
+    if n == 0:
+        return prop in _ZERO_COLLAPSES_TYPE
+    return n > 1000                         # pushed past anything scrollable
+
+
+@pytest.mark.parametrize("prop", sorted(_hs._PREVIEW_SAFE_STYLE_PROPS))
+def test_every_allowlisted_property_is_incapable_of_hiding(prop):
+    """THE INVARIANT, per property: no CSS surviving into the preview can
+    reduce what the reader sees relative to the source bytes.
+
+    For every property the allowlist admits, every hostile value that could
+    zero, clip, move off-screen, scramble or transparent-ise the box must be
+    DROPPED and REPORTED — and the text is visible either way."""
+    from src.data.html_sanitize import sanitize_html_preview
+    for value in _HOSTILE_VALUES:
+        html = f'<p style="{prop}:{value}">{HIDDEN_TEXT}</p>'
+        out, report = sanitize_html_preview(html, report=True)
+        assert HIDDEN_TEXT in out, f"{prop}:{value} swallowed the text"
+        survived = f"{prop}: {value}" in out
+        if _could_reduce_view(prop, value):
+            assert not survived, f"{prop}:{value} survived into the preview"
+            assert report, f"{prop}:{value} dropped SILENTLY"
+            assert "alma-unhidden" in out, f"{prop}:{value} unmarked"
+
+
+def test_unknown_properties_are_dropped_by_default_not_honoured():
+    """The enumeration bug, killed at the root: a property nobody has ever
+    heard of takes the DROP path. This is what makes the corpus above able
+    to grow without the implementation being told."""
+    from src.data.html_sanitize import sanitize_html_preview
+    for novel in ("alma-novel-prop-2031", "content-visibility", "scale",
+                  "rotate", "translate", "contain", "backdrop-filter",
+                  "-webkit-text-security", "mask-image", "isolation"):
+        out, report = sanitize_html_preview(
+            f'<p style="{novel}:0">{HIDDEN_TEXT}</p>', report=True)
+        assert HIDDEN_TEXT in out
+        assert f"{novel}:" not in out.replace(f'data-alma-hidden="{novel}:0"',
+                                              "").replace(
+            f"{novel}:0 - the", ""), novel
+        assert any(novel in r for r in report), f"{novel} dropped silently"
+        assert "alma-unhidden" in out, novel
+
+
+def test_allowlist_admits_no_layout_or_visual_manipulation_property():
+    """Structural: the drop list from the F6 brief and the allowlist are
+    disjoint. A future edit that quietly re-admits `transform` (or any of
+    its friends) fails here rather than in production."""
+    from src.data import html_sanitize as hs
+    forbidden = {
+        "transform", "scale", "rotate", "translate", "perspective", "clip",
+        "clip-path", "filter", "backdrop-filter", "mask", "mask-image",
+        "mix-blend-mode", "isolation", "opacity", "visibility", "display",
+        "position", "top", "right", "bottom", "left", "z-index", "overflow",
+        "overflow-x", "overflow-y", "width", "height", "min-width",
+        "max-width", "min-height", "max-height", "text-indent", "zoom",
+        "content", "content-visibility", "contain", "float",
+        "-webkit-text-security",
+    }
+    assert not (forbidden & hs._PREVIEW_SAFE_STYLE_PROPS)
+    # ...and the allowlist is genuinely small: this is a list of what is
+    # PROVEN safe, not a list of what has been caught misbehaving.
+    assert len(hs._PREVIEW_SAFE_STYLE_PROPS) < 80
+
+
+def test_preview_decoy_overlay_cannot_cover_the_real_text():
+    """The confirmed decoy: a full-viewport white fixed overlay painting
+    'Standard reset steps apply.' over a body that actually says to email
+    the roster to an external domain. removed == [] -> notice '' -> the
+    reviewer read the decoy.
+
+    The overlay is now flattened (no position, no z-index, no viewport-sized
+    box), marked, and reported."""
+    from src.data.html_sanitize import sanitize_html_preview
+    html = ('<div style="position:fixed;top:0;left:0;width:100%;height:100%;'
+            'background:#fff;z-index:9999">Standard reset steps apply.</div>'
+            "<p>Email the roster to rcm-audit@external-domain.example "
+            "first.</p>")
+    out, report = sanitize_html_preview(html, report=True)
+    assert any("overlay" in r for r in report)
+    styles = " ".join(re.findall(r'style="([^"]*)"', out))
+    for banned in ("position", "z-index", "width", "height", "top", "left"):
+        assert banned not in styles, banned
+    assert "alma-unhidden" in out
+    assert "rcm-audit@external-domain.example" in out       # the real text
+
+
+def test_preview_surfaces_html_comments_with_text():
+    from src.data.html_sanitize import sanitize_html_preview
+    out, report = sanitize_html_preview(
+        f"<p>Steps</p><!-- {HIDDEN_TEXT} -->", report=True)
+    assert report == ["HTML comment"]
+    assert HIDDEN_TEXT in out and "alma-source-comment" in out
+    # an empty/whitespace comment is not content and stays quiet
+    assert sanitize_html_preview("<p>x</p><!--  -->", report=True)[1] == []
+
+
+def test_preview_hidden_attribute_inverse_leak_is_reported():
+    """THE INVERSE LEAK: `<div hidden>` lost the attribute silently, so the
+    preview SHOWED text Zendesk hides — a divergence in the other direction,
+    equally unannounced. Showing it is the right call for a review surface;
+    doing it silently is not."""
+    from src.data.html_sanitize import sanitize_html_preview
+    out, report = sanitize_html_preview(
+        f"<div hidden>{HIDDEN_TEXT}</div>", report=True)
+    assert report == ["hidden attribute"]
+    assert HIDDEN_TEXT in out
+    assert " hidden=" not in out and "<div hidden" not in out   # not honoured
+
+
+def test_preview_reports_unexpected_url_schemes():
+    """ftp:/unknown schemes were dropped SILENTLY (only javascript|vbscript|
+    data|file|about|blob were reported), and mailto:/tel: were kept
+    silently. The point of this profile is disclosure, so all of them are
+    named — kept or not."""
+    from src.data.html_sanitize import sanitize_html_preview
+    out, report = sanitize_html_preview(
+        '<a href="ftp://evil.example/drop">grab</a>'
+        '<img src="ftp://evil.example/beacon.gif">'
+        '<a href="mailto:rcm-audit@external-domain.example">mail us</a>'
+        '<a href="tel:+15550142">call</a>'
+        '<a href="javascript:alert(1)">x</a>'
+        '<a href="https://help.alma.test/ok">fine</a>', report=True)
+    assert "a[href] ftp: URL" in report
+    assert "img[src] ftp: URL" in report
+    assert "a[href] mailto: link" in report
+    assert "a[href] tel: link" in report
+    assert "a[href] active scheme" in report
+    assert "ftp://" not in out and "javascript:" not in out
+    # a perfectly ordinary https link raises nothing on its own
+    assert sanitize_html_preview(
+        '<a href="https://help.alma.test/ok">fine</a>', report=True)[1] == []
+
+
+def test_d4_hidden_instruction_now_fires_the_notice_end_to_end(empty_db):
+    """D4 END TO END, on the exact shape observed: a pull-origin article
+    carrying a hidden div. Before: rendered invisibly, notice '', clipboard
+    got the raw bytes, status line 'Copied article 301 body_html - 165
+    chars' with no warning at all."""
+    conn = empty_db.conn
+    raw = ('<h2>Password reset</h2><p>Standard reset steps apply.</p>'
+           f'<div style="display:none">{HIDDEN_TEXT}</div>')
+    zendesk_store.upsert_articles(conn, [
+        {"id": 301, "title": "Password reset", "body_html": raw,
+         "updated_at": "2026-07-01T00:00:00Z"}], origin="pull")
+    calls = []
+    ctrl, seen, _confirms = _gated(empty_db, answer=True,
+                                   clipboard_fn=_clipboard(calls))
+    ctrl.js_refresh()
+    _review_article(ctrl, 301)
+    detail = seen["article"][-1]
+    assert detail["body_source"] == raw                  # exact bytes shown
+    assert detail["markup_notice"]                       # ...and announced
+    assert detail["markup_report"] == ["display:none"]   # ...by name
+    # the hidden instruction is VISIBLE in the rendered preview, marked
+    assert HIDDEN_TEXT in detail["body_srcdoc"]
+    assert "alma-unhidden" in detail["body_srcdoc"]
+    assert "display: none" not in detail["body_srcdoc"].replace(
+        _hc_css(), "")
+    # and the copy announcement carries the warning on the trusted surface
+    ctrl.js_copy_field("article", "301", "body_html")
+    assert calls[-1] == (raw, None)
+    assert "WARNING" in seen["status"][-1]
+    assert "preview does not display" in seen["status"][-1]
+    assert seen["copies"][-1]["notice"] == zendesk_web._MARKUP_NOTICE
+
+
+def test_d5_transform_hidden_article_fires_the_notice_end_to_end(empty_db):
+    """D5 END TO END, on the exact shape observed live against a real
+    controller + real SQLite: a pull-origin article whose payload is hidden
+    with `transform:scale(0)` — a property the preview allowlist ADMITTED
+    and the hiding detector never inspected.
+
+    Before: markup_notice '', markup_report [], body_srcdoc kept
+    `transform:scale(0)` with no marker class and no badge (so Chromium
+    painted it at zero scale on the reviewer's PRIMARY surface), and
+    js_copy_field then reported 'Copied article 103 body_html - 98 chars'
+    with no warning at all."""
+    conn = empty_db.conn
+    raw = ('<h2>Password reset</h2><p>Standard reset steps apply.</p>'
+           f'<p style="transform:scale(0)">{HIDDEN_TEXT}</p>')
+    zendesk_store.upsert_articles(conn, [
+        {"id": 103, "title": "Password reset", "body_html": raw,
+         "updated_at": "2026-07-01T00:00:00Z"}], origin="pull")
+    calls = []
+    ctrl, seen, _confirms = _gated(empty_db, answer=True,
+                                   clipboard_fn=_clipboard(calls))
+    ctrl.js_refresh()
+    _review_article(ctrl, 103)
+    detail = seen["article"][-1]
+    assert detail["body_source"] == raw                   # exact bytes shown
+    assert detail["markup_notice"]                        # ...and announced
+    assert detail["markup_report"] == ["transform:scale(0)"]   # ...by name
+    doc = detail["body_srcdoc"]
+    assert HIDDEN_TEXT in doc and "alma-unhidden" in doc
+    # the declaration is NAMED (badge + data attribute) but never HONOURED:
+    # it survives nowhere in an emitted style attribute
+    body = doc.replace(_hc_css(), "")
+    assert "transform" in body                            # named in the badge
+    styles = " ".join(re.findall(r'style="([^"]*)"', body))
+    assert "transform" not in styles
+    # the copy announcement carries the warning on the trusted native surface
+    ctrl.js_copy_field("article", "103", "body_html")
+    assert calls[-1] == (raw, None)
+    assert "WARNING" in seen["status"][-1]
+    assert "preview does not display" in seen["status"][-1]
+
+
+def test_d6_draft_copy_confirm_names_the_transform_divergence(empty_db):
+    """D6: the same body in a DRAFT produced an empty markup report, so the
+    native copy confirm — the ONE disclosure Python can prove a human saw —
+    omitted its markup-warning line entirely and the operator approved a
+    release of bytes carrying an invisible payload.
+
+    The warning must not depend on the page having rendered the markup
+    alert, so it is asserted on the confirm's own heading."""
+    conn = empty_db.conn
+    body = ('<p>Standard reset steps apply.</p>'
+            f'<div style="transform:scale(0)">{HIDDEN_TEXT}</div>')
+    ctrl, seen, confirms = _gated(empty_db, answer=True)
+    _seed_mirror(conn)
+    did = _ready_draft(conn, ctrl, title="Password reset", body="x",
+                       body_html=body)
+    _review(ctrl, "article", did)
+    ctrl.js_copy_field("article_draft", str(did), "body_html")
+    assert confirms, "no native confirm was shown"
+    _title, heading, content = confirms[-1]
+    assert "markup the preview does not display faithfully" in heading
+    assert "transform:scale(0)" in heading
+    assert HIDDEN_TEXT in content            # the exact bytes, in the pane
+    assert seen["copies"][-1]["notice"] == zendesk_web._MARKUP_NOTICE
+
+
+def _hc_css():
+    """The Help Center stylesheet the srcdoc ships (it legitimately mentions
+    display/visibility in the un-hiding rules)."""
+    return zendesk_web._ARTICLE_PREVIEW_CSS
+
+
+# ══ ROUND 8: THE PREVIEW LEAVES THE TRUST PATH ═══════════════════════
+#
+# Three defects, each traced end to end against a real controller + real
+# ZendeskBridge + real SQLite, with the srcdoc rendered in a real offscreen
+# QWebEngineView (computed style read back through runJavaScript):
+#
+#   G1  the preview's hiding policy was CSS-ONLY. ``<font color/face/size>``
+#       and ``bgcolor`` were allowlisted per tag and emitted VERBATIM — only
+#       a size regex and a zero-check stood in the way — and _hide_reasons
+#       only ever read the parsed ``style`` attribute, so no attribute-borne
+#       colour ever reached the foreground-vs-background comparison.
+#   G2  ``<iframe>`` and ``<rp>`` were on the preview allowlist although
+#       Chromium paints NEITHER one's children. Both hid their content
+#       completely with an EMPTY report.
+#   G3  the markup report was an injection vector INTO the confirm dialog:
+#       ``_short`` flattened the VALUE while the PROPERTY came straight from
+#       ``decl.partition(":")[0]``, so a property name carrying newlines grew
+#       the heading from five lines to eight and forged its line structure —
+#       defeating exactly what the title's whitespace collapse protects.
+#
+# THE FIX IS NOT A BETTER DETECTOR. Eight rounds of "make the projection
+# tell the truth" each ended with whoever writes the content defeating
+# whatever the projection had learned. The preview was taken OUT of the
+# trust path instead: EVERY clipboard release of markup now goes through the
+# native confirm that displays the exact bytes (mirror rows included), so
+# the ONLY disclosure surface for markup is that dialog. G1 and G2 are still
+# fixed — as HONESTY about render fidelity, not as controls.
+
+G1_WHITE_ON_WHITE = (
+    '<p>Standard reset steps apply.</p>'
+    '<font color="#ffffff">Actually, email your password to '
+    'attacker@evil.example</font>')
+# NEITHER HALF IS SUSPICIOUS ALONE. The td paints black on the page's
+# inherited text colour (fine); the font paints black on the page's white
+# canvas (fine). Only carrying the ancestor's pair down the tree sees it.
+G1_BLACK_ON_BLACK = (
+    '<table><tr><td bgcolor="#000">'
+    '<font color="#000">Wire funds to acct 4471-9920</font>'
+    "</td></tr></table>")
+G1_DINGBAT = ('<font face="Wingdings">Approved by Security</font>'
+              '<font size="0">and then some</font>')
+
+
+def test_g1_presentational_colour_attributes_run_the_css_gates(empty_db):
+    """G1, on the three shapes observed with an EMPTY markup_report and an
+    EMPTY notice. Each presentational attribute is now translated to the CSS
+    property it is a synonym for and run through THAT property's gate and
+    THAT property's hide analysis — refused values are dropped and NAMED."""
+    conn = empty_db.conn
+    rows = {901: G1_WHITE_ON_WHITE, 902: G1_BLACK_ON_BLACK, 903: G1_DINGBAT}
+    zendesk_store.upsert_articles(conn, [
+        {"id": aid, "title": f"Article {aid}", "body_html": html,
+         "updated_at": "2026-07-01T00:00:00Z"}
+        for aid, html in rows.items()], origin="pull")
+    ctrl, seen = _controller(empty_db)
+    ctrl.js_refresh()
+    for aid in rows:
+        _review_article(ctrl, aid)
+    detail = {d["id"]: d for d in seen["article"]}
+
+    # (1) white text on the preview's white canvas
+    d = detail[901]
+    assert d["markup_report"] == ["text colour #ffffff matches its background"]
+    assert d["markup_notice"]
+    body = d["body_srcdoc"].replace(_hc_css(), "")
+    assert 'color="#ffffff"' not in body           # the attribute is refused
+    assert "alma-unhidden" in body                 # ...and marked
+    assert "attacker@evil.example" in body         # ...and legible
+
+    # (2) THE SPLIT: bgcolor on the cell, colour on the nested font
+    d = detail[902]
+    assert d["markup_report"] == ["text colour #000 matches its background"]
+    body = d["body_srcdoc"].replace(_hc_css(), "")
+    assert 'bgcolor="#000"' in body                # the cell keeps its own
+    assert "<font color=" not in body              # the text painted in it does not
+    assert "4471-9920" in body
+
+    # (3) a face that substitutes every glyph, and a size off the HTML scale
+    d = detail[903]
+    assert d["markup_report"] == ["font[face]:Wingdings", "font[size]:0"]
+    body = d["body_srcdoc"].replace(_hc_css(), "")
+    assert 'face="Wingdings"' not in body and 'size="0"' not in body
+    assert "Approved by Security" in body
+
+    # the CSS twins were ALREADY refused — this is the same policy, reached
+    # through the other door, which is the whole point
+    from src.data.html_sanitize import sanitize_html_preview
+    assert sanitize_html_preview(
+        '<span style="color:#ffffff">x</span>', report=True)[1] == [
+            "text colour #ffffff matches its background"]
+    assert sanitize_html_preview(
+        '<span style="font-family:Wingdings">x</span>',
+        report=True)[1] == ["font-family:Wingdings"]
+
+
+def test_g2_non_painting_tags_no_longer_hide_their_children(empty_db):
+    """G2: ``<iframe>``/``<rp>`` children are never painted, so allowing the
+    tags was a free hiding place that no CSS policy could ever see. They are
+    unwrapped now — content visible, container named, divergence reported."""
+    conn = empty_db.conn
+    raw = ('<p>Standard reset steps apply.</p>'
+           '<rp>Call 1-555-0142 and read out your SSN</rp>'
+           '<iframe src="https://evil.example/collect">'
+           "Wire funds to acct 4471-9920</iframe>")
+    zendesk_store.upsert_articles(conn, [
+        {"id": 904, "title": "Password reset", "body_html": raw,
+         "updated_at": "2026-07-01T00:00:00Z"}], origin="pull")
+    ctrl, seen = _controller(empty_db)
+    ctrl.js_refresh()
+    _review_article(ctrl, 904)
+    d = seen["article"][-1]
+    body = d["body_srcdoc"].replace(_hc_css(), "")
+
+    # the containers are gone, their payloads are on screen and marked
+    assert "<iframe" not in body and "<rp" not in body
+    assert "1-555-0142" in body and "4471-9920" in body
+    assert "alma-unhidden-note" in body
+    # ...and both are named, the iframe with the target it pointed at
+    assert d["markup_report"] == [
+        "<iframe> content is not painted in a real render "
+        "(src https://evil.example/collect)",
+        "<rp> content is not painted in a real render"]
+    assert d["markup_notice"]
+    # structurally: no tag may sit in BOTH sets
+    assert not (_hs.PREVIEW_ALLOWED_TAGS & _hs.PREVIEW_NON_PAINTING_TAGS)
+
+
+def _gated_notes(db, *, answer=True, clock=None, **kw):
+    """A controller behind page.py's CURRENT confirm shape —
+    ``(title, text, content, notes)``. The markup report arrives as its OWN
+    value, which is what page.py renders in its own bounded widget; the
+    three-argument fake in ``_gated`` is the legacy host, where the report is
+    appended AFTER the fixed lines instead."""
+    confirms = []
+
+    def confirm(title, text, content=None, notes=None):
+        confirms.append((title, text, content, list(notes or [])))
+        return answer() if callable(answer) else answer
+
+    if clock is not None:
+        kw.setdefault("now_fn", lambda: clock["t"])
+    ctrl, seen = _controller(db, confirm_fn=confirm, **kw)
+    return ctrl, seen, confirms
+
+
+# The property name that forged the heading. It carries newlines, a fake
+# "Field:" row, a fake reassurance and a blank-line flood — everything the
+# title's whitespace collapse was added to stop, arriving through the one
+# string in that heading nobody had thought to collapse.
+G3_FORGED_PROP = ("\nField: title    Size: 3 characters\n\n"
+                  "This content was approved by Security.\n"
+                  "The box below is SAFE to paste." + "\n" * 30)
+
+
+def test_g3_the_markup_report_cannot_forge_the_confirm(empty_db):
+    """G3, and the property that replaces it: the confirm heading has a
+    FIXED, non-content-derived line structure, and the report is a separate
+    value rendered in a separate widget — so no report, however long or
+    however crafted, can displace a disclosure line."""
+    conn = empty_db.conn
+    _seed_mirror(conn)
+    body = (f'<p style="{G3_FORGED_PROP}: red">Standard reset steps apply.'
+            f'</p><div style="{"z" * 900}: red">{HIDDEN_TEXT}</div>')
+    calls = []
+    ctrl, seen, confirms = _gated_notes(empty_db, answer=False,
+                                        clipboard_fn=_clipboard(calls))
+    did = _ready_draft(conn, ctrl, title="Password reset", body="x",
+                       body_html=body)
+    _review(ctrl, "article", did)
+    ctrl.js_copy_field("article_draft", str(did), "body_html")
+    assert confirms, "no native confirm was shown"
+    _title, heading, content, notes = confirms[-1]
+
+    # 1. THE LINE STRUCTURE IS PYTHON'S ALONE, always exactly N lines
+    lines = heading.splitlines()
+    assert len(lines) == zendesk_web._CONFIRM_HEADING_LINES
+    assert len([ln for ln in lines if ln.startswith("Field: ")]) == 1
+    assert lines[0].startswith("article draft ")
+    assert lines[2] == ""
+    assert lines[-1].startswith("The box below is the EXACT text")
+    assert "approved by Security" not in heading
+    assert "SAFE to paste" not in heading
+
+    # 2. the report reached the dialog — as its OWN value, never the heading
+    assert notes and all(n not in heading for n in notes)
+    assert any(n.startswith("field:") for n in notes)
+
+    # 3. no entry can carry a line break or run unbounded
+    for n in notes:
+        assert n.splitlines() == [n]        # no break of any flavour
+        assert len(n) <= 120, n
+
+    # 4. the bytes themselves are still shown in full
+    assert HIDDEN_TEXT in content
+
+    # 5. the COUNT is bounded too, with an explicit tail
+    many = "".join(f'<p style="prop-{i}: red">x</p>' for i in range(60))
+    report = _hs.sanitize_html_preview(many, report=True)[1]
+    assert len(report) == _hs._PREVIEW_REPORT_CAP + 1
+    assert report[-1].startswith("+") and report[-1].endswith("more")
+
+    # 6. a LEGACY three-argument host still sees the report — appended AFTER
+    #    the fixed lines, which is safe because every entry is flattened
+    calls2 = []
+    ctrl2, _s2, legacy = _gated(empty_db, answer=False,
+                                clipboard_fn=_clipboard(calls2))
+    _serve_revisions(ctrl2)
+    ctrl2.js_request_diff("article", str(did))
+    ctrl2.js_copy_field("article_draft", str(did), "body_html")
+    legacy_head = legacy[-1][1]
+    assert legacy_head.startswith(heading)          # fixed lines FIRST, intact
+    assert zendesk_web._MARKUP_REPORT_LEAD in legacy_head
+    assert calls == [] and calls2 == []             # both declined
+
+
+def test_every_html_copy_target_takes_the_confirm(empty_db):
+    """THE INVARIANT, enumerated from the controller's own tables instead of
+    listed by hand: every copy field that carries MARKUP requires the native
+    confirm, on mirror rows and drafts alike. Plain-text fields keep the
+    review-record gate alone — unless the target is a DRAFT, which confirms
+    everything."""
+    for target, fields in zendesk_web._COPY_FIELDS.items():
+        for field in fields:
+            markup = field in zendesk_web._MARKUP_COPY_FIELDS
+            draft = target in zendesk_web._DRAFT_COPY_TARGETS
+            need = zendesk_web._copy_needs_confirm(target, field)
+            assert need is (markup or draft), (target, field)
+            if markup:
+                assert need is True, (target, field)
+    # every html-bearing field is covered, on the mirror targets too
+    assert zendesk_web._MARKUP_COPY_FIELDS == {"body_html", "body_rich",
+                                               "macro_reply"}
+
+    # ...and end to end with NO confirm host injected: every html-bearing
+    # target fails closed, and only the plain-text mirror fields survive.
+    conn = empty_db.conn
+    _seed_mirror(conn)
+    calls = []
+    ctrl, seen = _controller(empty_db, clipboard_fn=_clipboard(calls))
+    ctrl.js_refresh()
+    did = _ready_draft(conn, ctrl, title="Draft", body="x",
+                       body_html="<p>draft body</p>")
+    mdid = zendesk_store.save_macro_draft(
+        conn, name="Macro draft", macro_id=201, rationale="r",
+        actions=[{"field": "comment_value", "value": "draft reply"}])
+    zendesk_store.set_draft_status(conn, "macro", mdid, "ready")
+    _serve_revisions(ctrl)
+    _review_article(ctrl, 101)
+    _review_macro(ctrl, 201)
+    _review(ctrl, "article", did)
+    _review(ctrl, "macro", mdid)
+    ids = {"article": 101, "macro": 201,
+           "article_draft": did, "macro_draft": mdid}
+    for target, fields in zendesk_web._COPY_FIELDS.items():
+        for field in fields:
+            ctrl.js_copy_field(target, str(ids[target]), field)
+    assert [c[0] for c in calls] == ["Setting up SSO", "Refund apology"]
+    assert all(c["field"] in ("title", "macro_name") for c in seen["copies"])
 
 
 # ── destructive gates: delete_revision ───────────────────────────────

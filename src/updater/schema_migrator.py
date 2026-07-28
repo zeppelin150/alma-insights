@@ -150,6 +150,7 @@ class SchemaMigrator:
     _POST_HOOKS: dict[str, str] = {
         "009_chat_data_layer.sql": "_posthook_009_extract_json_messages",
         "051_zendesk_mirror.sql": "_posthook_051_zendesk_projections",
+        "053_zendesk_versions.sql": "_posthook_053_seed_draft_baselines",
     }
 
     def _run_post_hook(self, filename: str, conn: sqlite3.Connection) -> None:
@@ -171,6 +172,14 @@ class SchemaMigrator:
         fixed = backfill_mirror_projections(conn)
         if fixed.get("articles") or fixed.get("macros"):
             logger.info("051 post-hook backfilled projections: %s", fixed)
+
+    @staticmethod
+    def _posthook_053_seed_draft_baselines(conn: sqlite3.Connection) -> None:
+        """Seed a seq-1 'create' version from each EXISTING article draft's
+        current state so pre-053 drafts have a rollback baseline. Guarded:
+        only drafts with zero version rows are seeded (re-run safe)."""
+        from src.data.zendesk_versions import seed_draft_baselines
+        seed_draft_baselines(conn)
 
     @staticmethod
     def _posthook_009_extract_json_messages(conn: sqlite3.Connection) -> None:

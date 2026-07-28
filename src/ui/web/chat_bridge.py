@@ -32,7 +32,18 @@ class ChatBridge(QObject):
     historyLoaded = Signal(str)   # JSON: {session_id, messages: [{role, content}], new?}
     sessionDeleted = Signal(str)  # JSON: {session_id, ok}
     jobsListed = Signal(str)      # JSON: {items: [ {job_id, title, status, progress_pct, steps:[…]} ]}
-    draftsPending = Signal(str)   # JSON: {items: [ {draft_id, title, diff:[{tag,text}], checks:[…]} ]}
+    draftsPending = Signal(str)   # JSON: {items: [ {draft_id, title, diff:[{tag,text}],
+                                  #   checks:[…], notice, publish_body,
+                                  #   publish_body_available} ]}.
+                                  #   ``notice`` names what the diff CANNOT show of the
+                                  #   bytes that will be sent (lossy projection / missing
+                                  #   baseline); ``publish_body`` IS those exact bytes and
+                                  #   is present for every draft shape, notice or no
+                                  #   notice — the panel renders it as ESCAPED TEXT behind
+                                  #   an always-available disclosure so the operator can
+                                  #   read what ships regardless of what any detector
+                                  #   concluded. Both are part of the approval surface;
+                                  #   this bridge is a pure relay and filters neither.
     draftResolved = Signal(str)   # JSON: {draft_id, ok, rejected?, error?}
     actionRequested = Signal(str)  # JSON per claimed action: {id, request_id, type, payload} (M0)
     googleAuthState = Signal(str)  # JSON: {state: 'connecting'|'connected'|'failed'} (M2) — STATUS ONLY
@@ -505,11 +516,26 @@ class ChatBridge(QObject):
 
     # ── in-thread review / sign-off (M5) ────────────────────────────
 
-    def _poll_drafts(self):
+    def _poll_drafts(self, bind: bool = False):
+        """Emit the review list. ``bind`` decides whether this render is allowed
+        to MINT an approval binding.
+
+        It defaults to False, and that default is load-bearing. ``_on_busy``
+        calls this on every ``busy_changed(False)`` — the end of EVERY Renn turn
+        — and the controller used to re-fingerprint each draft here. Since
+        ``revise_draft`` runs inside a turn, an injected revision made between
+        the operator reading the panel and pressing Approve was silently
+        RE-AUTHORIZED by this poll: traced, hostile bytes reached the live Guru
+        spy; with only this call's binding removed, the same run refused with
+        ``draft_changed_after_review`` and sent nothing.
+
+        So the poll refreshes the LIST and nothing else. Only ``openReview`` —
+        the operator opening the panel — mints.
+        """
         if self._draft_api is None or not hasattr(self._draft_api, "pending_drafts"):
             return
         try:
-            drafts = self._draft_api.pending_drafts() or []
+            drafts = self._drafts_snapshot(bind)
         except Exception:  # noqa: BLE001 — best-effort
             return
         try:
@@ -520,20 +546,64 @@ class ChatBridge(QObject):
             self._drafts_last = payload
             self.draftsPending.emit(payload)
 
+    def _drafts_snapshot(self, bind: bool):
+        """``pending_drafts(bind=…)``, tolerating an API that predates the flag
+        (the duck-typed fakes, and any older controller)."""
+        try:
+            return self._draft_api.pending_drafts(bind=bind) or []
+        except TypeError:
+            return self._draft_api.pending_drafts() or []
+
     @Slot()
     def refreshDrafts(self):
-        """On-demand refresh of the review panel → ``draftsPending``."""
+        """On-demand refresh of the review LIST → ``draftsPending``.
+
+        Deliberately non-binding: this slot is page-callable, so it must not be
+        able to authorize anything. It shows the operator what is pending; it
+        does not decide that they read it."""
         self._drafts_last = None
-        self._poll_drafts()
+        self._poll_drafts(bind=False)
+
+    @Slot()
+    def openReview(self):
+        """The operator OPENED the review panel — the one render that binds.
+
+        Separated from ``refreshDrafts`` so that minting is an act, not a side
+        effect of a timer. A page script can of course call this too; that only
+        arms a binding, and a binding alone publishes nothing — the native
+        confirm in ``approve_draft`` is what proves a human, and it displays the
+        exact bytes and target before anything leaves the machine."""
+        self._drafts_last = None
+        self._poll_drafts(bind=True)
 
     @Slot(str)
     def approveDraft(self, draft_id):
-        """Record sign-off + publish → ``draftResolved`` (+ refresh the panel)."""
+        """Publish the reviewed draft → ``draftResolved`` (+ refresh the panel).
+
+        Pure relay, as always — the controller owns the decision. It refuses
+        when the draft moved between the render that bound the approval and
+        this click (the ``revise_draft`` TOCTOU), and its ``message`` is the
+        operator-facing sentence for that refusal. Relaying it verbatim is the
+        whole reason the refusal is honest on screen: a bare ``ok:false`` would
+        look identical to a Guru outage, and the operator would retry into a
+        publish of content they never read.
+
+        ``refused`` distinguishes "the gate said no" from "the publish was
+        attempted and failed", which ``ok`` alone cannot; the controller's
+        ``published`` flag is not re-emitted because ``ok`` already carries it
+        on this surface."""
         result = self._draft_call("approve_draft", draft_id) or {}
         payload = {"draft_id": draft_id, "ok": bool(result.get("ok"))}
         if result.get("error"):
             payload["error"] = result["error"]
+        if result.get("message"):
+            payload["message"] = result["message"]
+        if result.get("refused"):
+            payload["refused"] = True
         self._safe_emit(self.draftResolved, payload)
+        # NON-BINDING. A failed publish re-arms the draft, and re-minting a
+        # binding for it here would hand the next click an authorization no
+        # human granted.
         self.refreshDrafts()
 
     @Slot(str)
@@ -599,3 +669,147 @@ class ChatBridge(QObject):
             self.telemetry.emit(json.dumps(payload, default=str))
         except Exception:  # noqa: BLE001 — telemetry is best-effort, never fatal
             pass
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  THE NATIVE PUBLISH GATE (2026-07-27)
+#
+#  The Guru publish is the only LIVE REMOTE WRITE reachable from this chat,
+#  and until now it had no native confirmation at all. Both slots that reach
+#  it — refreshDrafts() and approveDraft() — are page-callable, and the
+#  QWebChannel is the trust boundary: a probe drove those two calls alone and
+#  published hostile bytes to a live-shaped Guru client with every signal
+#  discarded and no dialog on screen.
+#
+#  The Zendesk lane found and fixed this defect class for a CLIPBOARD release
+#  (page.py::_build_copy_confirm_dialog). This is the same gate, on the lane
+#  that performs the real write, and it mirrors that implementation exactly:
+#
+#    * the payload lives in a VISIBLE, scrollable, read-only QPlainTextEdit —
+#      never setDetailedText, which Qt collapses behind a "Show Details…"
+#      button nothing here ever presses;
+#    * the TARGET gets its own bounded plain-text widget, because the target is
+#      half of what the sign-off commits to and it appeared on no surface;
+#    * every content-derived string is Qt.PlainText (force_plain_text sweeps
+#      the rest) — a draft TITLE is attacker-writable through Renn's propose
+#      tools, QLabel defaults to AutoText, and mightBeRichText only scans to
+#      the first newline, which is exactly where a title sits;
+#    * the default button is CANCEL, so a stray Enter never publishes.
+# ═══════════════════════════════════════════════════════════════════════
+
+_PUBLISH_DIALOG_MIN = (760, 560)
+_PUBLISH_TARGET_MAX_HEIGHT = 92
+_PUBLISH_BYTES_MIN_HEIGHT = 260
+
+PUBLISH_CONFIRM_TITLE = "Publish to the live Guru knowledge base?"
+
+PUBLISH_CONFIRM_HEADING = (
+    "This publishes to the LIVE Guru knowledge base. Nothing has been sent "
+    "yet.\n"
+    "Below is the destination, then the EXACT bytes that will be sent — not a "
+    "preview, not a summary, and not the markdown.\n"
+    "Read both. If anything is unfamiliar, press Cancel: nothing is published "
+    "and the draft stays in the review panel.")
+
+
+def build_publish_confirm_dialog(parent, payload: dict):
+    """Build (do not run) the native Guru publish confirmation.
+
+    Separated from the exec so the properties that matter are testable without
+    spinning a modal event loop: the bytes are in a VISIBLE widget rather than
+    a collapsed pane, the resolved target is on screen, and the default button
+    is Cancel.
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QLabel,
+                                   QPlainTextEdit, QVBoxLayout)
+    from src.ui.pages.enablement._common import (force_plain_text,
+                                                 style_native_dialog)
+
+    data = payload or {}
+    dlg = QDialog(parent)
+    dlg.setObjectName("guruPublishConfirm")
+    dlg.setWindowTitle(PUBLISH_CONFIRM_TITLE)
+    dlg.setModal(True)
+    dlg.setMinimumSize(*_PUBLISH_DIALOG_MIN)
+    lay = QVBoxLayout(dlg)
+    lay.setContentsMargins(20, 18, 20, 16)
+    lay.setSpacing(12)
+
+    head = QLabel(PUBLISH_CONFIRM_HEADING)
+    head.setObjectName("guruPublishHeading")
+    # No interpolation here at all — the title and target are attacker-writable
+    # and live in their own widgets below, so this disclosure is Python's alone
+    # and its line structure cannot be rewritten by a crafted draft.
+    head.setTextFormat(Qt.PlainText)
+    head.setWordWrap(True)
+    head.setTextInteractionFlags(Qt.TextSelectableByMouse)
+    lay.addWidget(head)
+
+    target = QPlainTextEdit("\n".join([
+        f"Card title: {data.get('title') or ''}",
+        f"Destination: {data.get('target_label') or ''}",
+        f"card_id: {data.get('card_id') or '(none — a new card)'}",
+        f"collection_id: {data.get('collection_id') or '(default)'}",
+        f"folder_id: {data.get('folder_id') or '(none)'}",
+    ]))
+    target.setObjectName("guruPublishTarget")
+    target.setReadOnly(True)
+    target.setMaximumHeight(_PUBLISH_TARGET_MAX_HEIGHT)
+    target.setTabChangesFocus(True)
+    target.setStyleSheet(
+        "QPlainTextEdit { background:#FFF7ED; color:#8A5A00;"
+        " border:1px solid #E5B75A; border-radius:4px; padding:6px;"
+        " font-size:12px; }")
+    lay.addWidget(target)
+
+    view = QPlainTextEdit(str(data.get("publish_body") or ""))
+    view.setObjectName("guruPublishBytes")
+    view.setReadOnly(True)
+    view.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+    view.setMinimumHeight(_PUBLISH_BYTES_MIN_HEIGHT)
+    view.setTabChangesFocus(True)
+    view.setStyleSheet(
+        "QPlainTextEdit { background:#FFFFFF; color:#2F3941;"
+        " border:1px solid #C2C8CC; border-radius:4px; padding:8px;"
+        " font-family:'Consolas','SFMono-Regular',Menlo,monospace;"
+        " font-size:12px; }")
+    lay.addWidget(view, 1)
+
+    buttons = QDialogButtonBox(dlg)
+    cancel = buttons.addButton("Cancel", QDialogButtonBox.RejectRole)
+    publish = buttons.addButton("Publish to Guru", QDialogButtonBox.AcceptRole)
+    publish.setAutoDefault(False)
+    publish.setDefault(False)
+    cancel.setAutoDefault(True)
+    cancel.setDefault(True)
+    cancel.setFocus()
+    buttons.accepted.connect(dlg.accept)
+    buttons.rejected.connect(dlg.reject)
+    lay.addWidget(buttons)
+    style_native_dialog(dlg)
+    # Belt and braces: any label a future edit adds here is plain text too.
+    force_plain_text(dlg)
+    return dlg
+
+
+class PublishConfirmHost:
+    """The object ``AgentChatController`` calls to take the operator's native
+    confirmation. Injected from ``MainWindow``; when it is absent the
+    controller refuses to publish (see ``AgentChatController._confirm_publish``).
+
+    Deliberately NOT a QObject and NOT registered on any web channel: nothing
+    a page script can reach may call it, and nothing about it is a slot.
+    """
+
+    def __init__(self, parent_widget=None):
+        self._parent = parent_widget
+
+    def confirm_publish(self, payload: dict) -> bool:
+        """Show the modal gate. True ONLY on an explicit accept."""
+        from PySide6.QtWidgets import QDialog
+        dlg = build_publish_confirm_dialog(self._parent, payload)
+        try:
+            return dlg.exec() == QDialog.Accepted
+        finally:
+            dlg.deleteLater()

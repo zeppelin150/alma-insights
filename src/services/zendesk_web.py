@@ -26,15 +26,61 @@ Security posture (the QWebChannel trust boundary):
 * While EITHER inflight claim is held every mutating slot silently refuses
   (confused-deputy freeze); the claim is taken BEFORE any native nested
   event loop (the QMessageBox AND the QFileDialog pickers).
+* **THE PREVIEW IS NOT A DISCLOSURE SURFACE (2026-07-27).**
+
+      The ONLY disclosure surface for markup is the native copy dialog.
+
+  Eight rounds were spent making the sandboxed preview tell the truth about
+  bytes a human was about to paste, and eight times whoever wrote the
+  content defeated whatever the preview had learned to detect:
+  ``display:none``, then ``transform:scale(0)`` (a property the allowlist
+  admitted and the detector never inspected), then — with the CSS policy
+  finally closed — ``<font color="#ffffff">`` and ``<td bgcolor="#000">``,
+  which need no CSS at all, and ``<iframe>``/``<rp>``, whose children
+  Chromium simply never paints. The pattern, not any one bug, is the
+  finding: **a projection decides what the human needs to see, and whoever
+  controls the content controls the projection.**
+
+  So the preview was taken OUT of the trust path instead of hardened again.
+  Every clipboard release of MARKUP — mirror articles and mirror macros
+  included, not just drafts — now goes through the native confirm that
+  displays the exact bytes (item 6 below). Once the dialog is the
+  disclosure for every HTML copy, no CSS policy, sanitizer report or markup
+  notice is load-bearing for disclosure any more: the preview is a DISPLAY
+  concern, and ``markup_report`` / ``_MARKUP_NOTICE`` are a heads-up about
+  render fidelity, not the thing standing between hidden bytes and the
+  clipboard. The review-record/content-hash gate stays as defence in depth.
+
 * Every article HTML string RENDERED by this controller passes a sanitizer
   (``_article_srcdoc`` is the only srcdoc producer). The rendered preview
-  uses the wider, rendering-only ``sanitize_html_preview`` profile so a
-  pulled article looks the way an end user would see it in Zendesk —
-  classes, ids, data-attributes, style, tables and embeds are inert inside
-  the SPA's ``sandbox=""`` iframe. STORED content and the ``text/html``
-  clipboard flavour keep the STRICT ``sanitize_html``; the two profiles are
-  separate objects in ``html_sanitize`` precisely so widening the preview
-  can never widen a paste.
+  uses the rendering-only ``sanitize_html_preview`` profile so a pulled
+  article keeps its structure — classes, ids, data-attributes and tables
+  are inert inside the SPA's ``sandbox=""`` iframe. That profile still aims
+  to fail in ONE direction:
+
+      No CSS surviving into the preview can reduce what the reader sees
+      relative to the source bytes.
+
+  It is enforced by a CLOSED CSS allowlist rather than a list of known
+  hiding tricks: only typography, colour, non-negative spacing/borders and
+  table scaffolding survive, each value-gated, and everything else —
+  ``display``, ``position``, ``overflow``, ``opacity``, ``transform``,
+  ``clip-path``, ``filter``, ``zoom``, and any property CSS grows next year
+  — is dropped, rendered inside a marked wrapper, and named in
+  ``markup_report``. The presentational attributes that say the same things
+  without any CSS (``<font color/face/size>``, ``bgcolor``) run the same
+  gates and the same foreground-vs-background comparison, which now carries
+  the INHERITED colour pair down the tree so a black-on-black split across
+  two elements is caught. Tags whose children are never painted
+  (``<iframe>``, ``<rp>``) are unwrapped so their content becomes visible,
+  and named. The ``hidden`` attribute, ``width="0"``, collapsed
+  ``<details>`` and HTML comments are the non-CSS members of the same
+  family and are handled beside it. All of that is HONESTY about render
+  fidelity — the notice fires more often than it used to, and that is now
+  cheap, because it is no longer what protects anyone. STORED content and
+  the ``text/html`` clipboard flavour keep the STRICT ``sanitize_html``;
+  the two profiles are separate objects in ``html_sanitize`` precisely so
+  widening the preview can never widen a paste.
 * **THE CLIPBOARD INVARIANT (the whole point of this module).**
 
       Whatever reaches the clipboard is byte-identical to something the
@@ -88,14 +134,47 @@ Security posture (the QWebChannel trust boundary):
   rendering — ``sanitize_html_preview``, see ``_article_srcdoc`` — and is
   never a clipboard flavour.)
 
-  6. **EVERY DRAFT COPY TAKES A NATIVE CONFIRM THAT DISPLAYS THE BYTES.**
+  6. **EVERY COPY OF MARKUP TAKES A NATIVE CONFIRM THAT DISPLAYS THE
+     BYTES.**
 
-         No clipboard release of DRAFT content — article draft or macro
-         draft, every field, both mime flavours — happens without a NATIVE
-         confirm showing the EXACT characters about to be released. No
-         ``confirm_fn`` injected, declined, or the row's bytes moved while
-         the dialog was open ⇒ nothing is written to the clipboard and NO
-         ``copy_resolved`` receipt is emitted.
+         No clipboard release of MARKUP — ``body_html``, ``body_rich`` or
+         ``macro_reply``, on a MIRROR row or a draft — and no clipboard
+         release of DRAFT content at all — article draft or macro draft,
+         every field, both mime flavours — happens without a NATIVE confirm
+         showing the EXACT characters about to be released, IN A VISIBLE
+         SCROLLABLE VIEW, with the row's title and the field named.
+         No ``confirm_fn`` injected, declined, or the row's bytes moved
+         while the dialog was open ⇒ nothing is written to the clipboard and
+         NO ``copy_resolved`` receipt is emitted. The rule lives in
+         ``_copy_needs_confirm`` and is a pure function of (target kind,
+         field name) — nothing the content can steer.
+
+         Titles and macro names stay un-gated on MIRROR rows: they are not
+         markup, the destination does not interpret them, and the review
+         record already covers them. (A DRAFT still confirms them, because
+         a draft confirms everything.)
+
+     "Displays" is literal and was once false. The first implementation
+     routed anything over 400 characters into ``QMessageBox``'s DETAIL pane,
+     which Qt collapses behind a "Show Details…" button — so for every
+     realistic body (all of them exceed 400 characters) the dialog said
+     "these are the EXACT characters that will go on the clipboard" and then
+     showed none of them. ``_copy_confirm_text`` therefore hands the bytes
+     over as ``content``, page.py renders them in a read-only text view
+     sized to show a meaningful chunk without a further click, and
+     ``_confirm_shows_content`` verifies by PARAMETER NAME that the host
+     really implements that contract before trusting it with the payload.
+
+     Two further properties make the gate cover the CLIPBOARD rather than
+     just the release:
+
+     * ``js_copy_field`` is freeze-checked and an approved release holds the
+       clipboard for ``_COPY_HOLD_S``, so no un-gated copy can substitute
+       different bytes between the approval and the paste;
+     * every refusal at or after the confirm reports ONE string
+       (``_COPY_REFUSED``) and arms an escalating per-target cooldown, so a
+       page can neither tell a human decline from a machine refusal nor
+       summon modals until one is mis-clicked.
 
      Rationale, and why this replaced an authorship ledger: a draft is by
      definition content that is NOT yet in Zendesk and is about to be
@@ -128,10 +207,17 @@ Security posture (the QWebChannel trust boundary):
 
      The confirm runs the destructive-gate discipline verbatim (freeze
      check → claim before the nested event loop → confirm → re-verify the
-     bytes did not move → release). MIRROR rows (articles/macros already
-     live in Zendesk, unmodified) keep the review-record gate and the
-     markup notice ALONE — the risk there is different and the ergonomics
-     matter more. mark-ready / mark-copied stay confirm-free by design.
+     bytes did not move → release). mark-ready / mark-copied stay
+     confirm-free by design.
+
+     MIRROR rows used to be exempt: content already live in Zendesk was
+     released under the review record plus the preview and the markup
+     notice. That exemption is GONE (2026-07-27), because the preview +
+     notice chain is exactly the chain all three of the round-8 attackers
+     walked — a mirror row is a row an IMPORT can write, and a pull is
+     byte-faithful to whatever the remote instance holds. The ergonomic
+     cost is one click on an already-deliberate action, and the dialog
+     doubles as the "this is what you are pasting" view.
 * **This controller can never write to real Zendesk**: it holds no client,
   the compat ``article_push`` / ``macro_push`` / ``sync_requested`` signals
   exist for page.py wiring parity only and are NEVER emitted, and the only
@@ -185,20 +271,56 @@ _DRAFT_TARGET = {"article": "article_draft", "macro": "macro_draft"}
 # pasted into a public site by hand. Every clipboard release from one of
 # these takes the native confirm (module docstring, item 6).
 _DRAFT_COPY_TARGETS = frozenset(_DRAFT_TARGET.values())
+# THE COPY FIELDS THAT CARRY MARKUP, on every target kind — mirror rows
+# included (module docstring, item 6). A static set, not a look-at-the-bytes
+# test: "does this string contain a tag" is a content-derived branch, and a
+# content-derived branch is something whoever controls the content can steer.
+# ``macro_reply`` is here because a reply is routinely ``comment_value_html``
+# and the live Zendesk comment editor INTERPRETS what is pasted into it.
+# Titles and macro names are not markup and stay un-gated (a draft still
+# confirms them, because a draft confirms everything).
+_MARKUP_COPY_FIELDS = frozenset({"body_html", "body_rich", "macro_reply"})
 
-# Said out loud whenever the sandboxed preview genuinely CANNOT display part
-# of the stored bytes — a script/style/form/plugin container was dropped, an
-# event handler was stripped, a javascript:-style URL was refused. The mirror
-# keeps pull-origin bytes verbatim on purpose, so the honest move is to
-# announce it, never to silently rewrite or hide it.
+
+def _copy_needs_confirm(target: str, field: str) -> bool:
+    """Whether this clipboard release takes the native confirm.
+
+    TRUE for every release of markup, and for every release from a DRAFT.
+    Deliberately a pure function of (target kind, field name): no row state,
+    no byte inspection, nothing the content can influence."""
+    return target in _DRAFT_COPY_TARGETS or field in _MARKUP_COPY_FIELDS
+
+# Said out loud whenever the sandboxed preview and the stored bytes are not
+# the same picture, in EITHER direction:
+#
+# * something could not be displayed — a script/style/form/plugin container
+#   was dropped, an event handler stripped, a URL scheme refused or merely
+#   unexpected;
+# * the preview did not honour the source's presentation — every CSS
+#   declaration outside the closed display-safe allowlist is dropped and
+#   named (display / position / overflow / opacity / transform / clip-path /
+#   filter / zoom / anything unrecognised), as are the ``hidden`` attribute,
+#   zero-size presentational attributes and HTML comments.
+#
+# The mirror keeps pull-origin bytes verbatim on purpose, so the honest move
+# is to announce the divergence, never to silently rewrite or hide it.
 #
 # Measured against the PREVIEW profile (``sanitize_html_preview``), not the
-# strict one: the strict profile also throws away classes, ids, data-attrs,
-# most style declarations and table scaffolding, none of which hides content,
-# so measuring against it fired this notice on essentially every pulled
-# article. A warning that is always on is a warning nobody reads.
+# strict one: the strict profile also throws away classes, ids, data-attrs
+# and table scaffolding, none of which hides content, so measuring against it
+# fired this notice on essentially every pulled article. Under the closed CSS
+# allowlist the notice DOES fire more often than it did while the allowlist
+# was wide — an article that lays itself out with flexbox now says so. That
+# is deliberate: the alternative was `transform:scale(0)` reporting nothing
+# at all. Everything dropped is named, so this is never a bare "something
+# changed" a reader has to ignore.
+#
+# The report it is computed from is EMITTED alongside it (``markup_report``)
+# so the surface can name what was hidden instead of just warning that
+# something was.
 _MARKUP_NOTICE = ("this content contains markup the preview does not "
-                  "display - read the HTML source before pasting")
+                  "display faithfully - hidden or dropped in the source; "
+                  "read the exact HTML before pasting")
 # The macro flavour of the same honesty. A macro reply has no sanitized
 # preview (every action value renders verbatim as escaped text), so the
 # warning is about the DESTINATION: these bytes carry active markup that
@@ -228,13 +350,47 @@ _BODY_EDIT_KINDS = ("draft", "article")
 # is served exactly where an edit is accepted, so the feed can never grow
 # hundreds of 200k-char bodies and the editor can never open blank.
 _EDITABLE_DRAFT_STATUS = "pending"
-# Below this many characters the exact bytes go in the confirm's main text;
-# longer ones ride the scrollable detail pane.
-_CONFIRM_INLINE_CAP = 400
+# ── copy-gate timing (F2/F3) ─────────────────────────────────────────
+# After an APPROVED draft release, the clipboard belongs to the operator for
+# this long: no un-gated copy (mirror rows self-serve theirs) may overwrite
+# it. What the human approved has to still be there when they paste.
+_COPY_HOLD_S = 10.0
+# A refused copy confirm (declined, no dialog host, or bytes that moved) arms
+# a per-target cooldown, and repeated refusals escalate to a long lockout —
+# the js_request_pull pattern. A page cannot summon modals until one is
+# mis-clicked.
+_COPY_CONFIRM_COOLDOWN_S = 10.0
+_COPY_CONFIRM_MAX_ATTEMPTS = 3
+_COPY_CONFIRM_LOCKOUT_S = 300.0
+# THE ONE refusal string every copy refusal at or after the confirm uses.
+# Distinct wording per branch was an ORACLE: it let a page tell a human
+# decline ("Copy cancelled") from a missing dialog host ("can only be copied
+# from the app window") and grind accordingly.
+_COPY_REFUSED = "Copy refused - nothing was placed on the clipboard."
+# Parameter names a confirm host may use for the third, CONTENT-SHOWING
+# argument. Checked by NAME (see _confirm_shows_content) so a host whose
+# third parameter means something else — a parent widget, a flag — can never
+# be handed the clipboard payload and silently swallow it.
+_CONFIRM_CONTENT_PARAMS = ("content", "exact_bytes", "detail")
+# ...and the FOURTH argument: the markup report, as its own list. It is
+# rendered in its own widget, never concatenated into the heading, so no
+# report — however long, however crafted — can displace the heading's fixed
+# disclosure lines. A host that does not declare it gets the report appended
+# to the message instead (still visible, still after the fixed lines, and
+# harmless because every entry is flattened and capped at construction).
+_CONFIRM_NOTES_PARAMS = ("notes", "markup_notes", "report")
+# The one sentence that introduces the report, wherever it is rendered.
+_MARKUP_REPORT_LEAD = ("These bytes contain markup the preview does not "
+                       "display faithfully")
 _SPECIALIST_REF = "specialist-edit"
 _SPECIALIST_RATIONALE = "Edited in the workspace."
 _PULL_COOLDOWN_S = 60               # untrusted slot must not drive traffic
 _PULL_FAIL_COOLDOWN_S = 5           # a failed pull must not lock out retry
+# The copy confirm's heading is a FIXED number of lines, none of them
+# content-derived except the quoted row title on line 1 (whitespace-collapsed
+# and length-capped). Asserted in the tests: a report, a title or any other
+# untrusted string that could add or remove a line is a defect.
+_CONFIRM_HEADING_LINES = 5
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
@@ -282,6 +438,40 @@ details { border: 1px solid #e9ebed; border-radius: 4px; padding: .6em .9em;
   margin: 0 0 1.1em; }
 summary { cursor: pointer; font-weight: 600; }
 mark { background: #fff7d5; }
+/* BELT AND BRACES over the sanitizer's closed CSS allowlist. Nothing in
+   this document should carry any of these — html_sanitize drops every one
+   of them, whatever value they hold — so this rule costs a faithful render
+   nothing and makes a construct that ever slips through INERT instead of
+   INVISIBLE. Only properties with no legitimate use in an article body are
+   listed: neutralising display/position/opacity globally would break real
+   layout, which is why those are the sanitizer's job alone. */
+.alma-hc-article *, .alma-hc-article *::before, .alma-hc-article *::after {
+  transform: none !important; filter: none !important;
+  backdrop-filter: none !important; clip: auto !important;
+  clip-path: none !important; mask-image: none !important;
+  mix-blend-mode: normal !important; zoom: 1 !important;
+  -webkit-text-security: none !important; }
+/* Content the SOURCE hides and this preview shows anyway (see
+   html_sanitize's preview profile). Loud on purpose: an invisible payload
+   in a review surface is the whole attack, so the un-hidden version has to
+   be the most conspicuous thing on the page. !important because the
+   author's own declarations are still in the document. */
+.alma-unhidden { outline: 2px dashed #cc3340 !important;
+  outline-offset: 2px; background: #fff0f1 !important;
+  color: #2f3941 !important; opacity: 1 !important;
+  visibility: visible !important; display: block !important;
+  position: static !important; font-size: 15px !important;
+  text-indent: 0 !important; max-height: none !important;
+  max-width: none !important; min-height: 0 !important; overflow: visible
+  !important; z-index: auto !important; }
+.alma-unhidden-note, .alma-source-comment { display: block;
+  font-family: "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 12px !important; font-weight: 600; color: #cc3340 !important;
+  background: #fff0f1; border-left: 3px solid #cc3340; padding: 2px 8px;
+  margin: 2px 0; white-space: pre-wrap; opacity: 1 !important;
+  visibility: visible !important; }
+.alma-source-comment { color: #68737d !important; border-left-color: #68737d;
+  background: #f8f9f9; }
 """.strip()
 
 
@@ -443,6 +633,12 @@ class ZendeskWebController(QObject):
         # js_open_macro), read only by _review_covers. Covers drafts AND
         # mirror rows; see the clipboard-invariant note above.
         self._reviewed: dict[tuple[str, int], dict] = {}
+        # F2: an approved draft release owns the clipboard until this epoch
+        # second; un-gated (mirror) copies are refused until then.
+        self._copy_hold_until = 0.0
+        # F3: (target, id) -> {"count", "until"} — escalating cooldown after
+        # a refused copy confirm, so repeated modals cannot be summoned.
+        self._copy_backoff: dict[tuple[str, int], dict] = {}
         self._last_filter = "open"
         self._open_article_id = None    # last article served as a detail
 
@@ -600,6 +796,11 @@ class ZendeskWebController(QObject):
             # what was typed.
             "body_text": self._article_body_text(art),
             "markup_notice": payloads["body_html"]["notice"],
+            # WHAT diverges, item by item (dropped containers, refused or
+            # merely unexpected URL schemes, and every hiding construct the
+            # preview neutralized). The notice says "something"; this says
+            # what, so the reviewer knows where to look in the source.
+            "markup_report": payloads["body_html"].get("report") or [],
             "revisions": revisions,
         })
 
@@ -726,6 +927,8 @@ class ZendeskWebController(QObject):
         text_rows = diff_words(base_text, new_text)
         notice = next((p["notice"] for p in payloads.values()
                        if p.get("notice")), "")
+        report = next((p["report"] for p in payloads.values()
+                       if p.get("report")), [])
         self._record_review(target, did, payloads, content_hash)
         self._req_seq += 1
         self._emit(self.diff_ready, {
@@ -736,6 +939,7 @@ class ZendeskWebController(QObject):
             "warning": (_ZERO_CHANGE_WARNING
                         if (n_changed == 0 and not bytes_equal) else None),
             "markup_notice": notice,
+            "markup_report": list(report),
             "title": {"changed": old_title != new_title,
                       "old": old_title, "new": new_title},
             "rows": rows,                       # SOURCE — authoritative
@@ -979,17 +1183,36 @@ class ZendeskWebController(QObject):
         """Copy exact: re-reads the EXACT DB bytes at click time (never the
         page's copy of the text) and hands them to the Python-side clipboard.
 
-        MIRROR rows (content already live in Zendesk) copy under the review
-        record alone — read-only, no confirm, no status change. DRAFT rows
-        always take the native confirm that displays the exact bytes
-        (``_resolve_copy`` → ``_confirm_draft_copy``); if it is absent or
+        Every release of MARKUP (``body_html`` / ``body_rich`` /
+        ``macro_reply``, mirror rows included) and every release from a
+        DRAFT takes the native confirm that displays the exact bytes
+        (``_resolve_copy`` → ``_confirm_copy_release``); if it is absent or
         declined, ``_resolve_copy`` returns None and NOTHING is emitted —
-        no clipboard write and no ``copy_resolved`` receipt.
+        no clipboard write and no ``copy_resolved`` receipt. Only mirror
+        titles and macro names copy under the review record alone.
 
         Every successful copy is ALSO announced on the native status line
         via the compat set_status, a surface the page cannot forge —
         including the ``_MARKUP_NOTICE`` when the released bytes carry
-        markup the preview cannot display."""
+        markup the preview cannot display faithfully.
+
+        THE GATE GOVERNS THE CLIPBOARD, NOT ONLY THE RELEASE (F2). Two
+        belts, because "the human approved these bytes" is worthless if
+        different bytes are on the clipboard by the time they paste:
+
+        * this slot is FROZEN like every other mutating slot, so a page
+          script cannot write the clipboard from inside the nested event
+          loop of an open native modal (the observed exploit fired an
+          un-gated MIRROR copy while the draft dialog was still up);
+        * an approved GATED release arms ``_COPY_HOLD_S`` during which no
+          copy that carries no gate of its own — since 2026-07-27 that is
+          only a mirror title / macro name, which the page self-serves
+          through js_open_article — may overwrite it. A gated copy may, and
+          pays for its own confirm."""
+        if self._frozen():
+            # a native modal or a pull/import owns this moment
+            self.set_status(_COPY_REFUSED)
+            return
         target = str(target or "")
         fields = _COPY_FIELDS.get(target)
         if fields is None or str(field or "") not in fields:
@@ -997,6 +1220,11 @@ class ZendeskWebController(QObject):
         field = str(field)
         tid = self._copy_target_id(target, target_id)
         if tid is None:
+            return
+        gated = _copy_needs_confirm(target, field)
+        if not gated and self._now() < self._copy_hold_until:
+            # the operator's approved bytes are still the clipboard's
+            self.set_status(_COPY_REFUSED)
             return
         conn = self._db()
         if conn is None:
@@ -1011,6 +1239,8 @@ class ZendeskWebController(QObject):
                 ok = bool(self._clipboard_fn(text, html))
             except Exception:  # noqa: BLE001
                 ok = False
+        if ok and gated:
+            self._copy_hold_until = self._now() + _COPY_HOLD_S
         self._req_seq += 1
         self._emit(self.copy_resolved, {
             "request_id": f"c-{self._req_seq}", "target": target,
@@ -1192,33 +1422,79 @@ class ZendeskWebController(QObject):
         destructive modal OR a pull/import is inflight."""
         return self._action_inflight or self._pull_inflight
 
-    def _confirm(self, title, text, detail=None) -> bool:
+    def _confirm(self, title, text, content=None, notes=None) -> bool:
         """Native confirm; absent fn or a broken dialog means NO.
 
-        ``detail`` carries bytes the operator MUST see (the copy gate's
-        exact clipboard payload). A host that takes it renders it in a
-        scrollable pane (QMessageBox.setDetailedText); a host that does not
-        still gets the bytes, appended to the message — they are never
-        dropped. The arity is decided by introspection, not by catching a
-        TypeError, so a dialog can never be shown twice."""
+        ``content`` carries bytes the operator MUST SEE ON SCREEN (the copy
+        gate's exact clipboard payload). A host that declares it renders it
+        in a VISIBLE, scrollable, read-only view — never a collapsed
+        disclosure (page.py's ``_build_copy_confirm_dialog``); a host that
+        does not still gets the bytes, appended to the message, so they are
+        never dropped. Which of the two applies is decided by introspection,
+        not by catching a TypeError, so a dialog can never be shown twice.
+
+        ``notes`` is the markup report, kept OUT of the heading. It used to
+        be joined into it, and the report is attacker-reachable: a page could
+        drive a body whose sanitizer report grew the heading from five lines
+        to eight and forged its line structure — defeating the very property
+        the title's whitespace collapse exists to protect. A host that
+        declares the fourth parameter renders the report in its own widget;
+        one that does not gets it appended AFTER the fixed lines, which is
+        safe now that every entry is flattened and capped at construction."""
         if self._confirm_fn is None:
             return False
+        notes = [str(n) for n in (notes or [])]
         try:
-            if detail is None:
+            if content is None:
                 return bool(self._confirm_fn(title, text))
-            if self._confirm_takes_detail():
-                return bool(self._confirm_fn(title, text, detail))
-            return bool(self._confirm_fn(title, f"{text}\n\n{detail}"))
+            if self._confirm_shows_content():
+                if notes and self._confirm_shows_notes():
+                    return bool(self._confirm_fn(title, text, content, notes))
+                return bool(self._confirm_fn(
+                    title, self._with_notes(text, notes), content))
+            return bool(self._confirm_fn(
+                title, f"{self._with_notes(text, notes)}\n\n{content}"))
         except Exception:  # noqa: BLE001
             return False
 
-    def _confirm_takes_detail(self) -> bool:
+    @staticmethod
+    def _with_notes(text, notes) -> str:
+        """The fallback rendering: the report AFTER the fixed lines, never
+        interleaved with them."""
+        if not notes:
+            return text
+        return f"{text}\n\n{_MARKUP_REPORT_LEAD}: " + "; ".join(notes)
+
+    def _confirm_shows_content(self) -> bool:
+        """Whether the injected host declares the content-showing form.
+
+        Arity alone is NOT enough, and that was a live hazard: any
+        three-positional callable passed the old check, so a host whose third
+        parameter meant something else entirely — ``(title, text,
+        parent=None)`` is the obvious one — would have been handed the
+        clipboard payload as a parent widget and shown the operator NOTHING.
+        The parameter NAME must be one this contract defines, and ``*args``
+        (whose names cannot be inspected) fails closed to the append path,
+        where the bytes are still visible in the message."""
+        return self._confirm_param(2) in _CONFIRM_CONTENT_PARAMS
+
+    def _confirm_shows_notes(self) -> bool:
+        """Whether the injected host declares the separate REPORT parameter
+        (checked by name, for the same reason ``content`` is)."""
+        return self._confirm_param(3) in _CONFIRM_NOTES_PARAMS
+
+    def _confirm_param(self, index):
+        """Name of the host's Nth positional parameter, or None."""
         import inspect
         try:
-            inspect.signature(self._confirm_fn).bind("t", "x", "d")
+            sig = inspect.signature(self._confirm_fn)
         except (TypeError, ValueError):
-            return False
-        return True
+            return None
+        positional = [p for p in sig.parameters.values()
+                      if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+        if len(positional) <= index:
+            return None
+        return positional[index].name
 
     def _emit(self, signal, payload: dict):
         try:
@@ -1558,24 +1834,29 @@ class ZendeskWebController(QObject):
         reach the live Zendesk editor as formatted paste. The clipboard
         never sees the wider preview profile.
 
-        ``notice`` is measured against the PREVIEW profile instead: it fires
-        only when the sandboxed preview genuinely cannot display something
-        (a dropped script/style/form container, a stripped handler, a
-        refused URL scheme), not merely because the strict profile would
-        have thrown away a class attribute."""
+        ``notice``/``report`` are measured against the PREVIEW profile
+        instead: they fire when the sandboxed preview and the bytes are not
+        the same picture — something could not be displayed (a dropped
+        script/style/form container, a stripped handler, an unexpected URL
+        scheme) OR something the source hides is displayed anyway (the
+        preview neutralizes every hiding construct it can recognise). Not
+        merely because the strict profile would have thrown away a class
+        attribute. ``report`` names each item so the surface can say WHAT
+        was hidden, not only that something was."""
         from src.data.html_sanitize import sanitize_html, sanitize_html_preview
         raw = "" if raw is None else str(raw)
         safe = sanitize_html(raw)
-        _preview, removed = sanitize_html_preview(raw, report=True)
-        notice = _MARKUP_NOTICE if removed else ""
+        _preview, report = sanitize_html_preview(raw, report=True)
+        notice = _MARKUP_NOTICE if report else ""
         return {
             "title": {"text": title or "", "html": None,
-                      "sanitized": False, "notice": ""},
+                      "sanitized": False, "notice": "", "report": []},
             # Plain-text HTML source: byte-verbatim (pastes as text).
-            "body_html": {"text": raw, "html": None,
-                          "sanitized": False, "notice": notice},
+            "body_html": {"text": raw, "html": None, "sanitized": False,
+                          "notice": notice, "report": list(report)},
             "body_rich": {"text": raw, "html": safe,
-                          "sanitized": safe != raw, "notice": notice},
+                          "sanitized": safe != raw, "notice": notice,
+                          "report": list(report)},
         }
 
     @staticmethod
@@ -1594,16 +1875,19 @@ class ZendeskWebController(QObject):
         ("Billing & Claims") and nothing is hidden — hence the extra
         tag-start requirement (``_MARKUP_TAG_RE``)."""
         out = {"macro_name": {"text": name or "", "html": None,
-                              "sanitized": False, "notice": ""}}
+                              "sanitized": False, "notice": "", "report": []}}
         reply = _first_reply(actions)
         if reply is not None:
             from src.data.html_sanitize import sanitize_html
             notice = ""
+            report = []
             if (sanitize_html(reply) != reply
                     and _MARKUP_TAG_RE.search(reply)):
                 notice = _MACRO_MARKUP_NOTICE
+                report = [_MACRO_MARKUP_NOTICE]
             out["macro_reply"] = {"text": reply, "html": None,
-                                  "sanitized": False, "notice": notice}
+                                  "sanitized": False, "notice": notice,
+                                  "report": report}
         return out
 
     def _copy_bundle(self, conn, target, tid):
@@ -1647,55 +1931,116 @@ class ZendeskWebController(QObject):
                                      row.get("actions")),
                 store.draft_content_hash("macro", row), row)
 
-    def _copy_confirm_text(self, target, tid, field, exact, html):
-        """(title, text, detail) for the draft-copy confirm.
+    def _copy_confirm_text(self, target, tid, field, exact, html, row_title,
+                           report=None):
+        """``(title, heading, content, notes)`` for the copy confirm.
 
-        The dialog must SHOW the exact bytes: short payloads inline, long
-        ones in the scrollable detail pane. When the text/html mime flavour
-        differs from the plain one, BOTH strings are shown — the clipboard
-        carries both."""
-        label = f"{target.replace('_', ' ')} {tid}"
-        head = (f"Copy the {field} of {label} to the clipboard?\n\n"
-                "This is DRAFT content: it is not in Zendesk yet, and you "
-                "are about to paste it into a public site by hand. These "
-                "are the EXACT characters that will go on the clipboard:")
-        bytes_shown = "" if exact is None else str(exact)
+        ``content`` is ALWAYS the exact bytes and is NEVER None, however
+        long they are: the host renders it in a visible scrollable view, and
+        the heading states the full length so a payload that runs past the
+        viewport still announces its size.
+
+        Nothing here routes content by size any more. The old rule sent
+        anything over 400 characters into ``QMessageBox.setDetailedText``,
+        which Qt COLLAPSES behind a "Show Details…" button — so for every
+        realistic article body (all of them are longer than that) the gate's
+        headline claim, "these are the EXACT characters that will go on the
+        clipboard", was followed on screen by nothing at all.
+
+        The heading also NAMES the row (title + field), because "article
+        draft 1" told an operator nothing about what they were approving.
+
+        THE ROW TITLE IS PAGE-WRITABLE and is the only untrusted string in
+        this heading: a page script can set it through ``js_save_draft``'s
+        rename allowlist, or by driving Renn's propose tools over the
+        co-registered chat bridge. Two consequences, both load-bearing:
+
+        * the host MUST render this heading as PLAIN TEXT. It did not — the
+          QLabel defaulted to ``Qt::AutoText`` and ``Qt::mightBeRichText``
+          scans up to the first newline, which is exactly where the title
+          sits, so a title starting ``<!--`` deleted the rest of the
+          disclosure INCLUDING the markup-divergence warning below. Fixed in
+          page.py; ``tests/test_zendesk_web_tab.py`` pins it.
+        * whitespace in the title is collapsed here, so even as plain text a
+          crafted title cannot forge the heading's line structure (a fake
+          "Field: …" row, a fake warning, a wall of blank lines that scrolls
+          the real text away).
+
+        THE HEADING IS ALWAYS EXACTLY ``_CONFIRM_HEADING_LINES`` LINES, and
+        every line but the first is Python's alone. That is now a property
+        worth naming, because the markup report used to be appended here and
+        the report is attacker-reachable: a body whose sanitizer report
+        carried an embedded newline in a PROPERTY name grew this heading from
+        five lines to eight and forged its structure. The report is returned
+        as its own value instead (``notes``) and rendered in its own widget.
+
+        When the text/html mime flavour differs from the plain one BOTH
+        strings are shown — the clipboard carries both."""
+        kind = target.replace("_", " ")
+        exact = "" if exact is None else str(exact)
+        title = " ".join(str(row_title or "").split()) or "(untitled)"
+        if len(title) > 120:
+            title = title[:119] + "…"
+        sizes = f"{len(exact):,} characters"
+        content = exact
         if html is not None and html != exact:
-            bytes_shown = (f"{bytes_shown}\n\n"
-                           f"----- text/html clipboard flavour -----\n{html}")
-        if len(bytes_shown) <= _CONFIRM_INLINE_CAP:
-            return ("Copy draft content", f"{head}\n\n{bytes_shown}", None)
-        return ("Copy draft content", head, bytes_shown)
+            sizes += f" (plus a {len(html):,}-character text/html flavour)"
+            content = (f"{exact}\n\n"
+                       f"----- text/html clipboard flavour "
+                       f"({len(html):,} chars) -----\n{html}")
+        draft = target in _DRAFT_COPY_TARGETS
+        provenance = (
+            "This is DRAFT content: it is not in Zendesk yet, and you are "
+            "about to paste it into a public site by hand."
+            if draft else
+            "This is MIRRORED content: it is a local copy of a Zendesk row, "
+            "and you are about to paste it somewhere by hand.")
+        heading = (
+            f"{kind} {tid} — “{title}”\n"
+            f"Field: {field}    Size: {sizes}\n\n"
+            f"{provenance}\n"
+            "The box below is the EXACT text that will go on the clipboard. "
+            "Read it — scroll if it does not fit — before you approve.")
+        what = "draft" if draft else "mirrored"
+        return (f"Copy {what} content to the clipboard?", heading, content,
+                [str(r) for r in (report or [])])
 
-    def _confirm_draft_copy(self, conn, target, tid, field, payload,
-                            content_hash) -> bool:
-        """THE DRAFT-COPY GATE (module docstring, item 6). Every clipboard
-        release of draft content passes through here — no authorship
-        question is asked, because authorship is unknowable when the page
-        can drive a Python-side actor (Renn) through the shared QWebChannel.
+    def _confirm_copy_release(self, conn, target, tid, field, payload,
+                              content_hash, row_title) -> bool:
+        """THE COPY GATE (module docstring, item 6). Every clipboard release
+        of MARKUP, and every release from a DRAFT, passes through here — no
+        authorship question is asked, because authorship is unknowable when
+        the page can drive a Python-side actor (Renn) through the shared
+        QWebChannel, and no preview question is asked, because a preview is
+        a projection and projections lose.
 
         Runs the destructive-gate discipline verbatim: freeze check →
-        single-winner claim taken BEFORE the modal's nested event loop →
-        native confirm displaying the exact bytes → re-verify that the row
-        still produces those same bytes → release. Fails closed on every
-        branch, including no ``confirm_fn`` injected."""
+        per-target backoff → single-winner claim taken BEFORE the modal's
+        nested event loop → native confirm DISPLAYING the exact bytes →
+        re-verify that the row still produces those same bytes → release.
+        Fails closed on every branch, including no ``confirm_fn`` injected.
+
+        Every refusal — declined, no dialog host, bytes moved, cooled down —
+        reports the SAME string and arms the SAME backoff, so a page cannot
+        tell a human decline from a machine refusal and cannot grind for a
+        mis-click (F3)."""
         if self._frozen():
+            return False
+        key = (target, tid)
+        if self._copy_backoff_active(key):
+            self.set_status(_COPY_REFUSED)
             return False
         exact = payload.get("text")
         html = payload.get("html")
         self._action_inflight = True
         try:
             approved = self._confirm(
-                *self._copy_confirm_text(target, tid, field, exact, html))
+                *self._copy_confirm_text(target, tid, field, exact, html,
+                                         row_title, payload.get("report")))
         finally:
             self._action_inflight = False
         if not approved:
-            self.set_status(
-                "Copy cancelled - nothing was placed on the clipboard."
-                if self._confirm_fn is not None else
-                "Draft content can only be copied from the app window "
-                "- nothing was placed on the clipboard.")
-            return False
+            return self._refuse_copy(key)
         # Re-verify after the modal: a nested event loop ran, so the row may
         # have moved. Byte-identical or no copy.
         try:
@@ -1705,11 +2050,25 @@ class ZendeskWebController(QObject):
         fresh = None if bundle is None else bundle[0].get(field)
         if (fresh is None or bundle[1] != content_hash
                 or fresh.get("text") != exact or fresh.get("html") != html):
-            self.set_status(
-                f"{target.replace('_', ' ')} {tid} changed while the confirm "
-                "was open - nothing was copied.")
-            return False
+            return self._refuse_copy(key)
+        self._copy_backoff.pop(key, None)   # a human said yes: reset
         return True
+
+    def _copy_backoff_active(self, key) -> bool:
+        rec = self._copy_backoff.get(key)
+        return rec is not None and self._now() < rec["until"]
+
+    def _refuse_copy(self, key) -> bool:
+        """One refusal: one generic status line, one escalating cooldown.
+        Always returns False so callers can ``return self._refuse_copy(k)``."""
+        rec = self._copy_backoff.get(key) or {"count": 0, "until": 0.0}
+        rec["count"] += 1
+        rec["until"] = self._now() + (
+            _COPY_CONFIRM_LOCKOUT_S if rec["count"] >= _COPY_CONFIRM_MAX_ATTEMPTS
+            else _COPY_CONFIRM_COOLDOWN_S)
+        self._copy_backoff[key] = rec
+        self.set_status(_COPY_REFUSED)
+        return False
 
     def _record_review(self, target, tid, payloads, content_hash):
         """Bind the exact strings the reviewer was JUST SHOWN to (target,
@@ -1735,7 +2094,15 @@ class ZendeskWebController(QObject):
            the text/html mime flavour — hashes to something the review
            showed. This is what makes a projection blind spot unexploitable:
            if the reviewed material and the released bytes disagree by so
-           much as one character, there is no copy."""
+           much as one character, there is no copy.
+
+        These refusals keep their specific wording, unlike everything at or
+        after the confirm (which all report ``_COPY_REFUSED``). They are not
+        an oracle: they describe state the page ALREADY knows — whether it
+        asked for a diff, and whether it wrote to the row since — and the
+        operator genuinely needs to be told to re-open the source view. What
+        a page must not be able to learn is whether a HUMAN said no, and no
+        branch here answers that."""
         label = f"{target.replace('_', ' ')} {tid}"
         rec = self._reviewed.get((target, tid))
         if rec is None:
@@ -1770,13 +2137,13 @@ class ZendeskWebController(QObject):
         ('ready','copied') — the pending→ready review step is ENFORCED at
         the clipboard boundary, not advisory. Everything else, mirror rows
         included, goes through ``_review_covers``: no recorded review means
-        no clipboard write, for every target.
+        no clipboard write, for every target. That gate stays as defence in
+        depth even though it is no longer the disclosure.
 
-        And EVERY draft copy — article draft or macro draft, every field,
-        both mime flavours — then takes the one thing the page cannot fake:
-        a NATIVE confirm displaying those exact bytes (module docstring,
-        item 6). Mirror rows (already live in Zendesk, unmodified) keep the
-        review-record gate and the markup notice alone."""
+        And every release ``_copy_needs_confirm`` names — all markup, on
+        mirror rows and drafts alike, plus every draft field whatever it
+        carries — then takes the one thing the page cannot fake: a NATIVE
+        confirm displaying those exact bytes (module docstring, item 6)."""
         bundle = self._copy_bundle(conn, target, tid)
         if bundle is None:
             return None
@@ -1789,9 +2156,12 @@ class ZendeskWebController(QObject):
                 return None
         if not self._review_covers(target, tid, payload, content_hash):
             return None
-        if target in _DRAFT_COPY_TARGETS:
-            if not self._confirm_draft_copy(
-                    conn, target, tid, field, payload, content_hash):
+        if _copy_needs_confirm(target, field):
+            row_title = (payloads.get("title") or payloads.get("macro_name")
+                         or {}).get("text")
+            if not self._confirm_copy_release(
+                    conn, target, tid, field, payload, content_hash,
+                    row_title):
                 return None
         return (payload["text"], payload["html"], payload["sanitized"],
                 payload["notice"])

@@ -119,6 +119,75 @@ def list_documents(conn: sqlite3.Connection, *, limit: int = 100) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+# ── the published body: ONE definition ───────────────────────────────
+
+def publish_body(draft, *, md_to_html=None) -> str:
+    """THE published body — exactly the bytes ``publish_draft`` sends to Guru.
+
+    This is the single definition of "the card body". Every approval surface
+    (the Qt preview, the web preview, the Review-changes input) and every
+    safety belt derives its bytes from THIS function; nothing else may compose
+    a publish body. Before 2026-07-26 the previews rendered
+    ``markdown_to_html(content)`` while the network sent ``content_html`` —
+    two independent representations that could (and did) disagree, letting a
+    body the operator never saw ship.
+
+    ``draft`` is any mapping with ``content`` (canonical markdown) and the
+    optional ``content_html`` (the rich editor's cleaned HTML, or an imported
+    Guru card's source HTML). ``md_to_html`` overrides the markdown converter
+    for callers that inject one (the web controller / tests); production
+    always uses :func:`src.data.html_markdown.markdown_to_html`.
+
+    DEFERRED DECISION (2026-07-26, owner call): the returned bytes are NOT run
+    through ``html_sanitize.sanitize_html``. Guru's own native blocks
+    (callouts / collapsibles / card links, see :mod:`src.data.guru_blocks`)
+    depend on ``class=`` and ``data-ghq-*`` attributes that the strict
+    sanitizer strips, so sanitizing here would silently break a shipped
+    feature. The audit finding this leaves open (unsanitized HTML reaching a
+    live Guru card) is accepted for now; the honesty invariant it does close
+    is that the operator now REVIEWS those same unsanitized bytes.
+    """
+    from src.data.guru_blocks import expand_blocks
+    get = getattr(draft, "get", None)
+    if get is None:
+        return ""
+    html = get("content_html")
+    if not html:
+        content = get("content") or ""
+        if md_to_html is not None:
+            html = md_to_html(content)
+        else:
+            from src.data.html_markdown import markdown_to_html
+            html = markdown_to_html(content)
+    # Expand native-block directives (callout / collapsible / card-link) into
+    # Guru's markup — on the captured rich HTML and the markdown-derived HTML
+    # alike. Idempotent when there are no directives.
+    return expand_blocks(html or "")
+
+
+def review_text(draft, *, md_to_html=None) -> str:
+    """The reviewer-facing TEXT of :func:`publish_body` — the diff input.
+
+    A word/line diff needs text, not markup, so the Review-changes surfaces
+    can't render the HTML publish body directly. Two cases, one rule — the
+    diffed text is always a faithful representation of the shipped bytes:
+
+    * no ``content_html``: the shipped bytes are a pure function of the
+      markdown (``expand_blocks(markdown_to_html(content))``), so the markdown
+      IS the preimage and is diffed verbatim (no lossy round trip);
+    * ``content_html`` present (import / rich editor / attached artifact): the
+      markdown column is NOT what ships, so the actual publish body is
+      down-converted and that is diffed.
+    """
+    get = getattr(draft, "get", None)
+    if get is None:
+        return ""
+    if not get("content_html"):
+        return get("content") or ""
+    from src.data.html_markdown import html_to_markdown
+    return html_to_markdown(publish_body(draft, md_to_html=md_to_html))
+
+
 # ── card drafts (reuse guru_content_drafts) ──────────────────────────
 
 def save_card_draft(
@@ -156,6 +225,163 @@ def get_draft(conn: sqlite3.Connection, draft_id: int) -> dict | None:
     return dict(row) if row else None
 
 
+# ── the publish ACT: its target, and a scoped single-use sign-off ────
+#
+# 2026-07-27. ``approved_at`` used to be the whole gate: a bare timestamp that
+# ``_push_guru_draft_impl`` read as "a human said yes". Three things were wrong
+# with that, all traced end to end against a live-shaped Guru client:
+#
+#  1. NOTHING EVER ROLLED IT BACK. The approve that consumed a sign-off wrote
+#     ``approved_at``, the publish failed (an expired token — a 401 is the whole
+#     trigger), and the timestamp stayed. The gate was now permanently open, and
+#     the caller ALSO cleared ``pending_push_json``, so the draft vanished from
+#     the review panel and could never be re-reviewed. A prompt-injected Renn
+#     could then revise the body and push it unattended, with zero human
+#     interaction after the failed click and no surface left to notice.
+#  2. THE SIGN-OFF NAMED NOTHING. A timestamp does not say what was approved, so
+#     it could be redeemed by any later publish of any bytes to any target.
+#  3. THE TARGET WAS NOT PART OF IT. ``publish_draft`` sends the body to a
+#     card / collection / folder, and only the body was ever bound.
+#
+# So a sign-off is now a RECORD, not a flag. It says what it was for (the
+# fingerprint of the whole act — title, card, bytes AND target) and carries a
+# one-shot ``claim`` that the single publish it authorizes must present. It
+# lives inside ``pending_push_json`` alongside the target it belongs to, so
+# clearing the push request destroys the sign-off with it, and a publish that
+# does not succeed puts BOTH back (``revoke_approval``) — the draft returns to
+# the panel with the failure reason and the gate closes again.
+#
+# ``approve_draft`` (the old unscoped call) is untouched for the legacy Qt
+# surfaces; a row it signs off carries no record and behaves exactly as before.
+
+
+def _sha(text) -> str:
+    """SHA-256 of an EXACT string — never a projection or normalization of it."""
+    return hashlib.sha256(
+        ("" if text is None else str(text)).encode("utf-8", "surrogatepass")
+    ).hexdigest()
+
+
+def approval_fingerprint(title, card_id, body, target=None) -> str:
+    """Identity of everything ONE approval commits to.
+
+    ``publish_draft`` sends the body, the title, and — through ``card_id`` /
+    ``collection_id`` / ``folder_id`` — WHERE it lands: a non-empty ``card_id``
+    OVERWRITES that live card, an empty one CREATES in that collection+folder.
+    All of it is bound, because a revision that only re-points the destination
+    would otherwise redirect an approved publish at content the operator never
+    looked at (observed: a push re-requested against ``ATTACKER_COLL`` kept the
+    binding valid because the target was not in it).
+
+    Hash-of-hashes rather than a delimiter join, so no field value can
+    impersonate a field boundary. ``target=None`` hashes as the empty target,
+    which is exactly what a draft with no recorded push target produces.
+    """
+    t = target or {}
+    return _sha(_sha(title) + _sha(card_id) + _sha(body)
+                + _sha(t.get("collection_id") or "")
+                + _sha(t.get("folder_id") or ""))
+
+
+def draft_fingerprint(draft, *, collection_id=None, folder_id=None) -> str | None:
+    """``approval_fingerprint`` RECOMPUTED FROM A DRAFT ROW.
+
+    ``None`` when the publish body cannot be produced — an unreadable body is
+    never approvable, and ``None`` never compares equal to a recorded
+    fingerprint, so every caller fails closed without a special case.
+
+    The target defaults to the one recorded on the row; pass explicit ids to
+    fingerprint the act a specific publish call is about to perform.
+    """
+    get = getattr(draft, "get", None)
+    if get is None:
+        return None
+    try:
+        body = publish_body(draft)
+    except Exception:  # noqa: BLE001 — cannot prove the bytes → not approvable
+        return None
+    if body is None:
+        return None
+    target = push_target(draft)
+    if collection_id is not None:
+        target["collection_id"] = collection_id or ""
+    if folder_id is not None:
+        target["folder_id"] = folder_id or ""
+    return approval_fingerprint(get("title") or "", get("card_id") or "",
+                                body, target)
+
+
+def _push_state(draft) -> dict:
+    """The parsed ``pending_push_json`` blob ({} when absent/unreadable)."""
+    get = getattr(draft, "get", None)
+    if get is None:
+        return {}
+    try:
+        data = json.loads(get("pending_push_json") or "{}")
+    except (ValueError, TypeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def push_target(draft) -> dict:
+    """WHERE this draft's pending publish would land: collection + folder.
+
+    Always a full dict of strings so callers (and the fingerprint) never have
+    to distinguish NULL from empty.
+    """
+    state = _push_state(draft)
+    return {"collection_id": state.get("collection_id") or "",
+            "folder_id": state.get("folder_id") or ""}
+
+
+def approval_record(draft) -> dict:
+    """The scoped sign-off recorded for this draft ({} when there is none).
+
+    ``{}`` means either no sign-off at all or an old-style unscoped one; the
+    two are told apart by ``approved_at`` (see :func:`approval_open`).
+    """
+    rec = _push_state(draft).get("approval")
+    return dict(rec) if isinstance(rec, dict) else {}
+
+
+def push_failure(draft) -> str:
+    """Why the last publish of this draft did not succeed ('' when none).
+
+    Set by :func:`revoke_approval` so the panel can say out loud why a draft
+    came back rather than silently re-appearing.
+    """
+    return str(_push_state(draft).get("failure") or "")
+
+
+def approval_open(draft, *, claim: str | None = None,
+                  collection_id: str | None = None,
+                  folder_id: str | None = None) -> tuple[bool, str]:
+    """Is the M5 gate released for THIS publish act? ``(open, reason)``.
+
+    Fails closed on every branch. A scoped sign-off is released only by the
+    publish that holds its one-shot ``claim`` AND targets the same act it was
+    recorded for — so a sign-off left behind by a crashed or failed publish
+    authorizes nothing, and an unattended model-initiated push (which has no
+    claim to present) is refused even while ``approved_at`` is set.
+    """
+    get = getattr(draft, "get", None)
+    if get is None or not get("approved_at"):
+        return False, "no_sign_off"
+    rec = approval_record(draft)
+    if not rec:
+        # An unscoped sign-off from the legacy Qt approval surfaces. Behaviour
+        # preserved deliberately: those paths take their own native confirm and
+        # publish inline, so there is no window for a stale flag to be redeemed.
+        return True, "legacy_sign_off"
+    if not claim or claim != rec.get("claim"):
+        return False, "sign_off_not_claimed"
+    expected = draft_fingerprint(draft, collection_id=collection_id,
+                                 folder_id=folder_id)
+    if expected is None or expected != rec.get("fingerprint"):
+        return False, "sign_off_scope_changed"
+    return True, "claimed"
+
+
 def mark_push_requested(
     conn: sqlite3.Connection, draft_id: int,
     collection_id: str | None = None, folder_id: str | None = None,
@@ -164,17 +390,28 @@ def mark_push_requested(
 
     Stores the intended publish target so an in-UI approval can complete the
     push. A non-NULL ``pending_push_json`` is the "awaiting approval" flag.
+
+    It also DROPS any sign-off: re-requesting a push is a new act (possibly at
+    a new target), and a sign-off given for the previous one must not be
+    redeemable by it. Writing the target while leaving ``approved_at`` set was
+    how a refused retarget still left a live pre-authorization behind.
     """
     target = json.dumps({"collection_id": collection_id, "folder_id": folder_id})
     with atomic(conn):
         conn.execute(
-            "UPDATE guru_content_drafts SET pending_push_json = ? WHERE id = ?",
+            "UPDATE guru_content_drafts SET pending_push_json = ?, "
+            "approved_at = NULL WHERE id = ?",
             (target, int(draft_id)),
         )
 
 
 def approve_draft(conn: sqlite3.Connection, draft_id: int, *, approved_by: str = "user") -> dict | None:
-    """Record human sign-off on a draft, clearing the approval gate (M5)."""
+    """Record an UNSCOPED human sign-off (the legacy Qt approval surfaces).
+
+    Kept exactly as it was for callers that approve and publish inline in one
+    call. New callers should use :func:`record_approval`, which names what the
+    sign-off is for and hands back the claim its one publish must present.
+    """
     with atomic(conn):
         conn.execute(
             "UPDATE guru_content_drafts SET approved_at = ?, approved_by = ? WHERE id = ?",
@@ -183,8 +420,61 @@ def approve_draft(conn: sqlite3.Connection, draft_id: int, *, approved_by: str =
     return get_draft(conn, int(draft_id))
 
 
+def record_approval(conn: sqlite3.Connection, draft_id: int, *,
+                    approved_by: str = "user", fingerprint: str) -> str:
+    """Record a SCOPED, SINGLE-USE sign-off; return the claim token.
+
+    ``fingerprint`` is :func:`draft_fingerprint` of the act the operator
+    actually reviewed. The returned claim is held in memory by the caller and
+    handed to the ONE publish this authorizes; nothing persisted anywhere else
+    can produce it, so no other publish — model-initiated, retried, or after a
+    crash — can spend this sign-off.
+    """
+    claim = uuid.uuid4().hex
+    state = _push_state(get_draft(conn, int(draft_id)) or {})
+    state["approval"] = {"claim": claim, "fingerprint": fingerprint,
+                         "at": _now(), "by": approved_by}
+    state.pop("failure", None)
+    with atomic(conn):
+        conn.execute(
+            "UPDATE guru_content_drafts SET approved_at = ?, approved_by = ?, "
+            "pending_push_json = ? WHERE id = ?",
+            (_now(), approved_by, json.dumps(state), int(draft_id)),
+        )
+    return claim
+
+
+def revoke_approval(conn: sqlite3.Connection, draft_id: int, *,
+                    reason: str = "") -> None:
+    """Roll a sign-off back and RE-ARM the review request.
+
+    The transactional half of :func:`record_approval`: a sign-off is spent only
+    by a publish that actually succeeded. Anything else — the Guru client
+    raising, an ``ok:false`` result, ``publish_draft`` itself failing — lands
+    here, which clears ``approved_at``, deletes the claim, keeps the target,
+    and records ``reason`` so the panel can show the operator why the draft is
+    back instead of silently dropping it.
+    """
+    state = _push_state(get_draft(conn, int(draft_id)) or {})
+    state.pop("approval", None)
+    if reason:
+        state["failure"] = str(reason)[:400]
+    else:
+        state.pop("failure", None)
+    with atomic(conn):
+        conn.execute(
+            "UPDATE guru_content_drafts SET approved_at = NULL, "
+            "pending_push_json = ? WHERE id = ?",
+            (json.dumps(state), int(draft_id)),
+        )
+
+
 def clear_push_request(conn: sqlite3.Connection, draft_id: int) -> bool:
-    """Drop a pending push (used after a completed publish, or to reject one)."""
+    """Drop a pending push (used after a COMPLETED publish, or to reject one).
+
+    This also destroys any recorded sign-off, since the sign-off lives in the
+    same blob. That is the point: one sign-off, one successful publish.
+    """
     with atomic(conn):
         cur = conn.execute(
             "UPDATE guru_content_drafts SET pending_push_json = NULL WHERE id = ?",
@@ -194,11 +484,20 @@ def clear_push_request(conn: sqlite3.Connection, draft_id: int) -> bool:
 
 
 def list_pending_approvals(conn: sqlite3.Connection) -> list[dict]:
-    """Drafts a tool tried to push that await human sign-off (M5)."""
+    """Drafts a tool tried to push that await human sign-off (M5).
+
+    Deliberately NOT filtered on ``approved_at IS NULL``. A sign-off recorded
+    for a publish that then died — the process exiting between the approve and
+    the push — used to hide the draft from this list forever while leaving the
+    gate flag set on the row. The push request itself is the flag: while
+    ``pending_push_json`` is set and the draft is not pushed, it belongs on the
+    review panel, and a stale sign-off is refused by :func:`approval_open`
+    rather than papered over by hiding the row.
+    """
     rows = conn.execute(
         """SELECT * FROM guru_content_drafts
-           WHERE require_approval = 1 AND approved_at IS NULL
-                 AND pending_push_json IS NOT NULL
+           WHERE require_approval = 1 AND pending_push_json IS NOT NULL
+                 AND status <> 'pushed'
            ORDER BY created_at DESC""",
     ).fetchall()
     return [dict(r) for r in rows]
@@ -692,18 +991,12 @@ def publish_draft(
     card_id = draft.get("card_id") or ""
     guru_result = None
     if guru_client is not None:
-        # Guru's `content` field is HTML. Send the draft's rich HTML when the
-        # rich editor captured it (preserves color/highlight); otherwise derive
-        # it from the canonical markdown with the SAME converter the in-app
-        # preview uses, so the published card matches the preview. (Previously
-        # this sent raw markdown into Guru's HTML field — formatting was lost.)
-        from src.data.guru_blocks import expand_blocks
-        from src.data.html_markdown import markdown_to_html
-        html_body = draft.get("content_html") or markdown_to_html(draft["content"])
-        # Expand native-block directives (callout / collapsible / card-link)
-        # into Guru's markup — works on both the captured rich HTML and the
-        # markdown-derived HTML. Idempotent when there are no directives.
-        html_body = expand_blocks(html_body)
+        # Guru's `content` field is HTML. The body is composed in EXACTLY ONE
+        # place — publish_body() — which every preview and every publish belt
+        # also calls, so the bytes the operator reviewed are the bytes that
+        # ship. Never re-compose a body here (see publish_body's docstring for
+        # the deferred sanitizer decision).
+        html_body = publish_body(draft)
         try:
             if card_id:
                 guru_result = guru_client.update_card(card_id, html_body, draft["title"])

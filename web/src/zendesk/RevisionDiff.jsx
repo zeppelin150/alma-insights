@@ -60,21 +60,51 @@ function plural(n, word) {
 // been SERVED (js_open_article records the review) — the record is made by
 // the payload, not by the pixels, so collapsing changes nothing about it.
 //
-// Optionally controlled: pass `open` + `onToggle` to let the markup alert
-// expand it. Everything renders as escaped React children — never markup.
+// F5 (disclosure fix, 2026-07-26). Access to these bytes used to depend on
+// the markup notice: the summary was a muted grey strip and the ONLY thing
+// that expanded the panel for you was MarkupAlert. That notice was proven
+// silent for every content-HIDING vector (display:none, font-size:0,
+// off-screen positioning, white-on-white, decoy overlays, comments,
+// attribute payloads), because it reports what the sanitizer REMOVED and
+// never what it KEPT but will not paint. So the operator's route to the
+// exact characters must not run through it:
+//   * the summary is now an obvious, permanently visible control that names
+//     the action ("Show source" / "Hide source") — not a decorative header;
+//   * a matching "View exact source" button sits next to the copy controls
+//     (CopyControls `onShowSource`), because the copy row is where the
+//     decision to release bytes is actually made;
+//   * a firing notice STILL raises the loud alert and auto-expands, and is
+//     now also flagged on this summary so it survives a collapsed panel.
+//
+// Optionally controlled: pass `open` + `onToggle`. Everything renders as
+// escaped React children — never markup.
 export function SourcePanel({ source, notice, label, open, onToggle }) {
   const chars = String(source == null ? "" : source).length;
   return (
-    <details className="zd-source-panel" open={!!open}
+    <details className={"zd-source-panel" + (notice ? " noticed" : "")}
+             open={!!open}
              onToggle={onToggle
                ? (ev) => onToggle(!!(ev.currentTarget && ev.currentTarget.open))
                : undefined}>
       <summary className="zd-source-summary" id="zd-source-summary">
         <span className="zd-source-summary-label">
-          {label || "HTML source"} — what “Copy HTML” puts on the clipboard
+          {label || "Exact HTML source"} — every character the clipboard delivers
         </span>
+        {notice && (
+          <span className="zd-source-flag" title={notice}>
+            Preview is incomplete
+          </span>
+        )}
         <span className="zd-cell-meta">{formatChars(chars)} chars</span>
+        <span className="zd-source-action">
+          {open ? "Hide source" : "Show source"}
+        </span>
       </summary>
+      <div className="zd-source-why">
+        The rendered view above is a convenience. This is the only surface
+        that shows every stored character — including anything the preview
+        cannot paint, and anything the stored markup hides from a reader.
+      </div>
       {notice && <div className="zd-diff-warn">Warning: {notice}.</div>}
       <pre className="zd-source">{source || ""}</pre>
     </details>
@@ -82,19 +112,40 @@ export function SourcePanel({ source, notice, label, open, onToggle }) {
 }
 
 // The markup notice, promoted OUT of the collapsed disclosure so it is seen
-// when it fires — and rendered only then. Python's preview profile now keeps
-// what a sandboxed frame can safely render (classes, ids, data-attributes,
-// inline styles, tables, embedded frames), so this fires when something
-// genuinely cannot be displayed rather than on every pulled article. A
-// warning that is always on is a warning nobody reads.
-export function MarkupAlert({ notice, onShowSource }) {
+// when it fires — and rendered only then.
+//
+// This notice now fires FAR more often: Python no longer drops
+// content-hiding markup silently, so anything the preview cannot show
+// faithfully raises it. Frequency is why the body is three separate lines
+// rather than one red sentence — the specific server-supplied `notice` is
+// surfaced verbatim (that is the part that differs per article and carries
+// the information), wrapped in a fixed headline that says what is at stake
+// and a fixed instruction that says what to do about it. A warning that
+// only ever says "warning" is noise; one that names the finding and the
+// next action stays worth reading on the hundredth article.
+//
+// `headline` / `detail` / `actionLabel` let the diff pane reuse the same
+// component with wording that fits a diff rather than a preview.
+export function MarkupAlert({
+  notice, onShowSource, headline, detail, actionLabel,
+}) {
   if (!notice) return null;
   return (
     <div className="zd-markup-alert" role="alert">
-      <span className="zd-markup-alert-text">Warning: {notice}.</span>
+      <div className="zd-markup-alert-body">
+        <div className="zd-markup-alert-hd">
+          {headline || "The preview below is not a faithful view of this content"}
+        </div>
+        <div className="zd-markup-alert-text">{notice}.</div>
+        <div className="zd-markup-alert-what">
+          {detail || "Content the stored markup hides from a reader is marked "
+            + "in the preview. Read the exact source before you copy or paste "
+            + "— it is the only view that shows every character."}
+        </div>
+      </div>
       {onShowSource && (
         <button type="button" className="zd-btn danger" onClick={onShowSource}>
-          Show HTML source
+          {actionLabel || "Show exact source"}
         </button>
       )}
     </div>
@@ -109,9 +160,16 @@ export default function RevisionDiff({ diff }) {
   return (
     <div className="zd-diff">
       {diff.warning && <div className="zd-diff-warn">{diff.warning}</div>}
-      {diff.markup_notice && (
-        <div className="zd-diff-warn">Warning: {diff.markup_notice}.</div>
-      )}
+      {/* Same alert component as the article surface, worded for a diff:
+          here the exact bytes are already on screen unconditionally (the
+          source rows below), so the instruction points at them rather than
+          at a disclosure to open. */}
+      <MarkupAlert
+        notice={diff.markup_notice}
+        headline="A rendered view of this content would not show all of it"
+        detail={"The source rows below are the authority — they carry every "
+          + "character, including anything the stored markup hides from a "
+          + "reader."} />
       <div className="zd-diff-hd">
         Source review (authoritative) —{" "}
         {diff.baseline_present

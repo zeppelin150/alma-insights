@@ -1,0 +1,80 @@
+/* Version history + draft history panels (WS-V3a). NEW zd-vp-* / zd-hist-*
+   rules only, in their own file while the editing lane owns garden.css —
+   WS-V3b may fold these in later. Values use the .zd-app Garden v8 tokens
+   declared in garden.css, so these classes only resolve inside .zd-app. */
+
+.zd-vp, .zd-hist {
+  display: flex; flex-direction: column; gap: 12px;
+  padding: 16px; overflow-y: auto; flex: 1; min-width: 0;
+}
+.zd-vp-hd, .zd-hist-hd {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+}
+.zd-vp-sub, .zd-hist-sub { font-size: 12px; color: var(--zd-grey-600); }
+
+/* Shared timeline/list chrome */
+.zd-vp-timeline, .zd-hist-list {
+  display: flex; flex-direction: column;
+  border: 1px solid var(--zd-grey-300); border-radius: 4px;
+  background: #ffffff; margin: 0;
+}
+.zd-vp-cols {
+  display: flex; gap: 8px; padding: 6px 10px;
+  font-size: 11px; font-weight: 600; color: var(--zd-grey-600);
+  border-bottom: 1px solid var(--zd-grey-200);
+}
+.zd-vp-col { width: 16px; text-align: center; }
+.zd-vp-row, .zd-hist-row {
+  display: flex; align-items: flex-start; gap: 8px; padding: 10px;
+  border-bottom: 1px solid var(--zd-grey-200);
+}
+.zd-vp-row:last-child, .zd-hist-row:last-child { border-bottom: none; }
+.zd-vp-row.current { background: var(--zd-grey-100); }
+.zd-vp-radio {
+  width: 16px; height: 16px; margin: 2px 0 0; flex: none;
+  accent-color: var(--zd-blue-600);
+}
+.zd-vp-radio:focus-visible {
+  outline: none; box-shadow: var(--zd-focus-ring); border-radius: 100px;
+}
+.zd-vp-main, .zd-hist-main { flex: 1; min-width: 0; }
+.zd-vp-title, .zd-hist-title {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+}
+.zd-vp-name {
+  font-weight: 600; color: var(--zd-grey-800); overflow-wrap: anywhere;
+}
+.zd-vp-meta, .zd-hist-meta {
+  font-size: 12px; color: var(--zd-grey-600); margin-top: 2px;
+}
+.zd-vp-actions, .zd-hist-actions {
+  display: flex; gap: 6px; flex-wrap: wrap; align-items: flex-start;
+}
+.zd-vp-compare, .zd-hist-compare {
+  padding: 10px; border-top: 1px solid var(--zd-grey-200);
+  display: flex; justify-content: flex-end;
+}
+.zd-vp-empty {
+  padding: 24px; text-align: center; color: var(--zd-grey-600);
+  font-size: 13px;
+}
+
+/* Version body view + inline diff cards */
+.zd-vp-body, .zd-vp-diff, .zd-hist-diff {
+  border: 1px solid var(--zd-grey-300); border-radius: 4px;
+  background: #ffffff; overflow: hidden;
+}
+.zd-vp-diff-hd, .zd-hist-diff-hd {
+  padding: 8px 10px; font-size: 12px; font-weight: 600;
+  color: var(--zd-grey-700); background: var(--zd-grey-100);
+  border-bottom: 1px solid var(--zd-grey-200); overflow-wrap: anywhere;
+}
+.zd-vp-body .zd-frame {
+  width: 100%; height: 360px; border: none; display: block;
+}
+
+/* Draft-history specifics */
+.zd-hist-seq { font-weight: 600; color: var(--zd-grey-800); white-space: nowrap; }
+.zd-hist-name { color: var(--zd-grey-700); overflow-wrap: anywhere; }
+.zd-hist-note { font-size: 12px; color: var(--zd-yellow-700); margin-top: 2px; }
+.zd-hist-ro { font-size: 12px; color: var(--zd-grey-600); }

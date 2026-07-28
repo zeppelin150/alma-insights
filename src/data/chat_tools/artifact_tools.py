@@ -431,8 +431,18 @@ def handle_attach_artifact(conn, args: dict, filters: dict) -> dict:
         content = (draft.get("content") or "") + section_md
         kwargs = {"title": draft.get("title"), "content": content}
         if section_html:
-            kwargs["content_html"] = ((draft.get("content_html") or "")
-                                      + "\n" + section_html)
+            # An APPEND must never become the whole body. When the draft has no
+            # content_html (the normal case — save_card_draft and revise_draft
+            # both leave it NULL), seed it from the draft's own markdown first;
+            # otherwise the artifact fragment alone became content_html, and
+            # publish_draft — which prefers content_html — silently shipped the
+            # quiz INSTEAD of the card (and overwrote a linked live card with
+            # it). Belt-and-braces alongside the publish_body/preview parity.
+            base_html = draft.get("content_html")
+            if not base_html:
+                from src.data.html_markdown import markdown_to_html
+                base_html = markdown_to_html(draft.get("content") or "")
+            kwargs["content_html"] = (base_html or "") + "\n" + section_html
         enablement_store.update_draft_content(conn, did, **kwargs)
     else:
         new_title = (args.get("new_draft_title") or "").strip()

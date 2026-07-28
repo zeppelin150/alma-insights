@@ -909,6 +909,18 @@ describe("RevisionDiff — source review is authoritative", () => {
         markup_notice: "this content contains markup the preview does not "
           + "display - read the HTML source before pasting" }} />);
     expect(out).toContain("preview does not display");
+    // the shared alert component, worded for a diff: the exact rows below
+    // ARE the authority here, so it points at them rather than at a
+    // disclosure to open
+    expect(out).toContain("zd-markup-alert");
+    expect(out).toContain('role="alert"');
+    expect(out).toContain("The source rows below are the authority");
+    expect(out).not.toContain("Show exact source");   // nothing to expand
+  });
+
+  it("renders no alert element at all when the notice is empty", () => {
+    const out = renderToStaticMarkup(<RevisionDiff diff={diff} />);
+    expect(out).not.toContain("zd-markup-alert");
   });
 
   it("hostile warning / notice strings render escaped", () => {
@@ -935,12 +947,47 @@ describe("SourcePanel — collapsed source disclosure", () => {
     expect(out).not.toContain('open=""');
   });
 
-  it("labels the summary as what Copy HTML puts on the clipboard", () => {
+  it("labels the summary as what the clipboard delivers", () => {
     const out = renderToStaticMarkup(<SourcePanel source={RAW} />);
     expect(out).toContain("HTML source");
-    expect(out).toContain("Copy HTML");
     expect(out).toContain("clipboard");
     expect(out).toContain("chars");            // size hint on the summary
+  });
+
+  // F5. The disclosure used to be reachable in practice only via the markup
+  // alert, and that alert is silent for every content-HIDING vector. The
+  // summary must therefore be a control in its own right: permanently
+  // visible, naming the action, with no dependence on a notice.
+  it("carries an ALWAYS-visible named action, notice or no notice", () => {
+    const closed = renderToStaticMarkup(<SourcePanel source={RAW} />);
+    expect(closed).toContain("zd-source-action");
+    expect(closed).toContain("Show source");
+    // and it is not a function of the notice
+    expect(closed).not.toContain("zd-source-flag");
+    const open = renderToStaticMarkup(<SourcePanel source={RAW} open />);
+    expect(open).toContain("zd-source-action");
+    expect(open).toContain("Hide source");
+  });
+
+  it("says why the source matters even before it is expanded", () => {
+    const out = renderToStaticMarkup(<SourcePanel source={RAW} />);
+    expect(out).toContain("zd-source-why");
+    expect(out).toContain("every stored character");
+    expect(out).toContain("hides from a reader");
+  });
+
+  it("keeps the summary the ONLY focusable control (no nested button)", () => {
+    const tree = SourcePanel({ source: RAW, notice: "n", open: true });
+    const btns = collectElements(tree, (n) => n.type === "button");
+    expect(btns).toHaveLength(0);
+  });
+
+  it("flags a live notice on the summary so a COLLAPSED panel still warns", () => {
+    const out = renderToStaticMarkup(
+      <SourcePanel source={RAW} notice="markup the preview cannot display" />);
+    expect(out).toContain("zd-source-flag");
+    expect(out).toContain("Preview is incomplete");
+    expect(out).toContain("zd-source-panel noticed");
   });
 
   it("still shows the exact stored bytes as escaped text when expanded", () => {
@@ -975,10 +1022,12 @@ describe("SourcePanel — collapsed source disclosure", () => {
     expect(renderToStaticMarkup(<SourcePanel label="Macro action source" />))
       .toContain("Macro action source");
     expect(renderToStaticMarkup(<SourcePanel />)).toContain("zd-source");
+    // the always-visible control survives the degraded cases too
+    expect(renderToStaticMarkup(<SourcePanel />)).toContain("Show source");
   });
 });
 
-describe("MarkupAlert — occasional, meaningful, prominent when it fires", () => {
+describe("MarkupAlert — meaningful even when it fires constantly", () => {
   const NOTICE = "this content contains markup the preview does not display "
     + "- read the HTML source before pasting";
 
@@ -995,7 +1044,7 @@ describe("MarkupAlert — occasional, meaningful, prominent when it fires", () =
     expect(out).toContain('role="alert"');
     expect(out).toContain("zd-markup-alert");
     expect(out).toContain("preview does not display");
-    expect(out).toContain("Show HTML source");
+    expect(out).toContain("Show exact source");
 
     const tree = MarkupAlert({ notice: NOTICE, onShowSource: () => shown.push(1) });
     const btns = collectElements(tree, (n) => n.type === "button");
@@ -1004,11 +1053,191 @@ describe("MarkupAlert — occasional, meaningful, prominent when it fires", () =
     expect(shown).toEqual([1]);
   });
 
+  // Python now marks hidden content instead of dropping it silently, so this
+  // fires on a large share of pulled articles. A block that repeats one
+  // generic red sentence becomes wallpaper; these three parts are what keep
+  // it readable on the hundredth article.
+  it("separates the stake, the SPECIFIC finding, and the next action", () => {
+    const out = renderToStaticMarkup(<MarkupAlert notice={NOTICE} />);
+    expect(out).toContain("zd-markup-alert-hd");     // what is at stake
+    expect(out).toContain("not a faithful view");
+    expect(out).toContain("zd-markup-alert-text");   // the server's finding
+    expect(out).toContain(NOTICE);
+    expect(out).toContain("zd-markup-alert-what");   // what to do about it
+    expect(out).toContain("marked in the preview");
+    expect(out).toContain("before you copy or paste");
+  });
+
+  it("the specific notice is surfaced verbatim, never summarised away", () => {
+    const specific = "a hidden block (display:none) carries text a reader "
+      + "never sees";
+    const out = renderToStaticMarkup(<MarkupAlert notice={specific} />);
+    expect(out).toContain(specific);
+  });
+
+  it("lets a caller reword it for a surface that is not a preview", () => {
+    const out = renderToStaticMarkup(
+      <MarkupAlert notice={NOTICE} headline="H" detail="D"
+                   actionLabel="A" onShowSource={noop} />);
+    expect(out).toContain(">H<");
+    expect(out).toContain(">D<");
+    expect(out).toContain(">A<");
+    expect(out).not.toContain("not a faithful view");
+  });
+
   it("hostile notice strings render escaped", () => {
     const out = renderToStaticMarkup(
       <MarkupAlert notice='<img src=x onerror="alert(1)">' />);
     expect(out).not.toContain("<img");
     expect(out).toContain("&lt;img");
+  });
+});
+
+// ── F5: THE EXACT BYTES MUST NOT BE GATED ON THE NOTICE ──────────────
+//
+// Confirmed defect: the source disclosure auto-expanded ONLY via
+// MarkupAlert, and MarkupAlert is driven solely by markup_notice — which
+// measures what the preview sanitizer REMOVED, never what it kept but will
+// not paint. It was proven silent for display:none, visibility:hidden,
+// opacity:0, font-size:0, white-on-white, off-screen positioning,
+// zero-height clipping, text-indent, full-viewport decoy overlays, HTML
+// comments and attribute payloads. So the operator's route to the exact
+// characters is now independent of the notice, and these lock that.
+describe("CopyControls — the source route sits beside the copy buttons", () => {
+  const items = [{ field: "body_html", label: "Copy HTML source" }];
+  const base = { primaryLabel: "Copy content", primaryField: COPY_DRAFTED_FIELD,
+    items, onCopy: noop };
+
+  it("renders a named View exact source control when given onShowSource", () => {
+    const out = renderToStaticMarkup(
+      <CopyControls {...base} onShowSource={noop} />);
+    expect(out).toContain("zd-source-cta");
+    expect(out).toContain("View exact source");
+  });
+
+  it("states which way it will move", () => {
+    const label = (props) => {
+      const tree = CopyControls({ ...base, onShowSource: noop, ...props });
+      return collectElements(tree, (n) => n.type === "button").find(
+        (b) => String(b.props.className || "").includes("zd-source-cta")
+      ).props.children;
+    };
+    expect(label({})).toBe("View exact source");
+    expect(label({ sourceOpen: true })).toBe("Hide exact source");
+  });
+
+  it("is NEVER disabled — not by a pending confirm, not by a closed gate. "
+     + "Reading bytes is not releasing them, and a closed copy gate is "
+     + "exactly when someone most needs to read them", () => {
+    [{ pending: true }, { disabled: true }, { pending: true, disabled: true }]
+      .forEach((state) => {
+        const tree = CopyControls({ ...base, ...state, onShowSource: noop });
+        const btns = collectElements(tree, (n) => n.type === "button");
+        const cta = btns.filter(
+          (b) => String(b.props.className || "").includes("zd-source-cta"));
+        expect(cta).toHaveLength(1);
+        expect(cta[0].props.disabled).toBeFalsy();
+      });
+  });
+
+  it("does not touch the copy path: it asks onShowSource, never onCopy", () => {
+    const copied = [];
+    const shown = [];
+    const tree = CopyControls({ ...base, onCopy: (f) => copied.push(f),
+      onShowSource: () => shown.push(1) });
+    const cta = collectElements(tree, (n) => n.type === "button").find(
+      (b) => String(b.props.className || "").includes("zd-source-cta"));
+    cta.props.onClick({ currentTarget: {} });
+    expect(shown).toEqual([1]);
+    expect(copied).toEqual([]);
+  });
+
+  it("is absent when the owner supplies no handler (macros in the diff pane, "
+     + "the Revision Center, tests) — never a dead control", () => {
+    const out = renderToStaticMarkup(<CopyControls {...base} />);
+    expect(out).not.toContain("zd-source-cta");
+    expect(out).not.toContain("View exact source");
+  });
+});
+
+describe("Editors hand the source route to their copy row", () => {
+  const article = {
+    id: 105, title: "T", body_srcdoc: "<p>b</p>", body_source: "<p>b</p>",
+    markup_notice: "", body_text: "b", author: "", category: "C", draft: false,
+    html_url: "", labels: [], origin: "pull", outdated: false, position: 1,
+    section: "S", section_id: 9, source_file: "", updated_display: "x",
+    revisions: [],
+  };
+  const macro = {
+    id: 201, name: "M", description: "", active: true, updated_display: "x",
+    revisions: [], actions: [{ field: "comment_value", display: "C", value: "Hi." }],
+  };
+
+  it("ArticleEditor forwards onShowSource/sourceOpen to CopyControls", () => {
+    const shown = [];
+    const tree = ArticleEditor({ article, onBack: noop, onCopy: noop,
+      onOpenRevision: noop, onShowSource: () => shown.push(1), sourceOpen: true });
+    const controls = collectElements(tree, (n) => n.type === CopyControls);
+    expect(controls).toHaveLength(1);
+    expect(controls[0].props.sourceOpen).toBe(true);
+    controls[0].props.onShowSource();
+    expect(shown).toEqual([1]);
+  });
+
+  it("MacroEditor forwards it too (macro action source is a mirror row)", () => {
+    const shown = [];
+    const tree = MacroEditor({ macro, onBack: noop, onCopy: noop,
+      onOpenRevision: noop, onShowSource: () => shown.push(1) });
+    const controls = collectElements(tree, (n) => n.type === CopyControls);
+    expect(controls[0].props.sourceOpen).toBe(false);
+    controls[0].props.onShowSource();
+    expect(shown).toEqual([1]);
+  });
+
+  it("the article preview note no longer claims the preview is faithful", () => {
+    const out = renderToStaticMarkup(
+      <ArticleEditor article={article} onBack={noop} onCopy={noop}
+                     onOpenRevision={noop} onShowSource={noop} />);
+    expect(out).toContain("marked in the preview");
+    expect(out).toContain("View exact source");
+    expect(out).toContain("read it before you copy");
+  });
+});
+
+describe("ArticleBody marks content the stored markup hides from readers", () => {
+  // Python wraps previously-invisible content in a marker rather than
+  // letting it render invisibly. The frame stylesheet is the other half of
+  // that contract: the marker has to be visibly DIFFERENT from normal
+  // article content, and the hiding declarations inside it have to lose.
+  const out = renderToStaticMarkup(<ArticleBody srcdoc="<p>x</p>" />);
+
+  it("honours both marker forms of the contract", () => {
+    expect(out).toContain("data-alma-hidden");
+    expect(out).toContain("alma-hidden-source");
+  });
+
+  it("gives the marker a distinguishing rule and a muted label", () => {
+    expect(out).toContain("dashed");
+    expect(out).toContain("Hidden in the stored source");
+    expect(out).toContain("a Zendesk reader does not see this");
+    // the per-instance reason Python may attach rides the label
+    expect(out).toContain("attr(data-alma-hidden)");
+  });
+
+  it("neutralises the hiding declarations INSIDE the marker only", () => {
+    expect(out).toContain("visibility: visible !important");
+    expect(out).toContain("opacity: 1 !important");
+    expect(out).toContain("position: static !important");
+    expect(out).toContain("text-indent: 0 !important");
+    expect(out).toContain("max-height: none !important");
+    expect(out).toContain("font-size: inherit !important");
+    // scoped: no blanket override of ordinary article markup
+    expect(out).not.toMatch(/\.article-body \*\s*\{[^}]*!important/);
+  });
+
+  it("still an empty sandbox with the marker rules in place", () => {
+    expect(out).toContain('sandbox=""');
+    expect(out).not.toContain("allow-scripts");
   });
 });
 
@@ -1043,8 +1272,25 @@ describe("ZendeskApp wires the source panel next to every article/macro", () => 
     expect(src).toContain("open={sourceOpen} onToggle={setSourceOpen}");
     // every path that swaps the open row re-collapses it
     expect(src.match(/setSourceOpen\(false\)/g).length).toBeGreaterThanOrEqual(4);
-    // and only the markup alert expands it
+  });
+
+  // F5. Two independent routes into the exact bytes. The markup alert is one
+  // of them, but it cannot be the only one: markup_notice is silent for every
+  // content-HIDING vector, so an operator could otherwise reach a copy
+  // decision having seen a rendered view that omitted the payload.
+  it("the markup alert opens the disclosure — and only ever OPENS it", () => {
     expect(src).toContain("onShowSource={revealSource}");
+    expect(src).toMatch(/function revealSource\(\)\s*\{\s*setSourceOpen\(true\);/);
+    // an alert whose button could re-close what it points at is a trap
+    expect(src).not.toMatch(/function revealSource\(\)[^}]*setSourceOpen\(false\)/);
+  });
+
+  it("both editors get an always-available toggle that does NOT depend on "
+     + "the notice", () => {
+    expect(src).toContain("function toggleSource()");
+    // article editor and macro editor, both wired to the same state
+    expect(src.match(/onShowSource=\{toggleSource\} sourceOpen=\{sourceOpen\}/g))
+      .toHaveLength(2);
   });
 
   it("never renders untrusted HTML directly (CI guardrail, restated here)", () => {

@@ -35,6 +35,23 @@ CARD = {
 }
 
 
+def _md_html(md):
+    """Content-sensitive stub converter — a constant one would make the
+    publish belt's body comparison pass vacuously."""
+    return f"<p>{md}</p>"
+
+
+def _body(md, content_html=None):
+    """The publish body for a card, computed the way the controller does.
+
+    The belt compares publish bodies now (not the markdown column), so a fake
+    content_lookup has to serve the same unit page.py serves it:
+    ``enablement_store.publish_body(draft)``."""
+    from src.data.enablement_store import publish_body
+    return publish_body({"content": md, "content_html": content_html},
+                        md_to_html=_md_html)
+
+
 def _controller(**kw):
     kw.setdefault("md_to_html_fn", lambda md: "<h2>Steps</h2><p>rendered</p>")
     ctrl = WorkbenchWebController(**kw)
@@ -428,9 +445,9 @@ def test_publish_belt_compares_the_db_body_not_just_cache():
     # belt must refuse (operator saw OLD, DB holds NEW).
     db = {1: "OLD"}
     ctrl = WorkbenchWebController(
-        md_to_html_fn=lambda md: "<p>x</p>",
+        md_to_html_fn=_md_html,
         publish_confirm_fn=lambda dest, title: True,
-        content_lookup=lambda did: db.get(int(did)))
+        content_lookup=lambda did: _body(db.get(int(did))))
     published, resolved = [], []
     ctrl.publish_requested.connect(lambda d: published.append(d))
     ctrl.publish_resolved.connect(lambda j: resolved.append(json.loads(j)))
@@ -444,15 +461,59 @@ def test_publish_belt_compares_the_db_body_not_just_cache():
 def test_publish_allowed_when_db_matches_confirmed():
     db = {1: "AGREED"}
     ctrl = WorkbenchWebController(
-        md_to_html_fn=lambda md: "<p>x</p>",
+        md_to_html_fn=_md_html,
         publish_confirm_fn=lambda dest, title: True,
-        content_lookup=lambda did: db.get(int(did)))
+        content_lookup=lambda did: _body(db.get(int(did))))
     published = []
     ctrl.publish_requested.connect(lambda d: published.append(d))
     ctrl.set_pending_drafts(CHIPS, active_id=1)
     ctrl.show_draft(dict(CARD, markdown="AGREED"))
     ctrl.js_request_publish("guru_new")
     assert published == ["guru_new"]       # cache, DB, confirm all agree → ships
+
+
+def test_publish_belt_catches_a_content_html_only_divergence():
+    # A2/A6: the markdown column agreed while content_html — the field that
+    # actually ships — did not. The old belt compared markdown and approved.
+    db = {1: _body("SAME", content_html="<p>SAME</p><p>hidden rider</p>")}
+    ctrl = WorkbenchWebController(
+        md_to_html_fn=_md_html,
+        publish_confirm_fn=lambda dest, title: True,
+        content_lookup=lambda did: db.get(int(did)))
+    published, resolved = [], []
+    ctrl.publish_requested.connect(lambda d: published.append(d))
+    ctrl.publish_resolved.connect(lambda j: resolved.append(json.loads(j)))
+    ctrl.set_pending_drafts(CHIPS, active_id=1)
+    ctrl.show_draft(dict(CARD, markdown="SAME"))     # cache: markdown only
+    ctrl.js_request_publish("guru_new")
+    assert published == [] and resolved[0]["cancelled"] is True
+
+
+def test_preview_html_is_the_sanitized_publish_body():
+    # The preview's SOURCE is publish_body — stored content_html wins over the
+    # markdown exactly as it does at publish time.
+    from src.data.html_sanitize import sanitize_html
+    ctrl, seen = _controller(md_to_html_fn=_md_html)
+    ctrl.set_pending_drafts(CHIPS, active_id=1)
+    card = dict(CARD, markdown="markdown body",
+                content_html="<p>THE HTML THAT SHIPS</p>")
+    ctrl.show_draft(card)
+    assert seen["drafts"][-1]["preview_html"] == sanitize_html(_body(
+        "markdown body", content_html="<p>THE HTML THAT SHIPS</p>"))
+    assert "markdown body" not in seen["drafts"][-1]["preview_html"]
+
+
+def test_diff_proposed_side_derives_from_the_publish_body():
+    # Review-changes must diff what ships: a draft whose content_html differs
+    # from its markdown is diffed as the HTML-derived text.
+    ctrl, seen = _controller(md_to_html_fn=_md_html)
+    ctrl.set_pending_drafts(CHIPS, active_id=1)
+    ctrl.show_draft(dict(CARD, markdown="unused markdown",
+                         content_html="<p>quiz only</p>",
+                         linked_card_md="the original body"))
+    ctrl.js_request_diff()
+    text = " ".join(r.get("text", "") for r in seen["diffs"][-1]["rows"])
+    assert "quiz only" in text and "unused markdown" not in text
 
 
 def test_publish_refuses_while_a_revise_is_in_flight():
@@ -549,7 +610,7 @@ def test_publish_refuses_if_content_changed_during_modal():
         ctrl._cards[1]["markdown"] = "attacker body"   # a revise reload landed
         return True
 
-    ctrl = WorkbenchWebController(md_to_html_fn=lambda md: "<p>x</p>",
+    ctrl = WorkbenchWebController(md_to_html_fn=_md_html,
                                   publish_confirm_fn=confirm_mutates_content)
     published, resolved = [], []
     ctrl.publish_requested.connect(lambda d: published.append(d))

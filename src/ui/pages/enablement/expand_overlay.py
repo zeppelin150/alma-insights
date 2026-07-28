@@ -120,11 +120,15 @@ class ExpandOverlay(QFrame):
             f"border-radius:7px; padding:5px 13px; font-size:11px; font-weight:600;}}")
 
     # ── data in / mode ──────────────────────────────────────────────
-    def load(self, md: str, draft_id: int, title: str, *, read_only: bool = False):
+    def load(self, md: str, draft_id: int, title: str, *, read_only: bool = False,
+             content_html: str | None = None):
         self._draft_id = int(draft_id)
         self._read_only = bool(read_only)
         self._md = md or ""
-        self._html = None
+        # The draft's stored/captured HTML — what a push would actually send
+        # when it is present. Carried so the overlay preview renders the
+        # publish body, not a markdown-only re-derivation.
+        self._html = content_html
         self._title.setText(title or "Draft")
         self._ro_hint.setVisible(self._read_only)
         # Default to the faithful Guru preview — same render as the inline card,
@@ -150,9 +154,11 @@ class ExpandOverlay(QFrame):
         return self._html
 
     def _render_preview(self):
+        """Same renderer as the inline canvas — the PUBLISH BODY (markdown +
+        any captured/stored HTML), so expanding shows what a push sends."""
         try:
             from src.ui.pages.enablement.guru_preview import render_preview
-            render_preview(self._preview, self._md)
+            render_preview(self._preview, self._md, self._html)
         except Exception:
             self._preview.setMarkdown(self._md)
 

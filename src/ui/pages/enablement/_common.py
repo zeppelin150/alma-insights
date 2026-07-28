@@ -40,14 +40,44 @@ def native_dialog_button_qss() -> str:
     )
 
 
+def force_plain_text(dialog):
+    """Make every text-bearing label in ``dialog`` render LITERALLY.
+
+    A native confirm is the one channel Python can prove a human perceived,
+    and its message routinely interpolates strings the app does not author:
+    a Zendesk row title, an Asana task name, a Guru card name, a Drive API
+    error. ``QLabel``/``QMessageBox`` default to ``Qt::AutoText``, which asks
+    ``Qt::mightBeRichText`` — and that only scans up to the FIRST NEWLINE,
+    which is precisely where those interpolated names sit. A name beginning
+    ``<!--`` therefore swallowed the rest of the dialog's text, and a name
+    carrying ``<span style=…>`` could paint a convincing fake affordance. A
+    gate whose disclosure the attacker can delete is not a gate.
+
+    So: no content-derived string is ever interpreted as markup. Called from
+    :func:`style_native_dialog` (which every native Enablement dialog already
+    goes through) and explicitly at the sites that build their own labels.
+    Labels created AFTER the styling call are not covered — set the format
+    there too rather than relying on this sweep.
+    """
+    from PySide6.QtWidgets import QLabel, QMessageBox
+    if isinstance(dialog, QMessageBox):
+        dialog.setTextFormat(Qt.PlainText)      # covers text + informative
+    for lbl in dialog.findChildren(QLabel):
+        lbl.setTextFormat(Qt.PlainText)
+    return dialog
+
+
 def style_native_dialog(dialog):
     """Apply :func:`native_dialog_button_qss` to a native dialog and return it.
 
     Sets a cream dialog background + legible buttons in one shot, so a native
-    QMessageBox/QDialog under an Enablement page never renders blank buttons.
+    QMessageBox/QDialog under an Enablement page never renders blank buttons —
+    and forces PLAIN TEXT on the dialog's labels (:func:`force_plain_text`) so
+    a name the app did not author can never rewrite the question being asked.
     """
     dialog.setStyleSheet(f"QDialog, QMessageBox {{ background:{ALMA_WHITE}; }}"
                          + native_dialog_button_qss())
+    force_plain_text(dialog)
     return dialog
 
 # kind → (tint background, text colour)

@@ -767,12 +767,22 @@ class GuruPage(QWidget):
         self._approve_btn.setEnabled(is_pending)
         self._reject_btn.setEnabled(is_pending)
 
-        # Load content preview
+        # Load content preview — THE BYTES THAT SHIP, not the markdown column.
+        #
+        # This preview is the only thing the operator reads before pressing
+        # "Approve && Push", and ``approve_and_push`` sends
+        # ``enablement_store.publish_body(draft)``. It used to render
+        # ``draft["content"]``, a DIFFERENT representation: for a draft whose
+        # body lives in ``content_html`` (an imported card, the rich editor, an
+        # attached artifact) the preview showed benign markdown while a
+        # <script> tag went out over the wire. Same divergence the chat panel
+        # was rebuilt to close, on the legacy surface.
         if self._content_pipeline:
             try:
                 draft = self._content_pipeline._get_draft(draft_id)
                 if draft:
-                    self._draft_preview.setPlainText(draft["content"])
+                    from src.data.enablement_store import publish_body
+                    self._draft_preview.setPlainText(publish_body(draft))
                     return
             except Exception:
                 pass

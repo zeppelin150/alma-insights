@@ -98,10 +98,25 @@ export default function ZendeskApp() {
     setCopyBusy(false);
   }
 
-  // Opening the disclosure from the markup alert also moves focus to it —
-  // the alert is the one place that expands the source for you.
+  // Opening the disclosure moves focus to it, so a keyboard user lands on
+  // the source instead of hunting for it after the panel expands.
+  //
+  // revealSource only ever OPENS — it is what the markup alert fires, and an
+  // alert whose button could close the very thing it points at is a trap.
+  // toggleSource is the always-available control beside the copy buttons
+  // (F5): the operator's route to the exact bytes must not run through the
+  // markup notice, which is silent for every content-HIDING vector.
   function revealSource() {
     setSourceOpen(true);
+    focusSourceSummary();
+  }
+
+  function toggleSource() {
+    if (sourceOpen) { setSourceOpen(false); return; }
+    revealSource();
+  }
+
+  function focusSourceSummary() {
     if (typeof document === "undefined") return;
     setTimeout(() => {
       const el = document.getElementById("zd-source-summary");
@@ -422,7 +437,8 @@ export default function ZendeskApp() {
 
   // ── copy (Python re-reads exact DB bytes at click time) ────────────
   // Nothing below reports success. The clipboard write, the reviewed-bytes
-  // gate and — for bytes this page authored — a NATIVE confirm all happen
+  // gate and — for every copy of markup, mirror rows included — a NATIVE
+  // confirm displaying the exact bytes all happen
   // Python-side; the outcome arrives on copy_resolved. Until then the
   // controls only go BUSY, which is also what stops a second confirm.
   function demoCopyNotice(field) {
@@ -517,6 +533,7 @@ export default function ZendeskApp() {
     body = macro
       ? <MacroEditor macro={macro} onBack={() => setMacro(null)}
                      onCopy={copyMacroField} copyBusy={copyBusy}
+                     onShowSource={toggleSource} sourceOpen={sourceOpen}
                      onOpenRevision={(id, st) => jumpToRevision("macro", id, st)} />
       : <MacroList macros={data.macros} query={queries.macros}
                    served={data.query != null}
@@ -542,12 +559,19 @@ export default function ZendeskApp() {
       // user. The exact stored bytes still render as escaped text — what
       // Copy HTML/rich text would deliver — but as a COLLAPSED disclosure
       // beneath it, so reading the article never means scrolling past a
-      // wall of markup. When the preview genuinely cannot display the
-      // stored bytes, MarkupAlert fires above the fold and expands it.
+      // wall of markup.
+      //
+      // TWO independent routes into those bytes (F5). The markup alert
+      // fires above the fold and auto-expands the panel when Python says
+      // the preview is unfaithful — but that notice cannot be trusted to
+      // fire, so it is the ADDITION, not the access path. The access path
+      // is the always-visible "View exact source" control next to the copy
+      // buttons (onShowSource below) plus the panel's own labelled summary.
       ? (<div className="zd-article-review">
           <MarkupAlert notice={article.markup_notice}
                        onShowSource={revealSource} />
           <ArticleEditor article={article}
+                         onShowSource={toggleSource} sourceOpen={sourceOpen}
                          onBack={() => { setArticle(null); setBodyEdit(null); }}
                          onCopy={copyArticleField}
                          onOpenRevision={(id, st) => jumpToRevision("article", id, st)}

@@ -44,11 +44,17 @@ img {{ max-width: 100%; }}
 """
 
 
-def render_preview(browser, md: str) -> None:
-    """Render markdown into a QTextBrowser with the Guru-look stylesheet,
-    expanding native-block directives (callout / collapsible / card-link)
-    into Guru's markup so the preview matches the published card."""
-    from src.data.guru_blocks import expand_blocks
-    from src.data.html_markdown import markdown_to_html
+def render_preview(browser, content: str, content_html: str | None = None) -> None:
+    """Render the draft into a QTextBrowser with the Guru-look stylesheet.
+
+    The rendered string is ``enablement_store.publish_body`` — EXACTLY the
+    bytes ``publish_draft`` sends to Guru. Callers must pass the draft's
+    ``content_html`` alongside its markdown: previously this rendered only
+    ``markdown_to_html(content)`` while the network sent ``content_html``, so
+    an imported card's raw HTML or an attached artifact could ship without
+    ever appearing on an approval surface.
+    """
+    from src.data.enablement_store import publish_body
     browser.document().setDefaultStyleSheet(GURU_CSS)
-    browser.setHtml(expand_blocks(markdown_to_html(md or "")))
+    browser.setHtml(publish_body({"content": content or "",
+                                  "content_html": content_html}))

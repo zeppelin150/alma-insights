@@ -170,13 +170,14 @@ class GuruContentPipeline:
 
         now = datetime.now(timezone.utc).isoformat()
 
-        # Guru's `content` field is HTML — convert the markdown body (or use a
-        # captured rich HTML) so formatting survives publish (a bare markdown
-        # body would render as literal text).
-        from src.data.guru_blocks import expand_blocks
-        from src.data.html_markdown import markdown_to_html
-        html_body = expand_blocks(
-            draft.get("content_html") or markdown_to_html(draft["content"]))
+        # Guru's `content` field is HTML. The composition lives in exactly ONE
+        # place — enablement_store.publish_body — so this path cannot drift from
+        # the bytes every other publish path sends and every approval surface
+        # reviews. (It previously re-composed expand_blocks(content_html or
+        # markdown_to_html(...)) by hand: byte-equivalent at the time, and a
+        # second definition waiting to disagree.)
+        from src.data.enablement_store import publish_body
+        html_body = publish_body(draft)
 
         if draft["draft_type"] == "rewrite" and draft["card_id"]:
             try:
@@ -292,12 +293,26 @@ class GuruContentPipeline:
         ).fetchone()
         if not row:
             return None
-        return {
+        draft = {
             "id": row[0], "card_id": row[1], "friction_type": row[2],
             "draft_type": row[3], "title": row[4], "content": row[5],
             "source_tickets": row[6], "status": row[7],
             "approved_by": row[8], "pushed_at": row[9],
         }
+        # publish_body DECIDES on content_html, so a draft handed to it without
+        # that column would silently publish the markdown-derived body for a
+        # draft whose previewed/reviewed body is the HTML one. Fetched
+        # separately (and tolerantly) because the column arrived in migration
+        # 031 — a pre-031 schema must still return a draft, not raise.
+        try:
+            extra = self.db.conn.execute(
+                "SELECT content_html FROM guru_content_drafts WHERE id = ?",
+                (draft_id,),
+            ).fetchone()
+            draft["content_html"] = extra[0] if extra else None
+        except Exception:  # noqa: BLE001 — pre-031 schema: markdown is all there is
+            draft["content_html"] = None
+        return draft
 
     def _get_gap_descriptions(self, friction_types: list[str]) -> list[dict]:
         """Get coverage gap descriptions for friction types."""

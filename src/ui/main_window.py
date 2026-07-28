@@ -827,9 +827,18 @@ class MainWindow(QMainWindow):
             from src.data.settings_manager import get_section
             from src.services.agent_chat import AgentChatController
             from src.ui.web.agent_page import AgentPage
+            from src.ui.web.chat_bridge import PublishConfirmHost
             en_cfg = get_section("enablement", {}) or {}
             self._agent_controller = AgentChatController(
-                self.db, demo=en_cfg.get("demo_mode", True))
+                self.db, demo=en_cfg.get("demo_mode", True),
+                # THE NATIVE PUBLISH GATE. The Guru publish is the chat's only
+                # live remote write and both slots that reach it are
+                # page-callable, so it must pass a Qt dialog showing the exact
+                # bytes and the target — a channel Chromium cannot reach.
+                # Parented to the window so the modal blocks the app, not just
+                # the page. Without this injection the controller refuses to
+                # publish at all (fail closed).
+                confirm_host=PublishConfirmHost(self))
             if self._agent_controller.engine is None:
                 raise RuntimeError("chat engine unavailable")
             self.agent_page = AgentPage(self._agent_controller.engine,

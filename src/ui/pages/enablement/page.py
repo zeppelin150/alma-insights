@@ -36,6 +36,18 @@ import logging
 
 logger = logging.getLogger("alma.enablement")
 
+# The Zendesk draft-copy gate's exact-bytes view has to put a meaningful
+# amount of the payload on screen with NO further click — the defect it
+# replaced was a collapsed detail pane that showed none of it.
+_COPY_BYTES_MIN_HEIGHT = 260
+_COPY_DIALOG_MIN = (720, 520)
+# The markup report rides in its OWN widget, hard-bounded in height: it is
+# content-derived, so however long or crafted it gets it must never be able
+# to push the fixed disclosure lines or the bytes view off the screen.
+_COPY_NOTES_MAX_HEIGHT = 96
+_COPY_NOTES_LEAD = ("Heads up — the review preview could not render this "
+                    "faithfully:")
+
 RENN_SYSTEM_PROMPT = (
     "You are Renn, the enablement assistant inside the Alma Enablement Workbench. "
     "You help the enablement team turn product docs into Guru knowledge cards, manage "
@@ -819,12 +831,19 @@ class EnablementPage(QWidget):
         return box.exec() == QMessageBox.Yes
 
     def _web_publish_content_lookup(self, draft_id):
-        """The draft's current stored body — the exact bytes store.publish_draft
-        will read. The web publish belt snapshots this at confirm-open and
-        re-checks it at approve, so a body the operator didn't see can't ship."""
+        """The stored draft's PUBLISH BODY — the exact bytes
+        store.publish_draft will SEND. The web publish belt snapshots this at
+        confirm-open and re-checks it at approve, so a body the operator didn't
+        see can't ship.
+
+        This used to return ``draft["content"]`` (the markdown column), which
+        publish_draft ignores whenever ``content_html`` is set — the belt
+        compared a representation that was neither previewed nor shipped, so
+        the invariant this docstring asserts was false. It now returns the one
+        composition every preview also renders."""
         from src.data import enablement_store as store
         draft = store.get_draft(self._conn(), int(draft_id))
-        return (draft or {}).get("content")
+        return store.publish_body(draft) if draft else None
 
     def _make_zendesk(self):
         """The Zendesk tab: the React/WebHost Garden clone behind
@@ -903,36 +922,160 @@ class EnablementPage(QWidget):
         return page, self._scroll(page)
 
     def _web_zendesk_confirm(self, title: str, text: str,
-                             detail: str = None) -> bool:
-        """The native gate for the web Zendesk tab: a QMessageBox no page
-        script can click. Defaults to No; styled via style_native_dialog so
+                             content: str = None, notes=None) -> bool:
+        """The native gate for the web Zendesk tab: a dialog no page script
+        can click. Defaults to Cancel/No; styled via style_native_dialog so
         the page background can't blank the buttons (2026-07-22 fix).
 
-        Used by the destructive gates (delete revision / purge mirror) and by
-        the UNIVERSAL DRAFT-COPY gate, which passes ``detail`` — the exact
-        clipboard payload. It lands in the scrollable detail pane
-        (setDetailedText), because that gate's whole point is that the
-        operator sees the characters before they reach production.
+        Two shapes, and the difference is load-bearing:
 
-        This is the reason the draft gate cannot be authorship-based. The
-        Zendesk WebHost co-registers the Renn chat bridge (``almaBridge``)
+        * ``content is None`` — the destructive gates (delete revision /
+          purge mirror). A plain QMessageBox: the question IS the whole
+          message.
+        * ``content`` given — the UNIVERSAL MARKUP/DRAFT COPY gate, where
+          ``content`` is the exact clipboard payload and ``notes`` is the
+          sanitizer's markup report. Both go to
+          ``_build_copy_confirm_dialog``, which puts the payload in a
+          VISIBLE scrollable read-only view and the report in a SEPARATE,
+          height-bounded widget — never concatenated into the heading, whose
+          line structure is the disclosure and must stay Python's alone.
+
+        It used to land in ``QMessageBox.setDetailedText``, and that made the
+        gate's headline claim false: Qt collapses the detail pane behind a
+        "Show Details…" button that nothing here ever expands, and EVERY
+        realistic article body exceeded the 400-character threshold that
+        routed payloads there. Operators were shown a paragraph ending
+        "these are the EXACT characters that will go on the clipboard"
+        followed by nothing. setDetailedText is not used anywhere in this
+        file any more, and a test asserts that.
+
+        This gate is the reason the draft rule cannot be authorship-based.
+        The Zendesk WebHost co-registers the Renn chat bridge (``almaBridge``)
         on the SAME QWebChannel, and ``ChatBridge.send`` is a page-callable
         slot, so a page script can choose the exact text Renn receives and
         drive Renn's propose tools into writing page-chosen bytes into a
         draft — through a Python-side actor the controller never observes.
         A native dialog showing the bytes is the only channel Python can
-        prove a human perceived, so every draft copy takes one."""
-        from PySide6.QtWidgets import QMessageBox
+        prove a human perceived, so every draft copy takes one — and since
+        2026-07-27 so does every copy of MARKUP from a mirror row, because
+        the sandboxed preview stopped being trusted to disclose anything."""
+        from PySide6.QtWidgets import QDialog, QMessageBox
         from src.ui.pages.enablement._common import style_native_dialog
+        if content is not None:
+            dlg = self._build_copy_confirm_dialog(title, text, content, notes)
+            try:
+                return dlg.exec() == QDialog.Accepted
+            finally:
+                dlg.deleteLater()
         box = QMessageBox(self)
         box.setWindowTitle(str(title or "Confirm"))
+        box.setTextFormat(Qt.PlainText)   # never interpret a message as markup
         box.setText(str(text or ""))
-        if detail:
-            box.setDetailedText(str(detail))
         box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
         box.setDefaultButton(QMessageBox.No)
         style_native_dialog(box)
         return box.exec() == QMessageBox.Yes
+
+    def _build_copy_confirm_dialog(self, title: str, text: str, content: str,
+                                   notes=None):
+        """The purpose-built native copy gate: heading, then the markup
+        report (if any) in its OWN bounded widget, then the EXACT bytes in a
+        visible read-only scrollable view, then Cancel (default) / Copy.
+
+        Built as a separate method so the structure is testable without
+        spinning a modal event loop — the assertions that matter are "the
+        payload is in a widget that is visible, not in a collapsed pane",
+        "the report cannot displace the heading's fixed disclosure lines" and
+        "the default button is Cancel", and all three are properties of the
+        constructed dialog.
+
+        The report gets its own widget because it used to be appended to the
+        heading and the report is attacker-reachable — a crafted body grew
+        the heading by three lines and forged its structure. Here it is a
+        read-only, height-bounded, plain-text view: it can be arbitrarily
+        long without pushing one fixed line off the screen."""
+        from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QLabel,
+                                       QPlainTextEdit, QVBoxLayout)
+        from src.ui.pages.enablement._common import (force_plain_text,
+                                                     style_native_dialog)
+        dlg = QDialog(self)
+        dlg.setObjectName("zendeskCopyConfirm")
+        dlg.setWindowTitle(str(title or "Confirm"))
+        dlg.setModal(True)
+        dlg.setMinimumSize(*_COPY_DIALOG_MIN)
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(20, 18, 20, 16)
+        lay.setSpacing(12)
+
+        head = QLabel(str(text or ""))
+        head.setObjectName("zendeskCopyHeading")
+        # PLAIN TEXT, EXPLICITLY. The heading interpolates the row's TITLE,
+        # which a page script can write (js_save_draft's rename allowlist, or
+        # Renn's propose tools over the co-registered chat bridge). QLabel
+        # defaults to Qt::AutoText and Qt::mightBeRichText only scans to the
+        # first newline — where the title is — so a title beginning "<!--"
+        # deleted the rest of this disclosure, the markup-divergence warning
+        # included, and a styled fake "Cancel" could be painted in its place.
+        # Never rely on the caller having escaped it: this label must not be
+        # able to interpret markup at all.
+        head.setTextFormat(Qt.PlainText)
+        head.setWordWrap(True)
+        head.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        lay.addWidget(head)
+
+        entries = [str(n) for n in (notes or []) if str(n).strip()]
+        if entries:
+            # THE MARKUP REPORT, in its own bounded box. One entry per line,
+            # each line opened by a bullet THIS code writes, so no entry can
+            # look like a line of the heading above it. QPlainTextEdit is
+            # plain by construction and scrolls rather than growing.
+            report = QPlainTextEdit(
+                "\n".join(f"• {e}" for e in entries))
+            report.setObjectName("zendeskCopyNotes")
+            report.setReadOnly(True)
+            report.setMaximumHeight(_COPY_NOTES_MAX_HEIGHT)
+            report.setTabChangesFocus(True)
+            report.setStyleSheet(
+                "QPlainTextEdit { background:#FFF7ED; color:#8A5A00;"
+                " border:1px solid #E5B75A; border-radius:4px; padding:6px;"
+                " font-size:12px; }")
+            lay.addWidget(QLabel(_COPY_NOTES_LEAD))
+            lay.addWidget(report)
+
+        # THE DISCLOSURE. Read-only, selectable, scrollable, always visible.
+        # QPlainTextEdit is plain by construction — setPlainText/ctor never
+        # parse markup — which is a second reason the bytes live here.
+        view = QPlainTextEdit(str(content))
+        view.setObjectName("zendeskCopyBytes")
+        view.setReadOnly(True)
+        view.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        view.setMinimumHeight(_COPY_BYTES_MIN_HEIGHT)
+        view.setTabChangesFocus(True)
+        view.setStyleSheet(
+            "QPlainTextEdit { background:#FFFFFF; color:#2F3941;"
+            " border:1px solid #C2C8CC; border-radius:4px; padding:8px;"
+            " font-family:'Consolas','SFMono-Regular',Menlo,monospace;"
+            " font-size:12px; }")
+        lay.addWidget(view, 1)
+
+        buttons = QDialogButtonBox(dlg)
+        cancel = buttons.addButton("Cancel", QDialogButtonBox.RejectRole)
+        approve = buttons.addButton("Copy to clipboard",
+                                    QDialogButtonBox.AcceptRole)
+        # Defaults to CANCEL: a stray Enter must never release bytes.
+        approve.setAutoDefault(False)
+        approve.setDefault(False)
+        cancel.setAutoDefault(True)
+        cancel.setDefault(True)
+        cancel.setFocus()
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        lay.addWidget(buttons)
+        style_native_dialog(dlg)
+        # Belt and braces over the explicit setTextFormat above: any label a
+        # future edit adds to this dialog is plain too, by default.
+        force_plain_text(dlg)
+        return dlg
 
     def _web_zendesk_clipboard(self, text, html=None) -> bool:
         """Copy-exact conduit: the controller re-read the DB bytes; this puts

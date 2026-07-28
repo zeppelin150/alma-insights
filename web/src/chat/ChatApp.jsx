@@ -263,15 +263,158 @@ function DiffRow({ r }) {
   );
 }
 
-function DraftCard({ d, onApprove, onReject, busy }) {
+// Inline so the notice cannot be lost to a stylesheet that was never updated —
+// this is a safety surface, not decoration.
+const NOTICE_STYLE = {
+  margin: "8px 0 0",
+  padding: "8px 10px",
+  borderLeft: "3px solid #b45309",
+  background: "rgba(180, 83, 9, 0.12)",
+  color: "inherit",
+  fontSize: "12px",
+  lineHeight: 1.45,
+  whiteSpace: "pre-wrap",
+  wordBreak: "break-word",
+};
+
+// Inline for the same reason as NOTICE_STYLE: this disclosure is a safety
+// surface, not decoration, and must not depend on a stylesheet.
+const BYTES_SUMMARY_STYLE = {
+  cursor: "pointer",
+  listStyle: "none",
+  display: "flex",
+  gap: "8px",
+  alignItems: "baseline",
+  padding: "6px 8px",
+  border: "1px solid rgba(127,127,127,0.35)",
+  borderRadius: "4px",
+  fontSize: "12px",
+};
+
+const BYTES_PRE_STYLE = {
+  margin: "6px 0 0",
+  padding: "8px",
+  maxHeight: "260px",
+  overflow: "auto",
+  background: "rgba(127,127,127,0.10)",
+  fontFamily: "ui-monospace, SFMono-Regular, Consolas, monospace",
+  fontSize: "11px",
+  lineHeight: 1.45,
+  whiteSpace: "pre-wrap",
+  wordBreak: "break-all",
+};
+
+const BYTES_WHY_STYLE = { margin: "6px 0 0", fontSize: "11px", opacity: 0.85 };
+
+// The exact bytes this approval will send, as an ALWAYS-PRESENT collapsed
+// disclosure (the Zendesk SourcePanel pattern).
+//
+// It is deliberately NOT conditional on `d.notice`. Every detector that ever
+// gated a view of the real payload has turned out to be defeatable by whoever
+// wrote the payload — most recently a word-token "already reviewed" test that
+// the draft author silenced by seeding the prose with their own script's
+// tokens. So the operator's route to the characters that ship exists whether or
+// not anything fired, and the notice's job shrinks to saying "you should look".
+//
+// Rendered as escaped React children inside <pre> — never a raw-DOM HTML sink,
+// never a live frame. The bytes shown here are assumed hostile.
+function PublishBytesPanel({ body, available, flagged }) {
+  const text = typeof body === "string" ? body : "";
   return (
-    <div className="dcard">
+    <details className="dbytes">
+      <summary className="dbytes-summary" style={BYTES_SUMMARY_STYLE}>
+        <span className="dbytes-label">Exact bytes that will be sent</span>
+        {flagged ? (
+          <span className="dbytes-flag">— the text above does not account for them</span>
+        ) : null}
+        <span className="dbytes-size">
+          {available === false ? "unavailable" : `${text.length} chars`}
+        </span>
+      </summary>
+      <div className="dbytes-why" style={BYTES_WHY_STYLE}>
+        {available === false
+          ? "This draft's publish body could not be read. Nothing on this card "
+            + "represents what would be sent — do not approve it."
+          : "The diff above is a readable projection. This is the only view "
+            + "that shows every character Guru will receive, including markup, "
+            + "attributes and script bodies the projection cannot represent."}
+      </div>
+      <pre className="dbytes-src" style={BYTES_PRE_STYLE}>{text}</pre>
+    </details>
+  );
+}
+
+// WHERE this publish lands — Python-computed (agent_chat._target_label), shown
+// because the approval binds it. A re-requested push at another collection, or
+// a card_id re-pointed at a different live card, used to change nothing on this
+// card while changing everything about what the click did.
+function DraftTarget({ d }) {
+  const t = d.target || {};
+  const label = d.target_label || "";
+  if (!label && !t.card_id && !t.collection_id) return null;
+  return (
+    <div className="dtarget" style={TARGET_STYLE}>
+      <span className="dtarget-label">{label}</span>
+      {t.collection_id ? <span className="dtarget-id"> · collection {t.collection_id}</span> : null}
+      {t.folder_id ? <span className="dtarget-id"> · folder {t.folder_id}</span> : null}
+    </div>
+  );
+}
+
+const TARGET_STYLE = {
+  margin: "6px 0 0",
+  fontSize: "11px",
+  opacity: 0.9,
+  wordBreak: "break-all",
+};
+
+// A draft whose bytes moved is NOT approvable until a human re-opens the
+// review. `review_state` is Python's (agent_chat._bind_review): only "bound"
+// and "rebound" carry a live binding, and "changed" means the row moved under
+// an open panel — the case where the approve button would otherwise swap bytes
+// under the cursor.
+export function isApprovable(d) {
+  const state = d && d.review_state;
+  if (state === undefined) return true; // older payloads: unchanged behaviour
+  return state === "bound" || state === "rebound";
+}
+
+export function DraftCard({ d, onApprove, onReject, onReReview, busy }) {
+  const approvable = isApprovable(d) && !d.changed_under_review;
+  const moved = d.review_state === "changed" || d.changed_under_review;
+  return (
+    <div className="dcard" data-review-state={d.review_state || ""}>
       <div className="dcard-hdr">
         <span className="dtitle">{d.title}</span>
         <span className="dchg">
           {d.change_count} change{d.change_count === 1 ? "" : "s"}
         </span>
       </div>
+      <DraftTarget d={d} />
+      {/* A publish that did not succeed puts the draft back here rather than
+          dropping it silently. Python owns the sentence. */}
+      {d.failure ? (
+        <div className="dfail" role="alert" style={NOTICE_STYLE}>
+          The last publish of this draft did not succeed, so nothing was sent and
+          your earlier sign-off was not used: {d.failure}
+        </div>
+      ) : null}
+      {moved ? (
+        <div className="dmoved" role="alert" style={NOTICE_STYLE}>
+          This draft CHANGED after it was reviewed — what is shown below is not
+          what you approved, and approval is disabled. Re-open the review and
+          read the new content before approving.
+          <button className="dreview-again" onClick={() => onReReview && onReReview(d.draft_id)}>
+            Re-review
+          </button>
+        </div>
+      ) : null}
+      {d.review_state === "rebound" ? (
+        <div className="drebound" role="alert" style={NOTICE_STYLE}>
+          This draft changed since you last opened this panel. What is shown now
+          is the current content.
+        </div>
+      ) : null}
       {Array.isArray(d.checks) && d.checks.length > 0 && (
         <div className="dchecks">
           {d.checks.map((c, i) => (
@@ -286,11 +429,28 @@ function DraftCard({ d, onApprove, onReject, busy }) {
           <DiffRow key={i} r={r} />
         ))}
       </div>
+      {/* What the diff above CANNOT show of the bytes this approval sends —
+          Python-computed (agent_chat.review_notice). Plain text, never HTML. */}
+      {d.notice ? (
+        <div className="dnotice" role="alert" style={NOTICE_STYLE}>
+          {d.notice}
+        </div>
+      ) : null}
+      {/* Unconditional — present for every draft shape, notice or no notice. */}
+      <PublishBytesPanel
+        body={d.publish_body}
+        available={d.publish_body_available}
+        flagged={!!d.notice} />
       <div className="dactions">
         <button className="dreject" disabled={busy} onClick={() => onReject(d.draft_id)}>
           Reject
         </button>
-        <button className="dapprove" disabled={busy} onClick={() => onApprove(d.draft_id)}>
+        <button
+          className="dapprove"
+          disabled={busy || !approvable}
+          title={approvable ? "" : "This draft changed since it was reviewed — re-review it first."}
+          onClick={() => onApprove(d.draft_id)}
+        >
           Approve &amp; publish
         </button>
       </div>
@@ -298,7 +458,28 @@ function DraftCard({ d, onApprove, onReject, busy }) {
   );
 }
 
-function ReviewPanel({ drafts, open, onClose, onApprove, onReject, busyId }) {
+// A refused approval, said out loud. Python decides the wording (agent_chat's
+// STALE_REVIEW_REFUSAL and siblings); this only renders it.
+//
+// It has to be LOUDER than a normal error, because the failure it reports is
+// the one the operator cannot see for themselves: the draft moved between the
+// panel they read and the button they pressed, so nothing was published and
+// what is on screen behind this banner is no longer what a retry would send.
+// A bare "ok:false" would be indistinguishable from a Guru outage, and the
+// natural response to an outage is to click again.
+export function ResolveNotice({ note, onDismiss }) {
+  if (!note || !note.message) return null;
+  return (
+    <div className="dresolve" role="alert" style={NOTICE_STYLE}>
+      <span className="dresolve-msg">{note.message}</span>
+      <button className="dresolve-x" onClick={onDismiss} title="Dismiss">
+        ×
+      </button>
+    </div>
+  );
+}
+
+export function ReviewPanel({ drafts, open, onClose, onApprove, onReject, onReReview, busyId, note, onDismissNote }) {
   if (!open) return null;
   return (
     <div className="drawer-overlay" onClick={onClose}>
@@ -309,6 +490,7 @@ function ReviewPanel({ drafts, open, onClose, onApprove, onReject, busyId }) {
             ×
           </button>
         </div>
+        <ResolveNotice note={note} onDismiss={onDismissNote} />
         <div className="drawer-list">
           {drafts.length === 0 && <div className="drawer-empty">Nothing awaiting approval.</div>}
           {drafts.map((d) => (
@@ -317,6 +499,7 @@ function ReviewPanel({ drafts, open, onClose, onApprove, onReject, busyId }) {
               d={d}
               onApprove={onApprove}
               onReject={onReject}
+              onReReview={onReReview}
               busy={busyId === d.draft_id}
             />
           ))}
@@ -1114,11 +1297,18 @@ export default function ChatApp() {
   const [drafts, setDrafts] = useState([]);
   const [reviewOpen, setReviewOpen] = useState(false);
   const [resolvingId, setResolvingId] = useState(null);
+  // Last approve/reject outcome that carried an operator-facing message —
+  // in practice a REFUSAL (the draft moved after the review that bound it).
+  const [resolveNote, setResolveNote] = useState(null);
   const [voiceAvail, setVoiceAvail] = useState(false);
   const [listening, setListening] = useState(false);
   const [transcribing, setTranscribing] = useState(false);
   const [voiceError, setVoiceError] = useState(false);
   const scrollRef = useRef(null);
+  // The drafts as last rendered, so an incoming poll can be COMPARED against
+  // what is on screen instead of replacing it. The bridge callback below is
+  // registered once and closes over this ref, not over the drafts state.
+  const draftsRef = useRef([]);
 
   useEffect(() => {
     if (!bridge) return;
@@ -1199,15 +1389,43 @@ export default function ChatApp() {
       try {
         const p = JSON.parse(j);
         const items = Array.isArray(p.items) ? p.items : [];
-        setDrafts(items);
+        // NEVER a bare setDrafts. This signal fires from a background poll at
+        // the end of every Renn turn, so a revision made inside that turn used
+        // to swap the bytes under the operator's cursor while the panel stayed
+        // open and the approve button stayed armed. Anything whose content or
+        // destination moved is MARKED, and its approve affordance is reset.
+        const before = new Map(draftsRef.current.map((x) => [String(x.draft_id), x]));
+        const moved = new Set();
+        const merged = items.map((it) => {
+          const old = before.get(String(it.draft_id));
+          if (!old) return it;
+          const changed =
+            old.publish_body !== it.publish_body ||
+            old.title !== it.title ||
+            JSON.stringify(old.target || null) !== JSON.stringify(it.target || null);
+          if (!changed) return it;
+          moved.add(String(it.draft_id));
+          return { ...it, changed_under_review: true };
+        });
+        draftsRef.current = merged;
+        setDrafts(merged);
+        // A card that moved mid-click is no longer the card being resolved.
+        setResolvingId((cur) =>
+          cur !== null && cur !== undefined && moved.has(String(cur)) ? null : cur);
         window.__almaDrafts = items.length; // headless hook
+        window.__almaDraftsChanged = moved.size; // headless hook
       } catch (e) {}
     });
     bridge.draftResolved.connect((j) => {
       try {
         const p = JSON.parse(j);
         setResolvingId(null);
+        // Surface a refusal instead of letting it look like a silent no-op or
+        // a transient outage. Python owns the sentence.
+        setResolveNote(p.message ? { message: String(p.message), refused: !!p.refused } : null);
         window.__almaResolved = p.draft_id; // headless hook
+        window.__almaResolveRefused = !!p.refused; // headless hook
+        window.__almaResolveMessage = p.message || ""; // headless hook
       } catch (e) {}
     });
     if (bridge.refreshDrafts) bridge.refreshDrafts();
@@ -1248,15 +1466,26 @@ export default function ChatApp() {
     bridge.newSession(); // emits historyLoaded with an empty transcript
   }
 
+  // Opening the review panel is the ONE act that mints an approval binding
+  // (ChatBridge.openReview). refreshDrafts only refreshes the list — it must
+  // not be able to authorize anything, because a timer calls it too.
+  function openReview() {
+    if (!bridge) return;
+    if (bridge.openReview) bridge.openReview();
+    else if (bridge.refreshDrafts) bridge.refreshDrafts();
+  }
+
   function approveDraft(id) {
     if (!bridge) return;
     setResolvingId(id);
+    setResolveNote(null); // clear a previous refusal; this click gets its own answer
     bridge.approveDraft(String(id));
   }
 
   function rejectDraft(id) {
     if (!bridge) return;
     setResolvingId(id);
+    setResolveNote(null);
     bridge.rejectDraft(String(id));
   }
 
@@ -1273,7 +1502,7 @@ export default function ChatApp() {
           className={"hbtn review" + (drafts.length ? " alert" : "")}
           onClick={() => {
             setReviewOpen(true);
-            if (bridge) bridge.refreshDrafts();
+            openReview();
           }}
           title="Review edits awaiting your sign-off"
         >
@@ -1375,7 +1604,10 @@ export default function ChatApp() {
         onClose={() => setReviewOpen(false)}
         onApprove={approveDraft}
         onReject={rejectDraft}
+        onReReview={openReview}
         busyId={resolvingId}
+        note={resolveNote}
+        onDismissNote={() => setResolveNote(null)}
       />
 
       <ActionRouter bridge={bridge} />

@@ -49,7 +49,7 @@ function ActionValue({ action }) {
 }
 
 export default function MacroEditor({ macro, onBack, onCopy, onOpenRevision,
-                                      copyBusy }) {
+                                      copyBusy, onShowSource, sourceOpen }) {
   if (!macro) return null;
   const actions = Array.isArray(macro.actions) ? macro.actions : [];
   const revisions = Array.isArray(macro.revisions) ? macro.revisions : [];
@@ -72,7 +72,8 @@ export default function MacroEditor({ macro, onBack, onCopy, onOpenRevision,
             items={[{ field: "macro_name", label: "Copy name",
                       title: "Copy the exact stored macro name" }]}
             menuTitle="Other copy formats"
-            onCopy={onCopy} disabled={!hasReply} pending={!!copyBusy} />
+            onCopy={onCopy} disabled={!hasReply} pending={!!copyBusy}
+            onShowSource={onShowSource} sourceOpen={!!sourceOpen} />
         </div>
         <div className="zd-form">
           <div className="zd-field">

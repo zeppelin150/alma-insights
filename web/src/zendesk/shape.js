@@ -173,8 +173,8 @@ export function copyFieldLabel(field) {
 
 // copy_resolved payload → flash text.
 //
-// NOTHING here may claim a copy happened before Python says so. Copies of
-// page-authored bytes now run a NATIVE confirm inside js_copy_field, and a
+// NOTHING here may claim a copy happened before Python says so. Every copy
+// of markup now runs a NATIVE confirm inside js_copy_field, and a
 // cancelled/refused copy resolves with ok:false or does not resolve at all
 // (the controller returns silently) — so the caller arms a self-clearing
 // busy flag and this builder only ever describes a RESOLVED outcome.

@@ -258,10 +258,13 @@ class WorkbenchWebController(QObject):
     page.py works identically against either build.
 
     The preview is the security-critical seam: EVERY ``preview_html`` that
-    leaves this controller has passed :func:`src.data.html_sanitize.sanitize_html`
-    — stored Guru ``content_html`` and markdown-derived HTML alike. The page
-    renders it inside a fully-sandboxed ``srcdoc`` iframe (no scripts), so the
-    sanitizer and the sandbox each independently stop execution.
+    leaves this controller is :func:`src.data.enablement_store.publish_body`'s
+    output — the exact bytes a publish would send — passed through
+    :func:`src.data.html_sanitize.sanitize_html`. The page renders it inside a
+    fully-sandboxed ``srcdoc`` iframe (no scripts), so the sanitizer and the
+    sandbox each independently stop execution. The publish belt certifies the
+    same ``publish_body`` string, so the screen, the belt and the network all
+    read one variable.
     """
 
     MAX_WORKSPACES = 4          # parity with WorkbenchPage
@@ -311,9 +314,10 @@ class WorkbenchWebController(QObject):
         # gate for a web publish click (a QMessageBox in page.py, unreachable
         # from Chromium). Absent → publishing FAILS CLOSED.
         self._publish_confirm_fn = publish_confirm_fn
-        # ``content_lookup(draft_id) -> str|None`` reads the draft's CURRENT
-        # body straight from the store (page.py owns the DB). The publish belt
-        # compares this — the exact bytes store.publish_draft will read — not
+        # ``content_lookup(draft_id) -> str|None`` reads the stored draft's
+        # PUBLISH BODY straight from the store (page.py owns the DB, and
+        # returns enablement_store.publish_body(draft)). The publish belt
+        # compares this — the exact bytes store.publish_draft will SEND — not
         # the in-memory _cards, so no cache/DB divergence can slip a body the
         # operator didn't approve past the gate.
         self._content_lookup = content_lookup
@@ -484,10 +488,18 @@ class WorkbenchWebController(QObject):
 
     def js_request_diff(self):
         """Review-changes: word-level diff of the active draft against its
-        linked-card baseline, computed in Python (pure renderer rule)."""
+        linked-card baseline, computed in Python (pure renderer rule).
+
+        The proposed side is ``review_text`` — the reviewer-facing text of the
+        PUBLISH BODY — so a draft whose ``content_html`` differs from its
+        markdown is diffed as what ships, not as the unused markdown column."""
+        from src.data.enablement_store import review_text
         from src.data.text_diff import change_count, diff_words
         card = self._cards.get(self._active_draft_id) or {}
-        rows = diff_words(self._linked_card_md, card.get("markdown") or "")
+        proposed = review_text({"content": card.get("markdown") or "",
+                                "content_html": card.get("content_html")},
+                               md_to_html=self._render_markdown)
+        rows = diff_words(self._linked_card_md, proposed)
         try:
             self.diff_ready.emit(json.dumps({
                 "rows": rows,
@@ -606,8 +618,12 @@ class WorkbenchWebController(QObject):
             target_id = self._active_draft_id
             card = self._cards.get(target_id) or {}
             title = str(card.get("title") or "Untitled")
-            # Snapshot what the operator is being shown (the cached body).
-            target_md = card.get("markdown")
+            # Snapshot what the operator is being shown — the PUBLISH BODY of
+            # the cached card, i.e. the very bytes publish_draft will send.
+            # (Until 2026-07-26 this snapshotted the markdown column, which is
+            # neither what the preview rendered nor what shipped whenever
+            # content_html was populated — the belt certified a third string.)
+            target_body = self._publish_body(card)
             approved = False
             if self._publish_confirm_fn is not None:
                 try:
@@ -616,14 +632,13 @@ class WorkbenchWebController(QObject):
                     approved = False
             # The core invariant: publish ONLY what the operator saw and
             # approved. At approve time (a) the target must still be active and
-            # unchanged in cache, and (b) — authoritatively — the cached body
-            # the operator saw must equal the DB body publish_draft will read.
-            # (b) catches BOTH a pre-existing cache/DB divergence (e.g. a
-            # de-focused revise) and any mid-modal DB change, in the single
-            # source of truth that actually ships.
+            # its publish body unchanged in cache, and (b) — authoritatively —
+            # that body must equal the publish body of the DB row publish_draft
+            # will read. Both comparisons are over publish_body's output, so
+            # the bytes this belt certifies ARE the bytes that ship.
             if approved:
-                cache_now = (self._cards.get(target_id) or {}).get("markdown")
-                ok = (self._active_draft_id == target_id and cache_now == target_md)
+                cache_now = self._publish_body(self._cards.get(target_id) or {})
+                ok = (self._active_draft_id == target_id and cache_now == target_body)
                 if ok and self._content_lookup is not None:
                     ok = (cache_now == self._lookup_db_content(target_id))
                 if not ok:
@@ -671,8 +686,8 @@ class WorkbenchWebController(QObject):
 
     # ── internals ────────────────────────────────────────────────────
     def _lookup_db_content(self, draft_id):
-        """The draft's current DB body (or None if unavailable) — the exact
-        bytes store.publish_draft will read. Fail-safe: any error returns a
+        """The stored draft's PUBLISH BODY (or None if unavailable) — the exact
+        bytes store.publish_draft will send. Fail-safe: any error returns a
         sentinel that can never equal a real snapshot, so the belt refuses
         rather than publishing blind."""
         if self._content_lookup is None:
@@ -700,14 +715,24 @@ class WorkbenchWebController(QObject):
         except Exception:  # noqa: BLE001
             pass
 
+    def _publish_body(self, card: dict) -> str:
+        """The bytes a publish of THIS card would send — the one composition,
+        shared with ``enablement_store.publish_draft``. The preview renders it
+        and the publish belt certifies it, so screen and network can't drift."""
+        from src.data.enablement_store import publish_body
+        return publish_body({"content": card.get("markdown") or "",
+                             "content_html": card.get("content_html")},
+                            md_to_html=self._render_markdown)
+
     def _preview_html(self, card: dict) -> str:
-        """The ONLY producer of preview HTML — sanitize EVERY path."""
+        """The ONLY producer of preview HTML — sanitize EVERY path.
+
+        The SOURCE is the publish body (``_publish_body``); the sanitizer is
+        the rendering mechanism for the sandboxed iframe, not a second
+        composition. Anything the sanitizer removes is removed from a faithful
+        copy of the shipped bytes, never from a different representation."""
         from src.data.html_sanitize import sanitize_html
-        raw = card.get("content_html")
-        if not raw:
-            md = card.get("markdown") or ""
-            raw = self._render_markdown(md)
-        return sanitize_html(raw)
+        return sanitize_html(self._publish_body(card))
 
     def _render_markdown(self, md: str) -> str:
         if self._md_to_html_fn is not None:

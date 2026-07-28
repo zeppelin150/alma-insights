@@ -1262,7 +1262,17 @@ def _revise_draft_impl(conn, draft_id, instruction) -> dict:
     return {"ok": True, "draft_id": did, "title": title}
 
 
-def _push_guru_draft_impl(conn, draft_id, collection_id=None, folder_id=None) -> dict:
+def _push_guru_draft_impl(conn, draft_id, collection_id=None, folder_id=None,
+                          *, approval_claim=None) -> dict:
+    """Publish a draft to Guru, behind the M5 human-sign-off gate.
+
+    ``approval_claim`` is the one-shot token ``enablement_store.record_approval``
+    handed to the surface that just took the operator's sign-off. It is a
+    keyword-only argument with no default source: the REGISTERED CHAT TOOL never
+    passes one, so a model-initiated push can never redeem a scoped sign-off —
+    not a fresh one, and not one left behind by a publish that failed or by a
+    process that died mid-approve.
+    """
     from src.data import enablement_store as store
     try:
         did = int(draft_id)
@@ -1292,14 +1302,26 @@ def _push_guru_draft_impl(conn, draft_id, collection_id=None, folder_id=None) ->
     if not folder_id:
         folder_id = guru_cfg.get("publish_folder_id") or None
     # ── Approval gate (M5) ──────────────────────────────────────────
-    # A draft cannot be published to Guru without a recorded human sign-off.
-    # When blocked, we record the intended target so an in-UI approval can
-    # complete the push, and return a clear, actionable error.
-    if draft.get("require_approval") and not draft.get("approved_at"):
-        store.mark_push_requested(conn, did, collection_id, folder_id)
-        return {"ok": False, "error": "approval_required", "draft_id": did,
-                "message": "This edit needs your sign-off before it publishes to "
-                           "Guru — open the Review panel in the Agent to approve it."}
+    # A draft cannot be published to Guru without a human sign-off THAT NAMES
+    # THIS PUBLISH. ``store.approval_open`` checks the recorded sign-off against
+    # the claim this caller presents and against the act about to be performed
+    # (title, card, bytes, collection, folder), all recomputed from the row —
+    # a bare ``approved_at`` is no longer sufficient, because a timestamp left
+    # behind by a failed publish is indistinguishable from a fresh one.
+    #
+    # When blocked we record the intended target — which also DROPS the stale
+    # sign-off — so the draft returns to the in-UI review panel and the gate is
+    # closed again, and we return a clear, actionable error.
+    if draft.get("require_approval"):
+        released, why = store.approval_open(
+            draft, claim=approval_claim,
+            collection_id=collection_id, folder_id=folder_id)
+        if not released:
+            store.mark_push_requested(conn, did, collection_id, folder_id)
+            return {"ok": False, "error": "approval_required", "draft_id": did,
+                    "reason": why,
+                    "message": "This edit needs your sign-off before it publishes to "
+                               "Guru — open the Review panel in the Agent to approve it."}
     client = None
     if not demo_mode:
         try:
@@ -1609,6 +1631,11 @@ def handle_revise_draft(conn, args, filters):
 
 
 def handle_push_guru_draft(conn, args, filters):
+    """The MODEL-callable push. It passes NO ``approval_claim`` — deliberately,
+    and structurally: a claim only exists in the memory of the surface that just
+    took the operator's sign-off, so nothing the model can say releases the
+    gate. ``args`` is attacker-reachable (prompt injection), so no key of it is
+    forwarded as one either."""
     return _push_guru_draft_impl(conn, args.get("draft_id"),
                                  args.get("collection_id"), args.get("folder_id"))
 
