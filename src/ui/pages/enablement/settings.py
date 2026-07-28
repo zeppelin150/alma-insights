@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QPushButton, QScrollArea, QTabWidget, QTextBrowser, QVBoxLayout, QWidget,
 )
 
-from src.ui.pages.enablement._common import card_frame, field, pill, section_label, toggle
+from src.ui.pages.enablement._common import Toggle, card_frame, field, pill, section_label
 from src.ui.theme import (
     ALMA_BG_ELEVATED, ALMA_BG_INSET, ALMA_BORDER, ALMA_BORDER_LIGHT, ALMA_CREAM,
     ALMA_GREEN_DARK, ALMA_GREEN_LIGHT, ALMA_INFO, ALMA_SUCCESS, ALMA_TEXT_DARK,
@@ -24,6 +24,21 @@ from src.ui.theme import (
 )
 
 from src.ui.theme import ALMA_ACCENT_TEAL as _TEAL  # noqa: E402
+
+
+class _BoardToggle(Toggle):
+    """A shared Toggle that actually reports its flip.
+
+    ``_common.Toggle`` repaints on click and tells nobody — which is exactly how
+    the old Asana mockup's two switches could look live while being wired to
+    nothing. This subclass emits the new state so the host can persist it.
+    """
+
+    changed = Signal(bool)
+
+    def mousePressEvent(self, e):
+        super().mousePressEvent(e)
+        self.changed.emit(self.on)
 
 
 class _GuideSection(QFrame):
@@ -292,6 +307,17 @@ class SettingsPage(QWidget):
     card_template_saved = Signal(str)      # edited text saved from the inline editor
     identity_detect_email_requested = Signal()       # "Auto-detect from Google"
     identity_resolve_asana_gid_requested = Signal()  # "Resolve GID"
+    # ── Asana board management (2026-07-28) ──
+    # This card used to be a hardcoded mockup: invented board names, invented
+    # field mappings and a fabricated resolved-people list, rendered while
+    # monitor_sources was empty — so the header count and every board on screen
+    # described a configuration the database did not have. Everything here is
+    # now fed by the host from asana_setup.board_summary(), and these signals
+    # are the only way anything leaves the card.
+    board_add_requested = Signal()             # "+ Add board"
+    board_sync_toggled = Signal(str, bool)     # (source_id, sync on/off)
+    board_calendar_toggled = Signal(str, bool) # (source_id, show on calendar)
+    board_remove_requested = Signal(str)       # source_id → host runs the native confirm
     _kb_bootstrap_finished = Signal(str)             # worker thread → main (queued)
 
     def __init__(self, parent=None):
@@ -709,7 +735,9 @@ class SettingsPage(QWidget):
         v.setContentsMargins(20, 16, 20, 16)
         v.setSpacing(12)
         head = QHBoxLayout()
-        head.addWidget(section_label(title))
+        title_lbl = section_label(title)
+        card._section_title = title_lbl   # so a derived header can be re-titled
+        head.addWidget(title_lbl)
         head.addStretch(1)
         if action:
             b = QPushButton(action)
@@ -928,7 +956,16 @@ class SettingsPage(QWidget):
             pass
 
     def _asana(self):
-        card, v = self._section("ASANA BOARDS  ·  2 configured", "+ Add board")
+        """The Asana board card — rendered ENTIRELY from monitor_sources.
+
+        The header count, every board row, the indicator condition and the field
+        mappings come from the host's ``set_asana_boards`` feed. Nothing here is
+        a literal describing a board, because a screen that describes a board the
+        database does not have is how this feature shipped broken.
+        """
+        card, v = self._section("ASANA BOARDS", "+ Add board",
+                                on_action=self.board_add_requested.emit)
+        self._asana_header = getattr(card, "_section_title", None)
         # Connect + AI setup — Renn finds the custom-field / enum-value GIDs for you
         conn_row = QHBoxLayout()
         conn_row.setSpacing(8)
@@ -954,47 +991,128 @@ class SettingsPage(QWidget):
         v.addWidget(self._text(
             "Renn finds your projects, custom fields, and enum-value GIDs and fills these in — "
             "no GID hunting. (Renn can only edit these Asana settings.)", color=ALMA_TEXT_LIGHT))
-        # expanded board
-        b1 = self._inset()
-        bl = QVBoxLayout(b1)
+        self._asana_list = QVBoxLayout()
+        self._asana_list.setSpacing(10)
+        v.addLayout(self._asana_list)
+        self._asana_boards: list[dict] = []
+        self._render_asana_boards([])
+        return card
+
+    # ── Asana boards: host feed → rendered rows ───────────────────
+    def set_asana_boards(self, boards: list[dict]):
+        """Host feeds ``asana_setup.board_summary(conn)``. The single entry
+        point — the card has no other source of board information."""
+        self._render_asana_boards(list(boards or []))
+
+    def asana_boards(self) -> list[dict]:
+        """What the card is currently showing (tests + host read-back)."""
+        return list(self._asana_boards)
+
+    def _render_asana_boards(self, boards: list[dict]):
+        self._asana_boards = boards
+        self._clear_layout(self._asana_list)
+        if self._asana_header is not None:
+            n = len(boards)
+            self._asana_header.setText(
+                "ASANA BOARDS" if not n else
+                f"ASANA BOARDS  ·  {n} configured" if n != 1 else
+                "ASANA BOARDS  ·  1 configured")
+        if not boards:
+            # Honest + actionable: an unmapped Asana is the exact state that
+            # used to render as "2 configured" over an empty monitor_sources.
+            empty = self._text(
+                "No Asana boards are mapped, so no Asana tasks will sync — your "
+                "Tasks and Calendar stay empty. Press “Set up with Renn” (or "
+                "“+ Add board”) to map a board; nothing polls Asana until you do.",
+                color=ALMA_TEXT_LIGHT)
+            empty.setWordWrap(True)
+            self._asana_list.addWidget(empty)
+            return
+        for b in boards:
+            self._asana_list.addWidget(self._asana_board_row(b))
+
+    def _asana_board_row(self, b: dict) -> QFrame:
+        sid = str(b.get("source_id") or "")
+        box = self._inset()
+        bl = QVBoxLayout(box)
         bl.setContentsMargins(16, 12, 16, 12)
         bl.setSpacing(10)
+
         top = QHBoxLayout()
-        top.addWidget(self._text("Enablement Requests", size=14, color=ALMA_TEXT_DARK, bold=True))
+        top.addWidget(self._text(str(b.get("project_name") or sid), size=14,
+                                 color=ALMA_TEXT_DARK, bold=True))
         top.addSpacing(10)
-        top.addWidget(self._text("app.asana.com/0/120…84", color=ALMA_INFO))
+        if b.get("project_url"):
+            top.addWidget(self._text(str(b["project_url"]), color=ALMA_INFO))
         top.addStretch(1)
-        top.addWidget(toggle(True))
+        top.addWidget(self._text("Sync", color=ALMA_TEXT_LIGHT))
+        sync = _BoardToggle(bool(b.get("enabled")))
+        sync.changed.connect(lambda on, s=sid: self.board_sync_toggled.emit(s, on))
+        top.addWidget(sync)
+        top.addSpacing(10)
+        top.addWidget(self._text("Calendar", color=ALMA_TEXT_LIGHT))
+        cal = _BoardToggle(bool(b.get("calendar")))
+        cal.changed.connect(lambda on, s=sid: self.board_calendar_toggled.emit(s, on))
+        top.addWidget(cal)
         bl.addLayout(top)
+
         ind = QHBoxLayout()
         ind.setSpacing(10)
         ind.addWidget(self._text("Create task when", bold=True))
-        ind.addWidget(pill("Assigned Team  =  Enablement", "#E4EFE9", ALMA_SUCCESS))
-        ind.addWidget(self._text("+ add condition", color=ALMA_TEXT_LIGHT))
+        cond = str(b.get("indicator") or "")
+        if cond:
+            ind.addWidget(pill(cond, "#E4EFE9", ALMA_SUCCESS))
+        else:
+            ind.addWidget(self._text("no condition mapped — this board creates nothing",
+                                     color=ALMA_WARNING))
         ind.addStretch(1)
         bl.addLayout(ind)
+
         mp = QHBoxLayout()
         mp.setSpacing(8)
         mp.addWidget(self._text("Map fields", bold=True))
         mp.addSpacing(8)
         mp.addWidget(self._text("Priority from"))
-        mp.addWidget(field("Urgency", w=110))
+        mp.addWidget(field(str(b.get("priority_field") or "—"), w=140))
         mp.addWidget(self._text("Assignee from"))
-        mp.addWidget(field("Assigned People", w=150))
-        mp.addWidget(self._text("Resolved: J. Rivera, M. Chen, A. Osei  (+4)", color=ALMA_TEXT_LIGHT))
+        mp.addWidget(field(str(b.get("assignee_field") or "—"), w=160))
         mp.addStretch(1)
         bl.addLayout(mp)
-        v.addWidget(b1)
-        # collapsed board
-        b2 = QHBoxLayout()
-        b2.addWidget(self._text("Launch Coordination", size=13.5, color=ALMA_TEXT_DARK, bold=True))
-        b2.addSpacing(12)
-        b2.addWidget(pill("Assigned Team = Enablement", "#EBEFEA", ALMA_GREEN_DARK))
-        b2.addWidget(pill("Urgency to priority", "#EBEFEA", ALMA_GREEN_DARK))
-        b2.addStretch(1)
-        b2.addWidget(toggle(True))
-        v.addLayout(b2)
-        return card
+
+        foot = QHBoxLayout()
+        foot.setSpacing(10)
+        count = int(b.get("task_count") or 0)
+        foot.addWidget(self._text(
+            f"{count} imported task" + ("" if count == 1 else "s"),
+            color=ALMA_TEXT_LIGHT))
+        # Ownership is many-to-many: a task multi-homed into two mapped Asana
+        # projects is polled — and tracked — by BOTH boards, so it is counted
+        # under both and the per-board counts can sum to more than the number
+        # of tasks. Say so instead of hiding it behind an arbitrary winner,
+        # and say what removal would actually do to those rows.
+        shared = int(b.get("shared_task_count") or 0)
+        if shared:
+            foot.addWidget(self._text(
+                f"{shared} also tracked by another board (kept if you remove this one)",
+                color=ALMA_TEXT_LIGHT))
+        if not b.get("enabled"):
+            foot.addWidget(pill("sync paused", "#F6EBDD", ALMA_WARNING))
+        if not b.get("calendar"):
+            foot.addWidget(self._text("not shown on the calendar", color=ALMA_TEXT_LIGHT))
+        if b.get("last_error"):
+            foot.addWidget(self._text(f"last error: {b['last_error']}"[:120],
+                                      color=ALMA_WARNING))
+        foot.addStretch(1)
+        rm = QPushButton("Remove")
+        rm.setCursor(Qt.PointingHandCursor)
+        rm.setStyleSheet(
+            f"QPushButton{{background:transparent; color:{ALMA_WARNING}; "
+            f"border:1px solid {ALMA_BORDER}; border-radius:7px; padding:4px 12px; "
+            f"font-size:11.5px; font-weight:600;}}")
+        rm.clicked.connect(lambda _=False, s=sid: self.board_remove_requested.emit(s))
+        foot.addWidget(rm)
+        bl.addLayout(foot)
+        return box
 
     def _drive(self):
         card, v = self._section("GOOGLE DRIVE FOLDERS  ·  watched", "+ Add folder",

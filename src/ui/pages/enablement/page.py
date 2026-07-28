@@ -146,7 +146,15 @@ RENN_SYSTEM_PROMPT = (
     "the [SYSTEM: operator confirmed/cancelled] message. Acts only on Asana-sourced tasks.\n"
     "- Set up Asana: asana_discover (find projects + field/enum GIDs), then "
     "set_asana_board_config (save the board config). Never ask the user for GIDs — "
-    "discover them yourself.\n"
+    "discover them yourself. DO ask one thing: whether that board's tasks should "
+    "appear on the Calendar, and pass calendar accordingly (it defaults to off; "
+    "tasks sync to the task list either way).\n"
+    "- Asana boards already mapped: list_asana_boards. Use it before claiming Asana "
+    "is set up — a stored API key alone does not mean any board syncs.\n"
+    "- remove_asana_board PROPOSES unmapping a board; it deletes nothing. Removal "
+    "wipes Alma's LOCAL copy of that board's tasks and NEVER touches Asana. If the "
+    "tool answers needs_operator_confirm, tell the operator how many local tasks "
+    "would go and ask them to press Remove in Settings › Sources.\n"
     "- run_monitor_now to pull fresh items from the configured sources.\n"
     "- Guru analytics: get_guru_analytics (metric=top_cards|verification|comments|"
     "due_cards), import_guru_card (bring an existing card in as an editable draft — "
@@ -374,6 +382,13 @@ class EnablementPage(QWidget):
         # then reload the canvas live (result delivered on the main thread).
         self.workbench.ai_edit_requested.connect(self._on_ai_edit)
         self.ai_edit_done.connect(self._on_ai_edit_done)
+        # Asana board management — the Settings card is a pure renderer; every
+        # mutation lands here, and the destructive one goes through a NATIVE
+        # confirm before anything is deleted.
+        self.settings.board_add_requested.connect(self._on_asana_setup)
+        self.settings.board_sync_toggled.connect(self._on_board_sync_toggled)
+        self.settings.board_calendar_toggled.connect(self._on_board_calendar_toggled)
+        self.settings.board_remove_requested.connect(self._on_board_remove_requested)
         self.settings.drive_folder_added.connect(self._add_drive_folder)
         self.settings.drive_folder_picked.connect(self._on_drive_folder_picked)
         self.settings.style_guide_action.connect(self._on_style_guide_action)
@@ -427,6 +442,8 @@ class EnablementPage(QWidget):
                 self._set_status(f"Load error: {exc}")
         self._refresh_drive_folders()
         self._refresh_active_drive_folder()
+        self._refresh_asana_boards()
+        self._register_board_removal_confirm()
 
     def _header(self) -> QHBoxLayout:
         row = QHBoxLayout()
@@ -528,7 +545,24 @@ class EnablementPage(QWidget):
             return str(iso)
 
     def _tasks_to_rows(self, task_list: list[dict], conn) -> list[dict]:
+        """Shape DB task rows for the list AND the calendar feed.
+
+        ``source_ref`` and ``board_source_ids`` are carried deliberately: the
+        calendar filter judges rows of exactly this shape, so anything it needs
+        to attribute a row has to survive the trip. Dropping the board links
+        here would make every production row unattributable and the filter's
+        fail-open rule would silently show opted-out boards.
+
+        ``board_source_ids`` is a LIST because ownership is many-to-many — a
+        multi-homed Asana task is tracked by every mapped board it sits in, and
+        one opted-in board is enough to keep it on the calendar. The map is read
+        once per refresh rather than per row.
+        """
         from src.data import enablement_tasks as tasks
+        try:
+            links = tasks.task_board_map(conn)
+        except Exception:  # noqa: BLE001 — no links → fail OPEN (everything shows)
+            links = {}
         rows = []
         for t in task_list:
             subs = tasks.list_subtasks(conn, t["task_id"])
@@ -548,8 +582,33 @@ class EnablementPage(QWidget):
                 "description": t.get("description") or "",
                 "submitter": t.get("submitter") or "",
                 "source_url": t.get("source_url") or "",
+                "source_ref": t.get("source_ref") or "",
+                "board_source_ids": list(links.get(t["task_id"], ())),
             })
         return rows
+
+    def _calendar_rows(self, rows, conn=None) -> list[dict]:
+        """Apply the per-board Calendar opt-in to a feed.
+
+        Calendar inclusion is a board-level flag defaulting to OFF, so a board
+        can sync tasks into the list and the workbench while staying off the
+        calendar. This governs DISPLAY only — nothing here changes what syncs,
+        and it is applied at the calendar feed alone, never to ``self.tasks``.
+        """
+        try:
+            from src.data import asana_setup
+            allow = asana_setup.calendar_task_filter(conn if conn is not None else self._conn())
+        except Exception:  # noqa: BLE001 — a filter failure must not empty the calendar
+            return list(rows)
+        out = []
+        for r in rows:
+            try:
+                ok = allow(dict(r))
+            except Exception:  # noqa: BLE001
+                ok = True
+            if ok:
+                out.append(r)
+        return out
 
     def _make_help(self):
         """The Help Center tab. Content is bundled under assets/help/ and
@@ -1156,7 +1215,7 @@ class EnablementPage(QWidget):
             rows = self._tasks_to_rows(all_tasks, db.conn)
             self._all_tasks = rows
             self.tasks.load_tasks(rows)
-            self.calendar.set_tasks(all_tasks)
+            self.calendar.set_tasks(self._calendar_rows(all_tasks, db.conn))
             drafts = store.list_drafts(db.conn, status="pending")
             self._drafts = {int(d["id"]): d for d in drafts}
             chips = [{"id": int(d["id"]),
@@ -1192,6 +1251,7 @@ class EnablementPage(QWidget):
             self._load_live()
         except Exception:  # noqa: BLE001 — a refresh must never break navigation
             pass
+        self._refresh_asana_boards()
 
     def _load_live(self, prefer_draft_id=None):
         """Reload the four pages from the active DB (warehouse, or the demo DB in
@@ -1219,7 +1279,7 @@ class EnablementPage(QWidget):
                 })
         except Exception:  # noqa: BLE001 — analytics tables may not exist yet
             pass
-        self.calendar.set_tasks(cal_rows)
+        self.calendar.set_tasks(self._calendar_rows(cal_rows, conn))
         drafts = store.list_drafts(conn, status="pending")
         self._drafts = {int(d["id"]): d for d in drafts}
         chips = [{"id": int(d["id"]),
@@ -1776,6 +1836,148 @@ class EnablementPage(QWidget):
             from src.data import enablement_sources as sources
             self.settings.set_drive_folders(sources.list_sources(self._conn(), "drive"))
         except Exception:  # noqa: BLE001
+            pass
+
+    # ── Asana board config (Settings → monitor_sources) ───────────
+    def _refresh_asana_boards(self):
+        """Re-feed the Settings card from monitor_sources. The card renders
+        nothing it wasn't handed, so this is the only way boards appear."""
+        if self.demo and self._demo_db is None:
+            return
+        try:
+            from src.data import asana_setup
+            self.settings.set_asana_boards(asana_setup.board_summary(self._conn()))
+        except Exception:  # noqa: BLE001 — settings must survive a bad board row
+            pass
+
+    def _on_board_sync_toggled(self, source_id: str, on: bool):
+        from src.data import asana_setup
+        try:
+            asana_setup.set_board_enabled(self._conn(), source_id, bool(on))
+        except Exception as exc:  # noqa: BLE001
+            self._set_status(f"Couldn't change sync for {source_id}: {exc}")
+            return
+        self._set_status(
+            f"Sync {'enabled' if on else 'paused'} for {source_id}. "
+            "Already-imported tasks are untouched.")
+        self._refresh_asana_boards()
+
+    def _on_board_calendar_toggled(self, source_id: str, on: bool):
+        from src.data import asana_setup
+        try:
+            asana_setup.set_board_calendar(self._conn(), source_id, bool(on))
+        except Exception as exc:  # noqa: BLE001
+            self._set_status(f"Couldn't change calendar display for {source_id}: {exc}")
+            return
+        self._set_status(
+            f"{source_id} {'now shows' if on else 'no longer shows'} on the Calendar. "
+            "Syncing is unchanged.")
+        self._refresh_asana_boards()
+        try:
+            self._load_live()
+        except Exception:  # noqa: BLE001 — the flag is saved either way
+            pass
+
+    def _confirm_and_remove_board(self, source_id: str) -> dict | None:
+        """Board removal — LOCAL deletion, gated by a NATIVE confirm.
+
+        Renn can propose this and the Settings card can request it, so neither is
+        allowed to be the thing that authorizes it: a QMessageBox (unreachable
+        from a model, from a web page, and from the MCP subprocess) names the
+        board, states the exact number of local rows about to be deleted, and
+        says plainly that Asana is not modified. It defaults to No, and only a
+        Yes reaches ``asana_setup.remove_board``.
+
+        The quoted number is ``deletable_task_count`` — what removal ACTUALLY
+        deletes, not everything the board tracks. Tasks another mapped board
+        also tracks survive, and the dialog says so out loud: an operator must
+        never read "12 tasks" and get 9, nor be told work is going that stays.
+
+        Returns the removal result, ``{"ok": False, "cancelled": True}`` when the
+        operator declines, or ``None`` when the dialog cannot be shown at all —
+        which the tool layer reports to the model as a refusal.
+        """
+        from PySide6.QtCore import QThread
+        from PySide6.QtWidgets import QApplication, QMessageBox
+        from src.data import asana_setup
+        from src.ui.pages.enablement._common import style_native_dialog
+        app = QApplication.instance()
+        if app is None or QThread.currentThread() is not app.thread():
+            # No GUI thread → no confirm is possible → nothing may be deleted.
+            return None
+        conn = self._conn()
+        boards = {b["source_id"]: b for b in asana_setup.board_summary(conn)}
+        board = boards.get(source_id)
+        if board is None:
+            return {"ok": False, "error": "unknown_board", "source_id": source_id,
+                    "tasks_deleted": 0}
+        count = int(board.get("deletable_task_count") or 0)
+        kept = int(board.get("shared_task_count") or 0)
+        shared = (
+            f"\n\n{kept} more task{'' if kept == 1 else 's'} on this board "
+            f"{'is' if kept == 1 else 'are'} also tracked by another mapped "
+            f"board, so {'it stays' if kept == 1 else 'they stay'} — with "
+            "their notes and subtasks — after this board is removed."
+        ) if kept else ""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Remove Asana board")
+        box.setText(f"Remove “{board.get('project_name') or source_id}” from Alma?")
+        box.setInformativeText(
+            f"This deletes {count} imported task"
+            f"{'' if count == 1 else 's'} from Alma's local database, along with "
+            f"their subtasks and notes. This cannot be undone here.{shared}\n\n"
+            "Your Asana project is not modified. No task, comment or field in "
+            "Asana is changed or deleted — Alma only forgets what it imported.")
+        box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        box.setDefaultButton(QMessageBox.No)
+        style_native_dialog(box)
+        if box.exec() != QMessageBox.Yes:
+            return {"ok": False, "cancelled": True, "source_id": source_id,
+                    "tasks_deleted": 0}
+        return asana_setup.remove_board(conn, source_id)
+
+    def _on_board_remove_requested(self, source_id: str):
+        """Settings "Remove" → the native confirm → the local delete."""
+        try:
+            res = self._confirm_and_remove_board(source_id)
+        except Exception as exc:  # noqa: BLE001
+            self._set_status(f"Couldn't remove the board: {exc}")
+            return
+        if res is None:
+            self._set_status("Board removal needs a confirmation window — none available.")
+            return
+        if res.get("cancelled"):
+            self._set_status("Board removal cancelled — nothing was deleted.")
+            return
+        if not res.get("ok"):
+            self._set_status(f"No such Asana board: {source_id}")
+            self._refresh_asana_boards()
+            return
+        kept = int(res.get("tasks_kept") or 0)
+        self._set_status(
+            f"Removed “{res.get('display_name') or source_id}” — deleted "
+            f"{res.get('tasks_deleted', 0)} local task(s)"
+            + (f", kept {kept} still tracked by another board" if kept else "")
+            + ". Asana was not modified.")
+        self._refresh_asana_boards()
+        try:
+            self._load_live()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _register_board_removal_confirm(self):
+        """Hand the tool layer the ONLY callable that can authorize a removal.
+
+        Registered per-process: the MCP subprocess never runs this, so a tool
+        call there finds no hook and refuses. Even in-process the hook returns
+        None off the GUI thread, so the model's path to a delete always runs
+        through a dialog a human clicked.
+        """
+        try:
+            from src.data.chat_tools import enablement_tools
+            enablement_tools.set_board_removal_confirm(self._confirm_and_remove_board)
+        except Exception:  # noqa: BLE001 — chat tools absent → the tool just refuses
             pass
 
     def _on_push(self, draft_id):
@@ -3023,13 +3225,22 @@ class EnablementPage(QWidget):
                     indicator_field_gid=team["gid"], indicator_field_name=team["name"],
                     indicator_value_gid=enab["gid"], indicator_value_name=enab["name"],
                     priority_field_gid=(urg["gid"] if urg else None),
-                    assignee_field_gid=(ppl["gid"] if ppl else None))
+                    assignee_field_gid=(ppl["gid"] if ppl else None),
+                    priority_field_name=(urg["name"] if urg else None),
+                    assignee_field_name=(ppl["name"] if ppl else None))
                 self._chat_say("a",
                     f"Done — saved “{proj['name']}” to your Enablement settings (source {res['source_id']}). "
                     f"I only touched the Asana source config; nothing else.")
+                # Calendar inclusion is a per-board opt-in and starts OFF, so say
+                # so rather than letting an empty calendar look like a failure.
+                self._chat_say("a",
+                    "Its tasks will sync into your task list. I've left it OFF the "
+                    "Calendar for now — turn on the Calendar switch for this board "
+                    "in Settings › Sources whenever you want it there.")
                 self._set_status(f"Asana board configured by Renn: {proj['name']}")
         except Exception as exc:  # noqa: BLE001 — surface in chat
             self._chat_say("a", f"Setup hit an error: {exc}")
+        self._refresh_asana_boards()
         self._open_chat()
 
     def _on_calendar_event(self, label):

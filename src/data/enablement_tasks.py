@@ -66,11 +66,22 @@ def create_task(
     llm_rationale: str | None = None,
     created_by: str = "agent",
     key: str | None = None,
+    board_source_id: str | None = None,
 ) -> str:
     """Create a task (idempotent on dedup_key). Returns the task_id.
 
     If a task with the same dedup_key already exists, its id is returned and no
     new row is created — so a monitor can call this every poll cycle safely.
+
+    ``board_source_id`` is IMMUTABLE PROVENANCE — the monitor_sources.source_id
+    of the board whose poll created this row (migration 054). It is stored,
+    never derived, and deliberately absent from ``_UPDATABLE`` so no later edit,
+    tool call or reconcile can rewrite it.
+
+    It is NOT the attribution authority. Ownership is many-to-many (a
+    multi-homed Asana task is polled by every board it sits in) and lives in
+    ``task_board_links`` (migration 055) — see :func:`link_task_board`. Nothing
+    reads this column to decide what a board owns, counts, shows or deletes.
     """
     key = key or dedup_key(source, source_ref, title)
     tid = _uid()
@@ -80,12 +91,13 @@ def create_task(
             """INSERT INTO enablement_tasks
                (task_id, source, source_ref, source_url, kind, title, summary,
                 description, submitter, due_date, priority, status, draft_id,
-                llm_rationale, dedup_key, created_by, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                llm_rationale, dedup_key, created_by, created_at, updated_at,
+                board_source_id)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(dedup_key) DO NOTHING""",
             (tid, source, source_ref, source_url, kind, title, summary,
              description, submitter, due_date, priority, status, draft_id,
-             llm_rationale, key, created_by, now, now),
+             llm_rationale, key, created_by, now, now, board_source_id),
         )
     row = conn.execute(
         "SELECT task_id FROM enablement_tasks WHERE dedup_key = ?", (key,)
@@ -176,6 +188,74 @@ def list_tasks(
 
 def set_scratchpad(conn: sqlite3.Connection, task_id: str, text: str) -> bool:
     return update_task(conn, task_id, scratchpad=text)
+
+
+# ── board links: the MANY-TO-MANY attribution authority (migration 055) ──
+#
+# A board→task relationship is not a property of the task. An Asana library
+# custom field has one gid org-wide, so two mapped projects resolve the SAME
+# indicator and both poll the same multi-homed task: one board creates the row,
+# the other reconciles it. Both demonstrably track it, and both must be able to
+# say so — a single column could only hold the winner, and removing the winner
+# deleted the loser's live work.
+#
+# Every board that touches a task records a link. Removal drops a board's
+# links; the task row itself only goes when no OTHER board's link remains.
+
+
+def _has_link_table(conn: sqlite3.Connection) -> bool:
+    """False on a database that predates migration 055.
+
+    Both asymmetries hold for free in that case: no task is linked, so none is
+    deletable by a board removal (closed) and none is hidden (open).
+    """
+    try:
+        return conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_board_links'"
+        ).fetchone() is not None
+    except sqlite3.Error:
+        return False
+
+
+def link_task_board(conn: sqlite3.Connection, task_id: str,
+                    board_source_id: str | None) -> bool:
+    """Record that ``board_source_id`` tracks ``task_id``. Idempotent.
+
+    Called from BOTH asana_monitor poll sites — the board that creates a row and
+    a board that reconciles a row it did not create. ``first_seen_at`` keeps the
+    earliest observation (INSERT OR IGNORE), so re-polling never rewrites it.
+    """
+    if not task_id or not board_source_id or not _has_link_table(conn):
+        return False
+    with atomic(conn):
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO task_board_links "
+            "(task_id, board_source_id, first_seen_at) VALUES (?,?,?)",
+            (task_id, board_source_id, _now()),
+        )
+    return cur.rowcount > 0
+
+
+def task_board_ids(conn: sqlite3.Connection, task_id: str) -> list[str]:
+    """Every board currently linked to one task (empty for an unlinked row)."""
+    if not _has_link_table(conn):
+        return []
+    return [r[0] for r in conn.execute(
+        "SELECT board_source_id FROM task_board_links WHERE task_id = ? "
+        "ORDER BY board_source_id", (task_id,)).fetchall()]
+
+
+def task_board_map(conn: sqlite3.Connection) -> dict[str, list[str]]:
+    """task_id → linked board source_ids, for callers judging many rows at once
+    (the calendar filter, the page's row builder). Unlinked tasks are absent."""
+    if not _has_link_table(conn):
+        return {}
+    out: dict[str, list[str]] = {}
+    for tid, sid in conn.execute(
+            "SELECT task_id, board_source_id FROM task_board_links "
+            "ORDER BY task_id, board_source_id").fetchall():
+        out.setdefault(tid, []).append(sid)
+    return out
 
 
 # ── subtasks ─────────────────────────────────────────────────────────

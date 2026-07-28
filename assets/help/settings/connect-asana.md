@@ -19,7 +19,9 @@ falls short — and the setup button behaves badly when the key is missing, so r
 ## How it works
 
 The Asana card lives in the Sources tab. It shows a field labelled for an Asana
-API key and a button to set up with Renn, followed by an example board panel.
+API key and a button to set up with Renn, followed by the boards you actually
+have mapped — read from your own configuration, not an example. With none
+mapped it says so, and says that nothing will sync until one is.
 
 **The API key field does not save.** Typing a key into it and moving on stores
 nothing. There is no other credential entry for Asana anywhere in the app, so
@@ -40,8 +42,22 @@ reports it as a success. Nothing distinguishes that message from a real one exce
 the project names, so check them — see *If it doesn't* for what the sample data
 looks like and what to do about it.
 
-The button offering to add a board is not connected to anything, and the board
-panel below it shows fixed example content rather than your real board.
+Each mapped board shows its name, its project link, the condition that creates a
+task, the fields mapped to priority and assignee, and how many tasks have been
+imported from it. It carries two switches and a Remove control:
+
+- **Sync** turns polling of that board on or off. Turning it off leaves every
+  already-imported task exactly where it is.
+- **Calendar** decides whether that board's tasks appear on the Calendar. It
+  starts **off** for a newly added board — tasks sync into the task list first,
+  and you choose when they take over your calendar.
+- **Remove** unmaps the board. It deletes Alma's local copy of that board's
+  imported tasks, so it asks first, in a confirmation dialog that names the board
+  and the exact number of tasks going. **Your Asana project is never modified** —
+  nothing in Asana is changed or deleted, and re-mapping the board re-imports it.
+
+The button offering to add a board runs the same setup flow as *Set up with
+Renn*.
 
 ## How it should work
 
@@ -82,15 +98,14 @@ writes before it reports, so there is no prompt to decline and nothing to undo
 from this page. Do not treat any ID, field name or enum value it showed you as
 real, and do not repeat them to anyone as your board's settings.
 
-Recovering needs someone with access to your install, for two reasons. Board
-configurations are keyed by project ID, so storing a real key and running setup
-again adds a second board rather than replacing the invented one — the phantom
-stays. And nothing on this page removes a board: the add-board button is inert and
-the panel below it is fixed example content, so there is no delete control to
-reach for. Ask whoever set up your install to store a real Asana key and remove
-the phantom source, then re-run setup. Flag it as a bug at the same time: a setup
-step that saves invented configuration when a credential is missing is a defect,
-not a demo mode.
+Board configurations are keyed by project ID, so storing a real key and running
+setup again adds a second board rather than replacing the invented one — the
+phantom stays until you remove it. You can do that yourself now: find it in the
+board list on this card and press **Remove**. The confirmation will tell you how
+many local tasks go with it, and removing it changes nothing in Asana. Then store
+a real key and re-run setup. Flag it as a bug at the same time: a setup step that
+saves invented configuration when a credential is missing is a defect, not a demo
+mode.
 
 **Tasks stop appearing, or the board reports errors every cycle, after a real key
 is added.** If a phantom board from the case above is still configured, the poller

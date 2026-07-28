@@ -120,6 +120,8 @@ def _ensure_registered():
         handle_search_everywhere,
         handle_asana_discover,
         handle_set_asana_board_config,
+        handle_list_asana_boards,
+        handle_remove_asana_board,
         handle_create_card_draft,
         handle_revise_draft,
         handle_push_guru_draft,
@@ -201,7 +203,11 @@ def _ensure_registered():
     _register("asana_discover", handle_asana_discover,
               phi_level=0, desc="Discover Asana projects + custom-field/enum-value GIDs")
     _register("set_asana_board_config", handle_set_asana_board_config,
-              phi_level=0, desc="Save an Asana board's config using resolved GIDs (the assistant's only write)")
+              phi_level=0, desc="Save an Asana board's config using resolved GIDs (the assistant's only write). Pass calendar=true ONLY if the operator said they want this board's tasks on the Calendar — ASK them; it defaults to false and syncing works either way.")
+    _register("list_asana_boards", handle_list_asana_boards,
+              phi_level=0, desc="List the Asana boards actually MAPPED in this install (name, gid, indicator condition, sync + calendar flags, imported task count). Use this to answer 'is Asana set up' — a stored API key alone does not mean anything syncs.")
+    _register("remove_asana_board", handle_remove_asana_board,
+              phi_level=0, desc="PROPOSE removing a mapped Asana board. It does NOT delete: removal wipes Alma's LOCAL copy of that board's tasks, so an operator must confirm in a native dialog in the app. Never modifies Asana. Report the proposal's task count and send the operator to Settings › Sources if the tool says it cannot reach the dialog.")
     # ── Enablement Workbench action tools ──
     _register("create_card_draft", handle_create_card_draft,
               phi_level=0, desc="Create a new Guru card draft from a title + Markdown content")

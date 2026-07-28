@@ -832,7 +832,9 @@ TOOL_DEFINITIONS = [
             "ONLY SETTING THE ASSISTANT MAY WRITE — it creates/updates one Asana source "
             "in monitor_sources and touches nothing else. Call after asana_discover to "
             "persist the project + the indicator field/value GIDs + priority/assignee "
-            "field GIDs."
+            "field GIDs. ASK the operator whether this board's tasks should appear on "
+            "the Calendar and pass calendar accordingly — it defaults to false, and "
+            "tasks sync into the task list either way."
         ),
         "input_schema": {
             "type": "object",
@@ -845,9 +847,42 @@ TOOL_DEFINITIONS = [
                 "indicator_value_name": {"type": "string"},
                 "priority_field_gid": {"type": "string", "description": "Optional — field GID to map to task priority."},
                 "assignee_field_gid": {"type": "string", "description": "Optional — people-field GID to map to assignee."},
+                "priority_field_name": {"type": "string", "description": "Optional — the field's human-readable name, shown in Settings."},
+                "assignee_field_name": {"type": "string", "description": "Optional — the field's human-readable name, shown in Settings."},
+                "calendar": {"type": "boolean", "description": "Show this board's tasks on the Calendar. Defaults to false — ask the operator first."},
             },
             "required": ["project_gid", "project_name", "indicator_field_gid",
                          "indicator_field_name", "indicator_value_gid", "indicator_value_name"],
+        },
+    },
+    {
+        "name": "list_asana_boards",
+        "description": (
+            "List the Asana boards actually MAPPED in this install: name, project gid, "
+            "indicator condition, field mappings, sync + calendar flags, and how many "
+            "tasks were imported from each. Read-only. Use this to answer 'is my Asana "
+            "set up' — a stored API key alone proves nothing syncs."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "remove_asana_board",
+        "description": (
+            "PROPOSE removing a mapped Asana board. This tool does NOT delete anything. "
+            "Removal wipes Alma's LOCAL copy of that board's imported tasks, so it "
+            "requires the operator's confirmation in a native dialog in the app. It "
+            "NEVER modifies Asana — no task, comment or field there is touched. If the "
+            "result says needs_operator_confirm, report the proposal's "
+            "local_tasks_to_delete count and ask the operator to press Remove in "
+            "Settings › Sources › Asana boards."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "source_id": {"type": "string", "description": "The board's source_id, e.g. asana:1234 (from list_asana_boards)."},
+                "project_gid": {"type": "string", "description": "Alternative to source_id."},
+                "project_name": {"type": "string", "description": "Last-resort match when it is unambiguous."},
+            },
         },
     },
     {
@@ -1450,15 +1485,23 @@ def _asana_discover(args: dict, db) -> dict:
 
 
 def _set_asana_board_config(args: dict, db) -> dict:
-    from src.data.asana_setup import set_asana_board_config
+    """Claude twin — delegates to the shared impl so the calendar-flag contract
+    (default OFF; ask the operator) cannot drift between the two chat paths."""
+    from src.data.chat_tools.enablement_tools import handle_set_asana_board_config
     conn = db.get_connection() if hasattr(db, 'get_connection') else db.conn
-    return set_asana_board_config(
-        conn,
-        project_gid=args["project_gid"], project_name=args["project_name"],
-        indicator_field_gid=args["indicator_field_gid"], indicator_field_name=args["indicator_field_name"],
-        indicator_value_gid=args["indicator_value_gid"], indicator_value_name=args["indicator_value_name"],
-        priority_field_gid=args.get("priority_field_gid"), assignee_field_gid=args.get("assignee_field_gid"),
-    )
+    return handle_set_asana_board_config(conn, args, {})
+
+
+def _list_asana_boards(args: dict, db) -> dict:
+    from src.data.chat_tools.enablement_tools import handle_list_asana_boards
+    return handle_list_asana_boards(_ent_conn(db), args, {})
+
+
+def _remove_asana_board(args: dict, db) -> dict:
+    """PROPOSE-only twin. Deletes nothing; the native confirm in the app is the
+    only thing that can authorize a board removal."""
+    from src.data.chat_tools.enablement_tools import handle_remove_asana_board
+    return handle_remove_asana_board(_ent_conn(db), args, {})
 
 
 # ── Enablement Workbench action tools (delegate to the shared impls in
@@ -1856,6 +1899,8 @@ _DISPATCH = {
     "search_everywhere": _search_everywhere,
     "asana_discover": _asana_discover,
     "set_asana_board_config": _set_asana_board_config,
+    "list_asana_boards": _list_asana_boards,
+    "remove_asana_board": _remove_asana_board,
     "create_card_draft": _create_card_draft,
     "revise_draft": _revise_draft,
     "push_guru_draft": _push_guru_draft,

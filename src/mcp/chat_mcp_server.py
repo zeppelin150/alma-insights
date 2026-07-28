@@ -620,7 +620,10 @@ TOOL_SCHEMAS = [
         "description": (
             "Save an Asana board's enablement config using resolved GIDs. THE ONLY "
             "SETTING THE ASSISTANT MAY WRITE — creates/updates one Asana source in "
-            "monitor_sources and touches nothing else. Call after asana_discover."
+            "monitor_sources and touches nothing else. Call after asana_discover. "
+            "ASK the operator whether this board's tasks should appear on the "
+            "Calendar and pass calendar accordingly — it defaults to false, and "
+            "tasks sync into the task list either way."
         ),
         "inputSchema": {
             "type": "object",
@@ -633,9 +636,42 @@ TOOL_SCHEMAS = [
                 "indicator_value_name": {"type": "string"},
                 "priority_field_gid": {"type": "string"},
                 "assignee_field_gid": {"type": "string"},
+                "priority_field_name": {"type": "string", "description": "Human-readable name of the priority field (shown in Settings)."},
+                "assignee_field_name": {"type": "string", "description": "Human-readable name of the assignee field (shown in Settings)."},
+                "calendar": {"type": "boolean", "description": "Show this board's tasks on the Calendar. Defaults to false — ask the operator first."},
             },
             "required": ["project_gid", "project_name", "indicator_field_gid",
                          "indicator_field_name", "indicator_value_gid", "indicator_value_name"],
+        },
+    },
+    {
+        "name": "list_asana_boards",
+        "description": (
+            "List the Asana boards actually MAPPED in this install: name, project "
+            "gid, indicator condition, field mappings, sync + calendar flags, and "
+            "the number of tasks imported from each. Read-only. Use this to answer "
+            "'is my Asana set up' — a stored API key alone proves nothing syncs."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "remove_asana_board",
+        "description": (
+            "PROPOSE removing a mapped Asana board. This tool does NOT delete "
+            "anything. Removal wipes Alma's LOCAL copy of that board's imported "
+            "tasks, so it requires the operator's confirmation in a native dialog "
+            "in the app. It NEVER modifies Asana — no task, comment or field there "
+            "is touched. If the result says needs_operator_confirm, report the "
+            "proposal's local_tasks_to_delete count and ask the operator to press "
+            "Remove in Settings › Sources › Asana boards."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "source_id": {"type": "string", "description": "The board's source_id, e.g. asana:1234 (from list_asana_boards)."},
+                "project_gid": {"type": "string", "description": "Alternative to source_id."},
+                "project_name": {"type": "string", "description": "Last-resort match when it is unambiguous."},
+            },
         },
     },
     {

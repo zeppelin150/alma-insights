@@ -241,22 +241,41 @@ class TestOverviewDisplayOnlyControls:
         assert "15 min" in label_texts(w), "poll interval is not rendered as a QLabel"
         assert not [e for e in w.findChildren(QLineEdit) if e.text() == "15 min"]
 
-    def test_asana_board_panel_is_fixed_example_content(self, page):
-        """settings-connect-asana / settings-overview: 'the board panel below it
-        shows fixed example content rather than your real board' — the board
-        name, url, indicator and field mappings are hardcoded literals."""
+    def test_asana_board_panel_shows_your_real_boards(self, page):
+        """settings-connect-asana: 'followed by the boards you actually have
+        mapped — read from your own configuration, not an example. With none
+        mapped it says so, and says that nothing will sync until one is.'
+
+        Was: asserted the panel WAS fixed example content ("Enablement
+        Requests", "Launch Coordination", "2 configured", a fabricated resolved-
+        people list). That mockup shipped and read as a configured Asana over an
+        empty monitor_sources; the 2026-07-28 build deleted it.
+        """
         texts = label_texts(tab(page, "Sources"))
-        for literal in ("Enablement Requests", "app.asana.com/0/120…84",
-                        "Assigned Team  =  Enablement", "Urgency",
-                        "Assigned People", "Launch Coordination"):
-            assert literal in texts, f"hardcoded example {literal!r} not found"
-        # And the count in the section header is a literal too, with no source.
-        assert any(t == "ASANA BOARDS  ·  2 configured" for t in texts)
+        for gone in ("Enablement Requests", "Launch Coordination",
+                     "app.asana.com/0/120…84", "Assigned Team  =  Enablement",
+                     "ASANA BOARDS  ·  2 configured"):
+            assert gone not in texts, f"mockup literal {gone!r} is still rendered"
+        assert any("no Asana tasks will sync" in t for t in texts), (
+            "the unmapped state must say plainly that nothing syncs")
+        # An unfed panel claims no count at all.
+        assert "ASANA BOARDS" in texts
 
     def test_asana_board_field_mappings_are_labels_not_inputs(self, page):
         """settings-overview: 'the Asana board mapping fields' are labels, not
         controls that accept input."""
+        from src.data import asana_setup
+        from src.data.db_manager import DatabaseManager
+        db = DatabaseManager(":memory:")
+        db.initialize()
+        asana_setup.set_asana_board_config(
+            db.conn, project_gid="1", project_name="P",
+            indicator_field_gid="2", indicator_field_name="Assigned Team",
+            indicator_value_gid="3", indicator_value_name="Enablement",
+            priority_field_name="Urgency", assignee_field_name="Assigned People")
+        page.set_asana_boards(asana_setup.board_summary(db.conn))
         w = tab(page, "Sources")
+        assert "Urgency" in label_texts(w) and "Assigned People" in label_texts(w)
         editable = [e.text() for e in w.findChildren(QLineEdit)]
         assert "Urgency" not in editable
         assert "Assigned People" not in editable
@@ -550,7 +569,7 @@ class TestConnectAsana:
     def test_asana_card_is_on_the_sources_tab_with_key_field_and_setup_button(self, page):
         """settings-connect-asana: 'The Asana card lives in the Sources tab. It
         shows a field labelled for an Asana API key and a button to set up with
-        Renn, followed by an example board panel.'"""
+        Renn, followed by the boards you actually have mapped.'"""
         w = tab(page, "Sources")
         assert "API key" in label_texts(w)
         keyf = [e for e in w.findChildren(QLineEdit)
@@ -594,14 +613,22 @@ class TestConnectAsana:
         button(tab(page, "Sources"), "Set up with Renn").click()
         assert fired == [True]
 
-    def test_add_board_button_is_connected_to_nothing(self, page):
-        """settings-connect-asana: 'The button offering to add a board is not
-        connected to anything.' (Contrast: + Add folder IS wired.)"""
+    def test_add_board_button_runs_the_setup_flow(self, page):
+        """settings-connect-asana: 'The button offering to add a board runs the
+        same setup flow as Set up with Renn.'
+
+        Was: asserted the button was wired to NOTHING — the 2026-07-28 board
+        management build made it live, so the claim and the assertion flipped
+        together."""
         w = tab(page, "Sources")
         add_board = button(w, "+ Add board")
         add_folder = button(w, "+ Add folder")
-        assert add_board is not None and clicked_receivers(add_board) == 0
+        assert add_board is not None and clicked_receivers(add_board) == 1
         assert add_folder is not None and clicked_receivers(add_folder) == 1
+        fired = []
+        page.board_add_requested.connect(lambda: fired.append(True))
+        add_board.click()
+        assert fired == [True]
 
     def test_setup_picks_the_first_project_and_the_three_named_fields(
             self, settings, empty_db, monkeypatch):
@@ -624,6 +651,7 @@ class TestConnectAsana:
             chat=types.SimpleNamespace(set_chat=lambda msgs: chat.extend(msgs)),
             _chat_say=lambda role, msg: chat.append((role, msg)),
             _set_status=status.append,
+            _refresh_asana_boards=lambda: None,
             _open_chat=lambda: None)
         EnablementPage._on_asana_setup(stub)
 

@@ -183,15 +183,147 @@ def handle_asana_discover(conn, args: dict, filters: dict) -> dict:
 
 
 def handle_set_asana_board_config(conn, args: dict, filters: dict) -> dict:
-    """Renn's ONLY write — persist an Asana board's resolved GIDs (scoped to monitor_sources)."""
+    """Renn's ONLY write — persist an Asana board's resolved GIDs (scoped to monitor_sources).
+
+    ``calendar`` is the per-board Calendar-inclusion opt-in and defaults to
+    False. The model is told (in the tool schema) to ASK the operator whether the
+    board belongs on the calendar rather than deciding for them.
+    """
     from src.data.asana_setup import set_asana_board_config
-    return set_asana_board_config(
+    res = set_asana_board_config(
         conn,
         project_gid=args["project_gid"], project_name=args["project_name"],
         indicator_field_gid=args["indicator_field_gid"], indicator_field_name=args["indicator_field_name"],
         indicator_value_gid=args["indicator_value_gid"], indicator_value_name=args["indicator_value_name"],
         priority_field_gid=args.get("priority_field_gid"), assignee_field_gid=args.get("assignee_field_gid"),
+        priority_field_name=args.get("priority_field_name"),
+        assignee_field_name=args.get("assignee_field_name"),
+        calendar=bool(args.get("calendar", False)),
     )
+    res["calendar"] = bool((res.get("config") or {}).get("calendar"))
+    res["note"] = (
+        "Board saved. Its tasks will sync into the task list. Calendar display is "
+        + ("ON." if res["calendar"] else
+           "OFF — say so, and offer to turn it on if the operator wants this board "
+           "on the calendar."))
+    return res
+
+
+def handle_list_asana_boards(conn, args: dict, filters: dict) -> dict:
+    """Read-only: the boards currently mapped in monitor_sources.
+
+    The truthful answer to "is my Asana set up" — ``is_asana_connected()`` only
+    proves a key string is stored, which is exactly how the Settings screen could
+    report a healthy Asana while nothing had ever synced.
+    """
+    from src.data.asana_setup import board_summary, is_asana_connected
+    boards = board_summary(conn)
+    return {
+        "ok": True,
+        "key_stored": bool(is_asana_connected()),
+        "board_count": len(boards),
+        "boards": boards,
+        "note": ("No board is mapped, so nothing syncs from Asana no matter what "
+                 "the connection status says." if not boards else ""),
+    }
+
+
+# ── Board REMOVAL: propose only. This tool cannot delete. ────────────
+#
+# Removing a board deletes local tasks, so it is destructive AND reachable by a
+# model — which per the standing pattern means the model may PROPOSE it and only
+# a NATIVE dialog may authorize it. This handler therefore:
+#   * imports nothing from asana_setup that can delete (no remove_board here),
+#   * reads the board + the exact task count so the operator is told the truth,
+#   * and hands off to the host's native confirm if — and only if — the host has
+#     registered one AND we are running where that dialog can actually be shown.
+# In the MCP subprocess (and on any worker thread) no dialog is reachable, so the
+# tool refuses and tells the model to send the operator to Settings. There is no
+# code path in which the model completes this act unattended.
+
+_BOARD_REMOVAL_CONFIRM = None
+
+
+def set_board_removal_confirm(fn) -> None:
+    """Host registers the NATIVE confirm+remove callable (or None to clear).
+
+    ``fn(source_id) -> dict | None``: shows the native dialog and performs the
+    local removal on a Yes; returns None when it cannot show the dialog (wrong
+    thread / no window), which the tool reports as a refusal.
+    """
+    global _BOARD_REMOVAL_CONFIRM
+    _BOARD_REMOVAL_CONFIRM = fn
+
+
+_REMOVE_BOARD_REFUSAL = (
+    "I can't remove a board myself — removing one deletes Alma's local copy of "
+    "that board's tasks, so it needs the operator's confirmation in the app. Ask "
+    "them to open Settings › Sources › Asana boards and press Remove on this "
+    "board; a confirmation dialog will tell them exactly how many local tasks go "
+    "and that their Asana project is not modified."
+)
+
+
+def _resolve_board(conn, args: dict) -> tuple[dict | None, str]:
+    from src.data.asana_setup import board_summary
+    sid = str(args.get("source_id") or "").strip()
+    gid = str(args.get("project_gid") or "").strip()
+    if not sid and gid:
+        sid = f"asana:{gid}"
+    boards = board_summary(conn)
+    if not sid:
+        name = str(args.get("project_name") or "").strip().lower()
+        matches = [b for b in boards
+                   if name and str(b.get("project_name") or "").strip().lower() == name]
+        if len(matches) == 1:
+            return matches[0], matches[0]["source_id"]
+        return None, ""
+    for b in boards:
+        if b["source_id"] == sid:
+            return b, sid
+    return None, sid
+
+
+def handle_remove_asana_board(conn, args: dict, filters: dict) -> dict:
+    """PROPOSE removing a mapped Asana board. Never deletes anything itself."""
+    board, sid = _resolve_board(conn, args)
+    if board is None:
+        return {"ok": False, "error": "unknown_board", "source_id": sid,
+                "message": ("I couldn't find that board in the mapped list. Call "
+                            "list_asana_boards and use one of the source_ids it "
+                            "returns.")}
+    proposal = {
+        "source_id": board["source_id"],
+        "project_name": board.get("project_name") or board["source_id"],
+        "project_gid": board.get("project_gid") or "",
+        # What removal ACTUALLY deletes. Board↔task ownership is many-to-many,
+        # so a task another mapped board also tracks is kept — quoting the
+        # board's full task_count here would have the model tell the operator
+        # that live work of another board is about to go.
+        "local_tasks_to_delete": int(board.get("deletable_task_count") or 0),
+        "local_tasks_kept_for_other_boards": int(board.get("shared_task_count") or 0),
+        "deletes_in_asana": False,
+        "scope": ("Deletes Alma's local copy of the tasks ONLY this board tracks, "
+                  "plus its source configuration. Tasks another mapped board also "
+                  "tracks are kept. Asana is not modified."),
+    }
+    fn = _BOARD_REMOVAL_CONFIRM
+    if fn is None:
+        return {"ok": False, "needs_operator_confirm": True,
+                "proposal": proposal, "message": _REMOVE_BOARD_REFUSAL}
+    try:
+        res = fn(board["source_id"])
+    except Exception as exc:  # noqa: BLE001 — a UI failure is a refusal, not a delete
+        logger.warning("board removal confirm failed: %s", exc)
+        res = None
+    if not res:
+        return {"ok": False, "needs_operator_confirm": True,
+                "proposal": proposal, "message": _REMOVE_BOARD_REFUSAL}
+    return {"ok": bool(res.get("ok")), "proposal": proposal, "result": res,
+            "message": ("The operator confirmed in the app. Removed locally; "
+                        "their Asana project was not modified.")
+            if res.get("ok") else
+            "The operator cancelled — nothing was deleted."}
 
 
 # ═══════════════════════════════════════════════════════════════════════

@@ -1,0 +1,32 @@
+-- ─────────────────────────────────────────────────────────────────────
+-- Migration 054 — record WHICH Asana board imported each enablement task.
+--
+-- Board attribution used to be DERIVED from the stored permalink
+-- (enablement_tasks.source_url), because the table had no board column.
+-- That inference is wrong by construction: permalink_url names a task's
+-- HOME project, and Asana tasks are routinely multi-homed. A task polled
+-- by board B whose home project is board A reads as A's — so the Settings
+-- card mis-counts, and removing board A DELETES board B's row (with its
+-- scratchpad and subtask state). It is not recoverable by re-polling:
+-- the modified_since cursor has already advanced past that task.
+--
+-- board_source_id stores the monitor_sources.source_id of the board whose
+-- poll CREATED the row (asana_monitor._create_task_from_asana). That is
+-- the one place that knows the truth, so it is the only place that writes
+-- it. Rows from any other origin (manual entry, demo seed, Drive/Guru)
+-- stay NULL.
+--
+-- BACKFILL POLICY — deliberate: pre-054 rows stay NULL forever. Retro-
+-- attributing them from permalinks would bake the same wrong inference
+-- into the database permanently. A NULL row belongs to NO board: it is
+-- never deleted by a board removal (deletion fails CLOSED) and is always
+-- shown on the calendar (display fails OPEN).
+--
+-- Idempotent: single-line ALTER ADD COLUMN (the schema migrator's PRAGMA
+-- table_info guard skips it when present) + CREATE INDEX IF NOT EXISTS.
+-- The index serves board_task_ids / board_summary, which run the same
+-- equality lookup once per configured board on every Settings refresh.
+-- ─────────────────────────────────────────────────────────────────────
+
+ALTER TABLE enablement_tasks ADD COLUMN board_source_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_ent_board_source ON enablement_tasks(board_source_id);

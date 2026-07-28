@@ -279,7 +279,7 @@ def _process_task(conn, client, board: dict, task: dict, results: dict) -> None:
     # Two-way read-back: if we already track this task, pull Asana-side
     # changes (due / completion / assignee / subtasks) into the local task
     # and stop — never re-create what we already have.
-    tid = _reconcile_existing_task(conn, client, task)
+    tid = _reconcile_existing_task(conn, client, task, board=board)
     if tid:
         results["updated"].append(tid)
         return
@@ -354,12 +354,23 @@ def _on_stories_dirty(conn, client, gids: list, results: dict) -> None:
         logger.debug("mark_stories_dirty failed: %s", exc)
 
 
-def _reconcile_existing_task(conn, client, task: dict):
+def _reconcile_existing_task(conn, client, task: dict, board: dict | None = None):
     """Pull Asana-side changes into the local task we already track for this gid.
 
     Updates due date / completion / assignee and mirrors subtasks. Returns the
     local task_id when a tracked task was found (so the caller won't try to
-    re-create it), else None."""
+    re-create it), else None.
+
+    CO-OWNERSHIP IS RECORDED HERE. The row is matched on ``source_ref`` alone —
+    which is the point: an Asana task multi-homed into two mapped projects is
+    polled by both boards, one creates the row and the other lands here. That
+    second board demonstrably tracks the task (it advances its own cursor and
+    events token over it), so it takes a ``task_board_links`` row too. This is
+    exactly where the previous single-column model observed co-ownership and
+    then threw it away, leaving "remove board A" free to delete board B's live
+    work. ``board`` is optional only so the legacy 3-arg call shape still works;
+    the poll always passes it.
+    """
     from src.data import enablement_tasks as etasks
     gid = task.get("gid")
     if not gid:
@@ -371,6 +382,12 @@ def _reconcile_existing_task(conn, client, task: dict):
     if not row:
         return None
     tid = row[0]
+    if board is not None:
+        try:
+            etasks.link_task_board(conn, tid, board.get("source_id"))
+        except Exception as exc:  # noqa: BLE001 — a link failure must not kill the poll
+            logger.warning("board link failed for %s/%s: %s",
+                           board.get("source_id"), tid, exc)
     fields: dict = {}
     if task.get("modified_at"):
         # Check-and-set anchor for the WS1-M5/M6 write-back tier.
@@ -449,6 +466,23 @@ def _matches_indicators(task: dict, indicators: list[dict]) -> bool:
 
 
 def _create_task_from_asana(conn, board: dict, task: dict, mappings: dict) -> str | None:
+    """Create the local row for a matched Asana task.
+
+    ``board`` is the board actually being polled (threaded down through
+    _poll_board / _poll_board_events / _poll_board_legacy / _run_baseline),
+    which is the only fact in this flow that identifies the importing board. It
+    is NOT recoverable from ``permalink_url``: that names the task's HOME
+    project, and a multi-homed task polled by board B carries board A's
+    permalink. Deriving it later is how a removal of board A deleted board B's
+    rows.
+
+    Two writes, and they are not redundant:
+      * ``board_source_id`` — immutable provenance, "the board that created
+        this row". Never read to decide ownership.
+      * a ``task_board_links`` row — the attribution AUTHORITY. This board is
+        the first to claim the task; any other board that polls the same
+        multi-homed task adds its own link from _reconcile_existing_task.
+    """
     from src.data import enablement_tasks as etasks
     by_gid = {cf.get("gid"): cf for cf in (task.get("custom_fields") or [])}
 
@@ -482,7 +516,13 @@ def _create_task_from_asana(conn, board: dict, task: dict, mappings: dict) -> st
         due_date=task.get("due_on"),
         priority=priority,
         created_by="agent",
+        board_source_id=board.get("source_id"),
     )
+    try:
+        etasks.link_task_board(conn, tid, board.get("source_id"))
+    except Exception as exc:  # noqa: BLE001 — a link failure must not kill the poll
+        logger.warning("board link failed for %s/%s: %s",
+                       board.get("source_id"), tid, exc)
     upd: dict = {}
     if assignee:
         upd["assignee"] = assignee
