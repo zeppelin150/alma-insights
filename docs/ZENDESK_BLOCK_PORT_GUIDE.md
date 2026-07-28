@@ -1,10 +1,10 @@
-# Zendesk Block Port Guide — `d27eb3e` → `a8ead66` (enablement-content-tabs)
+# Zendesk Block Port Guide — `d27eb3e` → `d018107` (enablement-content-tabs)
 
 **Written:** 2026-07-28 on the Windows dev box, from the actual git delta. **Retargeted the same day** from `4ccd321` to `a8ead66` — see §1 for the four commits that moved the target, and §4.2, which changed from a hand-create step into a verify step as a result.
 **For:** the owner, on the production Mac (Apple Silicon M1, 16 GB, arm64). You are competent with a terminal but you did not write this code, and you should not have to read any of it to execute this guide.
-**Scope:** every change committed between `d27eb3e` (2026-07-24, "docs(port-guide): Appendix A — corrected delivery path via GitHub Desktop") and `a8ead66` (2026-07-28, "test(guru): lock the legacy guru_page preview to the publish body"), all pushed to `origin/enablement-content-tabs`.
+**Scope:** every change committed between `d27eb3e` (2026-07-24, "docs(port-guide): Appendix A — corrected delivery path via GitHub Desktop") and `d018107` (2026-07-28, "feat(credentials): Zendesk card in the shared panel"), all pushed to `origin/enablement-content-tabs`.
 
-**The delta:** 11 commits, **85 files** (42 added, 43 modified, **zero deleted, zero renamed** — a copy-over sync is complete and nothing on the Mac needs removing), +28,352 / −761 lines. 2 new SQL migrations (051 and 053 — the gap is real and safe, §7). **Zero new dependencies:** `requirements.txt`, `PACKAGES.md`, `web/package.json` and `web/package-lock.json` are byte-identical across the whole range. **The Mac needs no `pip install` and no `npm install`.** That removes the single largest historical source of Mac port pain from this run.
+**The delta:** 13 commits, **87 files** (42 added, 45 modified, **zero deleted, zero renamed** — a copy-over sync is complete and nothing on the Mac needs removing), +28,526 / −764 lines. 2 new SQL migrations (051 and 053 — the gap is real and safe, §7). **Zero new dependencies:** `requirements.txt`, `PACKAGES.md`, `web/package.json` and `web/package-lock.json` are byte-identical across the whole range. **The Mac needs no `pip install` and no `npm install`.** That removes the single largest historical source of Mac port pain from this run.
 
 **What makes this port different from the last one.** `PILOT_FIX_PORT_GUIDE.md` was a patch: five surgical FIND/REPLACE hunks into code the Mac already had. **This is an addition.** The entire Zendesk mirror subsystem — the local mirror schema, the importer, the controller, the bridge, the React workspace, the Renn revision tools — does not exist on production at all. 42 of the 85 files are brand new and copy wholesale with nothing to reconcile. The risk in this port is concentrated in the **43 modified files**, and inside those, in a much smaller set of about eight that are load-bearing in non-obvious ways. §1 and §12 name them individually.
 
@@ -114,7 +114,7 @@ the one whose §4.2 tells you to hand-create `src/data/app_paths.py`, which is
 wrong now that the module ships. The branch form always resolves to the tip and
 is the only form that delivers the guide you are currently reading.
 
-The code delta this guide describes is **`d27eb3e..a8ead66`** and does not move;
+The code delta this guide describes is **`d27eb3e..d018107`**;
 commits after `a8ead66` on this branch are documentation-only (this file). If
 the branch has advanced into new *code* since — check §4.1's structural compare
 — **STOP and report** rather than proceeding.
@@ -352,22 +352,22 @@ grep -c "^Only in $SRC" ~/alma_port_backup_2026-07-28/post_sync_compare.txt  # e
 # -uall is load-bearing: without it git COLLAPSES a wholly-new directory
 # (web/src/zendesk/) into a single ?? line and the count will not add up.
 git status --porcelain -uall > ~/alma_port_backup_2026-07-28/applied_delta_git_view.txt
-wc -l ~/alma_port_backup_2026-07-28/applied_delta_git_view.txt      # expect 85
+wc -l ~/alma_port_backup_2026-07-28/applied_delta_git_view.txt      # expect 87
 grep -c '^??' ~/alma_port_backup_2026-07-28/applied_delta_git_view.txt   # expect 42
 grep -c '^ M' ~/alma_port_backup_2026-07-28/applied_delta_git_view.txt   # expect 43
 grep '^??' ~/alma_port_backup_2026-07-28/applied_delta_git_view.txt
 ```
 
-**Expect exactly 85 lines** — the 85 files in `d27eb3e..a8ead66` — split **42 `??`** (the added files, which are untracked because the Mac's HEAD is still the baseline) and **43 ` M`**. `src/data/app_paths.py` is now one of the 42 `??`, not a special case.
+**Expect exactly 87 lines** — the 87 files in `d27eb3e..d018107` — split **42 `??`** (the added files, which are untracked because the Mac's HEAD is still the baseline) and **45 ` M`**. `src/data/app_paths.py` is now one of the 42 `??`, not a special case.
 
 **The count is a rule, not a magic number**, and it can legitimately move in
 *both* directions:
 
-- **Fewer than 85** — if the Mac's baseline is a *docs-only descendant* of
+- **Fewer than 87** — if the Mac's baseline is a *docs-only descendant* of
   `d27eb3e` (allowed by P1), one or two docs paths may already match and drop
-  out. A count of 83–85 is fine **when the shortfall is entirely under
+  out. A count of 85–87 is fine **when the shortfall is entirely under
   `docs/`**. A shortfall anywhere else means a partial sync → re-run 4.4.
-- **More than 85** — you synced from a branch tip carrying later commits (§3
+- **More than 87** — you synced from a branch tip carrying later commits (§3
   tells you to, and §4.1 explains why the SHA will not match). Every extra line
   must be **under `docs/`**, and `docs/ZENDESK_BLOCK_PORT_GUIDE.md` will
   normally be one of them since 4.4 excludes it from the sync. **Any extra line
@@ -400,7 +400,7 @@ diff "$SRC/PACKAGES.md"       PACKAGES.md        && echo "PACKAGES.md identical"
 diff "$SRC/web/package.json"  web/package.json   && echo "package.json identical"
 ```
 
-All three must print `identical`. `requirements.txt`, `PACKAGES.md`, `web/package.json`, `web/package-lock.json`, everything under `installer/` and everything under `scan_server/` are untouched across the whole of `d27eb3e..a8ead66` (re-verified at the retarget).
+All three must print `identical`. `requirements.txt`, `PACKAGES.md`, `web/package.json`, `web/package-lock.json`, everything under `installer/` and everything under `scan_server/` are untouched across the whole of `d27eb3e..d018107` (re-verified at each retarget).
 
 **Therefore: no `pip install`. No `npm install`. And never `npm run build` (rule 4).** Every new module in this range is stdlib-only or uses packages the Mac already has. If an import smoke in §6 fails with `ModuleNotFoundError` for a third-party package, that is a **pre-existing** venv problem on the Mac, not something this port introduced — report it rather than installing your way around it.
 
@@ -877,6 +877,67 @@ Its macOS probes are `page_size`, `rosetta` (`sysctl.proc_translated`, fix named
 
 ---
 
+### 12.I — The Settings UI: preserve the bedrock, add one card
+
+**This range changes exactly ONE existing UI surface, and the rule is
+preservation, not redesign.** `src/ui/widgets/credentials_panel.py` gains a
+Zendesk card (+98 lines) and `tests/test_credentials_panel.py` gains its
+coverage (+113). Nothing else in the panel moves.
+
+**Why it is in scope at all:** before this, the only writer of Zendesk
+credentials in the entire app was the **product-mode** Source Monitor
+connection tab (`src/ui/pages/source_monitor/connection_tab.py`). Changing a
+Zendesk setting meant switching app modes. The card closes that gap.
+
+**Strict guidelines — the bedrock UI is not yours to touch:**
+
+1. **`CredentialsPanel` is SHARED by two hosts.** Enablement Settings builds
+   it with `sections=("llm","external")`; the product Settings page builds it
+   with `sections=("external",)`. The Zendesk card lives in `"external"`, so
+   it appears in **both**. That is intended. **Never** "tidy" the panel by
+   scoping it to one host — you would silently remove it from the other.
+2. **Do not reorder, restyle or refactor the existing cards.** Guru, Google
+   and the LLM card are bedrock. The new card is inserted **between Guru and
+   Google** and copies `_guru_card()`'s structure verbatim (`self._card()`
+   frame, `QVBoxLayout(20,18,20,18)` spacing 10, `_field_label`, `_line_edit`,
+   a status + `_primary_btn` row). If your merge produces any diff in the Guru
+   or Google card bodies, the merge is wrong — **STOP** and re-copy the file
+   whole from `$SRC`.
+3. **Do not touch `src/ui/pages/source_monitor/connection_tab.py`.** It still
+   owns `view_id` and the TRC-field mapping for ticket ingestion. The new card
+   deliberately does **not** offer those fields.
+4. **Do not "simplify" the three save guards.** They exist because each one is
+   a way this form destroys data, and each is regression-tested:
+   - the stored `view_id` is read and **passed back through**
+     `save_credentials(..., view_id=view_id)`, so saving from Settings cannot
+     wipe the Source Monitor's ingestion setting;
+   - the token field is **never populated** with the stored secret, so a blank
+     token means *keep the stored one*, never *erase it*;
+   - a missing field **saves nothing at all** and names what is missing
+     inline, rather than half-writing a credential set that then reports as
+     connected.
+5. **No new storage path.** The card reuses
+   `ZendeskClient.save_credentials` / `load_credentials` unchanged. `pat_store`
+   and `zendesk_client.py` are untouched by it. The API token continues to go
+   to the OS keyring; subdomain / email / view_id to `ui_state.json`.
+6. **It adds no write capability.** `tests/test_zendesk_readonly_guard.py`
+   must stay green with this file in tree — entering credentials is not the
+   same as being able to use them for a write, and the guard proves it.
+
+**Verify after the sync** (offscreen; both hosts must build):
+
+```bash
+QT_QPA_PLATFORM=offscreen <venv-python> -m pytest   tests/test_credentials_panel.py tests/test_credentials_fields_persist.py   tests/test_zendesk_readonly_guard.py -q
+```
+
+Expect green, including the nine `test_zendesk_*` cases. **In the app:**
+Settings → Credentials shows a **Zendesk** card between Guru and Google, with
+Subdomain / Email / API token and the scope line *"Read-only. Used to pull
+Help Center content; the app never writes to Zendesk."* The token box is
+**empty** even when a token is stored — that is correct, not a bug.
+
+---
+
 ## 13. New and relevant settings keys — READ-ONLY inventory
 
 **You never write any of these during the port** (rules 1 and 2). This table exists so you know what the Mac does with them left alone, and what the owner may choose to change afterwards.
@@ -1028,7 +1089,18 @@ If every line is ✅, the Mac is functionally identical to the Windows dev box a
 
 ---
 
-## Appendix A — Full file manifest (85 files at `a8ead66`, grouped)
+## Appendix A — Full file manifest (87 files at `d018107`, grouped)
+
+
+**Added after the guide was first written (commit `d018107`) — the Settings
+credentials card, §12.I:**
+
+- `src/ui/widgets/credentials_panel.py` [M, +98/−3] — Zendesk card in the
+  shared `external` section. Appears in BOTH Settings hosts.
+- `tests/test_credentials_panel.py` [M, +113] — nine `test_zendesk_*` cases.
+
+These two are why the delta reads **87 files / 45 modified** rather than 85/43.
+They are expected in the compare and are **not** unreviewed code.
 
 This is a **VERIFICATION checklist** — it is what the Phase-2 pre-sync compare should show. It is **NOT** a list of manual copies (rule 9). **A** = added, copies wholesale, nothing to reconcile. **M** = modified, the Mac copy may have diverged.
 
