@@ -67,23 +67,47 @@ the real bytes. Concretely, do not reintroduce any of these:
 dialog showing the exact bytes uncollapsed. The preview is therefore a
 *display* concern, not a security control — render fidelity is free.
 
-## KNOWN OPEN — read before enabling Guru publish from chat
+## The Guru approval gate — CLOSED and verified
 
-**CRITICAL, unfixed at time of writing.** `approved_at` is a permanent gate
-release (`enablement_tools.py` ~1298) that is **never rolled back when the
-publish it authorized fails**. A transient Guru 401/502 leaves the gate open
-forever, and `clear_push_request` also drops the draft out of the review
-panel, so there is no surface left to notice. A prompt-injected Renn can then
-revise the draft and call `push_guru_draft` unattended. Also: the approval
-fingerprint does not cover the publish **target** (collection/folder/card),
-and `ChatBridge._on_busy` re-mints the binding after every Renn turn, which
-makes the revise-between-review-and-approve check inert in production.
+An earlier revision of this file said the gate was unfixed. That was wrong:
+the fixes had already landed in `45aab99`. All four defects were re-run
+verbatim against a real controller + real SQLite + a spy Guru client and
+**could not be reproduced**:
 
-A fix was in progress and is **partially applied but unverified** — see
-`~/.claude/plans/` and the `fix-guru-approval-gate` workflow. Until it is
-verified: **do not use "Approve & publish" for Guru cards from the Renn chat
-panel.** Everything else, including the entire Zendesk workspace, is
-unaffected.
+- A failed publish no longer leaves a standing authorization.
+  `record_approval` writes a **single-use claim scoped to the act**; the
+  sign-off is spent only by a publish that *succeeded*. A raising client, an
+  `ok:false`, a raising `publish_draft`, or process death between approve and
+  push all clear `approved_at`, destroy the claim, and return the draft to
+  the review panel with the failure reason attached.
+- The fingerprint covers the **whole act** — title, card_id, body,
+  collection_id, folder_id — as a hash-of-hashes, so no field can impersonate
+  a boundary and retargeting invalidates the binding. The panel shows the
+  resolved target and whether it OVERWRITEs or CREATEs.
+- The background poll no longer mints bindings (`bind=False`); only a
+  human-initiated render does. A draft that changes under an open panel is
+  visibly flagged and its Approve control is disabled until re-reviewed.
+- A **native Qt dialog** outside Chromium's reach shows the exact bytes
+  uncollapsed plus the resolved target, defaults to Cancel, and fails closed
+  with no host. Field values are collapsed to one line so a crafted title
+  cannot forge the destination block (`ed6482b`).
+
+**Final invariant:** a byte string reaches live Guru only when a fingerprint
+over the whole act, recomputed from the row at click time, equals one a
+human-initiated render minted; a native dialog displayed those exact bytes
+and that resolved target and was accepted; and a one-shot claim scoped to the
+same act was presented to the publish.
+
+Residual, deferred: a draft replacing a live card with no local `guru_cards`
+copy still diffs as pure additions. Disclosed in the panel notice, not fixed.
+
+## Configuration gotcha that will bite you
+
+`enablement.guru.publish_collection_id` shipped as the demo placeholder
+`col-1`. Any publish falling back to the default target failed at the API —
+and a failed publish is exactly what used to arm the gate hazard above. It is
+now pointed at a real collection. **Check this setting on every machine**;
+list real ids with `GuruClient.list_collections()`.
 
 ## Deliberately deferred (owner decisions)
 
