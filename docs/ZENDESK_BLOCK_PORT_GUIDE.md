@@ -100,13 +100,24 @@ git rev-parse --is-inside-work-tree 2>/dev/null || echo "NOT a git repo"
 
 ### Getting the zip (you do the download)
 
-**Preferred — pinned to the exact commit**, so a later push to the branch cannot race your download:
+**Use the branch form:**
 
 ```
-https://github.com/zeppelin150/alma-insights/archive/a8ead66e09d2f1709ee5ec24a74713a4edc145c3.zip
+https://github.com/zeppelin150/alma-insights/archive/refs/heads/enablement-content-tabs.zip
 ```
 
-The branch form (`https://github.com/zeppelin150/alma-insights/archive/refs/heads/enablement-content-tabs.zip`) is acceptable — it just risks picking up commits pushed after this guide was retargeted, which the structural-authentication fallback in §4.1 tells you how to handle.
+**Why not a pinned SHA — read this, it is not a style preference.** A guide can
+never contain its own commit hash: committing this file creates a new commit,
+so any SHA printed here is necessarily an *ancestor* of the revision you are
+reading. A zip pinned at `a8ead66` therefore carries the **superseded** guide —
+the one whose §4.2 tells you to hand-create `src/data/app_paths.py`, which is
+wrong now that the module ships. The branch form always resolves to the tip and
+is the only form that delivers the guide you are currently reading.
+
+The code delta this guide describes is **`d27eb3e..a8ead66`** and does not move;
+commits after `a8ead66` on this branch are documentation-only (this file). If
+the branch has advanced into new *code* since — check §4.1's structural compare
+— **STOP and report** rather than proceeding.
 
 A GitHub source zip is the full tree at one commit: **no `.git` directory, no gitignored files (therefore no `data/`)**, LF line endings preserved exactly as committed, binaries byte-exact, and the archive comment stamped with the full commit SHA.
 
@@ -218,12 +229,21 @@ uname -m
 
 ```bash
 unzip -z <path-to-zip>
-# Expect the archive comment to be:  a8ead66e09d2f1709ee5ec24a74713a4edc145c3
+# Prints the full SHA of whatever commit the zip was cut at.
 ```
 
-**This guide ships inside the target commit** — it landed in `24c8d0f`, which is an ancestor of `a8ead66`. So a zip taken at `a8ead66` **will** contain `docs/ZENDESK_BLOCK_PORT_GUIDE.md` *and* the SHA above **will** match. Finding this file in the zip is no longer a reason for the SHA to differ.
+**Do not expect a specific SHA here — authenticate structurally instead.** You
+downloaded the branch tip (§3), which is by construction a *descendant* of
+`a8ead66`: this guide cannot contain the hash of the commit that contains this
+guide. The SHA is useful to record in your report, not to gate on.
 
-**If it prints a different SHA, STOP — with one sanctioned exception.** A differing SHA now means only one thing: you downloaded the **branch tip** (or a pinned commit) that is a **descendant** of `a8ead66`, i.e. work pushed after this guide was retargeted. That is not automatically wrong, but it is unverified. Authenticate **structurally** instead: the pre-sync compare (4.3) must show nothing beyond Appendix A. Anything extra must be **under `docs/`** and docs-only. **Any extra path outside `docs/` — any `.py`, any `.sql`, any file under `src/` or `web/` or `tests/` — is code this guide did not review → STOP and report it before syncing.**
+**The gate is the compare, not the hash.** The pre-sync compare (4.3) must show
+nothing beyond Appendix A. Anything extra must be **under `docs/`** and
+docs-only — those are this guide's own later revisions and are expected. **Any
+extra path outside `docs/` — any `.py`, any `.sql`, any file under `src/` or
+`web/` or `tests/` — is code this guide did not review → STOP and report it
+before syncing.** That single rule is what makes a moving branch tip safe to
+port from.
 
 ```bash
 SRC=$(ls -d ~/alma_port_incoming/alma-insights-*)
@@ -248,7 +268,8 @@ wc -c "$SRC/src/ui/web/dist/qwebchannel.js"           # expect 15152
 **This step used to be a hand-create. It is now a one-line check.** At `4ccd321` this module was imported by committed code but had never been `git add`ed, so it was missing from the archive. Commit `1aa0ef2` fixed exactly that. **At `a8ead66` the file is tracked and ships in the zip. You create nothing.**
 
 ```bash
-ls -l "$SRC/src/data/app_paths.py"      # expect ~124 lines / ~4 KB, present
+wc -c "$SRC/src/data/app_paths.py"      # expect 4240
+wc -l "$SRC/src/data/app_paths.py"      # expect 124
 ```
 
 **PASS:** the file exists in `$SRC`. Nothing to do — it rides in with the one-pass `rsync` in 4.4 like every other added file. Go to 4.3.
@@ -267,7 +288,7 @@ The silence is structural: `zendesk_web.py::_pick_files` catches `Exception` and
 
 Commit `30fb086` additionally calls `app_paths.ensure_docs_tree()` from `main.py` at boot, inside a `try/except` that prints and continues. That hunk is **not** load-bearing — `space_dir()` does `mkdir(parents=True, exist_ok=True)` on every access, so every consumer creates what it needs on first use. It only makes the `data/documents/` folders appear before the user goes looking for them.
 
-**Verify after the sync** (this replaces the old hand-create verification):
+**Verify after the sync** — run these two in `$DEST` once 4.4 has completed, not now (this replaces the old hand-create verification):
 
 ```bash
 grep -c "def start_dir" src/data/app_paths.py
@@ -298,7 +319,16 @@ grep -c "differ$" ~/alma_port_backup_2026-07-28/pre_sync_compare.txt
 ### 4.4 Sync — one pass
 
 ```bash
-rsync -a "$SRC"/ "$DEST"/        # NO --delete. EVER. (rule 3)  Trailing slashes are load-bearing.
+rsync -a --exclude 'docs/ZENDESK_BLOCK_PORT_GUIDE.md' "$SRC"/ "$DEST"/
+# NO --delete. EVER. (rule 3)  Trailing slashes are load-bearing.
+# The --exclude is this guide protecting itself: if you are reading the copy
+# inside $DEST, an unguarded sync overwrites it mid-port with whatever
+# revision the zip happens to carry — which, for any zip pinned at or before
+# a8ead66, is the SUPERSEDED revision whose §4.2 tells you to hand-create
+# src/data/app_paths.py. That instruction is wrong now (the module ships) and
+# following it would put a stale hand-written file in front of the shipped
+# one. Copy the guide in deliberately at the END of the port instead:
+#   cp "$SRC/docs/ZENDESK_BLOCK_PORT_GUIDE.md" "$DEST/docs/"   # only if $SRC is newer
 ```
 
 **Do not cherry-pick, do not hand-apply hunks, do not copy files one at a time.** The per-file detail in §12 and in Appendix A exists for verification and debugging, not as a to-do list of manual copies. In particular, `src/data/zendesk_client.py` and `src/data/zendesk_store.py` must land together (§12.B) and a one-pass `rsync` guarantees that.
@@ -330,7 +360,18 @@ grep '^??' ~/alma_port_backup_2026-07-28/applied_delta_git_view.txt
 
 **Expect exactly 85 lines** — the 85 files in `d27eb3e..a8ead66` — split **42 `??`** (the added files, which are untracked because the Mac's HEAD is still the baseline) and **43 ` M`**. `src/data/app_paths.py` is now one of the 42 `??`, not a special case.
 
-**The count is a rule, not a magic number:** if the Mac's baseline is a *docs-only descendant* of `d27eb3e` (allowed by P1), one or two docs paths may already match and drop out, so a count of 83–85 with the shortfall entirely under `docs/` is fine. **A shortfall anywhere else means a partial sync → re-run 4.4.**
+**The count is a rule, not a magic number**, and it can legitimately move in
+*both* directions:
+
+- **Fewer than 85** — if the Mac's baseline is a *docs-only descendant* of
+  `d27eb3e` (allowed by P1), one or two docs paths may already match and drop
+  out. A count of 83–85 is fine **when the shortfall is entirely under
+  `docs/`**. A shortfall anywhere else means a partial sync → re-run 4.4.
+- **More than 85** — you synced from a branch tip carrying later commits (§3
+  tells you to, and §4.1 explains why the SHA will not match). Every extra line
+  must be **under `docs/`**, and `docs/ZENDESK_BLOCK_PORT_GUIDE.md` will
+  normally be one of them since 4.4 excludes it from the sync. **Any extra line
+  outside `docs/` is unreviewed code → STOP and report.**
 
 **Any `??` line naming `migrations/052_solver_ledger.sql`, `src/data/docs_backfill.py`, `src/data/solver_ledger.py`, `docs/pilot/` or `wheel_tail.bin`** means the zip was inflated from a dirty snapshot or copied too broadly — **STOP, do not commit.**
 
@@ -684,7 +725,7 @@ git status --porcelain
 git log --oneline -3
 ```
 
-**Expect:** `git status` shows only untracked strays — `?? src/data/app_paths.py` and anything gitignored; `data/` never appears. `git log` tip matches the zip's commit.
+**Expect:** `git status` is **clean apart from pre-existing Mac-local strays** and anything gitignored; `data/` never appears. Every one of the 85 files is now tracked at the branch tip — including `src/data/app_paths.py`, which used to appear here as a `??` line and no longer does. `git log` tip matches the zip's commit (`a8ead66`, or the descendant you authenticated structurally in §4.1).
 
 **If `git checkout` reports it would overwrite local files, STOP.** The tree is NOT identical to the snapshot and the post-sync compare in 4.5 was wrong. Do not force anything.
 
@@ -703,7 +744,7 @@ Things you will see and should leave exactly as they are.
 | The classic Zendesk tab's attributes are still called `_a_push` / `_m_push`, and its signals `article_push` / `macro_push` | Deliberately kept so host wiring and existing assertions keep resolving. They now mean "mark handled locally". Renaming them breaks `tests/test_zendesk_content.py`. |
 | `publish_article_draft` / `publish_macro_draft` still take a `zendesk_client=` kwarg and ignore it | Source compatibility, on purpose. They are local bookkeeping now and report `remote_write: False`. |
 | Grep hits for `create_confirm_write`, `_emit_confirm_write`, `_enqueue_write`, `execute_write`, `cancel_write`, `update_article_draft`, `update_macro_draft` | **Unrelated names.** They are not Zendesk writes. Do not "clean them up". |
-| `tests/test_export_asks_where_to_put_the_file_and_cancelling_writes_nothing` failing | Expected — `app_paths.py` ships as of `1aa0ef2`, and this test's expected string predates it (§8). |
+| `test_export_asks_where_to_put_the_file_and_cancelling_writes_nothing` (in `tests/test_help_claims_create.py`) failing | Expected — `app_paths.py` ships as of `1aa0ef2`, and this test's expected string predates it (§8). |
 | `data/documents/` (Downloads, Exports, Zendesk Imports, Zendesk Edits, Worksheets, `README.txt`) appearing after first launch | `main.py` creates it at boot (`30fb086`). It lives under `data/`, so rule 1 applies: leave it alone. It would have been created lazily on first use anyway. |
 | Preview iframes that render a blank article while the rest of the tab works | The sandboxed no-scripts iframe, not a WebEngine failure. Untrusted article HTML reaches the page only through `sanitize_html` into `sandbox=""`. |
 | `Failed to create GLES3 context` in the console | Benign offscreen/GPU noise on macOS. |
@@ -755,7 +796,7 @@ Why Zendesk specifically, and not Guru or Asana: Guru and Asana are production-l
 
 - `src/services/zendesk_web.py` [A, 2,242 lines / 112 KB] — the largest new file. Holds **all** authority: sanitize-every-`srcdoc`, copy-exact via a Python `QClipboard` reading DB bytes, native confirms for every destructive action.
 - `src/ui/web/zendesk_bridge.py` [A, 185 lines] — **pure relay.** No logic, no authority.
-- `web/src/zendesk/` [A, 18 files] — the SPA. A pure renderer: no server, no localhost, one `file://` bundle, no network from the page, no secrets.
+- `web/src/zendesk/` [A, 21 files] — the SPA. A pure renderer: no server, no localhost, one `file://` bundle, no network from the page, no secrets.
 
 **QWebChannel is the trust boundary** — any page script can call any slot, so no slot carries authority. Reads return viewmodels; side-effectful actions validate against Python-held state plus a single-winner claim plus a **native** confirm (`QMessageBox`, unreachable from Chromium). Never `dangerouslySetInnerHTML` / `innerHTML` in `web/src/` — `tests/test_web_guardrails.py` enforces it in the §8 group 4.
 
@@ -1009,9 +1050,9 @@ This is a **VERIFICATION checklist** — it is what the Phase-2 pre-sync compare
 **A:** `test_zendesk_bridge.py` (4,161) · `test_chat_review_panel.py` (1,540) · `test_zendesk_web_tab.py` (815) · `test_zendesk_mirror_tools.py` (773) · `test_zendesk_import.py` (763) · `test_publish_body_parity.py` (**585** — 500 at `4ccd321`, +85 in `a8ead66`; 28 tests) · `test_zendesk_versions.py` (567) · `test_zendesk_readonly_guard.py` (505) · `test_zendesk_mirror_schema.py` (499) · `test_zendesk_client_readonly.py` (253)
 **M:** `test_zendesk_content.py` (+210/−41) · `test_help_claims_create.py` (+140/−146) · `test_workbench_bridge.py` (+66/−5) · `test_enablement_web_flag.py` (+43) · `test_help_claims_troubleshooting.py` (+39/−6) · `test_help_claims_reference.py` (+6/−6) · `test_web_guardrails.py` (+5)
 
-### docs, help, CLAUDE.md — 1 A, 6 M
+### docs, help, CLAUDE.md — 2 A, 5 M
 
-**A:** `docs/ZENDESK_GURU_IMPLEMENTATION_NOTES.md` (159)
+**A:** `docs/ZENDESK_GURU_IMPLEMENTATION_NOTES.md` (159) · **`docs/ZENDESK_BLOCK_PORT_GUIDE.md` (this file — new in `24c8d0f`)**
 **M:** `CLAUDE.md` (+83/−4) · `assets/help/create/zendesk.md` (+74/−35) · `assets/help/create/zendesk-macros.md` (+38/−26) · `assets/help/reference/settings-keys.md` (+7/−6) · `assets/help/troubleshooting/connect-first.md` (+7/−1)
 
-**Addendum.** If the zip was taken from the branch tip rather than pinned at `4ccd321`, it may also contain `docs/ZENDESK_BLOCK_PORT_GUIDE.md` (this file) and other docs-only descendants. The pre-sync compare will show those paths beyond the 82 above — expected, and the basis for the structural authentication in §4.1. **Anything beyond Appendix A that is not under `docs/` is unexplained → STOP.**
+**Addendum.** If the zip was taken from the branch tip rather than pinned at `a8ead66`, it may contain further docs-only descendants pushed after the retarget. The pre-sync compare will show those paths beyond the 85 above — that is the basis for the structural authentication in §4.1. **Anything beyond Appendix A that is not under `docs/` is unexplained → STOP.**
