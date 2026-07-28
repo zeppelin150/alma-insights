@@ -11,12 +11,13 @@ shared store.
 Sections (selectable via `sections`):
   "llm"      — active model, Gemini API key, Claude API key (behind the
                3-acknowledgment HIPAA/BAA gate), task-routing override, PII.
-  "external" — Guru email+PAT, Google service-account file, and the
-               per-user Google OAuth "Connect my account" controls.
+  "external" — Guru email+PAT, Zendesk subdomain+email+API token, the
+               Google service-account file, and the per-user Google OAuth
+               "Connect my account" controls.
 
 The panel emits ``settings_changed(dict)`` with flags the host re-emits
 (gemini_updated / claude_connected / model_changed / guru_updated /
-drive_updated / routing_updated / pii_updated) so existing reactions
+zendesk_updated / drive_updated / routing_updated / pii_updated) so existing reactions
 (e.g. main_window._on_settings_changed → refresh_gemini_status) fire
 unchanged. Google OAuth button presses surface as dedicated signals the
 host wires to the worker in P5.
@@ -79,6 +80,7 @@ class CredentialsPanel(QWidget):
         if "external" in self._sections:
             outer.addWidget(self._heading("EXTERNAL API CREDENTIALS"))
             outer.addWidget(self._guru_card())
+            outer.addWidget(self._zendesk_card())
             outer.addWidget(self._google_card())
         outer.addStretch()
 
@@ -305,6 +307,50 @@ class CredentialsPanel(QWidget):
         v.addLayout(row)
         return card
 
+    # ── External: Zendesk ───────────────────────────────────────────
+
+    def _zendesk_card(self) -> QFrame:
+        """Zendesk credentials, editable from BOTH modes.
+
+        Before this card the only writer was the product-mode Source Monitor
+        connection tab, so an enablement operator had to switch app modes to
+        change a Zendesk setting. Deliberately NOT here: the view id and the
+        TRC field mapping — both are ticket-ingestion config and stay owned by
+        that tab."""
+        card = self._card()
+        v = QVBoxLayout(card)
+        v.setContentsMargins(20, 18, 20, 18)
+        v.setSpacing(10)
+        v.addWidget(self._field_label("Zendesk"))
+
+        scope = QLabel(
+            "Read-only. Used to pull Help Center content; the app never "
+            "writes to Zendesk."
+        )
+        scope.setWordWrap(True)
+        scope.setStyleSheet(
+            f"font-size: 11px; color: {ALMA_TEXT_LIGHT}; border: none; background: transparent;"
+        )
+        v.addWidget(scope)
+
+        self._zendesk_subdomain = self._line_edit(placeholder="d3v-acgshelp")
+        v.addWidget(self._zendesk_subdomain)
+        self._zendesk_email = self._line_edit(placeholder="you@company.com")
+        v.addWidget(self._zendesk_email)
+        self._zendesk_token = self._line_edit(
+            password=True, placeholder="Zendesk API token")
+        v.addWidget(self._zendesk_token)
+
+        row = QHBoxLayout()
+        self._zendesk_status = self._status_label()
+        self._zendesk_status.setWordWrap(True)
+        row.addWidget(self._zendesk_status, 1)
+        save = self._primary_btn("Save Zendesk credentials")
+        save.clicked.connect(self._on_save_zendesk)
+        row.addWidget(save)
+        v.addLayout(row)
+        return card
+
     # ── External: Google ────────────────────────────────────────────
 
     def _google_card(self) -> QFrame:
@@ -422,10 +468,29 @@ class CredentialsPanel(QWidget):
         if "external" in self._sections:
             self._guru_email.setText(load_setting("guru_email", "") or "")
             self._guru_token.setText(load_setting("guru_api_token", "") or "")
+            self._load_zendesk()
             drive = (get_section("enablement", {}) or {}).get("drive") or {}
             self._sa_path.setText(drive.get("credentials_path", "") or "")
             stored, active = self._google_state()
             self._render_google_state(stored, active)
+
+    def _load_zendesk(self):
+        """Populate the Zendesk card from the store.
+
+        The token field is left BLANK on purpose — the secret is never echoed
+        back into a widget. The status line says a token exists instead, and
+        `_on_save_zendesk` reads a blank field as "keep what is stored", so the
+        blank cannot be saved back over a working token."""
+        from src.data.zendesk_client import ZendeskClient
+        try:
+            sub, email, key, _view_id = ZendeskClient.load_credentials()
+        except Exception:
+            return
+        self._zendesk_subdomain.setText(sub or "")
+        self._zendesk_email.setText(email or "")
+        self._zendesk_token.clear()
+        self._zendesk_status.setText(
+            "Token saved — leave blank to keep it." if key else "")
 
     @staticmethod
     def _google_state() -> tuple[bool, bool]:
@@ -571,6 +636,33 @@ class CredentialsPanel(QWidget):
         ok = GuruClient.save_credentials(email, token)
         self._guru_status.setText("Saved." if ok else "Save failed.")
         self.settings_changed.emit({"guru_updated": True})
+
+    def _on_save_zendesk(self):
+        from src.data.zendesk_client import ZendeskClient
+        sub = self._zendesk_subdomain.text().strip()
+        email = self._zendesk_email.text().strip()
+        token = self._zendesk_token.text().strip()
+        # save_credentials writes all four keys, so the view id has to be read
+        # and handed straight back: it belongs to the Source Monitor's ticket
+        # ingestion, and passing the default "" from here would silently blank
+        # a view an operator configured in product mode.
+        _sub, _email, stored_key, view_id = ZendeskClient.load_credentials()
+        # A blank token means "leave it alone" — the field is never populated
+        # with the stored secret, so treating blank as an erase would destroy a
+        # working credential every time someone corrects a typo in the email.
+        if not token:
+            token = stored_key or ""
+        missing = [name for name, value in (
+            ("subdomain", sub), ("email", email), ("API token", token),
+        ) if not value]
+        if missing:
+            self._zendesk_status.setText(
+                f"Missing {', '.join(missing)} — nothing saved.")
+            return
+        ok = ZendeskClient.save_credentials(sub, email, token, view_id=view_id)
+        self._zendesk_token.clear()
+        self._zendesk_status.setText("Saved." if ok else "Save failed.")
+        self.settings_changed.emit({"zendesk_updated": True})
 
     def _on_browse_sa(self):
         path, _ = QFileDialog.getOpenFileName(
