@@ -184,6 +184,15 @@ def main():
             # User closed splash without Continue, or a critical check blocked it
             sys.exit(1)
 
+    # Ensure the managed documents tree exists (data/documents/ — Downloads,
+    # Exports, Zendesk Imports, Zendesk Edits, Worksheets). Fenced: a full
+    # disk or permissions error must never block boot.
+    try:
+        from src.data.app_paths import ensure_docs_tree
+        ensure_docs_tree()
+    except Exception as exc:
+        print(f"[startup] documents tree unavailable: {exc}")
+
     # Launch main window
     window = MainWindow()
     window.show()
