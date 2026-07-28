@@ -1022,7 +1022,7 @@ Report each line as ✅ / ❌ / skipped-with-reason.
 11. **In-app smokes** — splash reads `Schema v53`; app reaches Home; existing surfaces unchanged; the classic Zendesk tab shows **"Copy for Zendesk" + "Mark as copied"** with the read-only notice; Help shows **62 articles**.
 12. **Settings untouched** — `diff data/settings.yaml ~/alma_port_backup_2026-07-28/settings.yaml` is empty; `~/.alma-insights/ui_state.json` unchanged. (The warehouse differs by the new tables — that is expected, and it is not "destroyed settings".)
 13. **`publish_collection_id` checked and its value reported to the owner** — not `col-1`, not blank; **and not changed by you**.
-14. **Phase 8b done** — `git checkout enablement-content-tabs` completed without overwriting anything; `git log --oneline -3` tip matches the zip; the rescue branch is still in place; nothing was pushed.
+14. **Phase 8b done** — `git reset --mixed FETCH_HEAD` completed and `git status` is clean apart from pre-existing untracked strays; `git log --oneline -3` tip matches the zip; the rescue branch is still in place; nothing was pushed.
 
 If every line is ✅, the Mac is functionally identical to the Windows dev box at `a8ead66` — with its own settings intact, the entire new Zendesk workspace **dormant behind its own flag**, no credentials required, and the owner holding every switch. Flipping `enablement.web_tabs` to `zendesk` is then a separate, reversible, one-line decision (§13.1), and §16 R0 undoes it in one restart.
 
