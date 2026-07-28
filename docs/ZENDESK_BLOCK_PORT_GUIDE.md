@@ -1,12 +1,12 @@
-# Zendesk Block Port Guide — `d27eb3e` → `4ccd321` (enablement-content-tabs)
+# Zendesk Block Port Guide — `d27eb3e` → `a8ead66` (enablement-content-tabs)
 
-**Written:** 2026-07-28 on the Windows dev box, from the actual git delta.
+**Written:** 2026-07-28 on the Windows dev box, from the actual git delta. **Retargeted the same day** from `4ccd321` to `a8ead66` — see §1 for the four commits that moved the target, and §4.2, which changed from a hand-create step into a verify step as a result.
 **For:** the owner, on the production Mac (Apple Silicon M1, 16 GB, arm64). You are competent with a terminal but you did not write this code, and you should not have to read any of it to execute this guide.
-**Scope:** every change committed between `d27eb3e` (2026-07-24, "docs(port-guide): Appendix A — corrected delivery path via GitHub Desktop") and `4ccd321` (2026-07-28, "docs(guru): the approval gate is closed and verified"), all pushed to `origin/enablement-content-tabs`.
+**Scope:** every change committed between `d27eb3e` (2026-07-24, "docs(port-guide): Appendix A — corrected delivery path via GitHub Desktop") and `a8ead66` (2026-07-28, "test(guru): lock the legacy guru_page preview to the publish body"), all pushed to `origin/enablement-content-tabs`.
 
-**The delta:** 7 commits, **82 files** (52 added, 30 modified, **zero deleted, zero renamed** — a copy-over sync is complete and nothing on the Mac needs removing), +27,020 / −761 lines. 2 new SQL migrations (051 and 053 — the gap is real and safe, §7). **Zero new dependencies:** `requirements.txt`, `PACKAGES.md`, `web/package.json` and `web/package-lock.json` are byte-identical across the whole range. **The Mac needs no `pip install` and no `npm install`.** That removes the single largest historical source of Mac port pain from this run.
+**The delta:** 11 commits, **85 files** (42 added, 43 modified, **zero deleted, zero renamed** — a copy-over sync is complete and nothing on the Mac needs removing), +28,352 / −761 lines. 2 new SQL migrations (051 and 053 — the gap is real and safe, §7). **Zero new dependencies:** `requirements.txt`, `PACKAGES.md`, `web/package.json` and `web/package-lock.json` are byte-identical across the whole range. **The Mac needs no `pip install` and no `npm install`.** That removes the single largest historical source of Mac port pain from this run.
 
-**What makes this port different from the last one.** `PILOT_FIX_PORT_GUIDE.md` was a patch: five surgical FIND/REPLACE hunks into code the Mac already had. **This is an addition.** The entire Zendesk mirror subsystem — the local mirror schema, the importer, the controller, the bridge, the React workspace, the Renn revision tools — does not exist on production at all. 52 of the 82 files are brand new and copy wholesale with nothing to reconcile. The risk in this port is concentrated in the **30 modified files**, and inside those, in a much smaller set of about eight that are load-bearing in non-obvious ways. §1 and §12 name them individually.
+**What makes this port different from the last one.** `PILOT_FIX_PORT_GUIDE.md` was a patch: five surgical FIND/REPLACE hunks into code the Mac already had. **This is an addition.** The entire Zendesk mirror subsystem — the local mirror schema, the importer, the controller, the bridge, the React workspace, the Renn revision tools — does not exist on production at all. 42 of the 85 files are brand new and copy wholesale with nothing to reconcile. The risk in this port is concentrated in the **43 modified files**, and inside those, in a much smaller set of about eight that are load-bearing in non-obvious ways. §1 and §12 name them individually.
 
 **The breaking change:** commit `2cc0089` **deletes the app's ability to write to Zendesk, permanently.** Before this range the app could POST/PUT to a live, public, non-restorable Guide instance. After it, there is no write method left to call. This is a locked owner decision, and two files must be synced **as a pair** or the policy silently reverts — see §1/`2cc0089` and §12.B.
 
@@ -25,7 +25,7 @@ These override anything else you infer. Violating any one of them is the failure
 1. **NEVER touch `data/`.** The zip contains no `data/` directory — it is gitignored, so it is not in the archive and a file-over-file sync cannot reach it. Do not edit, "fix", add keys to, or reformat `data/settings.yaml`, even when a feature in this port appears to need a key. The one settings change this port contemplates (`enablement.web_tabs`) is **owner-gated and comes last**, after acceptance, and is listed in §10 as explicitly out of the port body. If something else needs a key, report it; do not set it.
 2. **NEVER touch `~/.alma-insights/ui_state.json` either.** Rule 1's protection stops at `data/` — but the Zendesk subdomain, email and view id live in that JSON file outside the project tree, and the API key lives in the macOS Keychain. The sync cannot reach either, and neither should you. They are backed up in Phase 1 as insurance, not as a thing to change.
 3. **NEVER pass `--delete` (or any `--delete-*` flag) to any `rsync` involving the project tree.** The zip has no `data/`, no `.git`, no `.venv` and no gitignored files, so a deleting sync would destroy exactly the things rules 1 and 2 protect. The range has zero deletions and zero renames, so a plain copy-over is already complete — `--delete` can only subtract things you need.
-4. **NEVER run `npm build` / `npm --prefix web run build`.** The React app ships as a committed build artifact: `src/ui/web/dist/index.html` (**333,921 bytes at `4ccd321`**, single-file bundle) plus `src/ui/web/dist/qwebchannel.js` (15,152 bytes, unchanged since June and still required). The Mac needs **no Node and no npm at all** to run the app. Rebuilding overwrites `dist/` with non-identical bytes and puts the Mac out of parity with what was tested.
+4. **NEVER run `npm build` / `npm --prefix web run build`.** The React app ships as a committed build artifact: `src/ui/web/dist/index.html` (**333,921 bytes at `a8ead66`** — unchanged since `45aab99`, single-file bundle) plus `src/ui/web/dist/qwebchannel.js` (15,152 bytes, unchanged since June and still required). The Mac needs **no Node and no npm at all** to run the app. Rebuilding overwrites `dist/` with non-identical bytes and puts the Mac out of parity with what was tested.
 5. **NEVER run a migration by hand with `sqlite3 data/local_warehouse.db < migrations/051_….sql`.** Both new migrations carry mandatory Python post-hooks (§7). A raw `sqlite3` apply skips them, leaves the FTS mirrors indexing empty body text and the drafts with no rollback baseline, and records nothing in `schema_migrations` — so the migrator will later try again on a half-built schema. Migrations land **only** by launching the app or by the explicit `DatabaseManager().initialize()` call in §7.
 6. **NEVER run the full test suite** (`pytest tests/`) — it hangs on this project. Run the four named groups in §8, each in its own invocation.
 7. **NEVER relax `tests/test_zendesk_readonly_guard.py`.** It AST-scans every module under `src/` for a re-added Zendesk write method and also asserts the GET lanes still exist. If it fails on the Mac, a stale file survived the sync — **remove the write, do not edit the guard.**
@@ -53,8 +53,12 @@ Newest last. Read this so you know what "done" looks like before any command run
 | `45aab99` | 07-27 | **The commit that makes this range not only about Zendesk** (44 files, +9,855/−530). Zendesk half: every markup-bearing clipboard release now passes a native dialog showing the exact bytes; preview CSS policy inverted to an allowlist; `force_plain_text` on native dialogs. Versions layer phase 1 lands **dormant** (migration 053 + store module + two React panels that nothing imports). **Guru half:** `publish_body()` becomes the single definition of the published body, fixing two confirmed criticals — attaching a quiz published *only* the quiz over live cards, and approval surfaces rendering markdown while publish sent a different HTML column. |
 | `ed6482b` | 07-27 | Security fix (3 files, +72/−20). A model-written draft `title` containing newlines could inject fake field lines into the publish confirm dialog and push the real destination below the pane's fold. Every field is now collapsed to a single line and capped before the join. **The fix is entirely Python-side** — the bundle change in this commit is pure re-minify churn. |
 | `4ccd321` | 07-28 | Documentation only (1 file, +41/−17). Records that the four approval-gate criticals were closed in `45aab99` and re-verified, states the final invariant, and documents the `publish_collection_id = "col-1"` config trap (§13.2). **Zero code change.** |
+| `1aa0ef2` | 07-28 | **The reason this guide was retargeted** (1 file, +124). Commits `src/data/app_paths.py`, which was already imported by committed code at `4ccd321` but had never been added to the index — so a zip taken at `4ccd321` shipped a tree whose Zendesk **Import files…** / **Import folder…** buttons raised `ModuleNotFoundError` inside a bridge that swallows exceptions, i.e. did nothing at all, silently. See §4.2. |
+| `24c8d0f` | 07-28 | **This guide itself** (1 file, added). Documentation only, zero code change. Its presence in the zip is now expected, not an anomaly — §4.1. |
+| `30fb086` | 07-28 | Startup convenience (1 file, +9). `main.py` calls `app_paths.ensure_docs_tree()` after the splash, inside a `try/except` that prints and continues. **Not load-bearing:** `space_dir()` already does `mkdir(parents=True, exist_ok=True)` on every access, so every consumer self-heals the tree on first use. If this hunk were missing the app would behave identically; it only moves folder creation earlier so the folders exist before the user goes looking for them in Finder. |
+| `a8ead66` | 07-28 | Test only (1 file, +85). Locks the legacy `guru_page` preview to `publish_body()` — the C4 fix shipped in `45aab99` with no test, and this adds one non-vacuous test for it. **Zero production-code change.** Adds one test to §8's group 4. |
 
-**One consequence to internalize now:** only the **tip** bundle is correct. `2cc0089` and `5743ef3` ship a stale `dist/index.html` (the React work in `5743ef3` did not reach the bundle until `45aab99`). You are syncing the tree at `4ccd321` in one pass, so this is automatic — but it is why you must never hand-merge or partially copy `src/ui/web/dist/index.html`.
+**One consequence to internalize now:** only the **tip** bundle is correct. `2cc0089` and `5743ef3` ship a stale `dist/index.html` (the React work in `5743ef3` did not reach the bundle until `45aab99`). You are syncing the tree at `a8ead66` in one pass, so this is automatic — but it is why you must never hand-merge or partially copy `src/ui/web/dist/index.html`. None of the four commits after `4ccd321` rebuilt the bundle, so every `333921` assertion in this guide is still exactly right at the new target.
 
 ---
 
@@ -77,7 +81,7 @@ git log --oneline -1
 git rev-parse HEAD
 ```
 
-**PASS:** the short SHA is `d27eb3e`, or a docs-only descendant of it. **FAIL:** if `git log --oneline -12` shows any of `1ba6fa5`, `fabb4be`, `2cc0089`, `5743ef3`, `45aab99`, `ed6482b`, `4ccd321`, part or all of this range is already applied — **STOP and report**; a re-run is not automatically safe.
+**PASS:** the short SHA is `d27eb3e`, or a docs-only descendant of it. **FAIL:** if `git log --oneline -15` shows any of `1ba6fa5`, `fabb4be`, `2cc0089`, `5743ef3`, `45aab99`, `ed6482b`, `4ccd321`, `1aa0ef2`, `24c8d0f`, `30fb086`, `a8ead66`, part or all of this range is already applied — **STOP and report**; a re-run is not automatically safe.
 
 **P2 — the pre-051 Zendesk tables must already exist.** Migration 051 is mostly `ALTER TABLE … ADD COLUMN` against tables created by migration 030. If they are absent, 051 fails — and it fails *silently* (§7).
 
@@ -99,10 +103,10 @@ git rev-parse --is-inside-work-tree 2>/dev/null || echo "NOT a git repo"
 **Preferred — pinned to the exact commit**, so a later push to the branch cannot race your download:
 
 ```
-https://github.com/zeppelin150/alma-insights/archive/4ccd321c178b63533f7d3f802dc3a2d27f7268f3.zip
+https://github.com/zeppelin150/alma-insights/archive/a8ead66e09d2f1709ee5ec24a74713a4edc145c3.zip
 ```
 
-The branch form (`https://github.com/zeppelin150/alma-insights/archive/refs/heads/enablement-content-tabs.zip`) is acceptable and is in fact **preferable if this guide is itself the thing you are reading from the zip** — see the structural-authentication fallback in §4.1.
+The branch form (`https://github.com/zeppelin150/alma-insights/archive/refs/heads/enablement-content-tabs.zip`) is acceptable — it just risks picking up commits pushed after this guide was retargeted, which the structural-authentication fallback in §4.1 tells you how to handle.
 
 A GitHub source zip is the full tree at one commit: **no `.git` directory, no gitignored files (therefore no `data/`)**, LF line endings preserved exactly as committed, binaries byte-exact, and the archive comment stamped with the full commit SHA.
 
@@ -214,10 +218,12 @@ uname -m
 
 ```bash
 unzip -z <path-to-zip>
-# Expect the archive comment to be:  4ccd321c178b63533f7d3f802dc3a2d27f7268f3
+# Expect the archive comment to be:  a8ead66e09d2f1709ee5ec24a74713a4edc145c3
 ```
 
-**If it prints a different SHA, STOP — with one sanctioned exception.** If this guide arrived **inside** the zip, then the zip is necessarily a descendant of `4ccd321` (this file did not exist at `4ccd321`) and the SHA will legitimately differ. In that case authenticate **structurally** instead: the pre-sync compare (4.3) must show nothing beyond Appendix A **plus** `docs/ZENDESK_BLOCK_PORT_GUIDE.md` and possibly other files under `docs/`. Anything else unexplained in the compare = wrong snapshot → STOP.
+**This guide ships inside the target commit** — it landed in `24c8d0f`, which is an ancestor of `a8ead66`. So a zip taken at `a8ead66` **will** contain `docs/ZENDESK_BLOCK_PORT_GUIDE.md` *and* the SHA above **will** match. Finding this file in the zip is no longer a reason for the SHA to differ.
+
+**If it prints a different SHA, STOP — with one sanctioned exception.** A differing SHA now means only one thing: you downloaded the **branch tip** (or a pinned commit) that is a **descendant** of `a8ead66`, i.e. work pushed after this guide was retargeted. That is not automatically wrong, but it is unverified. Authenticate **structurally** instead: the pre-sync compare (4.3) must show nothing beyond Appendix A. Anything extra must be **under `docs/`** and docs-only. **Any extra path outside `docs/` — any `.py`, any `.sql`, any file under `src/` or `web/` or `tests/` — is code this guide did not review → STOP and report it before syncing.**
 
 ```bash
 SRC=$(ls -d ~/alma_port_incoming/alma-insights-*)
@@ -237,162 +243,40 @@ wc -c "$SRC/src/ui/web/dist/qwebchannel.js"           # expect 15152
 
 **`migrations/052_solver_ledger.sql` is correctly absent.** It belongs to a separate local-only workstream on the dev box, it is untracked, and it is not part of this port. Do not create it. Do not "fix" the gap. §7 explains why the gap is harmless.
 
-### 4.2 The one file the zip is missing — `src/data/app_paths.py`
+### 4.2 Verify `src/data/app_paths.py` is in the zip — do NOT create it
 
-**This is the single defect in the shipped tree and you must handle it before the sync.**
+**This step used to be a hand-create. It is now a one-line check.** At `4ccd321` this module was imported by committed code but had never been `git add`ed, so it was missing from the archive. Commit `1aa0ef2` fixed exactly that. **At `a8ead66` the file is tracked and ships in the zip. You create nothing.**
 
-`src/ui/pages/enablement/page.py` at `4ccd321` contains three lazy imports of `src.data.app_paths`, but that module is untracked on the dev box and therefore **is not in the zip**. All three imports are inside methods, so the app still launches — the damage is at click time, and it is silent:
+```bash
+ls -l "$SRC/src/data/app_paths.py"      # expect ~124 lines / ~4 KB, present
+```
+
+**PASS:** the file exists in `$SRC`. Nothing to do — it rides in with the one-pass `rsync` in 4.4 like every other added file. Go to 4.3.
+
+**FAIL (file absent):** you are **not** holding a zip at `a8ead66` or later. Do not hand-write the module and do not proceed — go back to §4.1, re-check the archive comment, and download the pinned archive. A tree missing this file will launch, pass most of the smokes, and then fail silently on the exact feature this port exists to deliver.
+
+**Why this one file gets its own gate.** `src/ui/pages/enablement/page.py` imports `src.data.app_paths` **lazily, inside three methods** — so a missing module cannot break launch or import-time smokes. The damage is at click time, and it is silent:
 
 | Where | User-visible failure if the module is missing |
 |---|---|
-| `page.py:1103` `_web_zendesk_file_pick` | Zendesk web tab → **Import file** is a **silent no-op**. No error, no log line. |
-| `page.py:1111` `_web_zendesk_folder_pick` | Zendesk web tab → **Import folder** is a **silent no-op**. |
-| `page.py:2421` `_on_pptx_export` | **PowerPoint deck export raises** — a regression of a feature already shipped on the Mac. |
+| `page.py` `_web_zendesk_file_pick` | Zendesk web tab → **Import files…** is a **silent no-op**. No error, no log line. |
+| `page.py` `_web_zendesk_folder_pick` | Zendesk web tab → **Import folder…** is a **silent no-op**. |
+| `page.py` `_on_pptx_export` | **PowerPoint deck export raises** — a regression of a feature already shipped on the Mac. |
 
-The silence is structural: `zendesk_web.py::_pick_files` catches `Exception` and returns `[]`, so `ModuleNotFoundError` becomes "the button did nothing".
+The silence is structural: `zendesk_web.py::_pick_files` catches `Exception` and returns `[]`, so `ModuleNotFoundError` becomes "the button did nothing". That is how the gap was found in the first place, and it is why the check above is worth ten seconds.
 
-**Check first — the file may have been committed since this guide was written:**
+Commit `30fb086` additionally calls `app_paths.ensure_docs_tree()` from `main.py` at boot, inside a `try/except` that prints and continues. That hunk is **not** load-bearing — `space_dir()` does `mkdir(parents=True, exist_ok=True)` on every access, so every consumer creates what it needs on first use. It only makes the `data/documents/` folders appear before the user goes looking for them.
+
+**Verify after the sync** (this replaces the old hand-create verification):
 
 ```bash
-ls -l "$SRC/src/data/app_paths.py"
+grep -c "def start_dir" src/data/app_paths.py
+# expect 1
+<venv-python> -c "from src.data.app_paths import start_dir; print(start_dir('exports','D.pptx'))"
+# expect a path ending  data/documents/Exports/D.pptx
 ```
 
-**If it exists in `$SRC`:** nothing to do, it rides in with the sync. Skip to 4.3.
-
-**If it does not exist:** create it in the checkout with exactly the contents below. Do this **before** the sync so 4.4's post-sync compare accounts for it. Copy leading spaces exactly; never tabs.
-
-**CREATE `src/data/app_paths.py` (125 lines):**
-
-```python
-"""App-owned documents tree — the single source for where doc files live.
-
-The app organizes user-facing files under one root (default
-``data/documents/`` next to the database — inside data/ so the tree
-survives auto-updates, which replace src/ and config/ wholesale, and stays
-outside the installer's APP_CONTENTS, same rationale as artifact_store):
-
-    Downloads/        easy landing zone for saved reports and files
-    Exports/          generated deliverables (decks, report exports)
-    Zendesk Imports/  drop Zendesk export files here before importing
-    Zendesk Edits/    markdown copies of Zendesk revision drafts
-    Worksheets/       per-job markdown worksheets (solver / research)
-
-Qt-free and stdlib-only so it imports headlessly anywhere (the web_flags
-precedent). The root can be overridden with ``documents.root`` in settings;
-any settings error degrades to the default — path resolution must never
-block boot. All accessors lazily mkdir on access (the artifact_store
-pattern). Anchored to the project root — NEVER the cwd.
-"""
-
-from __future__ import annotations
-
-from pathlib import Path
-
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-_DEFAULT_ROOT = _PROJECT_ROOT / "data" / "documents"
-
-# name -> on-disk folder (human-titled: end users browse this tree)
-SPACES: dict[str, str] = {
-    "downloads": "Downloads",
-    "exports": "Exports",
-    "zendesk_imports": "Zendesk Imports",
-    "zendesk_edits": "Zendesk Edits",
-    "worksheets": "Worksheets",
-}
-
-_README = """This folder is managed by Alma Insights (Content Command Center).
-
-Downloads       - default landing zone for files you save from the app
-Exports         - generated deliverables (decks, report exports)
-Zendesk Imports - put Zendesk export files here, then import them in-app
-Zendesk Edits   - markdown copies of Zendesk revision drafts
-Worksheets      - per-job markdown worksheets
-
-You can move or delete files freely; "Run backfill" in Settings >
-Maintenance recreates the folders and re-exports app content.
-"""
-
-
-def _settings_root() -> Path | None:
-    """documents.root override; any error or blank degrades to None."""
-    try:
-        from src.data.settings_manager import get_section
-        raw = (get_section("documents", {}) or {}).get("root", "")
-        raw = str(raw or "").strip()
-        if not raw:
-            return None
-        return Path(raw).expanduser()
-    except Exception:
-        return None
-
-
-def docs_root() -> Path:
-    root = _settings_root() or _DEFAULT_ROOT
-    root.mkdir(parents=True, exist_ok=True)
-    return root
-
-
-def space_dir(name: str) -> Path:
-    if name not in SPACES:
-        raise ValueError(f"unknown documents space {name!r}")
-    path = docs_root() / SPACES[name]
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def downloads_dir() -> Path:
-    return space_dir("downloads")
-
-
-def exports_dir() -> Path:
-    return space_dir("exports")
-
-
-def zendesk_import_dir() -> Path:
-    return space_dir("zendesk_imports")
-
-
-def zendesk_edits_dir() -> Path:
-    return space_dir("zendesk_edits")
-
-
-def worksheets_dir() -> Path:
-    return space_dir("worksheets")
-
-
-def start_dir(space: str, filename: str | None = None) -> str:
-    """QFileDialog-safe accessor: the space path (optionally joined with a
-    suggested filename), degrading to the bare filename / "" on ANY error so
-    a filesystem problem can never break a save dialog."""
-    try:
-        base = space_dir(space)
-        return str(base / filename) if filename else str(base)
-    except Exception:
-        return filename or ""
-
-
-def ensure_docs_tree() -> list[dict]:
-    """Create the full tree idempotently; report per-space creation.
-
-    Returns [{"name", "path", "created"}] — the Maintenance backfill card's
-    status source. Also drops a README.txt at the root when missing.
-    """
-    report: list[dict] = []
-    root = docs_root()
-    for name, folder in SPACES.items():
-        path = root / folder
-        created = not path.is_dir()
-        path.mkdir(parents=True, exist_ok=True)
-        report.append({"name": name, "path": str(path), "created": created})
-    readme = root / "README.txt"
-    if not readme.exists():
-        readme.write_text(_README, encoding="utf-8")
-    return report
-```
-
-**Verify:** `grep -c "def start_dir" src/data/app_paths.py` → `1`; `<venv-python> -c "from src.data.app_paths import start_dir; print(start_dir('exports','D.pptx'))"` prints a path ending `data/documents/Exports/D.pptx`.
-
-**Do NOT also create** `src/data/docs_backfill.py`, `src/data/solver_ledger.py`, or `migrations/052_solver_ledger.sql`. They are siblings of `app_paths.py` in the same local-only workstream, **nothing committed references them**, and creating them would put unreviewed code and an unshipped migration onto production. `app_paths.py` is the only one anything in this range imports.
+**Its siblings must NOT appear, and must NOT be created.** `src/data/docs_backfill.py`, `src/data/solver_ledger.py` and `migrations/052_solver_ledger.sql` belong to the same local-only workstream on the dev box. They are **still untracked**, they are **correctly absent from the zip**, **nothing committed references them**, and creating them by hand would put unreviewed code and an unshipped migration onto production. `app_paths.py` was the only member of that group anything in this range imports, and it is the only one that got committed. If any of the three shows up in the pre-sync compare, the zip came from a dirty snapshot → **STOP** (§4.5).
 
 ### 4.3 Pre-sync compare (the audit moment — never skip)
 
@@ -408,8 +292,8 @@ grep -c "differ$" ~/alma_port_backup_2026-07-28/pre_sync_compare.txt
 
 **How to read it:**
 
-- **"Files … differ"** and **"Only in `$SRC`"** together are the delta about to be applied. They should account for the 82 paths in Appendix A (minus `src/data/app_paths.py`, which you just created in `$DEST` and so will not appear, and minus any docs-only descendants explained in §4.1). Roughly: ~52 "Only in $SRC", ~30 "differ". **More than that = baseline drift** — the sync heals it, but report every extra path.
-- **"Only in `$DEST`"** = Mac-local files the sync will leave untouched. Expected: `data/` never appears (excluded), `.venv`, editor files. **Exception to inspect: any `$DEST`-only `.py` under `src/` or `web/src/`** is a stray hand-copy that can **shadow imports** after the sync — report these; do not delete on your own. (`src/data/app_paths.py` will show here if you created it in 4.2. That one is expected.)
+- **"Files … differ"** and **"Only in `$SRC`"** together are the delta about to be applied. They should account for the **85 paths in Appendix A**, plus any docs-only descendants explained in §4.1. The rule, not a guess: **every `A` row in Appendix A is a "Only in `$SRC`" line (42 of them, including `src/data/app_paths.py`), and every `M` row is a "differ" line (43 of them).** **More than that = baseline drift** — the sync heals it, but report every extra path.
+- **"Only in `$DEST`"** = Mac-local files the sync will leave untouched. Expected: `data/` never appears (excluded), `.venv`, editor files. **Exception to inspect: any `$DEST`-only `.py` under `src/` or `web/src/`** is a stray hand-copy that can **shadow imports** after the sync — report these; do not delete on your own. `src/data/app_paths.py` must **not** appear here: it now arrives from `$SRC`, and a `$DEST`-only copy would mean somebody hand-created it from an earlier revision of this guide. If you see it there, say so — the `rsync` will overwrite it with the shipped version, which is the correct outcome, but the owner needs to know it happened.
 
 ### 4.4 Sync — one pass
 
@@ -435,12 +319,20 @@ grep -c "^Only in $SRC" ~/alma_port_backup_2026-07-28/post_sync_compare.txt  # e
 **If it IS a git repo**, capture the audit trail of exactly what the sync changed:
 
 ```bash
-git status --porcelain > ~/alma_port_backup_2026-07-28/applied_delta_git_view.txt
-wc -l ~/alma_port_backup_2026-07-28/applied_delta_git_view.txt      # expect 83
+# -uall is load-bearing: without it git COLLAPSES a wholly-new directory
+# (web/src/zendesk/) into a single ?? line and the count will not add up.
+git status --porcelain -uall > ~/alma_port_backup_2026-07-28/applied_delta_git_view.txt
+wc -l ~/alma_port_backup_2026-07-28/applied_delta_git_view.txt      # expect 85
+grep -c '^??' ~/alma_port_backup_2026-07-28/applied_delta_git_view.txt   # expect 42
+grep -c '^ M' ~/alma_port_backup_2026-07-28/applied_delta_git_view.txt   # expect 43
 grep '^??' ~/alma_port_backup_2026-07-28/applied_delta_git_view.txt
 ```
 
-**Expect exactly 83 lines** — the 82 files in `d27eb3e..4ccd321` plus `src/data/app_paths.py` — and exactly one `??` line: `?? src/data/app_paths.py`. Any other `??` line (`docs/pilot/`, `migrations/052_solver_ledger.sql`, `wheel_tail.bin`) means the zip was inflated from a dirty snapshot or copied too broadly — **STOP, do not commit.**
+**Expect exactly 85 lines** — the 85 files in `d27eb3e..a8ead66` — split **42 `??`** (the added files, which are untracked because the Mac's HEAD is still the baseline) and **43 ` M`**. `src/data/app_paths.py` is now one of the 42 `??`, not a special case.
+
+**The count is a rule, not a magic number:** if the Mac's baseline is a *docs-only descendant* of `d27eb3e` (allowed by P1), one or two docs paths may already match and drop out, so a count of 83–85 with the shortfall entirely under `docs/` is fine. **A shortfall anywhere else means a partial sync → re-run 4.4.**
+
+**Any `??` line naming `migrations/052_solver_ledger.sql`, `src/data/docs_backfill.py`, `src/data/solver_ledger.py`, `docs/pilot/` or `wheel_tail.bin`** means the zip was inflated from a dirty snapshot or copied too broadly — **STOP, do not commit.**
 
 ### Gate G5 — integrity spot-checks (binary fidelity + junk awareness)
 
@@ -467,7 +359,7 @@ diff "$SRC/PACKAGES.md"       PACKAGES.md        && echo "PACKAGES.md identical"
 diff "$SRC/web/package.json"  web/package.json   && echo "package.json identical"
 ```
 
-All three must print `identical`. `requirements.txt`, `PACKAGES.md`, `web/package.json`, `web/package-lock.json`, everything under `installer/` and everything under `scan_server/` are untouched across `d27eb3e..4ccd321`.
+All three must print `identical`. `requirements.txt`, `PACKAGES.md`, `web/package.json`, `web/package-lock.json`, everything under `installer/` and everything under `scan_server/` are untouched across the whole of `d27eb3e..a8ead66` (re-verified at the retarget).
 
 **Therefore: no `pip install`. No `npm install`. And never `npm run build` (rule 4).** Every new module in this range is stdlib-only or uses packages the Mac already has. If an import smoke in §6 fails with `ModuleNotFoundError` for a third-party package, that is a **pre-existing** venv problem on the Mac, not something this port introduced — report it rather than installing your way around it.
 
@@ -485,7 +377,7 @@ cd <the alma-insights checkout>
 import importlib
 checks = [
     # (module, why)
-    ("src.data.app_paths",                     "the §4.2 file — Import buttons and PPTX export need it"),
+    ("src.data.app_paths",                     "NEW in 1aa0ef2 (§4.2) — Import buttons and PPTX export need it"),
     ("src.data.zendesk_import",                "NEW — file import + GET-only pull"),
     ("src.data.zendesk_versions",              "NEW — the 053 post-hook imports this at migrate time"),
     ("src.data.chat_tools.zendesk_mirror_tools", "NEW — Renn propose tools"),
@@ -530,11 +422,11 @@ print("ALL IMPORT SMOKES PASSED")
 EOF
 ```
 
-**If `src.data.app_paths` raises `ModuleNotFoundError`:** §4.2 was skipped. Go back and create it — the app will still launch without it, which is exactly what makes this failure dangerous.
+**If `src.data.app_paths` raises `ModuleNotFoundError`:** the zip predates `1aa0ef2` or the sync was partial. **Do not hand-write the module** — go back to §4.1/§4.2 and get a zip at `a8ead66` or later, then re-run 4.4. The app will still launch without it, which is exactly what makes this failure dangerous.
 
 **If `WRITE METHOD STILL PRESENT` fires:** a stale `src/data/zendesk_client.py` survived the sync. This is the dangerous direction of a partial port (§12.B). Re-run 4.4 and 4.5.
 
-**If `ZendeskWriteBlocked missing` or a `READ LANE MISSING` fires:** the tree is not at `4ccd321` — re-run Phase 2 steps 4.4 and 4.5.
+**If `ZendeskWriteBlocked missing` or a `READ LANE MISSING` fires:** the tree is not at `a8ead66` — re-run Phase 2 steps 4.4 and 4.5.
 
 ---
 
@@ -657,10 +549,12 @@ QT_QPA_PLATFORM=offscreen <venv-python> -m pytest \
 QT_QPA_PLATFORM=offscreen <venv-python> -m pytest \
   tests/test_publish_body_parity.py tests/test_chat_review_panel.py \
   tests/test_enablement_web_flag.py tests/test_web_guardrails.py -q
-# expect: 165 passed   (~50 s)   — publish-body parity, approval gate, flag, no-innerHTML CI rule
+# expect: 166 passed   (~50 s)   — publish-body parity, approval gate, flag, no-innerHTML CI rule
 ```
 
-**Total: 664 passing.** Report the per-group counts in your final summary.
+**Total: 665 passing.** Report the per-group counts in your final summary.
+
+Group 4 is **166, not the 165** an earlier revision of this guide quoted: commit `a8ead66` adds exactly one test to `tests/test_publish_body_parity.py` (that file alone now reports **28 passed**). Groups 1–3 are unchanged by the retarget — none of the four commits after `4ccd321` touched their files.
 
 Optional fifth group — the help-text corpus. It is **known-red for reasons unrelated to this port**; include it only if you want the coverage, and expect exactly these three failures:
 
@@ -674,7 +568,7 @@ QT_QPA_PLATFORM=offscreen <venv-python> -m pytest \
 ### How to read the results — non-passes that are NOT port bugs
 
 - **`test_this_build_is_version_1_0_0`** and **`test_sidebar_and_settings_show_the_same_v_prefixed_version`** — `assert '1.0.7' == '1.0.0'`. The help corpus still claims 1.0.0. Stale test text, predates this range.
-- **`test_export_asks_where_to_put_the_file_and_cancelling_writes_nothing`** — `assert '…/data/documents/Exports/D.pptx' == 'D.pptx'`. This test fails **because `src/data/app_paths.py` is present**, which is exactly what §4.2 requires. It is the expected cost of fixing the silent Import buttons. Known-red; do not "fix" it by deleting the module.
+- **`test_export_asks_where_to_put_the_file_and_cancelling_writes_nothing`** (in `tests/test_help_claims_create.py`) — `assert '…/data/documents/Exports/D.pptx' == 'D.pptx'`. This test fails **because `src/data/app_paths.py` is present**, and as of `1aa0ef2` it is *always* present — it ships in the zip. The test text is stale, not the code. It is the expected cost of the silent-Import-buttons fix. Known-red; do not "fix" it by deleting the module.
 - **`tests/test_zendesk_readonly_guard.py` failing is never acceptable** (rule 7). It means a Zendesk write survived on the Mac. Re-run Phase 2 and the §6 smokes.
 - Machine-state skips (no credentials, no `claude` CLI) are expected — this port needs neither.
 - **Anything else red → a real problem.** Report it with the full pytest output; do not patch tests.
@@ -769,7 +663,7 @@ Observe, in order:
 Restart the app — the flag is read at page construction. Then:
 
 1. Enablement → Zendesk renders the **web** workspace: one compact 52px header row, an article list, and a Mirror menu. A blank white pane here → §9's probe and `web_diag`, not the database.
-2. Mirror menu → **Import file** → pick any `.html` or `.json`. **A dialog must appear.** If the button does nothing at all — no dialog, no error, no log line — that is §4.2: `src/data/app_paths.py` is missing. It is the only tell.
+2. Mirror menu → **Import file** → pick any `.html` or `.json`. **A dialog must appear.** If the button does nothing at all — no dialog, no error, no log line — that is §4.2: `src/data/app_paths.py` is missing, meaning a pre-`1aa0ef2` zip or a partial sync. It is the only tell.
 3. Import a file → it appears in the article list; search finds a phrase from its body.
 4. Open an article → the **rendered** body is primary, raw HTML is a collapsed disclosure.
 5. Copy any content → **a native dialog appears showing the exact bytes** before anything reaches the clipboard. No dialog, no clipboard write. That is the invariant from `5743ef3`/`45aab99`, working.
@@ -809,7 +703,8 @@ Things you will see and should leave exactly as they are.
 | The classic Zendesk tab's attributes are still called `_a_push` / `_m_push`, and its signals `article_push` / `macro_push` | Deliberately kept so host wiring and existing assertions keep resolving. They now mean "mark handled locally". Renaming them breaks `tests/test_zendesk_content.py`. |
 | `publish_article_draft` / `publish_macro_draft` still take a `zendesk_client=` kwarg and ignore it | Source compatibility, on purpose. They are local bookkeeping now and report `remote_write: False`. |
 | Grep hits for `create_confirm_write`, `_emit_confirm_write`, `_enqueue_write`, `execute_write`, `cancel_write`, `update_article_draft`, `update_macro_draft` | **Unrelated names.** They are not Zendesk writes. Do not "clean them up". |
-| `tests/test_export_asks_where_to_put_the_file_and_cancelling_writes_nothing` failing | Expected once `app_paths.py` is present (§8). |
+| `tests/test_export_asks_where_to_put_the_file_and_cancelling_writes_nothing` failing | Expected — `app_paths.py` ships as of `1aa0ef2`, and this test's expected string predates it (§8). |
+| `data/documents/` (Downloads, Exports, Zendesk Imports, Zendesk Edits, Worksheets, `README.txt`) appearing after first launch | `main.py` creates it at boot (`30fb086`). It lives under `data/`, so rule 1 applies: leave it alone. It would have been created lazily on first use anyway. |
 | Preview iframes that render a blank article while the rest of the tab works | The sandboxed no-scripts iframe, not a WebEngine failure. Untrusted article HTML reaches the page only through `sanitize_html` into `sandbox=""`. |
 | `Failed to create GLES3 context` in the console | Benign offscreen/GPU noise on macOS. |
 | Windows console-flash `subprocess` sites in `gemini_client.py` / `gemini_setup.py` | Cosmetic, Windows-only, unrelated to this range. |
@@ -908,7 +803,7 @@ Its macOS probes are `page_size`, `rosetta` (`sysctl.proc_translated`, fix named
 | Zendesk tab blank / white | macOS WebEngine, not this port | `scripts/web_diag.py`, then §9's probe. **Do not touch the DB.** |
 | Whole app blank at launch | `ui.web_home` got turned on — not part of this port | Set it back to `off` |
 | Tab renders but article/macro lists are empty | 051 didn't land, or FTS is desynced | §7 verification → §16 R2 |
-| **Import file / Import folder does nothing at all** | **`src/data/app_paths.py` is missing** | §4.2. Nothing is logged; this is the only tell. |
+| **Import file / Import folder does nothing at all** | **`src/data/app_paths.py` is missing** — a pre-`1aa0ef2` zip, or a partial sync | §4.2. Nothing is logged; this is the only tell. Re-check the archive comment, then re-run 4.4 / 4.5. |
 | PowerPoint deck export raises | Same root cause | §4.2 |
 | Guru publish does nothing | `PublishConfirmHost` not injected — stale `src/ui/main_window.py` | §12.D; re-run 4.4 / 4.5 |
 | Guru publish fails at the API | `publish_collection_id` is still `col-1` | §13.2 |
@@ -979,6 +874,8 @@ Things the sync will visibly land that are not defects. Report, do not fix.
 - The four `assets/help/*.md` changes are **not optional cosmetics.** `tests/test_help_claims_create.py`, `test_help_claims_troubleshooting.py` and `test_help_claims_reference.py` assert their exact claims, and they feed the in-app Help Center corpus. Skipping them would leave the Mac's Help articles telling the user the app can push to Zendesk when it structurally cannot.
 - `web/src/zendesk/demo.js` (391 lines) is a fixture, not dead code — it is what §9's headless probe renders.
 - `fabb4be` shows up in the history as a 5-file cosmetic refactor you never handle individually. Expected.
+- **`docs/ZENDESK_BLOCK_PORT_GUIDE.md` — this file — is itself one of the 85 paths.** It landed in `24c8d0f`. Seeing it in the compare and in `git status` is correct, not a sign of a wrong snapshot (§4.1).
+- **`main.py` gains 9 fenced lines** (`30fb086`) that call `app_paths.ensure_docs_tree()` after the splash. It is the only root-level file in the range. Not load-bearing (§4.2) — but it *is* a modified file, so it must land like any other.
 
 ---
 
@@ -1006,9 +903,11 @@ Ordered least- to most-destructive. Note the asymmetry: **code rollback is cheap
 
 ```bash
 rm -f src/data/app_paths.py migrations/051_zendesk_mirror.sql migrations/053_zendesk_versions.sql
-git status --porcelain                          # expect empty
+git status --porcelain                          # expect only untracked docs strays (see below)
 git diff pre-zendesk-port-2026-07-28 --stat     # expect empty
 ```
+
+`git diff` against the rescue branch is the authoritative check and **must be empty**. `git status` will still list `?? docs/ZENDESK_BLOCK_PORT_GUIDE.md` and `?? docs/ZENDESK_GURU_IMPLEMENTATION_NOTES.md` — both are added-in-range docs that the baseline `rsync` cannot remove. They are inert text; delete them or leave them, but do not let them make you think R1 failed.
 
 **Deleting the two `.sql` files does not undo them.** The rows stay in `schema_migrations` and the tables and columns stay in the database. That is harmless — baseline code never reads them — and it means R1 is *not* a schema rollback.
 
@@ -1050,35 +949,39 @@ Report each line as ✅ / ❌ / skipped-with-reason.
 1. **Baseline confirmed** — Phase 0 P1 showed `d27eb3e` (or a docs-only descendant), P2 showed all four pre-051 tables and max migration `050`.
 2. **Backups exist** — `~/alma_port_backup_2026-07-28/` contains `pre_sync_tree.tgz`, `settings.yaml`, `pre_sync_compare.txt`, `post_sync_compare.txt`; `data/local_warehouse.pre051.db` exists; the `pre-zendesk-port-2026-07-28` branch exists (or the tar is explicitly the sole rollback).
 3. **Environment gates green** — G1 `arm64 16384`, G2 `FTS5 OK`, G3 PySide6 quartet imports, G4 `web_diag` exit 0.
-4. **Sync is byte-identical** — 4.5 shows **zero** "differ" and **zero** "Only in `$SRC`" lines; `git status --porcelain | wc -l` = **83** with exactly one `??` (`src/data/app_paths.py`).
+4. **Sync is byte-identical** — 4.5 shows **zero** "differ" and **zero** "Only in `$SRC`" lines; `git status --porcelain -uall | wc -l` = **85** (42 `??` + 43 ` M`), with any shortfall confined to `docs/`, and **no** `??` naming `052_solver_ledger.sql`, `docs_backfill.py`, `solver_ledger.py`, `docs/pilot/` or `wheel_tail.bin`.
 5. **Integrity gate G5 green** — `dist/index.html` is exactly **333,921 bytes**, `qwebchannel.js` present, `__almaZendeskMounted` in the bundle, `051` and `053` present, **`052` absent**.
 6. **No dependency work happened** — §5's three `diff`s all printed `identical`; no `pip install`, no `npm install`, no `npm build` was run.
-7. **All import smokes passed** — including `ALL IMPORT SMOKES PASSED`, the read-only structural assertions, and `src.data.app_paths`.
+7. **All import smokes passed** — including `ALL IMPORT SMOKES PASSED`, the read-only structural assertions, and `src.data.app_paths` (which shipped in the zip — it was **not** hand-created).
 8. **Migrations applied via the migrator** — `schema_migrations` tail is `[…049, 050, 051_zendesk_mirror.sql, 053_zendesk_versions.sql]`; 6 tables and 6 triggers present; 4 new `zendesk_articles` columns; the import+FTS smoke returned `imported: 1` with a **non-empty** `fts` list.
-9. **Test gates** — the four groups reported **145 / 252 / 102 / 165 = 664 passing**, with per-group counts recorded. `tests/test_zendesk_readonly_guard.py` **passed**.
+9. **Test gates** — the four groups reported **145 / 252 / 102 / 166 = 665 passing**, with per-group counts recorded. `tests/test_zendesk_readonly_guard.py` **passed**.
 10. **Headless SPA probe** — `mounted=True`, `innerText_len` > 200, `exit=0`.
 11. **In-app smokes** — splash reads `Schema v53`; app reaches Home; existing surfaces unchanged; the classic Zendesk tab shows **"Copy for Zendesk" + "Mark as copied"** with the read-only notice; Help shows **62 articles**.
 12. **Settings untouched** — `diff data/settings.yaml ~/alma_port_backup_2026-07-28/settings.yaml` is empty; `~/.alma-insights/ui_state.json` unchanged. (The warehouse differs by the new tables — that is expected, and it is not "destroyed settings".)
 13. **`publish_collection_id` checked and its value reported to the owner** — not `col-1`, not blank; **and not changed by you**.
 14. **Phase 8b done** — `git checkout enablement-content-tabs` completed without overwriting anything; `git log --oneline -3` tip matches the zip; the rescue branch is still in place; nothing was pushed.
 
-If every line is ✅, the Mac is functionally identical to the Windows dev box at `4ccd321` — with its own settings intact, the entire new Zendesk workspace **dormant behind its own flag**, no credentials required, and the owner holding every switch. Flipping `enablement.web_tabs` to `zendesk` is then a separate, reversible, one-line decision (§13.1), and §16 R0 undoes it in one restart.
+If every line is ✅, the Mac is functionally identical to the Windows dev box at `a8ead66` — with its own settings intact, the entire new Zendesk workspace **dormant behind its own flag**, no credentials required, and the owner holding every switch. Flipping `enablement.web_tabs` to `zendesk` is then a separate, reversible, one-line decision (§13.1), and §16 R0 undoes it in one restart.
 
 ---
 
-## Appendix A — Full file manifest (82 files at `4ccd321`, grouped)
+## Appendix A — Full file manifest (85 files at `a8ead66`, grouped)
 
 This is a **VERIFICATION checklist** — it is what the Phase-2 pre-sync compare should show. It is **NOT** a list of manual copies (rule 9). **A** = added, copies wholesale, nothing to reconcile. **M** = modified, the Mac copy may have diverged.
 
-**Plus one file not in this manifest:** `src/data/app_paths.py`, created by hand in §4.2 unless it appears in the zip. That is the 83rd path in the `git status` count.
+**Everything is in this manifest.** There is no longer an off-manifest hand-created file: `src/data/app_paths.py` is listed under `src/data` below, and it ships. Totals: **42 A + 43 M = 85**.
 
 ### migrations — 2 files, both A
 
 `051_zendesk_mirror.sql` (A, 137) · `053_zendesk_versions.sql` (A, 59)
 
-### src/data — 4 A, 10 M
+### root — 1 M
 
-**A:** `zendesk_import.py` (429) · `zendesk_versions.py` (284) · `chat_tools/zendesk_mirror_tools.py` (537)
+`main.py` (+9/−0 — the fenced `ensure_docs_tree()` call from `30fb086`; not load-bearing, §4.2)
+
+### src/data — 4 A, 11 M
+
+**A:** `zendesk_import.py` (429) · `zendesk_versions.py` (284) · `chat_tools/zendesk_mirror_tools.py` (537) · **`app_paths.py` (124 — new in `1aa0ef2`; §4.2)**
 **M:** `html_sanitize.py` (+1174/−7) · `zendesk_store.py` (+967/−102) · `enablement_store.py` (+311/−18) · `chat_tools/enablement_tools.py` (+143/−85) · `zendesk_client.py` (+116/−74) · `chat_tools/registry.py` (+35/−4) · `enablement_sim.py` (+27/−19) · `guru_content_pipeline.py` (+23/−8) · `chat_tools/artifact_tools.py` (+12/−2) · `html_markdown.py` (+6/−1) · `INDEX.md` (+50)
 
 ### src/services — 1 A, 3 M
@@ -1103,7 +1006,7 @@ This is a **VERIFICATION checklist** — it is what the Phase-2 pre-sync compare
 
 ### tests — 10 A, 7 M
 
-**A:** `test_zendesk_bridge.py` (4,161) · `test_chat_review_panel.py` (1,540) · `test_zendesk_web_tab.py` (815) · `test_zendesk_mirror_tools.py` (773) · `test_zendesk_import.py` (763) · `test_zendesk_versions.py` (567) · `test_zendesk_readonly_guard.py` (505) · `test_publish_body_parity.py` (500) · `test_zendesk_mirror_schema.py` (499) · `test_zendesk_client_readonly.py` (253)
+**A:** `test_zendesk_bridge.py` (4,161) · `test_chat_review_panel.py` (1,540) · `test_zendesk_web_tab.py` (815) · `test_zendesk_mirror_tools.py` (773) · `test_zendesk_import.py` (763) · `test_publish_body_parity.py` (**585** — 500 at `4ccd321`, +85 in `a8ead66`; 28 tests) · `test_zendesk_versions.py` (567) · `test_zendesk_readonly_guard.py` (505) · `test_zendesk_mirror_schema.py` (499) · `test_zendesk_client_readonly.py` (253)
 **M:** `test_zendesk_content.py` (+210/−41) · `test_help_claims_create.py` (+140/−146) · `test_workbench_bridge.py` (+66/−5) · `test_enablement_web_flag.py` (+43) · `test_help_claims_troubleshooting.py` (+39/−6) · `test_help_claims_reference.py` (+6/−6) · `test_web_guardrails.py` (+5)
 
 ### docs, help, CLAUDE.md — 1 A, 6 M
