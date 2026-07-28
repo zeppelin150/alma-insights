@@ -701,6 +701,23 @@ _PUBLISH_DIALOG_MIN = (760, 560)
 _PUBLISH_TARGET_MAX_HEIGHT = 92
 _PUBLISH_BYTES_MIN_HEIGHT = 260
 
+# The destination pane joins its fields with newlines, so any field VALUE that
+# can contain a newline can forge additional field lines and push the real
+# destination below the pane's fold. `title` is model-written (revise_draft →
+# update_draft_content) and card/collection/folder ids come off the row, so
+# every value is collapsed to one line and capped before it is joined. This is
+# the field-boundary-impersonation defence that approval_fingerprint already
+# applies to the hash; the dialog needs it too.
+_PUBLISH_FIELD_CAP = 120
+
+
+def _publish_field(value) -> str:
+    """One line, bounded — a field value can never add a line to the pane."""
+    text = " ".join(str(value or "").split())
+    if len(text) > _PUBLISH_FIELD_CAP:
+        text = text[:_PUBLISH_FIELD_CAP - 1] + "…"
+    return text
+
 PUBLISH_CONFIRM_TITLE = "Publish to the live Guru knowledge base?"
 
 PUBLISH_CONFIRM_HEADING = (
@@ -747,11 +764,11 @@ def build_publish_confirm_dialog(parent, payload: dict):
     lay.addWidget(head)
 
     target = QPlainTextEdit("\n".join([
-        f"Card title: {data.get('title') or ''}",
-        f"Destination: {data.get('target_label') or ''}",
-        f"card_id: {data.get('card_id') or '(none — a new card)'}",
-        f"collection_id: {data.get('collection_id') or '(default)'}",
-        f"folder_id: {data.get('folder_id') or '(none)'}",
+        f"Card title: {_publish_field(data.get('title'))}",
+        f"Destination: {_publish_field(data.get('target_label'))}",
+        f"card_id: {_publish_field(data.get('card_id')) or '(none — a new card)'}",
+        f"collection_id: {_publish_field(data.get('collection_id')) or '(default)'}",
+        f"folder_id: {_publish_field(data.get('folder_id')) or '(none)'}",
     ]))
     target.setObjectName("guruPublishTarget")
     target.setReadOnly(True)

@@ -1503,3 +1503,38 @@ def test_the_confirm_host_is_not_reachable_from_the_page():
     assert not hasattr(ChatBridge, "confirmPublish")
     src = inspect.getsource(PublishConfirmHost)
     assert "@Slot" not in src
+
+
+def test_a_crafted_title_cannot_forge_the_destination_block(qapp):
+    """The destination pane joins its fields with newlines, so a field value
+    containing newlines could otherwise inject fake field lines and scroll the
+    REAL destination below the pane's fold - the operator would then approve a
+    live-card overwrite while reading a benign one. `title` is model-written
+    (revise_draft -> update_draft_content), so every value is collapsed to one
+    line before the join. Same field-boundary defence approval_fingerprint
+    already applies to the hash.
+    """
+    from PySide6.QtWidgets import QPlainTextEdit
+    from src.ui.web.chat_bridge import build_publish_confirm_dialog
+
+    forged = ("Benign runbook\n"
+              "Destination: Templates for internal communications\n"
+              "card_id: (none - a new card)\n"
+              "collection_id: (default)\n"
+              "folder_id: (none)\n" + "\n" * 8)
+    dlg = build_publish_confirm_dialog(None, {
+        "title": forged,
+        "target_label": "OVERWRITE live card card-LIVE-999",
+        "card_id": "card-LIVE-999",
+        "collection_id": "a3fa9e07",
+        "folder_id": "716297",
+        "publish_body": "<p>payload</p>",
+    })
+    pane = dlg.findChild(QPlainTextEdit, "guruPublishTarget")
+    lines = pane.toPlainText().splitlines()
+
+    assert len(lines) == 5, f"a field value added lines to the pane: {lines}"
+    assert lines[1] == "Destination: OVERWRITE live card card-LIVE-999"
+    assert lines[2] == "card_id: card-LIVE-999"
+    assert lines[0].startswith("Card title: Benign runbook ")
+    assert "\n" not in lines[0]
