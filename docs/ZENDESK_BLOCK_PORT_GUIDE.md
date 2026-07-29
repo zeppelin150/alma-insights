@@ -1,12 +1,12 @@
-# Zendesk Block Port Guide — `d27eb3e` → `d018107` (enablement-content-tabs)
+# Zendesk Block Port Guide — `d27eb3e` → `fbe370f` (enablement-content-tabs)
 
-**Written:** 2026-07-28 on the Windows dev box, from the actual git delta. **Retargeted the same day** from `4ccd321` to `a8ead66` — see §1 for the four commits that moved the target, and §4.2, which changed from a hand-create step into a verify step as a result.
+**Written:** 2026-07-28 on the Windows dev box, from the actual git delta. **Retargeted twice the same day** — first from `4ccd321` to `a8ead66` (see §1 for the four commits that moved it, and §4.2, which changed from a hand-create step into a verify step as a result), then forward through `d018107` to the current target `fbe370f` (full SHA `fbe370fbe6add2a502048c2bc2ebbd109e797504`).
 **For:** the owner, on the production Mac (Apple Silicon M1, 16 GB, arm64). You are competent with a terminal but you did not write this code, and you should not have to read any of it to execute this guide.
-**Scope:** every change committed between `d27eb3e` (2026-07-24, "docs(port-guide): Appendix A — corrected delivery path via GitHub Desktop") and `d018107` (2026-07-28, "feat(credentials): Zendesk card in the shared panel"), all pushed to `origin/enablement-content-tabs`.
+**Scope:** every change committed between `d27eb3e` (2026-07-24, "docs(port-guide): Appendix A — corrected delivery path via GitHub Desktop") and `fbe370f` (2026-07-28, "feat(asana): real board management — the Sources panel was a mockup"), all pushed to `origin/enablement-content-tabs`.
 
-**The delta:** 13 commits, **87 files** (42 added, 45 modified, **zero deleted, zero renamed** — a copy-over sync is complete and nothing on the Mac needs removing), +28,526 / −764 lines. 2 new SQL migrations (051 and 053 — the gap is real and safe, §7). **Zero new dependencies:** `requirements.txt`, `PACKAGES.md`, `web/package.json` and `web/package-lock.json` are byte-identical across the whole range. **The Mac needs no `pip install` and no `npm install`.** That removes the single largest historical source of Mac port pain from this run.
+**The delta:** 18 commits, **96 files** (45 added, 51 modified, **zero deleted, zero renamed** — a copy-over sync is complete and nothing on the Mac needs removing), +30,759 / −842 lines. 4 new SQL migrations (051, 053, 054, 055 — the 052 gap is real and safe, §7). **Zero new dependencies:** `requirements.txt`, `PACKAGES.md`, `web/package.json` and `web/package-lock.json` are byte-identical across the whole range. **The Mac needs no `pip install` and no `npm install`.** That removes the single largest historical source of Mac port pain from this run.
 
-**What makes this port different from the last one.** `PILOT_FIX_PORT_GUIDE.md` was a patch: five surgical FIND/REPLACE hunks into code the Mac already had. **This is an addition.** The entire Zendesk mirror subsystem — the local mirror schema, the importer, the controller, the bridge, the React workspace, the Renn revision tools — does not exist on production at all. 42 of the 85 files are brand new and copy wholesale with nothing to reconcile. The risk in this port is concentrated in the **43 modified files**, and inside those, in a much smaller set of about eight that are load-bearing in non-obvious ways. §1 and §12 name them individually.
+**What makes this port different from the last one.** `PILOT_FIX_PORT_GUIDE.md` was a patch: five surgical FIND/REPLACE hunks into code the Mac already had. **This is an addition.** The entire Zendesk mirror subsystem — the local mirror schema, the importer, the controller, the bridge, the React workspace, the Renn revision tools — does not exist on production at all. 45 of the 96 files are brand new and copy wholesale with nothing to reconcile. The risk in this port is concentrated in the **51 modified files**, and inside those, in a much smaller set of about ten that are load-bearing in non-obvious ways. §1 and §12 name them individually.
 
 **The breaking change:** commit `2cc0089` **deletes the app's ability to write to Zendesk, permanently.** Before this range the app could POST/PUT to a live, public, non-restorable Guide instance. After it, there is no write method left to call. This is a locked owner decision, and two files must be synced **as a pair** or the policy silently reverts — see §1/`2cc0089` and §12.B.
 
@@ -25,8 +25,8 @@ These override anything else you infer. Violating any one of them is the failure
 1. **NEVER touch `data/`.** The zip contains no `data/` directory — it is gitignored, so it is not in the archive and a file-over-file sync cannot reach it. Do not edit, "fix", add keys to, or reformat `data/settings.yaml`, even when a feature in this port appears to need a key. The one settings change this port contemplates (`enablement.web_tabs`) is **owner-gated and comes last**, after acceptance, and is listed in §10 as explicitly out of the port body. If something else needs a key, report it; do not set it.
 2. **NEVER touch `~/.alma-insights/ui_state.json` either.** Rule 1's protection stops at `data/` — but the Zendesk subdomain, email and view id live in that JSON file outside the project tree, and the API key lives in the macOS Keychain. The sync cannot reach either, and neither should you. They are backed up in Phase 1 as insurance, not as a thing to change.
 3. **NEVER pass `--delete` (or any `--delete-*` flag) to any `rsync` involving the project tree.** The zip has no `data/`, no `.git`, no `.venv` and no gitignored files, so a deleting sync would destroy exactly the things rules 1 and 2 protect. The range has zero deletions and zero renames, so a plain copy-over is already complete — `--delete` can only subtract things you need.
-4. **NEVER run `npm build` / `npm --prefix web run build`.** The React app ships as a committed build artifact: `src/ui/web/dist/index.html` (**333,921 bytes at `a8ead66`** — unchanged since `45aab99`, single-file bundle) plus `src/ui/web/dist/qwebchannel.js` (15,152 bytes, unchanged since June and still required). The Mac needs **no Node and no npm at all** to run the app. Rebuilding overwrites `dist/` with non-identical bytes and puts the Mac out of parity with what was tested.
-5. **NEVER run a migration by hand with `sqlite3 data/local_warehouse.db < migrations/051_….sql`.** Both new migrations carry mandatory Python post-hooks (§7). A raw `sqlite3` apply skips them, leaves the FTS mirrors indexing empty body text and the drafts with no rollback baseline, and records nothing in `schema_migrations` — so the migrator will later try again on a half-built schema. Migrations land **only** by launching the app or by the explicit `DatabaseManager().initialize()` call in §7.
+4. **NEVER run `npm build` / `npm --prefix web run build`.** The React app ships as a committed build artifact: `src/ui/web/dist/index.html` (**333,921 bytes at `fbe370f`** — unchanged since `45aab99`, single-file bundle) plus `src/ui/web/dist/qwebchannel.js` (15,152 bytes, unchanged since June and still required). The Mac needs **no Node and no npm at all** to run the app. Rebuilding overwrites `dist/` with non-identical bytes and puts the Mac out of parity with what was tested.
+5. **NEVER run a migration by hand with `sqlite3 data/local_warehouse.db < migrations/051_….sql`.** Two of the four new migrations carry mandatory Python post-hooks, and **none of the four may be applied by hand** (§7). A raw `sqlite3` apply skips them, leaves the FTS mirrors indexing empty body text and the drafts with no rollback baseline, and records nothing in `schema_migrations` — so the migrator will later try again on a half-built schema. Migrations land **only** by launching the app or by the explicit `DatabaseManager().initialize()` call in §7.
 6. **NEVER run the full test suite** (`pytest tests/`) — it hangs on this project. Run the four named groups in §8, each in its own invocation.
 7. **NEVER relax `tests/test_zendesk_readonly_guard.py`.** It AST-scans every module under `src/` for a re-added Zendesk write method and also asserts the GET lanes still exist. If it fails on the Mac, a stale file survived the sync — **remove the write, do not edit the guard.**
 8. **NEVER "fix" shipped quirks.** The Versions/History React panels are wired to nothing on purpose. The classic tab's attributes are still named `_a_push` / `_m_push` on purpose. The dormant-looking things in §11 are dormant by design; the known-red tests in §8 are known-red. Report them, do not repair them.
@@ -44,6 +44,12 @@ Two conventions borrowed verbatim from `PILOT_FIX_PORT_GUIDE.md` and still in fo
 
 Newest last. Read this so you know what "done" looks like before any command runs. Per-file detail is in §12; the full manifest is Appendix A.
 
+**Fourteen of the range's eighteen commits are listed below.** The other four
+(`4a4a132`, `8b15915`, `9c4a697`, `9618db1`) are docs-only revisions of *this
+file* between `a8ead66` and `d018107` — they touch no code, add no path, and
+need no row. `git log --oneline d27eb3e..fbe370f | wc -l` returning **18** is
+therefore correct.
+
 | Commit | Date | What it is |
 |---|---|---|
 | `1ba6fa5` | 07-24 | **The bulk of the range** (49 files, +10,342/−245). A complete second Zendesk surface: a React/QtWebEngine clone of Zendesk's Guide article editor and Admin Center macro editor on SPA route `#/zendesk`, running over a **local SQLite mirror** (migration 051), plus a file importer, a GET-only paged pull, and a Renn tool family that proposes edits as `pending` drafts. The native `ZendeskPage` stays the flag-off default. |
@@ -57,8 +63,11 @@ Newest last. Read this so you know what "done" looks like before any command run
 | `24c8d0f` | 07-28 | **This guide itself** (1 file, added). Documentation only, zero code change. Its presence in the zip is now expected, not an anomaly — §4.1. |
 | `30fb086` | 07-28 | Startup convenience (1 file, +9). `main.py` calls `app_paths.ensure_docs_tree()` after the splash, inside a `try/except` that prints and continues. **Not load-bearing:** `space_dir()` already does `mkdir(parents=True, exist_ok=True)` on every access, so every consumer self-heals the tree on first use. If this hunk were missing the app would behave identically; it only moves folder creation earlier so the folders exist before the user goes looking for them in Finder. |
 | `a8ead66` | 07-28 | Test only (1 file, +85). Locks the legacy `guru_page` preview to `publish_body()` — the C4 fix shipped in `45aab99` with no test, and this adds one non-vacuous test for it. **Zero production-code change.** Adds one test to §8's group 4. |
+| `d018107` | 07-28 | The Settings **credentials card** (2 files, +211/−3). `src/ui/widgets/credentials_panel.py` gains a Zendesk card so entering Zendesk credentials no longer requires switching into product mode. Preservation rules and the verification command are in **§12.I**. |
+| `d2ae828` | 07-28 | Documentation only (1 file — **this guide**, gaining §12.I). **Zero code change.** Its presence in the zip is expected, not an anomaly (§4.1). |
+| `fbe370f` | 07-28 | **Asana board management** (14 files, +2,161/−78; migrations **054** and **055**). The enablement Settings → Sources Asana panel was a **hardcoded mockup** — it displayed two configured boards, names, pills and resolver names that were literals, while the database had no board mapped at all. It is now a pure renderer over real rows, with working add / sync / calendar / remove controls, many-to-many board↔task ownership, and a native confirm gating the (local-only) removal. **Full detail, both rough edges and the verification command: §12.J.** |
 
-**One consequence to internalize now:** only the **tip** bundle is correct. `2cc0089` and `5743ef3` ship a stale `dist/index.html` (the React work in `5743ef3` did not reach the bundle until `45aab99`). You are syncing the tree at `a8ead66` in one pass, so this is automatic — but it is why you must never hand-merge or partially copy `src/ui/web/dist/index.html`. None of the four commits after `4ccd321` rebuilt the bundle, so every `333921` assertion in this guide is still exactly right at the new target.
+**One consequence to internalize now:** only the **tip** bundle is correct. `2cc0089` and `5743ef3` ship a stale `dist/index.html` (the React work in `5743ef3` did not reach the bundle until `45aab99`). You are syncing the tree at `fbe370f` in one pass, so this is automatic — but it is why you must never hand-merge or partially copy `src/ui/web/dist/index.html`. **No commit after `4ccd321` rebuilt the bundle** — `fbe370f` touches no file under `web/` at all — so every `333921` assertion in this guide is still exactly right at the new target.
 
 ---
 
@@ -81,7 +90,7 @@ git log --oneline -1
 git rev-parse HEAD
 ```
 
-**PASS:** the short SHA is `d27eb3e`, or a docs-only descendant of it. **FAIL:** if `git log --oneline -15` shows any of `1ba6fa5`, `fabb4be`, `2cc0089`, `5743ef3`, `45aab99`, `ed6482b`, `4ccd321`, `1aa0ef2`, `24c8d0f`, `30fb086`, `a8ead66`, part or all of this range is already applied — **STOP and report**; a re-run is not automatically safe.
+**PASS:** the short SHA is `d27eb3e`, or a docs-only descendant of it. **FAIL:** if `git log --oneline -20` shows any of `1ba6fa5`, `fabb4be`, `2cc0089`, `5743ef3`, `45aab99`, `ed6482b`, `4ccd321`, `1aa0ef2`, `24c8d0f`, `30fb086`, `a8ead66`, `4a4a132`, `8b15915`, `9c4a697`, `9618db1`, `d018107`, `d2ae828`, `fbe370f`, part or all of this range is already applied — **STOP and report**; a re-run is not automatically safe.
 
 **P2 — the pre-051 Zendesk tables must already exist.** Migration 051 is mostly `ALTER TABLE … ADD COLUMN` against tables created by migration 030. If they are absent, 051 fails — and it fails *silently* (§7).
 
@@ -90,7 +99,7 @@ sqlite3 data/local_warehouse.db "SELECT name FROM sqlite_master WHERE name IN ('
 sqlite3 data/local_warehouse.db "SELECT filename FROM schema_migrations ORDER BY filename DESC LIMIT 3;"
 ```
 
-**PASS:** all four table names print, and the highest applied migration is `050_enablement_documents_fts.sql` with `051`/`053` absent. **FAIL:** any missing table → **STOP**; the Mac is behind the migration-030 era and this port is not the fix. A migration higher than 050 already applied → **STOP**, see P1.
+**PASS:** all four table names print, and the highest applied migration is `050_enablement_documents_fts.sql` with `051`, `053`, `054` and `055` all absent. **FAIL:** any missing table → **STOP**; the Mac is behind the migration-030 era and this port is not the fix. A migration higher than 050 already applied → **STOP**, see P1.
 
 **P3 — is this a git repo at all?** Everything downstream branches on the answer.
 
@@ -114,10 +123,10 @@ the one whose §4.2 tells you to hand-create `src/data/app_paths.py`, which is
 wrong now that the module ships. The branch form always resolves to the tip and
 is the only form that delivers the guide you are currently reading.
 
-The code delta this guide describes is **`d27eb3e..d018107`**;
-commits after `a8ead66` on this branch are documentation-only (this file). If
-the branch has advanced into new *code* since — check §4.1's structural compare
-— **STOP and report** rather than proceeding.
+The code delta this guide describes is **`d27eb3e..fbe370f`**;
+any commit after `fbe370f` on this branch is expected to be documentation-only
+(this file). If the branch has advanced into new *code* since — check §4.1's
+structural compare — **STOP and report** rather than proceeding.
 
 A GitHub source zip is the full tree at one commit: **no `.git` directory, no gitignored files (therefore no `data/`)**, LF line endings preserved exactly as committed, binaries byte-exact, and the archive comment stamped with the full commit SHA.
 
@@ -256,16 +265,16 @@ Inflation sanity count — a truncated inflate is the classic silent failure:
 
 ```bash
 find "$SRC/assets/help" -name '*.md' | wc -l          # expect 63
-ls "$SRC/migrations"/05*.sql                          # expect 050, 051, 053 — and NO 052
+ls "$SRC/migrations"/05*.sql                          # expect 050, 051, 053, 054, 055 — and NO 052
 wc -c "$SRC/src/ui/web/dist/index.html"               # expect 333921
 wc -c "$SRC/src/ui/web/dist/qwebchannel.js"           # expect 15152
 ```
 
-**`migrations/052_solver_ledger.sql` is correctly absent.** It belongs to a separate local-only workstream on the dev box, it is untracked, and it is not part of this port. Do not create it. Do not "fix" the gap. §7 explains why the gap is harmless.
+**`migrations/052_solver_ledger.sql` is correctly absent.** It belongs to a separate local-only workstream on the dev box, it is untracked, and it is not part of this port. Do not create it. Do not "fix" the gap. **054 and 055 land on the far side of that gap** (they ship with `fbe370f`, §12.J) and change nothing about it — the sequence production applies is 051 → 053 → 054 → 055. §7 explains why the gap is harmless.
 
 ### 4.2 Verify `src/data/app_paths.py` is in the zip — do NOT create it
 
-**This step used to be a hand-create. It is now a one-line check.** At `4ccd321` this module was imported by committed code but had never been `git add`ed, so it was missing from the archive. Commit `1aa0ef2` fixed exactly that. **At `a8ead66` the file is tracked and ships in the zip. You create nothing.**
+**This step used to be a hand-create. It is now a one-line check.** At `4ccd321` this module was imported by committed code but had never been `git add`ed, so it was missing from the archive. Commit `1aa0ef2` fixed exactly that. **At `fbe370f` the file is tracked and ships in the zip. You create nothing.**
 
 ```bash
 wc -c "$SRC/src/data/app_paths.py"      # expect 4240
@@ -274,7 +283,7 @@ wc -l "$SRC/src/data/app_paths.py"      # expect 124
 
 **PASS:** the file exists in `$SRC`. Nothing to do — it rides in with the one-pass `rsync` in 4.4 like every other added file. Go to 4.3.
 
-**FAIL (file absent):** you are **not** holding a zip at `a8ead66` or later. Do not hand-write the module and do not proceed — go back to §4.1, re-check the archive comment, and download the pinned archive. A tree missing this file will launch, pass most of the smokes, and then fail silently on the exact feature this port exists to deliver.
+**FAIL (file absent):** you are **not** holding a zip at `a8ead66` or later (the target is `fbe370f`). Do not hand-write the module and do not proceed — go back to §4.1, re-check the archive comment, and download the branch-tip archive again (§3; never a pinned-SHA archive). A tree missing this file will launch, pass most of the smokes, and then fail silently on the exact feature this port exists to deliver.
 
 **Why this one file gets its own gate.** `src/ui/pages/enablement/page.py` imports `src.data.app_paths` **lazily, inside three methods** — so a missing module cannot break launch or import-time smokes. The damage is at click time, and it is silent:
 
@@ -313,7 +322,7 @@ grep -c "differ$" ~/alma_port_backup_2026-07-28/pre_sync_compare.txt
 
 **How to read it:**
 
-- **"Files … differ"** and **"Only in `$SRC`"** together are the delta about to be applied. They should account for the **85 paths in Appendix A**, plus any docs-only descendants explained in §4.1. The rule, not a guess: **every `A` row in Appendix A is a "Only in `$SRC`" line (42 of them, including `src/data/app_paths.py`), and every `M` row is a "differ" line (43 of them).** **More than that = baseline drift** — the sync heals it, but report every extra path.
+- **"Files … differ"** and **"Only in `$SRC`"** together are the delta about to be applied. They should account for the **96 paths in Appendix A**, plus any docs-only descendants explained in §4.1. The rule, not a guess: **every `A` row in Appendix A is a "Only in `$SRC`" line (45 of them, including `src/data/app_paths.py`), and every `M` row is a "differ" line (51 of them).** **More than that = baseline drift** — the sync heals it, but report every extra path.
 - **"Only in `$DEST`"** = Mac-local files the sync will leave untouched. Expected: `data/` never appears (excluded), `.venv`, editor files. **Exception to inspect: any `$DEST`-only `.py` under `src/` or `web/src/`** is a stray hand-copy that can **shadow imports** after the sync — report these; do not delete on your own. `src/data/app_paths.py` must **not** appear here: it now arrives from `$SRC`, and a `$DEST`-only copy would mean somebody hand-created it from an earlier revision of this guide. If you see it there, say so — the `rsync` will overwrite it with the shipped version, which is the correct outcome, but the owner needs to know it happened.
 
 ### 4.4 Sync — one pass
@@ -352,22 +361,22 @@ grep -c "^Only in $SRC" ~/alma_port_backup_2026-07-28/post_sync_compare.txt  # e
 # -uall is load-bearing: without it git COLLAPSES a wholly-new directory
 # (web/src/zendesk/) into a single ?? line and the count will not add up.
 git status --porcelain -uall > ~/alma_port_backup_2026-07-28/applied_delta_git_view.txt
-wc -l ~/alma_port_backup_2026-07-28/applied_delta_git_view.txt      # expect 87
-grep -c '^??' ~/alma_port_backup_2026-07-28/applied_delta_git_view.txt   # expect 42
-grep -c '^ M' ~/alma_port_backup_2026-07-28/applied_delta_git_view.txt   # expect 43
+wc -l ~/alma_port_backup_2026-07-28/applied_delta_git_view.txt      # expect 96
+grep -c '^??' ~/alma_port_backup_2026-07-28/applied_delta_git_view.txt   # expect 45
+grep -c '^ M' ~/alma_port_backup_2026-07-28/applied_delta_git_view.txt   # expect 51
 grep '^??' ~/alma_port_backup_2026-07-28/applied_delta_git_view.txt
 ```
 
-**Expect exactly 87 lines** — the 87 files in `d27eb3e..d018107` — split **42 `??`** (the added files, which are untracked because the Mac's HEAD is still the baseline) and **45 ` M`**. `src/data/app_paths.py` is now one of the 42 `??`, not a special case.
+**Expect exactly 96 lines** — the 96 files in `d27eb3e..fbe370f` — split **45 `??`** (the added files, which are untracked because the Mac's HEAD is still the baseline) and **51 ` M`**. `src/data/app_paths.py` is now one of the 45 `??`, not a special case.
 
 **The count is a rule, not a magic number**, and it can legitimately move in
 *both* directions:
 
-- **Fewer than 87** — if the Mac's baseline is a *docs-only descendant* of
+- **Fewer than 96** — if the Mac's baseline is a *docs-only descendant* of
   `d27eb3e` (allowed by P1), one or two docs paths may already match and drop
-  out. A count of 85–87 is fine **when the shortfall is entirely under
+  out. A count of 94–96 is fine **when the shortfall is entirely under
   `docs/`**. A shortfall anywhere else means a partial sync → re-run 4.4.
-- **More than 87** — you synced from a branch tip carrying later commits (§3
+- **More than 96** — you synced from a branch tip carrying later commits (§3
   tells you to, and §4.1 explains why the SHA will not match). Every extra line
   must be **under `docs/`**, and `docs/ZENDESK_BLOCK_PORT_GUIDE.md` will
   normally be one of them since 4.4 excludes it from the sync. **Any extra line
@@ -382,7 +391,8 @@ grep '^??' ~/alma_port_backup_2026-07-28/applied_delta_git_view.txt
 ls -la src/ui/web/dist/qwebchannel.js                       # must exist; 15152 bytes, unchanged in this range
 grep -c __almaZendeskMounted src/ui/web/dist/index.html     # expect >= 1 — the Zendesk route is in the bundle
 grep -c __almaHomeMounted src/ui/web/dist/index.html        # expect 1 — the other routes survived the rebuild
-ls -la migrations/051_zendesk_mirror.sql migrations/053_zendesk_versions.sql
+ls -la migrations/051_zendesk_mirror.sql migrations/053_zendesk_versions.sql \
+       migrations/054_task_board_source.sql migrations/055_task_board_links.sql
 ls migrations/052_solver_ledger.sql 2>/dev/null && echo "UNEXPECTED — 052 must NOT be here"
 ```
 
@@ -400,11 +410,11 @@ diff "$SRC/PACKAGES.md"       PACKAGES.md        && echo "PACKAGES.md identical"
 diff "$SRC/web/package.json"  web/package.json   && echo "package.json identical"
 ```
 
-All three must print `identical`. `requirements.txt`, `PACKAGES.md`, `web/package.json`, `web/package-lock.json`, everything under `installer/` and everything under `scan_server/` are untouched across the whole of `d27eb3e..d018107` (re-verified at each retarget).
+All three must print `identical`. `requirements.txt`, `PACKAGES.md`, `web/package.json`, `web/package-lock.json`, everything under `installer/` and everything under `scan_server/` are untouched across the whole of `d27eb3e..fbe370f` (re-verified at each retarget).
 
 **Therefore: no `pip install`. No `npm install`. And never `npm run build` (rule 4).** Every new module in this range is stdlib-only or uses packages the Mac already has. If an import smoke in §6 fails with `ModuleNotFoundError` for a third-party package, that is a **pre-existing** venv problem on the Mac, not something this port introduced — report it rather than installing your way around it.
 
-`installer/build_release.py` already ships `migrations/` inside `APP_CONTENTS`, so an installed bundle picks up the two new `.sql` files with no installer change.
+`installer/build_release.py` already ships `migrations/` inside `APP_CONTENTS`, so an installed bundle picks up all four new `.sql` files with no installer change.
 
 ---
 
@@ -463,19 +473,19 @@ print("ALL IMPORT SMOKES PASSED")
 EOF
 ```
 
-**If `src.data.app_paths` raises `ModuleNotFoundError`:** the zip predates `1aa0ef2` or the sync was partial. **Do not hand-write the module** — go back to §4.1/§4.2 and get a zip at `a8ead66` or later, then re-run 4.4. The app will still launch without it, which is exactly what makes this failure dangerous.
+**If `src.data.app_paths` raises `ModuleNotFoundError`:** the zip predates `1aa0ef2` or the sync was partial. **Do not hand-write the module** — go back to §4.1/§4.2 and get a zip at `fbe370f` (the branch tip), then re-run 4.4. The app will still launch without it, which is exactly what makes this failure dangerous.
 
 **If `WRITE METHOD STILL PRESENT` fires:** a stale `src/data/zendesk_client.py` survived the sync. This is the dangerous direction of a partial port (§12.B). Re-run 4.4 and 4.5.
 
-**If `ZendeskWriteBlocked missing` or a `READ LANE MISSING` fires:** the tree is not at `a8ead66` — re-run Phase 2 steps 4.4 and 4.5.
+**If `ZendeskWriteBlocked missing` or a `READ LANE MISSING` fires:** the tree is not at `fbe370f` — re-run Phase 2 steps 4.4 and 4.5.
 
 ---
 
-## 7. Phase 5 — First launch & migrations 051 → 053
+## 7. Phase 5 — First launch & migrations 051 → 053 → 054 → 055
 
 ### The numbering gap 051 → 053 is safe
 
-Production will apply `051_zendesk_mirror.sql` then `053_zendesk_versions.sql` with **no 052**. That is correct and expected.
+Production will apply `051_zendesk_mirror.sql`, then `053_zendesk_versions.sql`, `054_task_board_source.sql` and `055_task_board_links.sql`, with **no 052**. That is correct and expected. The two Asana migrations (§12.J) sit on the far side of the gap and do not change its reasoning by one line — they are simply the next two files the glob finds.
 
 `src/updater/schema_migrator.py::pending()` is:
 
@@ -484,7 +494,7 @@ files = sorted(self._dir.glob("*.sql"))
 return [f for f in files if f.name not in applied]
 ```
 
-Discovery is **sorted filename minus the set already recorded in `schema_migrations`**. There is no contiguity check, no "expected next number", nowhere that compares N to N−1. A missing `052_*.sql` is simply a file that never appears in the glob. `current_version()` is `max()` over the parsed leading digits, not a count, so the version reads **53** and nothing is confused by the jump. Migration 053's SQL references nothing 052 creates — its own comment cites 052 only as a *precedent* for a soft-reference convention.
+Discovery is **sorted filename minus the set already recorded in `schema_migrations`**. There is no contiguity check, no "expected next number", nowhere that compares N to N−1. A missing `052_*.sql` is simply a file that never appears in the glob. `current_version()` is `max()` over the parsed leading digits, not a count, so the version reads **55** and nothing is confused by the jump. Migration 053's SQL references nothing 052 creates — its own comment cites 052 only as a *precedent* for a soft-reference convention. 054 and 055 reference nothing 052 creates either: 054 adds a column to `enablement_tasks` (migration 027's table) and 055 creates `task_board_links` against that same table.
 
 **Do not hand-create a placeholder `052`.** That would record a filename in `schema_migrations` that does not correspond to anything, and it would diverge production from every other machine.
 
@@ -494,12 +504,13 @@ Discovery is **sorted filename minus the set already recorded in `schema_migrati
 
 ### Apply the migrations
 
-Rule 5 stands: **never** `sqlite3 data/local_warehouse.db < migrations/051_zendesk_mirror.sql`. Both migrations carry Python post-hooks a raw apply would skip:
+Rule 5 stands: **never** `sqlite3 data/local_warehouse.db < migrations/051_zendesk_mirror.sql`. Two of the four migrations carry Python post-hooks a raw apply would skip:
 
 | Migration | Post-hook | What it does, and what breaks without it |
 |---|---|---|
 | `051_zendesk_mirror.sql` | `_posthook_051_zendesk_projections` → `zendesk_store.backfill_mirror_projections(conn)` | Recomputes the Python-side `body_text` / `actions_text` plain-text projections and `content_hash` for rows predating 051, then the FTS mirrors rebuild. Without it, pre-051 rows index **empty body text** — invisible to search, and **unrepairable on a box with no API key to re-pull from**. |
 | `053_zendesk_versions.sql` | `_posthook_053_seed_draft_baselines` → `zendesk_versions.seed_draft_baselines(conn)` | Seeds a `seq=1` `'create'` version from each existing article draft so pre-053 drafts have a rollback baseline. Guarded — only drafts with zero version rows are seeded, so it is re-run safe. |
+| `054_task_board_source.sql` · `055_task_board_links.sql` | **none** | Pure SQL, and idempotent by construction (single-line `ADD COLUMN`, `CREATE … IF NOT EXISTS`, `INSERT OR IGNORE`). They still must land **through the migrator**, because a raw `sqlite3` apply records nothing in `schema_migrations` and the migrator would then try them again. 055's backfill deliberately links only rows that already carry a non-NULL `board_source_id` — see §12.J's first rough edge. |
 
 Apply them the sanctioned way, with the app closed:
 
@@ -509,11 +520,11 @@ cd <the alma-insights checkout>
 from src.data.db_manager import DatabaseManager
 db = DatabaseManager(); db.initialize()
 rows = [r[0] for r in db.conn.execute('SELECT filename FROM schema_migrations ORDER BY filename')]
-print(rows[-4:])
+print(rows[-6:])
 "
 ```
 
-**Expect the tail:** `['049_kb_extra_fields.sql', '050_enablement_documents_fts.sql', '051_zendesk_mirror.sql', '053_zendesk_versions.sql']`.
+**Expect the tail:** `['049_kb_extra_fields.sql', '050_enablement_documents_fts.sql', '051_zendesk_mirror.sql', '053_zendesk_versions.sql', '054_task_board_source.sql', '055_task_board_links.sql']`.
 
 ### Prove it landed
 
@@ -530,9 +541,13 @@ SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'zendesk_%';"
 ```bash
 sqlite3 data/local_warehouse.db "PRAGMA table_info(zendesk_articles);" | grep -cE "body_html|body_text|content_hash|origin"
 # expect 4
+
+# 054 + 055 (Asana board management, §12.J)
+sqlite3 data/local_warehouse.db "PRAGMA table_info(enablement_tasks);" | grep -c board_source_id   # expect 1
+sqlite3 data/local_warehouse.db "SELECT name FROM sqlite_master WHERE name='task_board_links';"    # expect task_board_links
 ```
 
-**On the next app launch the splash's Database integrity line must read `Schema v53`.** If it still says `v50`, the migrator raised and `db_manager` swallowed it — read the `alma.db` log for `Schema migration skipped:` and go to §16, R2.
+**On the next app launch the splash's Database integrity line must read `Schema v55`.** If it still says `v50`, the migrator raised and `db_manager` swallowed it — read the `alma.db` log for `Schema migration skipped:` and go to §16, R2.
 
 ### Import + FTS smoke (needs no credentials)
 
@@ -569,7 +584,7 @@ pkill -9 -f alma_mcp_server; pkill -9 -f chat_mcp_server; pkill -9 -x gemini; pk
 export QT_QPA_PLATFORM=offscreen
 ```
 
-Four groups. **Each in its OWN pytest invocation** — grouping WebEngine-touching files stacks Chromium teardown to exit 255. Never `pytest tests/` (rule 6). Timings are from the dev box; the M1 will be in the same order.
+Four groups for the Zendesk block, then one more for the Asana work. **Each in its OWN pytest invocation** — grouping WebEngine-touching files stacks Chromium teardown to exit 255. Never `pytest tests/` (rule 6). Timings are from the dev box; the M1 will be in the same order.
 
 ```bash
 QT_QPA_PLATFORM=offscreen <venv-python> -m pytest \
@@ -590,14 +605,35 @@ QT_QPA_PLATFORM=offscreen <venv-python> -m pytest \
 QT_QPA_PLATFORM=offscreen <venv-python> -m pytest \
   tests/test_publish_body_parity.py tests/test_chat_review_panel.py \
   tests/test_enablement_web_flag.py tests/test_web_guardrails.py -q
-# expect: 166 passed   (~50 s)   — publish-body parity, approval gate, flag, no-innerHTML CI rule
+# expect: 165 passed   (~2 min)  — publish-body parity, approval gate, flag, no-innerHTML CI rule
 ```
 
-**Total: 665 passing.** Report the per-group counts in your final summary.
+**Total: 664 passing.** Report the per-group counts in your final summary.
 
-Group 4 is **166, not the 165** an earlier revision of this guide quoted: commit `a8ead66` adds exactly one test to `tests/test_publish_body_parity.py` (that file alone now reports **28 passed**). Groups 1–3 are unchanged by the retarget — none of the four commits after `4ccd321` touched their files.
+**All four counts were re-measured on the dev box at the `fbe370f` target**
+(145 / 252 / 102 / 165). Two notes so an earlier revision of this guide does not
+mislead you:
 
-Optional fifth group — the help-text corpus. It is **known-red for reasons unrelated to this port**; include it only if you want the coverage, and expect exactly these three failures:
+- Group 4 is **165**, not the 166 quoted before the `fbe370f` retarget. That
+  number was arithmetic (165 + "the one test `a8ead66` adds"), and it
+  double-counted: the file `a8ead66` touched, `tests/test_publish_body_parity.py`,
+  reports **28 passed** and the group sums to 28 + 69 + 53 + 15 = **165**.
+  Measured, not derived. **If you see 166, report it; do not assume this line is
+  the stale one.**
+- Groups 2 and 3 were re-run specifically because `fbe370f` modifies files they
+  cover (`chat_tools/registry.py`, `chat_tools/enablement_tools.py`,
+  `llm/claude_tools.py`, `mcp/chat_mcp_server.py`, `pages/enablement/page.py`).
+  Both are unchanged at 252 and 102 — the Asana tools are additive.
+
+**`fbe370f` brings its own group**, which is not folded into the four above
+because it is not part of the Zendesk block. Run it separately — see §12.J:
+
+```bash
+QT_QPA_PLATFORM=offscreen <venv-python> -m pytest tests/test_asana_board_management.py -q
+# expect: 43 passed   (~15 s)   — board summary, ownership links, removal gates
+```
+
+Optional extra group — the help-text corpus. It is **known-red for reasons unrelated to this port**; include it only if you want the coverage, and expect exactly these three failures:
 
 ```bash
 QT_QPA_PLATFORM=offscreen <venv-python> -m pytest \
@@ -684,12 +720,13 @@ ALMA_WEB_DIAG=1 <venv-python> main.py
 
 Observe, in order:
 
-1. Splash appears; **Database integrity reads `Schema v53`**. `v50` here = the migrator raised and was swallowed → §7, then §16 R2.
+1. Splash appears; **Database integrity reads `Schema v55`**. `v50` here = the migrator raised and was swallowed → §7, then §16 R2.
 2. App reaches the Home page with no error dialog. Existing surfaces (Calendar, Workbench, Chat) look and behave exactly as before — **this port changes none of them visually.**
 3. Enablement → **Zendesk tab opens as the classic native Qt tab** (`enablement.web_tabs` is still `off`, and that is correct at this point). Its former "Push to Zendesk" button is now **"Copy for Zendesk"** plus **"Mark as copied"**, with a read-only notice label. That change is the point of `2cc0089` — it is not a bug.
 4. Help tab opens → **62 articles** in the ToC. The Zendesk and Zendesk-macros articles no longer claim the app can push to Zendesk. A count below 62 means the assets tree did not land.
 5. Guru / Workbench → open any draft's **Review changes** and confirm the preview renders. This exercises the `publish_body()` cluster from `45aab99`. Do **not** publish yet — see §13.2 first.
-6. **Do not flip any flag yet.** Finish acceptance (§17) with everything dormant.
+6. Settings → **Sources → Asana** now shows real state, not the old mockup: either your mapped board(s) with derived counts, or the plain empty state saying no board is mapped. **This is the first time this panel has ever been clicked in a running app** — read §12.J before touching its toggles or its Remove button.
+7. **Do not flip any flag yet.** Finish acceptance (§17) with everything dormant.
 
 **Explicitly owner-gated — do NOT do as part of the port:**
 
@@ -730,9 +767,9 @@ moves `FETCH_HEAD` and the remote-tracking ref **only** — it does not move you
 local branch. So a `git checkout enablement-content-tabs` here is a **no-op**
 when the Mac already has that local branch at the `d27eb3e` baseline (the
 expected state per P1): HEAD would stay at the baseline and `git status` would
-show all 85 files as changes, looking like a catastrophic failure at the very
+show all 96 files as changes, looking like a catastrophic failure at the very
 last step of a successful port. And if no local branch exists, the DWIM
-checkout has to replace 42 untracked files and can abort outright.
+checkout has to replace 45 untracked files and can abort outright.
 
 `git reset --mixed FETCH_HEAD` moves the branch pointer **and the index** to the
 fetched tip **without touching a single working-tree byte**. That is exactly
@@ -740,7 +777,7 @@ right here: §4.5 already proved the bytes are correct, so this step is pure
 bookkeeping — it tells git what you already know.
 
 **Expect:** `git status` is **clean apart from pre-existing Mac-local strays**
-and anything gitignored; `data/` never appears. Every one of the 85 files is now
+and anything gitignored; `data/` never appears. Every one of the 96 files is now
 tracked at the branch tip — including `src/data/app_paths.py`, which used to
 appear here as a `??` line and no longer does. `git log` tip matches the zip's
 commit (the branch tip you downloaded in §3).
@@ -762,7 +799,8 @@ Things you will see and should leave exactly as they are.
 | What you'll see | Why it stays |
 |---|---|
 | No Versions / History / Rollback UI anywhere, despite migration 053 running and `zendesk_versions.py` being present | **Phase 1 is deliberately dormant.** `VersionsPanel.jsx`, `HistoryPanel.jsx`, `versionShape.js` and `versions.css` are imported by nothing except their own test file, and the tip bundle contains no "Versions"/"Rollback" strings. The Python side is *not* dormant — the 053 post-hook imports `zendesk_versions`, so the module is load-bearing for the migration to run at all. Answer to "where is the version history": **not shipped yet**, not broken on macOS. |
-| `migrations/052_solver_ledger.sql` missing; `schema_migrations` jumps 051 → 053 | Correct and safe (§7). Do not create a placeholder. |
+| `migrations/052_solver_ledger.sql` missing; `schema_migrations` runs 051 → 053 → 054 → 055 with no 052 | Correct and safe (§7). Do not create a placeholder. |
+| An Asana board in Settings showing **"0 imported tasks"** while the calendar clearly has that board's tasks on it | Expected on a database with pre-054/055 rows: attribution exists only from the first poll *after* the migrations. Inert, never deleted, always shown — §12.J, rough edge 1. Do not "repair" it by hand. |
 | The classic Zendesk tab's attributes are still called `_a_push` / `_m_push`, and its signals `article_push` / `macro_push` | Deliberately kept so host wiring and existing assertions keep resolving. They now mean "mark handled locally". Renaming them breaks `tests/test_zendesk_content.py`. |
 | `publish_article_draft` / `publish_macro_draft` still take a `zendesk_client=` kwarg and ignore it | Source compatibility, on purpose. They are local bookkeeping now and report `remote_write: False`. |
 | Grep hits for `create_confirm_write`, `_emit_confirm_write`, `_enqueue_write`, `execute_write`, `cancel_write`, `update_article_draft`, `update_macro_draft` | **Unrelated names.** They are not Zendesk writes. Do not "clean them up". |
@@ -784,12 +822,14 @@ Go here when a specific gate or smoke fails; stay in the phases for execution or
 |---|---|---|---|
 | `migrations/051_zendesk_mirror.sql` | A (137 lines) | 21 `ADD COLUMN`s across `zendesk_articles` (`body_html`, `body_text`, `draft`, `outdated`, `labels_json`, `author_name`, `position`, `created_at_remote`, `content_hash`, `origin`, `source_file`, `raw_json`), `zendesk_macros` (`actions_text`, `content_hash`, `origin`, `source_file`, `raw_json`), and both draft tables (`body_html`/`reply_html`, `rationale`, `sources_json`, `copied_at`); new `zendesk_categories` + `zendesk_sections`; two contentless FTS5 mirrors; six delete-discipline triggers | `zendesk_store`, `zendesk_import`, `zendesk_web` |
 | `migrations/053_zendesk_versions.sql` | A (59 lines) | `zendesk_article_versions` + `zendesk_draft_versions` (`UNIQUE(draft_id, seq)`), both `AUTOINCREMENT` so pruning at 50/row cannot recycle rowids | `zendesk_versions` (Python only — no UI) |
+| `migrations/054_task_board_source.sql` | A (32 lines) | `enablement_tasks.board_source_id` + its index — immutable provenance, **never the authority** | `asana_monitor` writes it; nothing reads it for attribution (**§12.J**) |
+| `migrations/055_task_board_links.sql` | A (70 lines) | `task_board_links` (PK `(task_id, board_source_id)`, `ON DELETE CASCADE`, index on board) + a backfill of one link per non-NULL `board_source_id` | `asana_setup`, `enablement_tasks`, the Settings Sources panel (**§12.J**) |
 | `src/data/zendesk_import.py` | A (429) | File import (API-shaped JSON / HTML / doc_reader), per-file reports, hostile-input hardened (50 MB cap, 255-char titles); `pull_mirror` GET-only paged pull | the web controller and the classic tab |
 | `src/data/zendesk_versions.py` | A (284) | Version rows + `seed_draft_baselines` | **the 053 post-hook — must be present before the migration runs** |
 | `src/data/zendesk_store.py` | M (+967/−102) | The whole mirror API. **Never `INSERT OR REPLACE` into mirror tables** — grep-guarded by `tests/test_zendesk_mirror_schema.py` | everything |
-| `src/updater/schema_migrator.py` | M (+25) | Registers both post-hooks in `_POST_HOOKS` | §7 |
+| `src/updater/schema_migrator.py` | M (+25) | Registers both Zendesk post-hooks in `_POST_HOOKS` (054 and 055 need none) | §7 |
 
-Both migrations are **re-runnable**, which is what makes §16 R2 a real repair lever: every `ADD COLUMN` in 051 is single-line so the migrator's `PRAGMA table_info` guard catches all 21; every `CREATE TABLE`/`INDEX`/`VIRTUAL TABLE` is `IF NOT EXISTS`; the six triggers are `DROP … IF EXISTS` + `CREATE`; the FTS backfill is a `'delete-all'` followed by a full re-index. 053 is two `CREATE TABLE IF NOT EXISTS` and one index.
+051 and 053 are **re-runnable**, which is what makes §16 R2 a real repair lever: every `ADD COLUMN` in 051 is single-line so the migrator's `PRAGMA table_info` guard catches all 21; every `CREATE TABLE`/`INDEX`/`VIRTUAL TABLE` is `IF NOT EXISTS`; the six triggers are `DROP … IF EXISTS` + `CREATE`; the FTS backfill is a `'delete-all'` followed by a full re-index. 053 is two `CREATE TABLE IF NOT EXISTS` and one index. 054 and 055 are re-runnable on the same principles (single-line `ADD COLUMN`, `IF NOT EXISTS`, `INSERT OR IGNORE` against a primary key).
 
 ### 12.B — The read-only policy, and the one pair that must land together
 
@@ -822,7 +862,7 @@ Why Zendesk specifically, and not Guru or Asana: Guru and Asana are production-l
 
 **QWebChannel is the trust boundary** — any page script can call any slot, so no slot carries authority. Reads return viewmodels; side-effectful actions validate against Python-held state plus a single-winner claim plus a **native** confirm (`QMessageBox`, unreachable from Chromium). Never `dangerouslySetInnerHTML` / `innerHTML` in `web/src/` — `tests/test_web_guardrails.py` enforces it in the §8 group 4.
 
-`src/ui/pages/enablement/page.py` [M, +458/−12] wires it in `_make_zendesk`, with the native `ZendeskPage` as the **construction-failure fallback**: any import or construction error in the web branch yields the native tab, not a crash.
+`src/ui/pages/enablement/page.py` [M, **+673/−16 across the whole range** — `_make_zendesk` from `1ba6fa5`, plus the Asana board handlers from `fbe370f`, §12.J] wires it in `_make_zendesk`, with the native `ZendeskPage` as the **construction-failure fallback**: any import or construction error in the web branch yields the native tab, not a crash.
 
 ### 12.D — The Guru half (do NOT treat this range as Zendesk-only)
 
@@ -842,7 +882,7 @@ Why Zendesk specifically, and not Guru or Asana: Guru and Asana are production-l
 
 ### 12.F — Renn's tool surface
 
-Three dispatch paths all carry the same tool definitions and all state that Zendesk is read-only: `src/llm/claude_tools.py` (+220/−14), `src/mcp/chat_mcp_server.py` (+174/−13), `src/data/chat_tools/enablement_tools.py` (+143/−85), registered via `src/data/chat_tools/registry.py` (+35/−4). The new family lives in `src/data/chat_tools/zendesk_mirror_tools.py` [A, 537]: **propose-only.** Tools create `pending` drafts with mandatory rationale and sources; a specialist reviews the word-diff, marks ready, copies exact content, pastes into real Zendesk by hand, marks copied. Lifecycle `pending → ready → copied`; `copied` and `pushed` are immutable. **No tool can reach a Zendesk write, because there are none left to reach** (§12.B).
+Three dispatch paths all carry the same tool definitions and all state that Zendesk is read-only: `src/llm/claude_tools.py` (+274/−23), `src/mcp/chat_mcp_server.py` (+211/−14), `src/data/chat_tools/enablement_tools.py` (+277/−87), registered via `src/data/chat_tools/registry.py` (+42/−5). **Those four totals are for the whole range — they also carry the two new Asana board tools from `fbe370f` (§12.J), which are not Zendesk tools.** The new Zendesk family lives in `src/data/chat_tools/zendesk_mirror_tools.py` [A, 537]: **propose-only.** Tools create `pending` drafts with mandatory rationale and sources; a specialist reviews the word-diff, marks ready, copies exact content, pastes into real Zendesk by hand, marks copied. Lifecycle `pending → ready → copied`; `copied` and `pushed` are immutable. **No tool can reach a Zendesk write, because there are none left to reach** (§12.B).
 
 ### 12.G — macOS risk on a brand-new WebEngine surface
 
@@ -871,7 +911,9 @@ Its macOS probes are `page_size`, `rosetta` (`sysctl.proc_translated`, fix named
 | Guru publish does nothing | `PublishConfirmHost` not injected — stale `src/ui/main_window.py` | §12.D; re-run 4.4 / 4.5 |
 | Guru publish fails at the API | `publish_collection_id` is still `col-1` | §13.2 |
 | Pull says `zendesk_not_connected` | No credentials — expected, not a defect | §13.3 |
-| Splash says `Schema v50` | Migrator raised; `db_manager` swallowed it | Read the `alma.db` log for `Schema migration skipped:` → §16 R2 |
+| Splash says `Schema v50` (or anything below `v55`) | Migrator raised; `db_manager` swallowed it | Read the `alma.db` log for `Schema migration skipped:` → §16 R2 |
+| Settings → Sources shows an Asana board with **0 imported tasks** | Pre-054/055 rows carry no attribution — expected, not data loss | §12.J, rough edge 1. Those tasks are never deleted and stay on the calendar. |
+| Calendar shows nothing although a board is mapped and enabled | The **old mockup** symptom, which this range fixes — if it persists, the board's `calendar` flag is off (it defaults off for a newly mapped board) | Turn that board's Calendar toggle on in Settings → Sources (§12.J) |
 | `test_zendesk_readonly_guard` fails | A stale `zendesk_client.py` survived | §12.B. **Remove the write, never the guard.** |
 | Copy button produces no clipboard content and no dialog | Working as designed — no dialog means no write | Not a defect (§10, smoke 5) |
 
@@ -879,10 +921,13 @@ Its macOS probes are `page_size`, `rosetta` (`sysctl.proc_translated`, fix named
 
 ### 12.I — The Settings UI: preserve the bedrock, add one card
 
-**This range changes exactly ONE existing UI surface, and the rule is
-preservation, not redesign.** `src/ui/widgets/credentials_panel.py` gains a
+**The Zendesk block changes exactly ONE existing Settings surface, and the rule
+is preservation, not redesign.** `src/ui/widgets/credentials_panel.py` gains a
 Zendesk card (+98 lines) and `tests/test_credentials_panel.py` gains its
-coverage (+113). Nothing else in the panel moves.
+coverage (+113). Nothing else in the panel moves. (The `fbe370f` retarget adds a
+second Settings surface — the **Sources → Asana** panel, `settings.py` — which
+is a separate file, a separate subsystem and a separate section: **§12.J**. The
+two do not touch each other.)
 
 **Why it is in scope at all:** before this, the only writer of Zendesk
 credentials in the entire app was the **product-mode** Source Monitor
@@ -938,6 +983,149 @@ Help Center content; the app never writes to Zendesk."* The token box is
 
 ---
 
+### 12.J — Asana board management: the Sources panel was a mockup
+
+**This is the one part of the range that is not about Zendesk or Guru, and it is
+the one part that changes what the app *does* with data it already has.** It
+arrives whole in `fbe370f` — 14 files, two migrations (**054**, **055**), and
+948 lines of new test.
+
+#### What was broken
+
+`src/ui/pages/enablement/settings.py::_asana()` **was a hardcoded mockup, and it
+shipped.** The header count "2 configured", the board names "Enablement
+Requests" and "Launch Coordination", every field pill, and the literal
+`Resolved: J. Rivera, M. Chen, A. Osei (+4)` were **string literals in the
+widget**. "+ Add board" and both toggles were connected to nothing.
+
+The consequence was not cosmetic. Settings reported two configured boards while
+`monitor_sources` held **none** and `enablement_tasks` held **zero rows**, so the
+Calendar rendered empty — and the panel was the surface an operator would check
+to find out why. Two further things made it hard to see:
+
+- **Renn's task counts came from a different place.** Renn calls the Asana API
+  live and would happily report ~270 tasks; the Calendar renders **local** rows.
+  A confident number from the model was not evidence that anything had synced.
+- **Setting an ACTIVE board and MAPPING a board were always two separate
+  writes**, and only the first ever happened. "I picked my board" was true and
+  still left nothing to poll.
+
+#### What it is now
+
+The panel is a **pure renderer** over `asana_setup.board_summary(conn)`. Nothing
+in it is a literal:
+
+- one row per **configured** board, read from `monitor_sources`;
+- **derived counts** — everything linked to the board, how many of those another
+  board also tracks, and *what a removal would actually delete*;
+- the indicator field and the priority / assignee mappings shown **by name**;
+- a per-board **SYNC** toggle and a per-board **CALENDAR** toggle. Calendar
+  defaults **OFF** for a newly mapped board, so mapping a board fills the task
+  list without silently repainting the operator's calendar;
+- an **empty state that says the true thing** — no board is mapped, so nothing
+  will sync — instead of drawing two boards that do not exist.
+
+#### Ownership is many-to-many, and it took two rounds to get right
+
+Read this before you touch the Remove button; it is the reason the model looks
+heavier than "one board owns one task".
+
+1. **Round 1 — attribution derived from the permalink.** A task's
+   `permalink_url` names its **home project**, not the board that polled it, and
+   Asana teams multi-home tasks constantly. Removing board A therefore deleted
+   board B's tasks, **unrecoverably**: B's `modified_since` cursor had already
+   advanced past them, so re-polling would not bring them back.
+2. **Migration 054** closed that by storing the board whose poll *created* the
+   row (`enablement_tasks.board_source_id`) — a true fact, and one column.
+3. **Round 2 — one column cannot hold the shape.** An Asana **library** custom
+   field carries **one gid org-wide**, so two mapped boards legitimately resolve
+   the same indicator and both poll the same multi-homed task (in one cycle it
+   comes back as *created* to one board and *updated* to the other). Ownership
+   fell to whichever `source_id` sorted first, and removing that board deleted a
+   row the other board was still actively tracking.
+4. **Migration 055** makes co-ownership representable: `task_board_links`, one
+   row per (task, board that demonstrably tracks it), written at **both** poll
+   sites in `asana_monitor` — `_create_task_from_asana` **and**
+   `_reconcile_existing_task`. Removal drops **this board's claim** and deletes
+   the task row **only when no other board still holds one**.
+
+`enablement_tasks.board_source_id` survives as **immutable provenance** and is
+**never the authority** — there is a test pinning exactly that. Nothing derives
+attribution from `source_url` any more.
+
+#### Two asymmetries, deliberately pointing opposite ways
+
+| Rule | Behaviour | Why |
+|---|---|---|
+| **DELETION FAILS CLOSED** | A task dies in a board removal only when **every** link pointing at it belongs to the board being removed. Rows with no link at all — pre-054/055, manual, demo, non-Asana — survive **every** removal. | The worst case is a stray row an operator can dismiss by hand. The alternative is silent, unrecoverable loss of another board's work. A **pre-055 database degrades closed for free**: no links means nothing is deletable. |
+| **DISPLAY FAILS OPEN** | A task is hidden from the Calendar only when **every** linked board is a configured board with Calendar off. Unlinked rows, rows linked to an unmapped board, and every row when no board is mapped stay visible. | Hiding on ambiguity is precisely what produced the empty calendar. A filter must never be the reason the operator's calendar is blank. |
+
+#### Removal is local-only and structurally cannot reach Asana
+
+`asana_setup.remove_board()` performs three `DELETE`s inside one `atomic()` —
+this board's links, the tasks nothing else claims, the `monitor_sources` row —
+and it **holds no Asana client, no HTTP verb and no gid it could write back
+with**. The tests assert it directly: a spy client records **zero calls** across
+a full removal, and `AsanaClient` still has no delete-shaped method. Map the
+board again, re-poll, and the same tasks come back from Asana untouched.
+
+**Authority sits in a native dialog, not in Renn and not in the panel.**
+`EnablementPage._confirm_and_remove_board` raises a `QMessageBox` that names the
+board, quotes **`deletable_task_count`** (what removal *actually* deletes — never
+the larger "everything this board tracks" number), says out loud that Asana is
+not modified, defaults to **No**, and refuses outright in all four broken-confirm
+modes: **absent**, **None**, **raising**, **cancelled**. No GUI thread → no
+confirm → nothing is deleted.
+
+#### Renn's two new tools — on every dispatch path
+
+Both are declared in `llm/claude_tools.py`, `mcp/chat_mcp_server.py` and
+`chat_tools/enablement_tools.py`, and registered in `chat_tools/registry.py`
+— the same three-path pattern as §12.F.
+
+| Tool | What it does |
+|---|---|
+| `list_asana_boards` | **Read-only.** The honest answer to "is Asana set up". `is_asana_connected()` only proves a key *string* exists — it says nothing about whether any board is mapped, and Renn used to answer from that plus a live API call, which is how "Asana is connected" coexisted with a database that had nothing to poll. |
+| `remove_asana_board` | Returns a **PROPOSAL**. It deletes nothing. The operator's click on the native confirm is what removes anything. |
+
+#### Verification
+
+```bash
+QT_QPA_PLATFORM=offscreen <venv-python> -m pytest tests/test_asana_board_management.py -q
+# expect: 43 passed
+```
+
+Optional adjunct — the help article changed with the code
+(`assets/help/settings/connect-asana.md`), and its claims are asserted:
+
+```bash
+QT_QPA_PLATFORM=offscreen <venv-python> -m pytest tests/test_help_claims_settings.py -q
+# dev box: 119 passed
+```
+
+**In the app:** Settings → Sources → Asana shows either your real mapped
+board(s) with derived counts, or the plain empty state. It must **never** again
+show "Enablement Requests" or "Launch Coordination" unless those are boards you
+actually mapped.
+
+#### Two rough edges — expected, and neither is a defect
+
+1. **Rows imported BEFORE these migrations carry NULL attribution.** 055's
+   backfill only links rows that already had a non-NULL `board_source_id`; it
+   invents nothing from a permalink, because that inference is what both
+   data-loss rounds died on. So a board may honestly read **"0 imported tasks"**
+   until those tasks are re-polled and re-created. Those rows are **inert**:
+   never deleted by any removal (fails closed), always shown on the Calendar
+   (fails open). Do not hand-repair the database.
+2. **Nobody has clicked any of this in a running app.** No toggle has been
+   flipped in the UI, and no board has been mapped against live Asana. Every bit
+   of verification behind `fbe370f` is headless — offscreen Qt and fake Asana
+   clients. **You are the first live test.** Treat the first board mapping and
+   especially the first Remove as a UAT: prefer a scratch board, and read the
+   confirm dialog's numbers before clicking Yes.
+
+---
+
 ## 13. New and relevant settings keys — READ-ONLY inventory
 
 **You never write any of these during the port** (rules 1 and 2). This table exists so you know what the Mac does with them left alone, and what the owner may choose to change afterwards.
@@ -950,6 +1138,7 @@ Help Center content; the app never writes to Zendesk."* The token box is
 | `documents.root` | `data/settings.yaml` | `data/documents` | Optional override for the documents tree `app_paths.py` manages. Absent is fine. |
 | `zendesk_api_key` | **macOS Keychain** (`pat_store._SECRET_KEYS`) | absent | Pull degrades to `zendesk_not_connected`. Everything else works. |
 | `zendesk_subdomain` · `zendesk_email` · `zendesk_view_id` | `~/.alma-insights/ui_state.json` | absent | Same. **Outside `data/` — rule 2 covers it.** |
+| `asana_api_key` | **macOS Keychain** (`pat_store._SECRET_KEYS`) | absent | The Asana panel (§12.J) reads existing state either way. **Board mappings are not a settings key at all** — they live in the `monitor_sources` table, so the port neither reads nor writes them. |
 
 ### 13.1 — `enablement.web_tabs`: `zendesk`, not `all`
 
@@ -995,10 +1184,11 @@ Things the sync will visibly land that are not defects. Report, do not fix.
 - `docs/ZENDESK_GURU_IMPLEMENTATION_NOTES.md` arrives new and its "Not yet done" section is honest about this port's own gaps — see §15.
 - `CLAUDE.md` grows an 83-line Zendesk section. It is documentation for future development sessions; it changes no behavior.
 - `src/data/INDEX.md` (+50) and `src/services/INDEX.md` (+13) are API reference files, regenerated by hand.
-- The four `assets/help/*.md` changes are **not optional cosmetics.** `tests/test_help_claims_create.py`, `test_help_claims_troubleshooting.py` and `test_help_claims_reference.py` assert their exact claims, and they feed the in-app Help Center corpus. Skipping them would leave the Mac's Help articles telling the user the app can push to Zendesk when it structurally cannot.
+- The five `assets/help/*.md` changes are **not optional cosmetics.** `tests/test_help_claims_create.py`, `test_help_claims_troubleshooting.py`, `test_help_claims_reference.py` and `test_help_claims_settings.py` assert their exact claims, and they feed the in-app Help Center corpus. Skipping them would leave the Mac's Help articles telling the user the app can push to Zendesk when it structurally cannot.
 - `web/src/zendesk/demo.js` (391 lines) is a fixture, not dead code — it is what §9's headless probe renders.
 - `fabb4be` shows up in the history as a 5-file cosmetic refactor you never handle individually. Expected.
-- **`docs/ZENDESK_BLOCK_PORT_GUIDE.md` — this file — is itself one of the 85 paths.** It landed in `24c8d0f`. Seeing it in the compare and in `git status` is correct, not a sign of a wrong snapshot (§4.1).
+- **`docs/ZENDESK_BLOCK_PORT_GUIDE.md` — this file — is itself one of the 96 paths.** It landed in `24c8d0f` and has been revised several times since (most recently `d2ae828`, and again for the `fbe370f` retarget). Seeing it in the compare and in `git status` is correct, not a sign of a wrong snapshot (§4.1).
+- **`assets/help/settings/connect-asana.md` changes with `fbe370f`** and, like the other help articles, is not optional cosmetics — `tests/test_help_claims_settings.py` asserts its claims (§12.J).
 - **`main.py` gains 9 fenced lines** (`30fb086`) that call `app_paths.ensure_docs_tree()` after the splash. It is the only root-level file in the range. Not load-bearing (§4.2) — but it *is* a modified file, so it must land like any other.
 
 ---
@@ -1014,12 +1204,23 @@ This is the honest ledger. All of it is the author's own disclosure in `ZENDESK_
 5. **The versions/revisions editor is phase 1 only** — migration, store module and two React panels exist and pass; controller and UI wiring are not built (§11).
 6. **Deferred audit majors.** Seventeen audit majors were left as-is by owner decision, along with a deliberate decision not to run `sanitize_html` on the Guru write path (Guru's native callouts and card-links depend on `class=` / `data-ghq-*` attributes the strict sanitizer strips) and to leave Renn's Guru/Asana write capability intact. **Two you should know about because they will look like bugs:** the Qt workbench "Push to Guru" ships the last *saved* body rather than what is on screen, and both "Review changes" diffs compare against an empty baseline, so a replacement renders as all-additions. **Read `ZENDESK_GURU_IMPLEMENTATION_NOTES.md` for the full list — this guide will not restate it and must not be treated as the authority on it.**
 7. **The GET-only pull was live-verified on the dev box** (16 articles, 8 macros, 2 sections, 1 category, `truncated: False`) — so the pull lane itself is sound. **Only the Mac's own credentials are in question**, and this port does not need them (§13.3).
+8. **The Asana board flow (`fbe370f`, §12.J) has never been exercised in a running app, on any platform, and never against live Asana.** No toggle has been clicked in the UI, no board has been mapped live, and no removal has been confirmed by a human. All 43 of its tests are headless — offscreen Qt widgets and fake Asana clients — which proves the wiring and the ownership rules, not the lived behaviour. **The operator is the first live test.** The safety properties that matter most here (removal is local-only, deletion fails closed) are the ones with the strongest structural proof; the ones with the least evidence are the ordinary ones — that the toggles persist and the counts read right on a real board.
 
 ---
 
 ## 16. Rollback
 
 Ordered least- to most-destructive. Note the asymmetry: **code rollback is cheap; schema rollback is a restore.** In almost every case the answer is R0.
+
+**The ladder below is written for the Zendesk block (051 / 053) and is unchanged
+by the `fbe370f` retarget.** Migrations **054** and **055** need no rung of their
+own: they carry no post-hooks, so there is nothing for R2 to repair; they add one
+nullable column and one table, which baseline code never reads, so like 051/053
+they are inert after a code rollback; and R3 restores them away with everything
+else. The only mechanical adjustment: R1's `rm -f` line may also name
+`migrations/054_task_board_source.sql` and `migrations/055_task_board_links.sql`
+— and, exactly as R1 already says of 051/053, deleting the files does not undo
+the schema.
 
 **R0 — instant, and it covers roughly 95% of "the Zendesk tab is broken".** Set `enablement.web_tabs: off` in `data/settings.yaml` and restart. The native Qt `ZendeskPage` returns immediately. Migrations 051 and 053 stay applied and harm nothing — baseline code never reads their tables. **Try this before anything else.**
 
@@ -1070,26 +1271,26 @@ Keyring secrets are untouched by this port and need no rollback.
 
 Report each line as ✅ / ❌ / skipped-with-reason.
 
-1. **Baseline confirmed** — Phase 0 P1 showed `d27eb3e` (or a docs-only descendant), P2 showed all four pre-051 tables and max migration `050`.
+1. **Baseline confirmed** — Phase 0 P1 showed `d27eb3e` (or a docs-only descendant), P2 showed all four pre-051 tables and max migration `050` (no `051`/`053`/`054`/`055`).
 2. **Backups exist** — `~/alma_port_backup_2026-07-28/` contains `pre_sync_tree.tgz`, `settings.yaml`, `pre_sync_compare.txt`, `post_sync_compare.txt`; `data/local_warehouse.pre051.db` exists; the `pre-zendesk-port-2026-07-28` branch exists (or the tar is explicitly the sole rollback).
 3. **Environment gates green** — G1 `arm64 16384`, G2 `FTS5 OK`, G3 PySide6 quartet imports, G4 `web_diag` exit 0.
-4. **Sync is byte-identical** — 4.5 shows **zero** "differ" and **zero** "Only in `$SRC`" lines; `git status --porcelain -uall | wc -l` = **85** (42 `??` + 43 ` M`), with any shortfall confined to `docs/`, and **no** `??` naming `052_solver_ledger.sql`, `docs_backfill.py`, `solver_ledger.py`, `docs/pilot/` or `wheel_tail.bin`.
-5. **Integrity gate G5 green** — `dist/index.html` is exactly **333,921 bytes**, `qwebchannel.js` present, `__almaZendeskMounted` in the bundle, `051` and `053` present, **`052` absent**.
+4. **Sync is byte-identical** — 4.5 shows **zero** "differ" and **zero** "Only in `$SRC`" lines; `git status --porcelain -uall | wc -l` = **96** (45 `??` + 51 ` M`), with any shortfall confined to `docs/`, and **no** `??` naming `052_solver_ledger.sql`, `docs_backfill.py`, `solver_ledger.py`, `docs/pilot/` or `wheel_tail.bin`.
+5. **Integrity gate G5 green** — `dist/index.html` is exactly **333,921 bytes**, `qwebchannel.js` present, `__almaZendeskMounted` in the bundle, `051`, `053`, `054` and `055` present, **`052` absent**.
 6. **No dependency work happened** — §5's three `diff`s all printed `identical`; no `pip install`, no `npm install`, no `npm build` was run.
 7. **All import smokes passed** — including `ALL IMPORT SMOKES PASSED`, the read-only structural assertions, and `src.data.app_paths` (which shipped in the zip — it was **not** hand-created).
-8. **Migrations applied via the migrator** — `schema_migrations` tail is `[…049, 050, 051_zendesk_mirror.sql, 053_zendesk_versions.sql]`; 6 tables and 6 triggers present; 4 new `zendesk_articles` columns; the import+FTS smoke returned `imported: 1` with a **non-empty** `fts` list.
-9. **Test gates** — the four groups reported **145 / 252 / 102 / 166 = 665 passing**, with per-group counts recorded. `tests/test_zendesk_readonly_guard.py` **passed**.
+8. **Migrations applied via the migrator** — `schema_migrations` tail is `[…049, 050, 051_zendesk_mirror.sql, 053_zendesk_versions.sql, 054_task_board_source.sql, 055_task_board_links.sql]`; 6 Zendesk tables and 6 triggers present; 4 new `zendesk_articles` columns; `enablement_tasks.board_source_id` and `task_board_links` present; the import+FTS smoke returned `imported: 1` with a **non-empty** `fts` list.
+9. **Test gates** — the four groups reported **145 / 252 / 102 / 165 = 664 passing**, with per-group counts recorded. `tests/test_zendesk_readonly_guard.py` **passed**. The fifth run, §12.J's `tests/test_asana_board_management.py`, reported **43 passed**.
 10. **Headless SPA probe** — `mounted=True`, `innerText_len` > 200, `exit=0`.
-11. **In-app smokes** — splash reads `Schema v53`; app reaches Home; existing surfaces unchanged; the classic Zendesk tab shows **"Copy for Zendesk" + "Mark as copied"** with the read-only notice; Help shows **62 articles**.
+11. **In-app smokes** — splash reads `Schema v55`; app reaches Home; existing surfaces unchanged; the classic Zendesk tab shows **"Copy for Zendesk" + "Mark as copied"** with the read-only notice; Help shows **62 articles**; Settings → Sources → Asana shows **real state or the empty state**, never the old mockup boards (§12.J).
 12. **Settings untouched** — `diff data/settings.yaml ~/alma_port_backup_2026-07-28/settings.yaml` is empty; `~/.alma-insights/ui_state.json` unchanged. (The warehouse differs by the new tables — that is expected, and it is not "destroyed settings".)
 13. **`publish_collection_id` checked and its value reported to the owner** — not `col-1`, not blank; **and not changed by you**.
 14. **Phase 8b done** — `git reset --mixed FETCH_HEAD` completed and `git status` is clean apart from pre-existing untracked strays; `git log --oneline -3` tip matches the zip; the rescue branch is still in place; nothing was pushed.
 
-If every line is ✅, the Mac is functionally identical to the Windows dev box at `a8ead66` — with its own settings intact, the entire new Zendesk workspace **dormant behind its own flag**, no credentials required, and the owner holding every switch. Flipping `enablement.web_tabs` to `zendesk` is then a separate, reversible, one-line decision (§13.1), and §16 R0 undoes it in one restart.
+If every line is ✅, the Mac is functionally identical to the Windows dev box at `fbe370f` — with its own settings intact, the entire new Zendesk workspace **dormant behind its own flag**, no credentials required, and the owner holding every switch. Flipping `enablement.web_tabs` to `zendesk` is then a separate, reversible, one-line decision (§13.1), and §16 R0 undoes it in one restart.
 
 ---
 
-## Appendix A — Full file manifest (87 files at `d018107`, grouped)
+## Appendix A — Full file manifest (96 files at `fbe370f`, grouped)
 
 
 **Added after the guide was first written (commit `d018107`) — the Settings
@@ -1099,39 +1300,53 @@ credentials card, §12.I:**
   shared `external` section. Appears in BOTH Settings hosts.
 - `tests/test_credentials_panel.py` [M, +113] — nine `test_zendesk_*` cases.
 
-These two are why the delta reads **87 files / 45 modified** rather than 85/43.
+These two are why the delta grew from 85 files / 43 modified to **87 / 45**.
 They are expected in the compare and are **not** unreviewed code.
+
+**Added by the `fbe370f` retarget — Asana board management,
+§12.J.** Fourteen files, of which **nine are new paths in this manifest** (the
+other five — `chat_tools/enablement_tools.py`, `chat_tools/registry.py`,
+`llm/claude_tools.py`, `mcp/chat_mcp_server.py`, `pages/enablement/page.py` —
+were already `M` rows and simply grew):
+
+- `migrations/054_task_board_source.sql` [A, 32] · `migrations/055_task_board_links.sql` [A, 70]
+- `src/data/asana_setup.py` [M, +325/−3] · `src/data/asana_monitor.py` [M, +43/−3] · `src/data/enablement_tasks.py` [M, +83/−3]
+- `src/ui/pages/enablement/settings.py` [M, +143/−25] — the panel that was a mockup
+- `tests/test_asana_board_management.py` [A, 948 — **43 tests**] · `tests/test_help_claims_settings.py` [M, +43/−15]
+- `assets/help/settings/connect-asana.md` [M, +27/−12]
+
+That is what takes the delta from **87 / 42 A / 45 M** to **96 / 45 A / 51 M**.
 
 This is a **VERIFICATION checklist** — it is what the Phase-2 pre-sync compare should show. It is **NOT** a list of manual copies (rule 9). **A** = added, copies wholesale, nothing to reconcile. **M** = modified, the Mac copy may have diverged.
 
-**Everything is in this manifest.** There is no longer an off-manifest hand-created file: `src/data/app_paths.py` is listed under `src/data` below, and it ships. Totals: **42 A + 43 M = 85**.
+**Everything is in this manifest.** There is no longer an off-manifest hand-created file: `src/data/app_paths.py` is listed under `src/data` below, and it ships. Totals: **45 A + 51 M = 96**.
 
-### migrations — 2 files, both A
+### migrations — 4 files, all A
 
-`051_zendesk_mirror.sql` (A, 137) · `053_zendesk_versions.sql` (A, 59)
+`051_zendesk_mirror.sql` (A, 137) · `053_zendesk_versions.sql` (A, 59) · `054_task_board_source.sql` (A, 32) · `055_task_board_links.sql` (A, 70) — **no `052`** (§7)
 
 ### root — 1 M
 
 `main.py` (+9/−0 — the fenced `ensure_docs_tree()` call from `30fb086`; not load-bearing, §4.2)
 
-### src/data — 4 A, 11 M
+### src/data — 4 A, 14 M
 
 **A:** `zendesk_import.py` (429) · `zendesk_versions.py` (284) · `chat_tools/zendesk_mirror_tools.py` (537) · **`app_paths.py` (124 — new in `1aa0ef2`; §4.2)**
-**M:** `html_sanitize.py` (+1174/−7) · `zendesk_store.py` (+967/−102) · `enablement_store.py` (+311/−18) · `chat_tools/enablement_tools.py` (+143/−85) · `zendesk_client.py` (+116/−74) · `chat_tools/registry.py` (+35/−4) · `enablement_sim.py` (+27/−19) · `guru_content_pipeline.py` (+23/−8) · `chat_tools/artifact_tools.py` (+12/−2) · `html_markdown.py` (+6/−1) · `INDEX.md` (+50)
+**M:** `html_sanitize.py` (+1174/−7) · `zendesk_store.py` (+967/−102) · `enablement_store.py` (+311/−18) · `chat_tools/enablement_tools.py` (+277/−87) · `asana_setup.py` (+325/−3 — §12.J) · `zendesk_client.py` (+116/−74) · `enablement_tasks.py` (+83/−3 — §12.J) · `chat_tools/registry.py` (+42/−5) · `asana_monitor.py` (+43/−3 — §12.J, both poll sites write links) · `enablement_sim.py` (+27/−19) · `guru_content_pipeline.py` (+23/−8) · `chat_tools/artifact_tools.py` (+12/−2) · `html_markdown.py` (+6/−1) · `INDEX.md` (+50)
 
 ### src/services — 1 A, 3 M
 
 **A:** `zendesk_web.py` (2,242 lines / 112 KB — the largest new file, holds all authority)
 **M:** `agent_chat.py` (+808/−36) · `enablement_web.py` (+51/−26) · `INDEX.md` (+13)
 
-### src/ui — 1 A, 11 M
+### src/ui — 1 A, 13 M
 
 **A:** `web/zendesk_bridge.py` (185)
-**M:** `pages/enablement/page.py` (+458/−12) · `web/chat_bridge.py` (+237/−6) · `pages/enablement/zendesk_tab.py` (+93/−19) · `pages/enablement/_common.py` (+31/−1) · `web/web_flags.py` (+24/−2) · `pages/enablement/workbench.py` (+19/−4) · `pages/enablement/guru_preview.py` (+13/−7) · `pages/guru_page.py` (+12/−2) · **`main_window.py` (+10/−1 — fails closed, §12.D)** · `pages/enablement/expand_overlay.py` (+9/−3) · `web/dist/index.html` (241,310 → **333,921 bytes**)
+**M:** `pages/enablement/page.py` (+673/−16) · `web/chat_bridge.py` (+237/−6) · `pages/enablement/settings.py` (+143/−25 — §12.J) · `widgets/credentials_panel.py` (+98/−3 — §12.I) · `pages/enablement/zendesk_tab.py` (+93/−19) · `pages/enablement/_common.py` (+31/−1) · `web/web_flags.py` (+24/−2) · `pages/enablement/workbench.py` (+19/−4) · `pages/enablement/guru_preview.py` (+13/−7) · `pages/guru_page.py` (+12/−2) · **`main_window.py` (+10/−1 — fails closed, §12.D)** · `pages/enablement/expand_overlay.py` (+9/−3) · `web/dist/index.html` (241,310 → **333,921 bytes**)
 
 ### src/llm, src/mcp, src/updater — 3 M
 
-`llm/claude_tools.py` (+220/−14) · `mcp/chat_mcp_server.py` (+174/−13) · `updater/schema_migrator.py` (+25/−0)
+`llm/claude_tools.py` (+274/−23) · `mcp/chat_mcp_server.py` (+211/−14) · `updater/schema_migrator.py` (+25/−0)
 
 ### web/src — 22 A, 2 M
 
@@ -1139,14 +1354,14 @@ This is a **VERIFICATION checklist** — it is what the Phase-2 pre-sync compare
 **A (other):** `web/src/chat/chat.test.jsx` (136)
 **M:** `web/src/App.jsx` (+3 — route registration only) · `web/src/chat/ChatApp.jsx` (+238/−6)
 
-### tests — 10 A, 7 M
+### tests — 11 A, 9 M
 
-**A:** `test_zendesk_bridge.py` (4,161) · `test_chat_review_panel.py` (1,540) · `test_zendesk_web_tab.py` (815) · `test_zendesk_mirror_tools.py` (773) · `test_zendesk_import.py` (763) · `test_publish_body_parity.py` (**585** — 500 at `4ccd321`, +85 in `a8ead66`; 28 tests) · `test_zendesk_versions.py` (567) · `test_zendesk_readonly_guard.py` (505) · `test_zendesk_mirror_schema.py` (499) · `test_zendesk_client_readonly.py` (253)
-**M:** `test_zendesk_content.py` (+210/−41) · `test_help_claims_create.py` (+140/−146) · `test_workbench_bridge.py` (+66/−5) · `test_enablement_web_flag.py` (+43) · `test_help_claims_troubleshooting.py` (+39/−6) · `test_help_claims_reference.py` (+6/−6) · `test_web_guardrails.py` (+5)
+**A:** `test_zendesk_bridge.py` (4,161) · `test_chat_review_panel.py` (1,540) · `test_zendesk_web_tab.py` (815) · `test_zendesk_mirror_tools.py` (773) · `test_zendesk_import.py` (763) · `test_publish_body_parity.py` (**585** — 500 at `4ccd321`, +85 in `a8ead66`; 28 tests) · `test_zendesk_versions.py` (567) · `test_zendesk_readonly_guard.py` (505) · `test_zendesk_mirror_schema.py` (499) · `test_zendesk_client_readonly.py` (253) · **`test_asana_board_management.py` (948 — 43 tests, §12.J)**
+**M:** `test_zendesk_content.py` (+210/−41) · `test_help_claims_create.py` (+140/−146) · `test_credentials_panel.py` (+113 — §12.I) · `test_workbench_bridge.py` (+66/−5) · `test_enablement_web_flag.py` (+43) · `test_help_claims_settings.py` (+43/−15 — §12.J) · `test_help_claims_troubleshooting.py` (+39/−6) · `test_help_claims_reference.py` (+6/−6) · `test_web_guardrails.py` (+5)
 
-### docs, help, CLAUDE.md — 2 A, 5 M
+### docs, help, CLAUDE.md — 2 A, 6 M
 
 **A:** `docs/ZENDESK_GURU_IMPLEMENTATION_NOTES.md` (159) · **`docs/ZENDESK_BLOCK_PORT_GUIDE.md` (this file — new in `24c8d0f`)**
-**M:** `CLAUDE.md` (+83/−4) · `assets/help/create/zendesk.md` (+74/−35) · `assets/help/create/zendesk-macros.md` (+38/−26) · `assets/help/reference/settings-keys.md` (+7/−6) · `assets/help/troubleshooting/connect-first.md` (+7/−1)
+**M:** `CLAUDE.md` (+83/−4) · `assets/help/create/zendesk.md` (+74/−35) · `assets/help/create/zendesk-macros.md` (+38/−26) · `assets/help/settings/connect-asana.md` (+27/−12 — §12.J) · `assets/help/reference/settings-keys.md` (+7/−6) · `assets/help/troubleshooting/connect-first.md` (+7/−1)
 
-**Addendum.** If the zip was taken from the branch tip rather than pinned at `a8ead66`, it may contain further docs-only descendants pushed after the retarget. The pre-sync compare will show those paths beyond the 85 above — that is the basis for the structural authentication in §4.1. **Anything beyond Appendix A that is not under `docs/` is unexplained → STOP.**
+**Addendum.** If the zip was taken from the branch tip rather than pinned at `fbe370f`, it may contain further docs-only descendants pushed after the retarget. The pre-sync compare will show those paths beyond the 96 above — that is the basis for the structural authentication in §4.1. **Anything beyond Appendix A that is not under `docs/` is unexplained → STOP.**
