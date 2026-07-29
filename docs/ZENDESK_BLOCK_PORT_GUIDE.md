@@ -1357,7 +1357,7 @@ This is a **VERIFICATION checklist** — it is what the Phase-2 pre-sync compare
 ### src/ui — 1 A, 13 M
 
 **A:** `web/zendesk_bridge.py` (185)
-**M:** `pages/enablement/page.py` (+673/−16) · `web/chat_bridge.py` (+237/−6) · `pages/enablement/settings.py` (+143/−25 — §12.J) · `widgets/credentials_panel.py` (+98/−3 — §12.I) · `pages/enablement/zendesk_tab.py` (+93/−19) · `pages/enablement/_common.py` (+31/−1) · `web/web_flags.py` (+24/−2) · `pages/enablement/workbench.py` (+19/−4) · `pages/enablement/guru_preview.py` (+13/−7) · `pages/guru_page.py` (+12/−2) · **`main_window.py` (+10/−1 — fails closed, §12.D)** · `pages/enablement/expand_overlay.py` (+9/−3) · `web/dist/index.html` (241,310 → **333,921 bytes**)
+**M:** `pages/enablement/page.py` (+673/−16) · `web/chat_bridge.py` (+237/−6) · `pages/enablement/settings.py` (+143/−25 — §12.J) · `widgets/credentials_panel.py` (+95/−3 — §12.I) · `pages/enablement/zendesk_tab.py` (+93/−19) · `pages/enablement/_common.py` (+31/−1) · `web/web_flags.py` (+24/−2) · `pages/enablement/workbench.py` (+19/−4) · `pages/enablement/guru_preview.py` (+13/−7) · `pages/guru_page.py` (+12/−2) · **`main_window.py` (+10/−1 — fails closed, §12.D)** · `pages/enablement/expand_overlay.py` (+9/−3) · `web/dist/index.html` (241,310 → **333,921 bytes**)
 
 ### src/llm, src/mcp, src/updater — 3 M
 
