@@ -350,10 +350,16 @@ diff -rq "$SRC" "$DEST" \
   --exclude .pytest_cache --exclude .claude --exclude node_modules --exclude .DS_Store \
   | sort > ~/alma_port_backup_2026-07-28/post_sync_compare.txt
 grep -c "differ$" ~/alma_port_backup_2026-07-28/post_sync_compare.txt      # expect 0
-grep -c "^Only in $SRC" ~/alma_port_backup_2026-07-28/post_sync_compare.txt  # expect 0
+grep -c "^Only in $SRC" ~/alma_port_backup_2026-07-28/post_sync_compare.txt  # expect 0 or 1 — see below
+grep "^Only in $SRC" ~/alma_port_backup_2026-07-28/post_sync_compare.txt
 ```
 
-**PASS = zero "differ" lines and zero "Only in `$SRC`" lines.** ("Only in `$DEST`" strays remain by design.) **FAIL:** the sync did not complete — re-run 4.4 and re-check. Do not proceed on a partial tree; §12.B explains why a partial sync of this particular range is the one dangerous outcome.
+**PASS = zero "differ" lines, and the only permitted "Only in `$SRC`" line is
+`docs/ZENDESK_BLOCK_PORT_GUIDE.md` itself** — 4.4 deliberately excludes this file
+from the sync (it is the document you are reading; see the comment there), so it
+stays unsynced by design. That is why the second command above prints the lines
+rather than only counting them: **any OTHER "Only in `$SRC`" path means the sync
+did not complete.** ("Only in `$DEST`" strays remain by design.) **FAIL:** the sync did not complete — re-run 4.4 and re-check. Do not proceed on a partial tree; §12.B explains why a partial sync of this particular range is the one dangerous outcome.
 
 **If it IS a git repo**, capture the audit trail of exactly what the sync changed:
 
@@ -378,8 +384,11 @@ grep '^??' ~/alma_port_backup_2026-07-28/applied_delta_git_view.txt
   `docs/`**. A shortfall anywhere else means a partial sync → re-run 4.4.
 - **More than 96** — you synced from a branch tip carrying later commits (§3
   tells you to, and §4.1 explains why the SHA will not match). Every extra line
-  must be **under `docs/`**, and `docs/ZENDESK_BLOCK_PORT_GUIDE.md` will
-  normally be one of them since 4.4 excludes it from the sync. **Any extra line
+  must be **under `docs/`**. Note that
+  `docs/ZENDESK_BLOCK_PORT_GUIDE.md` will NOT be among them: 4.4 excludes it
+  from the sync, so it never reaches `$DEST` and cannot appear in a git status
+  of `$DEST`. It shows up in the 4.5 compare instead, as the one permitted
+  "Only in `$SRC`" line. **Any extra line
   outside `docs/` is unreviewed code → STOP and report.**
 
 **Any `??` line naming `migrations/052_solver_ledger.sql`, `src/data/docs_backfill.py`, `src/data/solver_ledger.py`, `docs/pilot/` or `wheel_tail.bin`** means the zip was inflated from a dirty snapshot or copied too broadly — **STOP, do not commit.**
@@ -723,7 +732,7 @@ Observe, in order:
 1. Splash appears; **Database integrity reads `Schema v55`**. `v50` here = the migrator raised and was swallowed → §7, then §16 R2.
 2. App reaches the Home page with no error dialog. Existing surfaces (Calendar, Workbench, Chat) look and behave exactly as before — **this port changes none of them visually.**
 3. Enablement → **Zendesk tab opens as the classic native Qt tab** (`enablement.web_tabs` is still `off`, and that is correct at this point). Its former "Push to Zendesk" button is now **"Copy for Zendesk"** plus **"Mark as copied"**, with a read-only notice label. That change is the point of `2cc0089` — it is not a bug.
-4. Help tab opens → **62 articles** in the ToC. The Zendesk and Zendesk-macros articles no longer claim the app can push to Zendesk. A count below 62 means the assets tree did not land.
+4. Help tab opens → **63 articles** in the ToC. The Zendesk and Zendesk-macros articles no longer claim the app can push to Zendesk. A count below 63 means the assets tree did not land.
 5. Guru / Workbench → open any draft's **Review changes** and confirm the preview renders. This exercises the `publish_body()` cluster from `45aab99`. Do **not** publish yet — see §13.2 first.
 6. Settings → **Sources → Asana** now shows real state, not the old mockup: either your mapped board(s) with derived counts, or the plain empty state saying no board is mapped. **This is the first time this panel has ever been clicked in a running app** — read §12.J before touching its toggles or its Remove button.
 7. **Do not flip any flag yet.** Finish acceptance (§17) with everything dormant.
@@ -1173,7 +1182,13 @@ Storage is split: `zendesk_api_key` goes to the **macOS Keychain**; `zendesk_sub
 
 **Nothing else needs credentials.** File and folder import, the entire mirror workspace, search, drafts, versions, diffs and copy-exact all work with zero credentials. **Ship this port credential-less** and add the key later if the owner wants live pulls.
 
-**There is no Zendesk credential UI in enablement mode.** The only entry point is **product mode → Source Monitor → Connection tab**. Say this out loud, or the operator will hunt through enablement Settings and not find it.
+**Where the credential UI is.** As of `d018107` there is a **Zendesk card in
+Settings → Credentials** (§12.I), in the shared panel, so it appears in **both**
+enablement and product Settings — subdomain, email, API token. The older entry
+point, **product mode → Source Monitor → Connection tab**, still exists and still
+owns `view_id` and the TRC-field mapping for ticket ingestion; the new card
+deliberately does not offer those and passes the stored `view_id` back through
+untouched. Either one writes the same keyring entry.
 
 ---
 
@@ -1281,7 +1296,7 @@ Report each line as ✅ / ❌ / skipped-with-reason.
 8. **Migrations applied via the migrator** — `schema_migrations` tail is `[…049, 050, 051_zendesk_mirror.sql, 053_zendesk_versions.sql, 054_task_board_source.sql, 055_task_board_links.sql]`; 6 Zendesk tables and 6 triggers present; 4 new `zendesk_articles` columns; `enablement_tasks.board_source_id` and `task_board_links` present; the import+FTS smoke returned `imported: 1` with a **non-empty** `fts` list.
 9. **Test gates** — the four groups reported **145 / 252 / 102 / 165 = 664 passing**, with per-group counts recorded. `tests/test_zendesk_readonly_guard.py` **passed**. The fifth run, §12.J's `tests/test_asana_board_management.py`, reported **43 passed**.
 10. **Headless SPA probe** — `mounted=True`, `innerText_len` > 200, `exit=0`.
-11. **In-app smokes** — splash reads `Schema v55`; app reaches Home; existing surfaces unchanged; the classic Zendesk tab shows **"Copy for Zendesk" + "Mark as copied"** with the read-only notice; Help shows **62 articles**; Settings → Sources → Asana shows **real state or the empty state**, never the old mockup boards (§12.J).
+11. **In-app smokes** — splash reads `Schema v55`; app reaches Home; existing surfaces unchanged; the classic Zendesk tab shows **"Copy for Zendesk" + "Mark as copied"** with the read-only notice; Help shows **63 articles**; Settings → Sources → Asana shows **real state or the empty state**, never the old mockup boards (§12.J).
 12. **Settings untouched** — `diff data/settings.yaml ~/alma_port_backup_2026-07-28/settings.yaml` is empty; `~/.alma-insights/ui_state.json` unchanged. (The warehouse differs by the new tables — that is expected, and it is not "destroyed settings".)
 13. **`publish_collection_id` checked and its value reported to the owner** — not `col-1`, not blank; **and not changed by you**.
 14. **Phase 8b done** — `git reset --mixed FETCH_HEAD` completed and `git status` is clean apart from pre-existing untracked strays; `git log --oneline -3` tip matches the zip; the rescue branch is still in place; nothing was pushed.
@@ -1296,7 +1311,7 @@ If every line is ✅, the Mac is functionally identical to the Windows dev box a
 **Added after the guide was first written (commit `d018107`) — the Settings
 credentials card, §12.I:**
 
-- `src/ui/widgets/credentials_panel.py` [M, +98/−3] — Zendesk card in the
+- `src/ui/widgets/credentials_panel.py` [M, +95/−3] — Zendesk card in the
   shared `external` section. Appears in BOTH Settings hosts.
 - `tests/test_credentials_panel.py` [M, +113] — nine `test_zendesk_*` cases.
 
