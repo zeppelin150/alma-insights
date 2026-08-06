@@ -8,7 +8,7 @@ order: 3
 status: partial
 features: [en_zendesk]
 summary: The Zendesk connection is one-way — the app reads your Help Center and can never write to it; drafts are edited locally and reach Zendesk only when a person copies them into the Zendesk editor.
-last_verified: 2026-07-26
+last_verified: 2026-08-05
 ---
 
 The Zendesk connection is **one-way**. Everything in this app reads from
@@ -110,10 +110,13 @@ mirror** instead of your live instance.
 **Working in the mirror.** The article and macro editors look and behave like
 Zendesk's, but every change stays local. Renn researches from your go-to-market
 docs, ticket exports and Asana briefs, and proposes updates as **revisions** —
-each with a rationale and its sources. Revisions move pending → ready → copied:
-you review the diff against the mirrored original, use **Copy exact** to put
-the final content on the clipboard byte-for-byte, paste it into real Zendesk
-yourself, and mark the revision copied.
+each with a rationale and its sources. You review the diff against the
+mirrored original, then copy the content whenever you are ready — a native
+confirmation dialog in the app window shows the exact bytes before anything
+reaches the clipboard — paste it into real Zendesk yourself, and mark the
+revision ready or copied to track your progress by hand. The pending → ready →
+copied statuses are workflow bookkeeping, not a gate: a revision can be copied
+at any of them.
 
 **Nothing writes back.** Neither the web workspace nor Renn can touch your
 Zendesk instance — there is deliberately no push, no publish, and no API write

@@ -100,7 +100,11 @@ Security posture (the QWebChannel trust boundary):
      line/word-wise. Every attribute, style declaration, ``<script>`` body
      and hidden span is literally on screen. The readable
      ``html_to_review_text`` projection ships alongside as an explicitly
-     SECONDARY convenience view and is never shown alone.
+     SECONDARY convenience view and is never shown alone. (The
+     ``body_text`` flavour is the markdown SOURCE of that same reviewed
+     content and is NOT separately diffed — see the precision note below;
+     its release-time disclosure on a draft is the native byte-showing
+     confirm, item 6.)
   2. **Copy releases only reviewed bytes** (``_resolve_copy`` +
      ``_review_covers``): the payload is recomputed from the DB by
      ``_copy_bundle`` — the SAME function that built the reviewed material
@@ -121,12 +125,26 @@ Security posture (the QWebChannel trust boundary):
      the payload carries ``warning`` instead of an innocent "0 changed
      lines".
   5. Every draft-content mutator drops the recorded review, so a stale
-     on-screen diff can never authorize a copy, and pending drafts are
-     refused at the clipboard regardless.
+     on-screen diff can never authorize a copy. Draft STATUS is workflow
+     bookkeeping only: any reviewed draft — pending, ready, copied or
+     pushed — releases under this same review record + native confirm
+     (owner decision 2026-08-05). The pending→ready→copied lane tracks
+     the specialist's progress by hand; it does not gate the clipboard.
 
-  Precision on "shown": of the strings ``_record_review`` binds, the plain
-  flavours are rendered literally — the diff rows, ``body_source``, the
-  title row. The rich (``text/html`` mime) flavour is not independent
+  Precision on "shown": of the strings ``_record_review`` binds, the
+  DIFFED plain flavours are rendered literally — the diff rows,
+  ``body_source``, the title row. ``body_text`` is NOT one of them: the
+  diff is computed from the ``body_html`` bytes + title, and ``body_text``
+  is the markdown SOURCE of that same reviewed content (a draft's stored
+  body; the ``_article_body_text`` projection for a mirror row, which
+  ``js_open_article`` serves as the editor seed), so markdown constructs
+  that render to nothing in HTML — a link reference definition, say — can
+  be present in it without a visible diff row. The character-for-character
+  guarantee is therefore scoped to the diffed flavours; for ``body_text``
+  the release-time protection is that every DRAFT copy, ``body_text``
+  included, passes the native byte-showing confirm
+  (``_confirm_copy_release``, item 6), which displays the exact released
+  bytes. The rich (``text/html`` mime) flavour is not independent
   content: it is ``sanitize_html`` of the string the reviewer WAS shown,
   and sanitize only removes and escapes — it can never introduce a tag,
   attribute or URL absent from the source. That derivation is asserted in
@@ -241,8 +259,8 @@ _PURGE_SCOPES = ("all", "articles", "macros", "imported")
 # Per-target copy-field allowlists: the TARGET kind (never a polymorphic id)
 # decides the table, so a draft id can never silently address an article row.
 _COPY_FIELDS = {
-    "article": ("title", "body_html", "body_rich"),
-    "article_draft": ("title", "body_html", "body_rich"),
+    "article": ("title", "body_html", "body_rich", "body_text"),
+    "article_draft": ("title", "body_html", "body_rich", "body_text"),
     "macro": ("macro_name", "macro_reply"),
     "macro_draft": ("macro_name", "macro_reply"),
 }
@@ -277,8 +295,10 @@ _DRAFT_COPY_TARGETS = frozenset(_DRAFT_TARGET.values())
 # content-derived branch is something whoever controls the content can steer.
 # ``macro_reply`` is here because a reply is routinely ``comment_value_html``
 # and the live Zendesk comment editor INTERPRETS what is pasted into it.
-# Titles and macro names are not markup and stay un-gated (a draft still
-# confirms them, because a draft confirms everything).
+# Titles, macro names and the drafted-content text (``body_text``, a prose
+# flavour the destination does not interpret) are not markup and stay
+# un-gated (a draft still confirms them, because a draft confirms
+# everything).
 _MARKUP_COPY_FIELDS = frozenset({"body_html", "body_rich", "macro_reply"})
 
 
@@ -770,7 +790,8 @@ class ZendeskWebController(QObject):
         self._served_article_ids.add(aid)
         self._open_article_id = aid
         payloads = self._html_payloads(art.get("title") or "",
-                                       self._article_source(art))
+                                       self._article_source(art),
+                                       self._article_body_text(art))
         self._record_review("article", aid, payloads,
                             str(art.get("content_hash") or ""))
         self._emit(self.article_detail, {
@@ -791,10 +812,11 @@ class ZendeskWebController(QObject):
             # reads the same characters the clipboard will carry.
             "body_source": payloads["body_html"]["text"],
             # Plain/markdown seed for the specialist edit textarea
-            # (ArticleEditor -> BodyEditForm). Without it the editor opened
-            # BLANK and a save silently replaced the whole body with only
-            # what was typed.
-            "body_text": self._article_body_text(art),
+            # (ArticleEditor -> BodyEditForm) AND the bytes the primary
+            # "Copy content" (body_text) copy delivers. Without it the
+            # editor opened BLANK and a save silently replaced the whole
+            # body with only what was typed.
+            "body_text": payloads["body_text"]["text"],
             "markup_notice": payloads["body_html"]["notice"],
             # WHAT diverges, item by item (dropped containers, refused or
             # merely unexpected URL schemes, and every hiding construct the
@@ -875,9 +897,18 @@ class ZendeskWebController(QObject):
 
         Emitting the diff RECORDS the review: hashes of every exact string
         ``_copy_bundle`` can release for this draft. ``_resolve_copy``
-        releases nothing whose hash is absent, so nothing can be present in
-        the copied bytes without having been present, character for
-        character, in this diff.
+        releases nothing whose hash is absent. For the DIFFED flavours —
+        the title and the ``body_html``-derived strings this surface
+        renders — that means nothing can be present in the copied bytes
+        without having been present, character for character, in this
+        diff. The ``body_text`` flavour is NOT separately diffed: it is
+        the markdown SOURCE of the same reviewed content (the draft's
+        stored body), and markdown constructs that render to nothing in
+        HTML — a link reference definition, say — can be present in it
+        without a visible diff row. Its release-time disclosure is the
+        native byte-showing confirm (``_confirm_copy_release``), which
+        displays the exact released bytes for EVERY draft copy,
+        ``body_text`` included (module docstring, item 6).
 
         ``warning`` is set when the source diff reports no changed line
         although the bytes differ from the baseline — a diff bug, surfaced
@@ -1188,8 +1219,13 @@ class ZendeskWebController(QObject):
         DRAFT takes the native confirm that displays the exact bytes
         (``_resolve_copy`` → ``_confirm_copy_release``); if it is absent or
         declined, ``_resolve_copy`` returns None and NOTHING is emitted —
-        no clipboard write and no ``copy_resolved`` receipt. Only mirror
-        titles and macro names copy under the review record alone.
+        no clipboard write and no ``copy_resolved`` receipt. Only the
+        plain-text mirror fields — titles, macro names and the
+        drafted-content ``body_text`` prose — copy under the review record
+        alone. Draft STATUS never gates a copy: any reviewed draft
+        releases behind the confirm, at pending, ready, copied or pushed
+        alike (owner decision 2026-08-05) — the statuses track the
+        specialist's hand-paste workflow, nothing more.
 
         Every successful copy is ALSO announced on the native status line
         via the compat set_status, a surface the page cannot forge —
@@ -1206,9 +1242,9 @@ class ZendeskWebController(QObject):
           un-gated MIRROR copy while the draft dialog was still up);
         * an approved GATED release arms ``_COPY_HOLD_S`` during which no
           copy that carries no gate of its own — since 2026-07-27 that is
-          only a mirror title / macro name, which the page self-serves
-          through js_open_article — may overwrite it. A gated copy may, and
-          pays for its own confirm."""
+          only a plain-text mirror field (title / macro name / body_text),
+          which the page self-serves through js_open_article — may
+          overwrite it. A gated copy may, and pays for its own confirm."""
         if self._frozen():
             # a native modal or a pull/import owns this moment
             self.set_status(_COPY_REFUSED)
@@ -1821,7 +1857,7 @@ class ZendeskWebController(QObject):
 
     # ── copy-exact resolution + the reviewed-bytes gate ──────────────
     @staticmethod
-    def _html_payloads(title: str, raw: str) -> dict:
+    def _html_payloads(title: str, raw: str, body_text: str = "") -> dict:
         """Releasable payloads for an HTML-bodied row (mirror article or
         article draft), keyed by copy field.
 
@@ -1833,6 +1869,11 @@ class ZendeskWebController(QObject):
         do not vouch for, so the mime flavour is defanged before it can
         reach the live Zendesk editor as formatted paste. The clipboard
         never sees the wider preview profile.
+
+        ``body_text`` is the drafted-content prose — the SPA's primary
+        "Copy content" flavour: the stored markdown for a draft, the
+        ``_article_body_text`` projection for a mirror row. Prose, not
+        markup, so like ``title`` it copies text-only.
 
         ``notice``/``report`` are measured against the PREVIEW profile
         instead: they fire when the sandboxed preview and the bytes are not
@@ -1857,6 +1898,9 @@ class ZendeskWebController(QObject):
             "body_rich": {"text": raw, "html": safe,
                           "sanitized": safe != raw, "notice": notice,
                           "report": list(report)},
+            # Drafted-content prose: text-only, like the title.
+            "body_text": {"text": body_text or "", "html": None,
+                          "sanitized": False, "notice": "", "report": []},
         }
 
     @staticmethod
@@ -1904,7 +1948,8 @@ class ZendeskWebController(QObject):
             if row is None:
                 return None
             return (self._html_payloads(row.get("title") or "",
-                                        self._article_source(row)),
+                                        self._article_source(row),
+                                        self._article_body_text(row)),
                     str(row.get("content_hash") or ""), row)
         if target == "article_draft":
             row = store.get_article_draft(conn, tid)
@@ -1915,7 +1960,13 @@ class ZendeskWebController(QObject):
                 # Renn drafts store markdown; render deterministically.
                 from src.data.html_markdown import markdown_to_html
                 html = markdown_to_html(row.get("body") or "")
-            return (self._html_payloads(row.get("title") or "", str(html)),
+            body_text = str(row.get("body") or "")
+            if not body_text:
+                # Body-less legacy drafts: project the stored HTML back to
+                # markdown, the same way a mirror row seeds its editor.
+                body_text = self._article_body_text(row)
+            return (self._html_payloads(row.get("title") or "", str(html),
+                                        body_text),
                     store.draft_content_hash("article", row), row)
         if target == "macro":
             row = store.get_macro(conn, tid)
@@ -2071,8 +2122,18 @@ class ZendeskWebController(QObject):
         return False
 
     def _record_review(self, target, tid, payloads, content_hash):
-        """Bind the exact strings the reviewer was JUST SHOWN to (target,
-        tid). Only these hashes can later leave through the clipboard."""
+        """Bind the exact strings of the material just served for review
+        to (target, tid). Only these hashes can later leave through the
+        clipboard.
+
+        Not every bound string is literally on the review surface: the
+        diffed flavours (title, ``body_html``-derived) are rendered
+        character for character, while ``body_text`` is the markdown
+        SOURCE of the same content — served as the editor seed /
+        ``body_text`` detail field, never diffed. Every DRAFT copy of it
+        still passes the native byte-showing confirm
+        (``_confirm_copy_release``), which is the release-time disclosure
+        (module docstring, item 6 + the precision note)."""
         blobs = set()
         for p in (payloads or {}).values():
             blobs.add(_sha(p.get("text")))
@@ -2133,12 +2194,13 @@ class ZendeskWebController(QObject):
         """(text, html|None, sanitized, notice) for a validated copy
         request, or None for a silent refusal.
 
-        DRAFT-content copies additionally require the CURRENT DB status in
-        ('ready','copied') — the pending→ready review step is ENFORCED at
-        the clipboard boundary, not advisory. Everything else, mirror rows
-        included, goes through ``_review_covers``: no recorded review means
-        no clipboard write, for every target. That gate stays as defence in
-        depth even though it is no longer the disclosure.
+        Draft STATUS is not consulted (owner decision 2026-08-05): a draft
+        releases at pending, ready, copied or pushed alike. The protection
+        is the review record + the native confirm, and status is workflow
+        bookkeeping the specialist advances by hand. Every target, mirror
+        rows included, goes through ``_review_covers``: no recorded review
+        means no clipboard write. That gate stays as defence in depth even
+        though it is no longer the disclosure.
 
         And every release ``_copy_needs_confirm`` names — all markup, on
         mirror rows and drafts alike, plus every draft field whatever it
@@ -2147,13 +2209,10 @@ class ZendeskWebController(QObject):
         bundle = self._copy_bundle(conn, target, tid)
         if bundle is None:
             return None
-        payloads, content_hash, row = bundle
+        payloads, content_hash, _row = bundle
         payload = payloads.get(field)
         if payload is None:
             return None                 # e.g. a macro with no reply action
-        if target in _DRAFT_COPY_TARGETS:
-            if row.get("status") not in ("ready", "copied"):
-                return None
         if not self._review_covers(target, tid, payload, content_hash):
             return None
         if _copy_needs_confirm(target, field):

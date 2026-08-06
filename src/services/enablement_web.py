@@ -101,6 +101,8 @@ class CalendarWebController(QObject):
                 "subs": str(t.get("subs") or ""),
                 "description": str(t.get("description") or "")[:_DESCRIPTION_CAP],
                 "is_card_due": t.get("kind") == "guru_card_due",
+                "is_subtask": bool(t.get("is_subtask")),
+                "parent_title": str(t.get("parent_title") or ""),
             })
         self._push({"events": events})
 

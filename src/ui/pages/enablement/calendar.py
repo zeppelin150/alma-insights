@@ -91,9 +91,12 @@ class CalendarPage(QWidget):
             due = t.get("due_date") or ""
             if len(due) >= 10:
                 kind = t.get("source") if t.get("source") in TINT else "normal"
-                ev.setdefault(due[:10], []).append(
-                    ((t.get("title") or "")[:20], kind, dict(t))
-                )
+                label = (t.get("title") or "")[:20]
+                if t.get("is_subtask"):
+                    # Promoted Asana subtasks carry a ↳ marker (PlainText chip
+                    # — the glyph is never interpreted as markup).
+                    label = "↳ " + label
+                ev.setdefault(due[:10], []).append((label, kind, dict(t)))
         self._events = ev
         self._rebuild_grid()
 

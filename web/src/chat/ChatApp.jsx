@@ -27,6 +27,60 @@ function Meter({ m }) {
   );
 }
 
+// Clear the queued badge on the first queued bubble whose text matches the
+// dispatched payload. Driven ONLY by the bridge's queuedDispatched(text) —
+// never inferred from busyChanged(true): the Python queue interleaves items
+// with no JS bubble ([SYSTEM] triggers, sends from the other surface), so "a
+// turn started" is not proof that THIS surface's oldest queued bubble is the
+// one that ran. Pure + exported so both surfaces share it and it is testable.
+export function unbadgeDispatched(messages, text) {
+  const i = messages.findIndex((x) => x.queued && x.text === text);
+  if (i < 0) return messages;
+  const next = messages.slice();
+  next[i] = { ...next[i], queued: false };
+  return next;
+}
+
+// One transcript bubble. Exported so the queued badge is testable: a message
+// parked while a turn ran carries `queued: true` until its turn starts.
+export function Bubble({ m }) {
+  return (
+    <div className={"msg " + m.role}>
+      {m.role === "assistant" ? <Markdown text={m.text} /> : m.text}
+      {m.queued ? <span className="queued-badge">queued</span> : null}
+    </div>
+  );
+}
+
+// The message composer. Exported so its busy contract is testable: the input
+// stays ENABLED while a turn runs (extra context queues and sends when the
+// engine frees up), and the Send control swaps to Stop while busy. `mic` is
+// the surface's own dictation button (or null).
+export function Composer({ input, onInput, onSend, onStop, busy, stopping, disabled, mic }) {
+  return (
+    <div className="composer">
+      <input
+        value={input}
+        onChange={(e) => onInput(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && onSend()}
+        placeholder="Message the agent…"
+        autoFocus
+      />
+      {mic}
+      {busy ? (
+        <button className="send stop" onClick={onStop} disabled={stopping || disabled}
+                title="Stop this response">
+          Stop
+        </button>
+      ) : (
+        <button className="send" onClick={onSend} disabled={disabled}>
+          Send
+        </button>
+      )}
+    </div>
+  );
+}
+
 // One day-stamp like "Jun 29 · 2:14 PM" from an ISO timestamp (best-effort).
 function when(ts) {
   if (!ts) return "";
@@ -1304,7 +1358,14 @@ export default function ChatApp() {
   const [listening, setListening] = useState(false);
   const [transcribing, setTranscribing] = useState(false);
   const [voiceError, setVoiceError] = useState(false);
+  const [stopping, setStopping] = useState(false); // Stop clicked, kill in flight
   const scrollRef = useRef(null);
+  // The streamed buffer, mirrored into a ref so runStopped can finalize the
+  // partial text without racing React state.
+  const streamRef = useRef("");
+  // Monotonic id for user bubbles, so a queueMessage callback can badge the
+  // exact bubble it queued.
+  const seqRef = useRef(0);
   // The drafts as last rendered, so an incoming poll can be COMPARED against
   // what is on screen instead of replacing it. The bridge callback below is
   // registered once and closes over this ref, not over the drafts state.
@@ -1317,11 +1378,13 @@ export default function ChatApp() {
       setBusy(false);
       setTools([]);
       setStreaming(""); // finalized — the full text replaces the streamed buffer
+      streamRef.current = "";
       setMessages((m) => [...m, { role: "assistant", text: t }]);
     });
     bridge.errorOccurred.connect((e) => {
       setBusy(false);
       setStreaming("");
+      streamRef.current = "";
       setMessages((m) => [...m, { role: "error", text: e }]);
     });
     bridge.busyChanged.connect((b) => {
@@ -1329,9 +1392,37 @@ export default function ChatApp() {
       if (b) {
         setTools([]);
         setStreaming("");
+        streamRef.current = "";
         setStatus("Renn is thinking…");
+      } else {
+        setStopping(false);
       }
     });
+    // A queued bubble is un-badged only when Python names the drained text —
+    // see unbadgeDispatched for why busyChanged(true) must not be used.
+    if (bridge.queuedDispatched) {
+      bridge.queuedDispatched.connect((t) => {
+        setMessages((m) => unbadgeDispatched(m, t));
+      });
+    }
+    // The user aborted the turn: finalize any partial text instead of
+    // discarding it, or say so plainly when nothing had streamed yet.
+    if (bridge.runStopped) {
+      bridge.runStopped.connect(() => {
+        const buf = streamRef.current;
+        streamRef.current = "";
+        setStreaming("");
+        setTools([]);
+        setStopping(false);
+        setMessages((m) => [
+          ...m,
+          buf
+            ? { role: "assistant", text: buf + "\n\n— stopped" }
+            : { role: "system", text: "Run stopped." },
+        ]);
+        window.__almaRunStopped = (window.__almaRunStopped || 0) + 1; // headless hook
+      });
+    }
     // Keep the Agent's own neutral label — the shared engine hardcodes
     // "Gemini is thinking…", which is wrong on the Claude path. Real status
     // messages (e.g. bridge refresh) still come through.
@@ -1342,6 +1433,7 @@ export default function ChatApp() {
     bridge.tokenStreamed.connect((d) => {
       setStreaming((s) => {
         const next = s + d;
+        streamRef.current = next;
         window.__almaStreamBuf = next; // headless hook
         return next;
       });
@@ -1369,6 +1461,7 @@ export default function ChatApp() {
         setMeter(null);
         setBusy(false);
         setStreaming("");
+        streamRef.current = "";
         setHistoryOpen(false);
         window.__almaLoaded = msgs.length; // headless hook
       } catch (e) {}
@@ -1456,9 +1549,31 @@ export default function ChatApp() {
   function send() {
     const text = input.trim();
     if (!text || !bridge) return;
-    setMessages((m) => [...m, { role: "user", text }]);
+    const id = ++seqRef.current;
+    setMessages((m) => [...m, { role: "user", text, id }]);
     setInput("");
-    bridge.send(text);
+    if (bridge.queueMessage) {
+      // Always route through the queue: it sends immediately when idle and
+      // parks the text while a turn runs. The result arrives via the
+      // QWebChannel callback (same consumption as voiceAvailable).
+      bridge.queueMessage(text, (r) => {
+        if (r === "queued") {
+          setMessages((m) => m.map((x) => (x.id === id ? { ...x, queued: true } : x)));
+        }
+      });
+    } else {
+      bridge.send(text);
+    }
+  }
+
+  function stop() {
+    if (!bridge || !bridge.stopRun) return;
+    setStopping(true);
+    bridge.stopRun((ok) => {
+      // Nothing was aborted (idle, or a client with no abort) — the run keeps
+      // going, so give the button back rather than leaving it dead.
+      if (!ok) setStopping(false);
+    });
   }
 
   function newChat() {
@@ -1525,9 +1640,7 @@ export default function ChatApp() {
 
       <div className="messages" ref={scrollRef}>
         {messages.map((m, i) => (
-          <div key={i} className={"msg " + m.role}>
-            {m.role === "assistant" ? <Markdown text={m.text} /> : m.text}
-          </div>
+          <Bubble key={i} m={m} />
         ))}
         {busy && (
           <div className={"msg assistant " + (streaming ? "streaming" : "thinking")}>
@@ -1552,42 +1665,40 @@ export default function ChatApp() {
 
       <Meter m={meter} />
 
-      <div className="composer">
-        <input
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && send()}
-          placeholder="Message the agent…"
-          disabled={busy}
-          autoFocus
-        />
-        <button
-          className={
-            "mic" +
-            (listening || transcribing ? " listening" : voiceError ? " err" : "")
-          }
-          title={
-            !voiceAvail
-              ? "Dictation unavailable on this device"
-              : listening
-              ? "Listening — click to stop"
-              : voiceError
-              ? "Dictation failed — click to try again"
-              : "Click to dictate (on-device)"
-          }
-          disabled={!voiceAvail || busy || transcribing}
-          onClick={() => {
-            if (!bridge) return;
-            if (listening) bridge.stopVoice();
-            else bridge.startVoice();
-          }}
-        >
-          {transcribing ? "● transcribing…" : listening ? "● listening" : voiceError ? "mic ⚠" : "mic"}
-        </button>
-        <button className="send" onClick={send} disabled={busy || !bridge}>
-          Send
-        </button>
-      </div>
+      <Composer
+        input={input}
+        onInput={setInput}
+        onSend={send}
+        onStop={stop}
+        busy={busy}
+        stopping={stopping}
+        disabled={!bridge}
+        mic={
+          <button
+            className={
+              "mic" +
+              (listening || transcribing ? " listening" : voiceError ? " err" : "")
+            }
+            title={
+              !voiceAvail
+                ? "Dictation unavailable on this device"
+                : listening
+                ? "Listening — click to stop"
+                : voiceError
+                ? "Dictation failed — click to try again"
+                : "Click to dictate (on-device)"
+            }
+            disabled={!voiceAvail || busy || transcribing}
+            onClick={() => {
+              if (!bridge) return;
+              if (listening) bridge.stopVoice();
+              else bridge.startVoice();
+            }}
+          >
+            {transcribing ? "● transcribing…" : listening ? "● listening" : voiceError ? "mic ⚠" : "mic"}
+          </button>
+        }
+      />
 
       <History
         bridge={bridge}

@@ -16,8 +16,15 @@ from PySide6.QtCore import QCoreApplication
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _MIGRATION_SQL = (_PROJECT_ROOT / "migrations" / "005_persistence_layer.sql").read_text(encoding="utf-8")
 
-# Ensure QCoreApplication exists for signal delivery
-_app = QCoreApplication.instance() or QCoreApplication([])
+# Ensure an application exists for signal delivery. A FULL QApplication, not
+# QCoreApplication: this module imports first in its pytest group, and widget
+# tests later in the same process (test_chat_review_panel's real dialog)
+# crash natively if the singleton is core-only.
+try:
+    from PySide6.QtWidgets import QApplication as _AppClass
+except Exception:  # noqa: BLE001 — headless build without QtWidgets
+    _AppClass = QCoreApplication
+_app = _AppClass.instance() or _AppClass([])
 
 
 def _wait_for_engine(engine, timeout=5.0):

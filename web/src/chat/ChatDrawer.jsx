@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Markdown } from "../lib/markdown.jsx";
+import { Bubble, unbadgeDispatched } from "./ChatApp.jsx";
 
 // Renn as an in-page drawer (M5.5) — the updated chat surface the web tabs
 // raise instead of the legacy Qt ChatPanel drilldown. A pure renderer over
@@ -19,11 +20,16 @@ export default function ChatDrawer({ bridge, open, onClose }) {
   const [streaming, setStreaming] = useState("");
   const [tools, setTools] = useState([]);
   const [input, setInput] = useState("");
+  const [stopping, setStopping] = useState(false);
   const scrollRef = useRef(null);
   // Texts this drawer rendered optimistically and expects to see echoed back
   // as a chatNotice("u") from the host — so it can skip its own echo (a second
   // open drawer, which has no pending echo, renders the turn normally).
   const pendingEchoes = useRef([]);
+  // The streamed buffer mirrored into a ref (runStopped finalizes it) and a
+  // monotonic id so a queueMessage callback can badge the bubble it queued.
+  const streamRef = useRef("");
+  const seqRef = useRef(0);
 
   useEffect(() => {
     if (!bridge) return;
@@ -31,12 +37,14 @@ export default function ChatDrawer({ bridge, open, onClose }) {
       setBusy(false);
       setTools([]);
       setStreaming("");
+      streamRef.current = "";
       setMessages((m) => [...m, { role: "assistant", text: t }]);
       window.__almaDrawerMsgs = (window.__almaDrawerMsgs || 0) + 1; // headless hook
     });
     bridge.errorOccurred.connect((e) => {
       setBusy(false);
       setStreaming("");
+      streamRef.current = "";
       setMessages((m) => [...m, { role: "error", text: e }]);
     });
     bridge.busyChanged.connect((b) => {
@@ -44,16 +52,49 @@ export default function ChatDrawer({ bridge, open, onClose }) {
       if (b) {
         setTools([]);
         setStreaming("");
+        streamRef.current = "";
         setStatus("Renn is thinking…");
+      } else {
+        setStopping(false);
       }
     });
+    // A queued bubble is un-badged only when Python names the drained text —
+    // see unbadgeDispatched (ChatApp) for why busyChanged(true) must not be
+    // used: the shared queue also drains items with no bubble in THIS drawer.
+    if (bridge.queuedDispatched) {
+      bridge.queuedDispatched.connect((t) => {
+        setMessages((m) => unbadgeDispatched(m, t));
+      });
+    }
+    // The user aborted the turn: keep any partial text instead of dropping it.
+    if (bridge.runStopped) {
+      bridge.runStopped.connect(() => {
+        const buf = streamRef.current;
+        streamRef.current = "";
+        setStreaming("");
+        setTools([]);
+        setStopping(false);
+        setMessages((m) => [
+          ...m,
+          buf
+            ? { role: "assistant", text: buf + "\n\n— stopped" }
+            : { role: "system", text: "Run stopped." },
+        ]);
+      });
+    }
     // Keep the drawer's neutral label — the shared engine hardcodes a
     // provider-specific "… is thinking" we don't want to parrot.
     bridge.statusUpdate.connect((s) => {
       if (s && !/is thinking/i.test(s)) setStatus(s);
     });
     if (bridge.tokenStreamed) {
-      bridge.tokenStreamed.connect((d) => setStreaming((s) => s + d));
+      bridge.tokenStreamed.connect((d) =>
+        setStreaming((s) => {
+          const next = s + d;
+          streamRef.current = next;
+          return next;
+        })
+      );
     }
     if (bridge.toolCall) {
       bridge.toolCall.connect((j) => {
@@ -95,11 +136,29 @@ export default function ChatDrawer({ bridge, open, onClose }) {
 
   function send() {
     const text = input.trim();
-    if (!text || !bridge || busy) return;
-    setMessages((m) => [...m, { role: "user", text }]);
+    if (!text || !bridge) return;
+    const id = ++seqRef.current;
+    setMessages((m) => [...m, { role: "user", text, id }]);
     pendingEchoes.current.push(text);   // dedupe our own mirrored echo
     setInput("");
-    bridge.send(text);
+    if (bridge.queueMessage) {
+      // Sends immediately when idle; parks the text while a turn runs.
+      bridge.queueMessage(text, (r) => {
+        if (r === "queued") {
+          setMessages((m) => m.map((x) => (x.id === id ? { ...x, queued: true } : x)));
+        }
+      });
+    } else {
+      bridge.send(text);
+    }
+  }
+
+  function stop() {
+    if (!bridge || !bridge.stopRun) return;
+    setStopping(true);
+    bridge.stopRun((ok) => {
+      if (!ok) setStopping(false);   // nothing was aborted — re-arm the button
+    });
   }
 
   if (!open) return null;
@@ -127,9 +186,7 @@ export default function ChatDrawer({ bridge, open, onClose }) {
               </div>
             )}
             {messages.map((m, i) => (
-              <div key={i} className={"msg " + m.role}>
-                {m.role === "assistant" ? <Markdown text={m.text} /> : m.text}
-              </div>
+              <Bubble key={i} m={m} />
             ))}
             {busy && (
               <div className={"msg assistant " + (streaming ? "streaming" : "thinking")}>
@@ -162,10 +219,14 @@ export default function ChatDrawer({ bridge, open, onClose }) {
             <input value={input}
                    onChange={(e) => setInput(e.target.value)}
                    onKeyDown={(e) => e.key === "Enter" && send()}
-                   placeholder="Message Renn…"
-                   disabled={busy} />
-            <button className="wb-btn primary" onClick={send}
-                    disabled={busy || !input.trim()}>Send</button>
+                   placeholder="Message Renn…" />
+            {busy ? (
+              <button className="wb-btn primary stop" onClick={stop}
+                      disabled={stopping} title="Stop this response">Stop</button>
+            ) : (
+              <button className="wb-btn primary" onClick={send}
+                      disabled={!input.trim()}>Send</button>
+            )}
           </div>
         </>
       )}

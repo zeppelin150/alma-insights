@@ -24,6 +24,49 @@ import threading
 logger = logging.getLogger("alma.claude_cli_subprocess")
 
 
+def kill_process_tree(proc: subprocess.Popen | None) -> None:
+    """Force-kill ``proc`` AND every child it spawned. Idempotent; never raises.
+
+    On Windows a bare ``proc.kill()`` is ``TerminateProcess`` on the one PID:
+    the ``claude`` CLI dies but the ``python -m src.mcp.chat_mcp_server`` child
+    it spawned survives — a zombie holding the warehouse DB open and still able
+    to commit tool rows after the operator pressed Stop. ``taskkill /T /F``
+    walks the child tree. Any taskkill failure (missing binary, timeout,
+    nonzero exit) falls back to the plain kill, so a stop is never weaker than
+    it was before.
+
+    POSIX path unchanged (single kill). Mac follow-up for the port: spawn the
+    CLI with ``start_new_session=True`` and kill the process group
+    (``os.killpg``) to get the same tree semantics.
+
+    This is the ONE choke point for killing a CLI call: the bridge's
+    abort/shutdown (``_kill_proc``), the timeout/early_stop paths
+    (``CliSubprocess.kill``) and the atexit sweep all route through it.
+    """
+    if proc is None:
+        return
+    try:
+        if proc.poll() is not None:
+            return
+        if sys.platform == "win32":
+            rc = 1
+            try:
+                rc = subprocess.run(
+                    ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                    capture_output=True, timeout=10,
+                ).returncode
+            except Exception as e:  # noqa: BLE001 — fall through to plain kill
+                logger.debug("taskkill /T failed for pid %s: %s", proc.pid, e)
+                rc = 1
+            if rc != 0:
+                proc.kill()
+        else:
+            proc.kill()
+        proc.wait(timeout=5)
+    except Exception:  # noqa: BLE001 — a kill must never raise into the caller
+        pass
+
+
 class CliSubprocess:
     """A spawned ``claude`` subprocess with stderr drain + line streaming."""
 
@@ -93,15 +136,9 @@ class CliSubprocess:
         return self.proc.wait(timeout=timeout)
 
     def kill(self) -> None:
-        """Force-kill the subprocess. Idempotent."""
-        if not self.proc:
-            return
-        try:
-            if self.proc.poll() is None:
-                self.proc.kill()
-                self.proc.wait(timeout=5)
-        except Exception:
-            pass
+        """Force-kill the subprocess AND its children (the MCP server the CLI
+        spawned) — see ``kill_process_tree``. Idempotent."""
+        kill_process_tree(self.proc)
 
     def is_running(self) -> bool:
         return self.proc is not None and self.proc.poll() is None

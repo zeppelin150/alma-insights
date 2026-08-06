@@ -149,7 +149,8 @@ class ZendeskBridge(QObject):
     def copyField(self, target, target_id, field):
         """Copy exact — the controller re-reads the DB bytes at click time
         and the Python-side clipboard does the copy (target kind decides
-        the table; draft copies require reviewed status)."""
+        the table; draft copies require a recorded review + the native
+        confirm, at any status)."""
         self._call(self._copy_fn, target or "", target_id or "", field or "")
 
     @Slot()

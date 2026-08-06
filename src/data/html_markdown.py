@@ -20,7 +20,7 @@ def markdown_to_html(md: str) -> str:
     # The rich editor emits GitHub-dialect markdown (toMarkdown). The base
     # `markdown` package (no pymdown-extensions installed) renders tables /
     # fenced code / sane lists but NOT GFM strikethrough or task-list
-    # checkboxes — a small regex post-pass closes those two gaps within the
+    # checkboxes — small regex post-passes close those gaps within the
     # installed deps so the preview matches what the WYSIWYG editor showed.
     # md_in_html lets the document reader's exact-colour callout boxes
     # (<div markdown="1" style="background-color:…">) render their inner
@@ -29,6 +29,7 @@ def markdown_to_html(md: str) -> str:
     html = _md.markdown(
         md or "",
         extensions=["tables", "fenced_code", "sane_lists", "md_in_html"])
+    html = _unwrap_loose_list_items(html)
     html = _GFM_STRIKE.sub(r"<del>\1</del>", html)
     html = _gfm_task_items(html)
     return html
@@ -36,15 +37,35 @@ def markdown_to_html(md: str) -> str:
 
 # ~~text~~ → <del>text</del>  (GFM strikethrough)
 _GFM_STRIKE = re.compile(r"~~(.+?)~~", re.DOTALL)
-# Leading "[ ]" / "[x]" inside a freshly-opened <li> → a real checkbox.
-_GFM_TASK = re.compile(r"<li>\s*\[( |x|X)\]\s*", re.IGNORECASE)
+# Leading "[ ]" / "[x]" inside a freshly-opened <li> (tight, or still wrapped
+# in the item's leading <p>) → a text glyph. Qt cannot render <input>, the
+# strict sanitizer drops it, and Guru may strip it — a character survives
+# every surface.
+_GFM_TASK = re.compile(
+    r"<li>(?P<lead>\s*(?:<p>\s*)?)\[(?P<state> |x|X)\]\s*", re.IGNORECASE)
+
+# Loose (blank-line-separated) markdown lists render as <li><p>…</p></li>.
+# Qt collapses the inner <p> while Chromium (Guru, Zendesk) honors its
+# margins, so the editor shows tight items and the published card shows
+# double-spaced ones. Unwrap the <p> when it is the item's only paragraph
+# (the (?!</?p\b) guard keeps genuinely multi-paragraph items intact), and
+# unwrap a leading <p> immediately followed by a nested list.
+_LOOSE_LI = re.compile(
+    r"<li>\s*<p>((?:(?!</?p\b).)*?)</p>\s*</li>", re.DOTALL)
+_LOOSE_LI_NESTED = re.compile(
+    r"<li>\s*<p>((?:(?!</?p\b).)*?)</p>\s*(?=<[uo]l\b)", re.DOTALL)
+
+
+def _unwrap_loose_list_items(html: str) -> str:
+    html = _LOOSE_LI.sub(r"<li>\1</li>", html)
+    html = _LOOSE_LI_NESTED.sub("<li>\\1\n", html)
+    return html
 
 
 def _gfm_task_items(html: str) -> str:
     def _repl(m: "re.Match") -> str:
-        checked = " checked" if m.group(1).lower() == "x" else ""
-        return (f'<li class="task-list-item">'
-                f'<input type="checkbox" disabled{checked}> ')
+        glyph = "☑" if m.group("state").lower() == "x" else "☐"
+        return f'<li class="task-list-item">{m.group("lead")}{glyph} '
     return _GFM_TASK.sub(_repl, html)
 
 
@@ -167,6 +188,65 @@ def qt_html_to_clean_html(qt_html: str) -> str:
     return out.strip()
 
 
+# List items whose text starts with a task glyph map back to markdown
+# checkboxes: "- ☐ Do A" → "- [ ] Do A" (inverse of _gfm_task_items).
+_TASK_GLYPH_MD = re.compile(
+    r"^(?P<marker>\s*(?:[-*+]|\d+[.)])\s+)(?P<glyph>[☐☑])\s*",
+    re.MULTILINE)
+
+# A fenced-code delimiter line. Backtick fences ONLY: both converter paths
+# emit them exclusively (QTextMarkdownWriter writes ``` fences; the stdlib
+# fallback emits literal "```"), and a line starting "~~~" is Qt
+# strikethrough ("~~" + text beginning "~"), never a converter-produced
+# fence — treating it as one would suppress restoration for the rest of
+# the document. Leading whitespace is allowed because Qt indents fences
+# inside list items. The [^`]*$ guard keeps a one-line code SPAN
+# (```foo```) from reading as an opener, per the CommonMark rule that a
+# backtick fence's info string cannot contain backticks.
+_FENCE_DELIM = re.compile(r"^\s*(?P<fence>`{3,})(?P<info>[^`]*)$")
+
+
+def _restore_task_markers(md: str) -> str:
+    """Map task glyphs back to markdown checkboxes, OUTSIDE code fences.
+
+    A line like "- ☐ item" inside a ``` fence is code someone wrote and
+    must round-trip byte-identical (it seeds _article_body_text and the
+    zendesk body_text clipboard flavour); the same line outside a fence is
+    a rendered task item mapping back to "- [ ] item". The document is
+    split on fence delimiter lines and the substitution runs only on the
+    segments outside fences, so out-of-fence behavior is unchanged."""
+    def _repl(m: "re.Match") -> str:
+        box = "[x]" if m.group("glyph") == "☑" else "[ ]"
+        return f"{m.group('marker')}{box} "
+
+    out: list[str] = []
+    plain: list[str] = []       # consecutive lines outside any fence
+
+    def _flush():
+        if plain:
+            out.append(_TASK_GLYPH_MD.sub(_repl, "\n".join(plain)))
+            plain.clear()
+
+    fence_len = 0               # opening run length; >0 while inside
+    for line in md.split("\n"):
+        m = _FENCE_DELIM.match(line)
+        # An opener is any delimiter line; a closer must be at least as
+        # long as its opener and carry no info string (CommonMark).
+        if m is not None and (
+                fence_len == 0
+                or (len(m.group("fence")) >= fence_len
+                    and not m.group("info").strip())):
+            _flush()
+            fence_len = len(m.group("fence")) if fence_len == 0 else 0
+            out.append(line)
+        elif fence_len:
+            out.append(line)    # inside a fence: byte-identical
+        else:
+            plain.append(line)
+    _flush()
+    return "\n".join(out)
+
+
 def html_to_markdown(html: str) -> str:
     if not (html or "").strip():
         return ""
@@ -180,15 +260,15 @@ def html_to_markdown(html: str) -> str:
         if isinstance(QGuiApplication.instance(), QGuiApplication):
             doc = QTextDocument()
             doc.setHtml(html)
-            return doc.toMarkdown(
+            return _restore_task_markers(doc.toMarkdown(
                 QTextDocument.MarkdownFeature.MarkdownDialectGitHub
-            ).strip()
+            ).strip())
     except Exception:
         pass
     parser = _MarkdownParser()
     parser.feed(html)
     parser.close()
-    return parser.result()
+    return _restore_task_markers(parser.result())
 
 
 _BLOCK_END = {"p", "div", "section", "article"}

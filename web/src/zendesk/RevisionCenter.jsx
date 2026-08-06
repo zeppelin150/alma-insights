@@ -1,10 +1,11 @@
 // Revision Center: Renn's proposed drafts in status lanes (pending → ready →
 // copied) with the specialist's review controls. Every button only ASKS —
 // status transitions, deletes and clipboard copies are validated and gated
-// Python-side (delete gets a NATIVE confirm; pending drafts can never reach
-// the clipboard; a copy releases only bytes a served SOURCE diff showed).
-// Buttons here mirror those gates so the UI doesn't invite clicks the
-// controller will silently refuse.
+// Python-side (delete gets a NATIVE confirm; a copy releases only bytes a
+// served SOURCE diff showed, behind a native confirm displaying them; the
+// status lanes are workflow bookkeeping the specialist advances by hand and
+// never gate the clipboard). Buttons here mirror those gates so the UI
+// doesn't invite clicks the controller will silently refuse.
 import BodyEditForm from "./BodyEditForm.jsx";
 import CopyControls from "./CopyControls.jsx";
 import RevisionDiff from "./RevisionDiff.jsx";
@@ -78,11 +79,11 @@ export function RevisionDetail({
   const st = statusInfo(rev.status);
   const copyOk = canCopyDraft(rev.status);
   // Python refuses a copy until a SOURCE diff has been served for the
-  // draft's current bytes, so say so on the enabled buttons too — the
-  // status gate is only half of the clipboard gate.
+  // draft's current bytes, then a native confirm displays the exact bytes
+  // before anything reaches the clipboard — status never gates a copy.
   const copyHint = copyOk
-    ? "Releases only bytes the source review above showed"
-    : "Mark the draft ready first — pending drafts never reach the clipboard";
+    ? "Releases only bytes the source review above showed — a native confirm shows them first"
+    : "Unknown revision status — refresh before copying";
   return (
     <div className="zd-rev-detail">
       <div className="zd-rev-detail-hd">

@@ -291,7 +291,8 @@ def _process_task(conn, client, board: dict, task: dict, results: dict) -> None:
     if tid:
         results["created"].append(tid)
         try:
-            _pull_subtasks(conn, client, tid, task.get("gid"))
+            _pull_subtasks(conn, client, tid, task.get("gid"),
+                           board_source_id=board.get("source_id"))
         except Exception as exc:  # noqa: BLE001 — best-effort initial subtask pull
             logger.debug("initial subtask pull failed for %s: %s", task.get("gid"), exc)
 
@@ -308,14 +309,30 @@ def _is_http_404(exc: Exception) -> bool:
 
 def _dismiss_by_gid(conn, gid: str) -> None:
     """A task deleted in Asana → dismiss the local row (kept resolvable —
-    dismissed ≠ deleted, per D1/D7)."""
+    dismissed ≠ deleted, per D1/D7).
+
+    CASCADES to promoted subtask rows (``parent_task_ref = gid``): a deleted
+    parent takes its subtasks with it in Asana, but subtasks are not project
+    members so their deletion emits no event of its own — this is the only
+    place their orphaning is observable. Status change only, never a DELETE;
+    ``done`` children keep their done state (completed work stays recorded)."""
     from src.data import enablement_tasks as etasks
     row = conn.execute(
-        "SELECT task_id FROM enablement_tasks WHERE source='asana' AND source_ref=?",
+        "SELECT task_id, status FROM enablement_tasks "
+        "WHERE source='asana' AND source_ref=?",
         (gid,),
     ).fetchone()
-    if row:
+    if not row:
+        return
+    if row[1] != "dismissed":
         etasks.update_task(conn, row[0], status="dismissed")
+    kids = conn.execute(
+        "SELECT task_id FROM enablement_tasks WHERE source='asana' "
+        "AND parent_task_ref=? AND status NOT IN ('done','dismissed')",
+        (gid,),
+    ).fetchall()
+    for kid in kids:
+        etasks.update_task(conn, kid[0], status="dismissed")
 
 
 def _handle_removed(conn, client, board: dict, gid: str) -> None:
@@ -334,7 +351,9 @@ def _handle_removed(conn, client, board: dict, gid: str) -> None:
         client.get_task(gid, opt_fields="name,completed")
     except Exception as exc:  # noqa: BLE001
         if _is_http_404(exc):
-            etasks.update_task(conn, row[0], status="dismissed")
+            # Verified deleted — same dismissal path as a 'deleted' event,
+            # including the promoted-children cascade.
+            _dismiss_by_gid(conn, gid)
         return
     name = (board.get("display_name") or board.get("source_id") or "board")
     note = f"[monitor] No longer on {name} (moved in Asana)."
@@ -415,16 +434,37 @@ def _reconcile_existing_task(conn, client, task: dict, board: dict | None = None
     if fields:
         etasks.update_task(conn, tid, **fields)
     try:
-        _pull_subtasks(conn, client, tid, gid)
+        _pull_subtasks(conn, client, tid, gid,
+                       board_source_id=(board or {}).get("source_id"))
     except Exception as exc:  # noqa: BLE001 — subtask read-back is best-effort
         logger.debug("subtask read-back failed for %s: %s", gid, exc)
     return tid
 
 
-def _pull_subtasks(conn, client, task_id, task_gid) -> None:
+def _pull_subtasks(conn, client, task_id, task_gid, board_source_id=None) -> None:
     """Mirror Asana subtasks locally: add ones we don't have yet and sync the
     done-state of ones we do, matched by asana_subtask_gid (so our own
-    write-backs are recognised and never duplicated)."""
+    write-backs are recognised and never duplicated).
+
+    ASSIGNED subtasks are additionally promoted into real enablement_tasks
+    rows (see :func:`_promote_subtask`) so they reach the calendar, the "mine"
+    scope and Renn. The checklist mirror above is unchanged — the parent's
+    "x / y" counts still cover every subtask. One list_subtasks call per
+    parent per pass is the whole API budget.
+
+    DELETION DIFF. Subtasks are not project members, so deleting one emits no
+    board event — this authoritative list is the only deletion signal. Any
+    previously-known gid (the checklist mirror's ``asana_subtask_gid`` set)
+    that has vanished from the list gets its PROMOTED row dismissed via
+    :func:`_dismiss_by_gid` (status change, never a DELETE). FAILS CLOSED:
+    ``list_subtasks`` → ``_paginate`` can silently return a TRUNCATED list
+    (mid-walk offset expiry, or the page cap) — but only after at least one
+    full page, so a result of one-full-page-or-more is not demonstrably
+    complete and the dismissal pass is skipped for that parent this cycle
+    (a raised exception skips it too, by construction — we never get here).
+    Decision: the checklist-mirror row itself is retained, same never-DELETE
+    discipline as the task row — it simply stops syncing.
+    """
     from src.data import enablement_tasks as etasks
     from src.data.connection_factory import atomic
     subs = client.list_subtasks(task_gid) or []
@@ -447,6 +487,100 @@ def _pull_subtasks(conn, client, task_id, task_gid) -> None:
                     "UPDATE enablement_subtasks SET asana_subtask_gid=? WHERE subtask_id=?",
                     (gid, sid),
                 )
+        try:
+            _promote_subtask(conn, s, parent_gid=task_gid,
+                             board_source_id=board_source_id)
+        except Exception as exc:  # noqa: BLE001 — promotion must not kill the mirror
+            logger.debug("subtask promotion failed for %s: %s", gid, exc)
+    try:
+        from src.data.asana_client import _PAGE_SIZE as _page_size
+    except Exception:  # noqa: BLE001 — completeness gate must never raise
+        _page_size = 100
+    if len(subs) < _page_size:
+        returned = {s.get("gid") for s in subs if s.get("gid")}
+        for gone in set(existing) - returned:
+            _dismiss_by_gid(conn, gone)
+    elif set(existing) - {s.get("gid") for s in subs}:
+        logger.debug(
+            "subtask listing for %s spans a full page (%d items) — possibly "
+            "truncated; skipping the deletion diff this cycle", task_gid, len(subs))
+
+
+def _promote_subtask(conn, sub: dict, *, parent_gid, board_source_id) -> None:
+    """Promote an ASSIGNED Asana subtask into a real enablement_tasks row.
+
+    Admission is assignment (any assignee — the existing "mine" display scope
+    filters per-operator downstream); unassigned subtasks stay checklist-only.
+    The assignment gate applies to CREATION ONLY: a row that already exists is
+    reconciled on every poll even when the Asana assignee has since been
+    removed (the un-assignment clears the assignee columns to empty while
+    title / parent / due / description / done-state keep syncing — an early
+    return here is how a promoted row froze forever).
+    Matched on ``source_ref`` exactly like tasks, so a re-poll reconciles the
+    row in place (title / due / assignee / done-state) instead of duplicating
+    it, and a completed subtask is never created after the fact. Board
+    attribution goes through ``link_task_board`` — ``task_board_links`` stays
+    the only authority (migration 055); nothing is derived from the permalink.
+    """
+    from src.data import enablement_tasks as etasks
+    gid = sub.get("gid")
+    if not gid:
+        return
+    assignee_gid = sub.get("assignee_gid") or ""
+    row = conn.execute(
+        "SELECT task_id FROM enablement_tasks WHERE source='asana' AND source_ref=?",
+        (gid,),
+    ).fetchone()
+    if row:
+        tid = row[0]
+        fields: dict = {
+            "title": sub.get("name") or "Asana subtask",
+            "parent_task_ref": parent_gid,
+            "assignee_gid": assignee_gid,
+        }
+        if not assignee_gid:
+            fields["assignee"] = ""            # un-assigned in Asana → clear
+        elif sub.get("assignee_name"):
+            fields["assignee"] = sub["assignee_name"]
+        if "due_on" in sub:
+            fields["due_date"] = sub.get("due_on")
+        if sub.get("notes") is not None:
+            fields["description"] = sub.get("notes")  # Asana owns the body
+        if sub.get("modified_at"):
+            fields["remote_modified_at"] = sub["modified_at"]
+        if sub.get("completed"):
+            from src.data.asana_writeback import is_status_inflight
+            if not is_status_inflight(tid):
+                fields["status"] = "done"
+        etasks.update_task(conn, tid, **fields)
+    else:
+        if not assignee_gid:
+            return
+        if sub.get("completed"):
+            return
+        tid = etasks.create_task(
+            conn,
+            source="asana",
+            kind="request",
+            title=sub.get("name") or "Asana subtask",
+            source_ref=gid,
+            source_url=sub.get("permalink_url"),
+            description=sub.get("notes"),
+            due_date=sub.get("due_on"),
+            created_by="agent",
+            board_source_id=board_source_id,
+            parent_task_ref=parent_gid,
+        )
+        upd: dict = {"assignee_gid": assignee_gid}
+        if sub.get("assignee_name"):
+            upd["assignee"] = sub["assignee_name"]
+        if sub.get("modified_at"):
+            upd["remote_modified_at"] = sub["modified_at"]
+        etasks.update_task(conn, tid, **upd)
+    try:
+        etasks.link_task_board(conn, tid, board_source_id)
+    except Exception as exc:  # noqa: BLE001 — a link failure must not kill the poll
+        logger.warning("board link failed for %s/%s: %s", board_source_id, tid, exc)
 
 
 def _matches_indicators(task: dict, indicators: list[dict]) -> bool:

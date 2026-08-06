@@ -33,6 +33,20 @@ def test_event_activated_carries_payload(qapp):
     assert got[0]["kind"] == "guru_card_due"
 
 
+def test_subtask_chip_carries_marker(qapp):
+    from src.ui.pages.enablement.calendar import CalendarPage, _Chip
+    cal = CalendarPage()
+    today = date.today().isoformat()
+    cal.set_tasks([
+        {"due_date": today, "source": "asana", "title": "Sub work",
+         "is_subtask": True, "parent_title": "Parent"},
+        {"due_date": today, "source": "asana", "title": "Top work"},
+    ])
+    texts = [c.text() for c in cal.findChildren(_Chip)]
+    assert "↳ Sub work" in texts
+    assert "Top work" in texts
+
+
 def test_sample_tuples_still_render(qapp):
     """Pre-scan sample events are (label, kind) 2-tuples — must not crash."""
     from src.ui.pages.enablement.calendar import CalendarPage

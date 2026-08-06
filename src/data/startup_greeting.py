@@ -84,7 +84,11 @@ def _bullet(t: dict) -> str:
     due = (t.get("due_date") or "")[:10] or "no date"
     prio = (t.get("priority") or "normal").lower()
     src = t.get("source") or "task"
-    return f"- {_clean(t.get('title'))} — due {due} [{prio}] ({src})"
+    line = f"- {_clean(t.get('title'))} — due {due} [{prio}] ({src})"
+    if t.get("parent_task_ref"):
+        parent = _clean(t.get("parent_title") or "")
+        line += f" (subtask of {parent})" if parent else " (subtask)"
+    return line
 
 
 def operator_aliases(conn=None) -> set[str]:

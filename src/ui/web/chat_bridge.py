@@ -56,6 +56,13 @@ class ChatBridge(QObject):
     chatNotice = Signal(str)       # JSON {role, text} — host-pushed notices (scan
                                    # results, publish outcomes) for embedded drawers
                                    # (M5.5); NOT an engine turn, NOT JS-invokable
+    runStopped = Signal()          # the in-flight turn was aborted by the user
+    queuedDispatched = Signal(str)  # a previously QUEUED message was just
+                                    # dispatched — payload is its exact text, so
+                                    # JS un-badges the one bubble that ran (the
+                                    # Python queue also carries [SYSTEM] triggers
+                                    # and other-surface sends with no bubble, so
+                                    # busyChanged(True) is NOT proof of dispatch)
 
     def __init__(self, engine, send_fn=None, tool_poll=None, session_api=None,
                  job_poll=None, draft_api=None, voice=None, action_poll=None,
@@ -65,7 +72,7 @@ class ChatBridge(QObject):
                  asana_resolve_fn=None, asana_projects_signal=None,
                  guru_list_fn=None, guru_resolve_fn=None,
                  guru_targets_signal=None, confirm_fn=None, cancel_fn=None,
-                 parent=None):
+                 stop_fn=None, queue_fn=None, parent=None):
         super().__init__(parent)
         self._engine = engine
         self._prior_telemetry = None   # a controller's persistence callback, if any
@@ -75,6 +82,19 @@ class ChatBridge(QObject):
         # Injected (not imported) so the bridge stays the only JS<->Python
         # boundary and tests can supply a fake.
         self._session_api = session_api
+        # ── queued-dispatch relay (FIX 4) ──
+        # The Agent controller (injected here as session_api on that surface)
+        # announces each busy-queue drain on ``queued_dispatched(text)``; we
+        # re-emit it as ``queuedDispatched`` so React clears the queued badge
+        # on exactly the bubble that ran. Duck-typed + best-effort: hosts
+        # without the signal (page-level drains) call
+        # ``notify_queued_dispatched`` directly instead.
+        _queued_sig = getattr(session_api, "queued_dispatched", None)
+        if _queued_sig is not None:
+            try:
+                _queued_sig.connect(self.queuedDispatched)
+            except Exception:  # noqa: BLE001 — best-effort wiring
+                pass
         # ``send_fn`` lets a controller intercept sends (e.g. to lazily wire the
         # provider/MCP on first message); defaults to the engine's own send.
         self._send_fn = send_fn if send_fn is not None else engine.send
@@ -190,6 +210,15 @@ class ChatBridge(QObject):
         # tool — these slots are the ONLY way a write runs, and only via a click.
         self._confirm_fn = confirm_fn
         self._cancel_fn = cancel_fn
+        # ── stop + queue-while-busy ──
+        # ``stop_fn() -> bool`` aborts the in-flight LLM turn and NOTHING else —
+        # no WriteWorkers, no chat_action_requests, no drafts, no confirms.
+        # ``queue_fn(text) -> 'sent'|'queued'`` dispatches now when idle, else
+        # parks the text to run as its own turn on the next idle. Both injected
+        # (not imported) so the bridge stays the only JS<->Python boundary and
+        # tests can supply fakes.
+        self._stop_fn = stop_fn
+        self._queue_fn = queue_fn
         # Re-emit the engine's signals as the bridge's (signal-to-signal).
         engine.response_ready.connect(self.responseReady)
         engine.error_occurred.connect(self.errorOccurred)
@@ -198,6 +227,8 @@ class ChatBridge(QObject):
         engine.status_update.connect(self.statusUpdate)
         if hasattr(engine, "token_streamed"):
             engine.token_streamed.connect(self.tokenStreamed)
+        if hasattr(engine, "run_stopped"):
+            engine.run_stopped.connect(self.runStopped)
         if hasattr(engine, "set_telemetry_callback"):
             # Chain — don't clobber. A controller may already have registered a
             # telemetry callback (e.g. to persist the turn to chat_messages); we
@@ -217,12 +248,48 @@ class ChatBridge(QObject):
         except Exception:  # noqa: BLE001 — notices are best-effort
             pass
 
+    def notify_queued_dispatched(self, text):
+        """Tell the JS surfaces a previously queued message was just dispatched
+        (the page-level drawer drain calls this directly; the Agent controller
+        arrives via its ``queued_dispatched`` signal instead). Plain method,
+        deliberately NOT a Slot — a page script must not be able to forge a
+        dispatch event and silently un-badge a message that never ran."""
+        self._safe_emit_str(self.queuedDispatched, str(text or ""))
+
     # ── inbound (JS -> Python) ──────────────────────────────────────
 
     @Slot(str)
     def send(self, text):
         """Send a user message into the chat runtime."""
         self._send_fn(text or "")
+
+    @Slot(result=bool)
+    def stopRun(self):
+        """Abort the in-flight LLM turn. True only when an abort was sent.
+
+        Carries no authority beyond that abort: it never touches WriteWorkers,
+        chat_action_requests, drafts, or confirms, so a forged invoke can at
+        worst cancel a response the operator was reading."""
+        if self._stop_fn is None:
+            return False
+        try:
+            return bool(self._stop_fn())
+        except Exception:  # noqa: BLE001 — never crash the chat
+            return False
+
+    @Slot(str, result=str)
+    def queueMessage(self, text):
+        """Send a user message, queueing it when a turn is in flight. Returns
+        'sent' (dispatched now), 'queued' (parked; runs on the next idle), or
+        'error'. Without an injected ``queue_fn`` this degrades to a plain
+        send so the composer keeps working on older wirings."""
+        try:
+            if self._queue_fn is not None:
+                return str(self._queue_fn(text or ""))
+            self._send_fn(text or "")
+            return "sent"
+        except Exception:  # noqa: BLE001 — never crash the chat
+            return "error"
 
     @Slot(result=str)
     def ping(self):
@@ -456,6 +523,29 @@ class ChatBridge(QObject):
             self._poll_jobs()
             self._poll_drafts()
             self._tool_timer.stop()
+            # FIX 2b (late tool row swallowed): a row the MCP subprocess
+            # commits in the same instant the turn ends can land AFTER the
+            # final polls above (cross-process WAL latency, or a row a Stop's
+            # kill raced), and the next busy(True) re-baselines _tool_cursor
+            # past it forever. One delayed catch-up closes that window.
+            QTimer.singleShot(1200, self._late_catchup)
+
+    def _late_catchup(self):
+        """The delayed final poll scheduled by ``_on_busy(False)``. Runs the
+        same catch-up ONLY while the engine is still idle: if a new turn
+        already started, its busy(True) re-baseline owns the cursor and this
+        poll must not race it. That residual window (a late row swallowed by
+        an immediately-following turn) is accepted — the subprocess tree-kill
+        closes the main hazard (an MCP child outliving a Stop and committing
+        rows nobody polls for)."""
+        try:
+            if getattr(self._engine, "is_busy", False):
+                return
+        except Exception:  # noqa: BLE001 — a dead engine ends the catch-up
+            return
+        self._poll_tools()
+        self._poll_jobs()
+        self._poll_drafts()
 
     def _latest_tool_id(self) -> int:
         try:

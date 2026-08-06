@@ -50,14 +50,14 @@ describe("normalizeData", () => {
 });
 
 describe("draft lifecycle guards (mirror of the Python gates)", () => {
-  it("pending: ready-able, copy-able to status only, never clipboard", () => {
+  it("pending: ready-able, editable, and copyable (status never gates the clipboard)", () => {
     expect(canMarkReady("pending")).toBe(true);
     expect(canMarkCopied("pending")).toBe(true);
     expect(canSaveDraft("pending")).toBe(true);
-    expect(canCopyDraft("pending")).toBe(false);
+    expect(canCopyDraft("pending")).toBe(true);
   });
 
-  it("ready: clipboard unlocked, no re-ready", () => {
+  it("ready: copyable, no re-ready", () => {
     expect(canMarkReady("ready")).toBe(false);
     expect(canMarkCopied("ready")).toBe(true);
     expect(canCopyDraft("ready")).toBe(true);
@@ -68,8 +68,13 @@ describe("draft lifecycle guards (mirror of the Python gates)", () => {
       expect(canMarkReady(s)).toBe(false);
       expect(canMarkCopied(s)).toBe(false);
       expect(canSaveDraft(s)).toBe(false);
+      expect(canCopyDraft(s)).toBe(true);
     }
-    expect(canCopyDraft("copied")).toBe(true);
+  });
+
+  it("an unknown status keeps the copy buttons off", () => {
+    expect(canCopyDraft("weird")).toBe(false);
+    expect(canCopyDraft("")).toBe(false);
   });
 
   it("statusInfo maps every state to a label", () => {

@@ -329,15 +329,18 @@ describe("RevisionCenter status lanes", () => {
     expect(out).toContain("changed line");           // diff rendered
   });
 
-  it("a pending draft disables clipboard copies (Python refuses them anyway)", () => {
+  it("a pending draft shows ENABLED copy controls (status never gates the clipboard)", () => {
     const out = renderToStaticMarkup(
       <RevisionCenter {...props}
                       activeDraft={{ draft_id: 8, kind: "article" }}
                       diff={fx.diffs["article:8"]} />);
     expect(out).toContain("Mark ready");
-    // every copy affordance renders disabled with the explain-why tooltip
-    expect(out).toContain("Mark the draft ready first");
-    expect((out.match(/disabled=""/g) || []).length).toBeGreaterThanOrEqual(4);
+    // the copy affordances are live — Python's review record + native
+    // confirm are the gate, not the status
+    expect(out).not.toContain("Mark the draft ready first");
+    expect(out).toContain("Copy content");
+    expect(out).toContain("native confirm");
+    expect(out).not.toContain("disabled=\"\"");
   });
 
   it("the reviewed DRAFTED CONTENT is the primary copy on an article draft; "

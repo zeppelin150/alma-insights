@@ -78,6 +78,22 @@ def test_description_capped():
     assert len(e["description"]) == 240
 
 
+def test_subtask_fields_carried_into_viewmodel():
+    ctrl, seen = _controller()
+    ctrl.set_tasks([
+        {"task_id": "s1", "title": "Sub work", "source": "asana",
+         "due_date": "2026-07-19", "is_subtask": True,
+         "parent_title": "Parent task"},
+        {"task_id": "t1", "title": "Top work", "source": "asana",
+         "due_date": "2026-07-19"},
+    ])
+    events = {e["id"]: e for e in seen["data"][0]["events"]}
+    assert events["s1"]["is_subtask"] is True
+    assert events["s1"]["parent_title"] == "Parent task"
+    assert events["t1"]["is_subtask"] is False
+    assert events["t1"]["parent_title"] == ""
+
+
 def test_unknown_source_becomes_normal_kind():
     ctrl, seen = _controller()
     ctrl.set_tasks([{"task_id": "x", "source": "weird", "title": "t",

@@ -584,6 +584,8 @@ class EnablementPage(QWidget):
                 "source_url": t.get("source_url") or "",
                 "source_ref": t.get("source_ref") or "",
                 "board_source_ids": list(links.get(t["task_id"], ())),
+                "is_subtask": t.get("parent_task_ref") is not None,
+                "parent_title": t.get("parent_title") or "",
             })
         return rows
 
@@ -730,9 +732,13 @@ class EnablementPage(QWidget):
             return None
         try:
             from src.ui.web.chat_bridge import ChatBridge
+            self._web_chat_pending = []
             self._web_chat_bridge = ChatBridge(
                 self._engine, send_fn=self._web_chat_send,
-                tool_poll=self._web_chat_tool_poll, parent=self)
+                tool_poll=self._web_chat_tool_poll,
+                stop_fn=self._web_chat_stop,
+                queue_fn=self._web_chat_queue, parent=self)
+            self._engine.busy_changed.connect(self._on_web_chat_busy_changed)
         except Exception:  # noqa: BLE001 — chat degrades, the tabs still work
             self._web_chat_bridge = None
         return self._web_chat_bridge
@@ -742,19 +748,103 @@ class EnablementPage(QWidget):
         canonical transcript) AND to every open drawer, then dispatch to the
         shared engine. The originating drawer already rendered its own bubble
         and dedupes this echo (by text); a second drawer (flag=all) renders it,
-        so the transcript stays coherent across surfaces."""
+        so the transcript stays coherent across surfaces.
+
+        Returns True when the message was dispatched, False when the
+        publish-confirm refusal below swallowed it — the drain uses that to
+        KEEP a queued message instead of losing it (FIX 5)."""
         # Refuse a send while a publish confirm modal is open: the modal blocks
         # human input, so any send arriving now is a page script — and a chat
         # revise_draft during the publish would write the DB out from under the
         # confirmed content. (Zero legit-UX cost: a human can't send then.)
         if getattr(getattr(self, "workbench", None), "is_publish_inflight", False):
-            return
+            return False
         try:
             self.chat.add_message("u", text)
         except Exception:  # noqa: BLE001
             pass
         self._mirror_user_turn(text)
         self._dispatch_chat(text)
+        return True
+
+    def _web_chat_stop(self) -> bool:
+        """The drawer's Stop control: abort this page's in-flight engine turn.
+        No authority beyond that abort."""
+        engine = self._engine
+        if engine is None or not hasattr(engine, "stop"):
+            return False
+        try:
+            return bool(engine.stop())
+        except Exception:  # noqa: BLE001 — a failed stop must never crash the chat
+            return False
+
+    def _web_chat_queue(self, text) -> str:
+        """The drawer's queue-while-busy send: dispatch now when idle ('sent'),
+        else park it ('queued') to drain on the next busy_changed(False) —
+        the page-level mirror of AgentChatController.queue_user_message."""
+        engine = self._engine
+        if engine is None:
+            return "error"
+        if engine.is_busy:
+            self._web_chat_pending.append(text or "")
+            return "queued"
+        self._web_chat_send(text or "")
+        return "sent"
+
+    def _on_web_chat_busy_changed(self, busy):
+        """Drain ONE queued drawer message when the engine goes idle — via
+        deferred dispatch, so the drain's busy_changed(True) never reaches
+        later slots before the False they are still processing."""
+        if busy or not getattr(self, "_web_chat_pending", None):
+            return
+        from PySide6.QtCore import QCoreApplication, QTimer
+        if QCoreApplication.instance() is not None:
+            QTimer.singleShot(0, self._drain_web_chat_pending)
+        else:
+            self._drain_web_chat_pending()
+
+    def _drain_web_chat_pending(self):
+        """Send the head of the drawer queue if the engine is still idle; if a
+        turn started meanwhile, leave it queued for the next idle.
+
+        PEEK-then-pop (FIX 5): ``_web_chat_send`` refuses (returns False)
+        while the publish-confirm modal is open, and a popped-then-refused
+        message was silently LOST. On refusal the message stays at the head
+        and one ~1s retry is armed — a modal that outlives the last
+        busy_changed(False) would otherwise strand it with nothing left to
+        drain on. On success the drained text is announced so the JS surfaces
+        un-badge exactly the bubble that ran (FIX 4)."""
+        pending = getattr(self, "_web_chat_pending", None)
+        if not pending or self._engine is None:
+            return
+        if self._engine.is_busy:
+            return
+        text = pending[0]
+        if not self._web_chat_send(text):
+            self._arm_web_drain_retry()
+            return
+        pending.pop(0)
+        bridge = getattr(self, "_web_chat_bridge", None)
+        if bridge is not None:
+            bridge.notify_queued_dispatched(text)
+
+    def _arm_web_drain_retry(self):
+        """One armed ~1s retry for a drain the publish modal refused. Single
+        timer at a time (re-armed on each refusal), so an open modal is polled
+        gently rather than stacking timers; the next busy_changed(False) also
+        retries, whichever comes first."""
+        if getattr(self, "_web_drain_retry_armed", False):
+            return
+        from PySide6.QtCore import QCoreApplication, QTimer
+        if QCoreApplication.instance() is None:
+            return   # no event loop to schedule on; the next idle drains it
+        self._web_drain_retry_armed = True
+
+        def _retry():
+            self._web_drain_retry_armed = False
+            self._drain_web_chat_pending()
+
+        QTimer.singleShot(1000, _retry)
 
     def _mirror_user_turn(self, text):
         """Broadcast a user turn to the web drawers (they dedupe their own)."""
@@ -1432,6 +1522,11 @@ class EnablementPage(QWidget):
             self._engine.response_ready.connect(self._on_engine_response)
             self._engine.error_occurred.connect(self._on_engine_error)
             self._engine.bridge_recycle_requested.connect(self._on_bridge_recycle)
+            # FIX 2c: a stopped run ends with run_stopped, not response_ready,
+            # so without this the native panel showed nothing and the canvas
+            # never refreshed after tools that ran before the kill.
+            if hasattr(self._engine, "run_stopped"):
+                self._engine.run_stopped.connect(self._on_engine_stopped)
         except Exception as exc:  # noqa: BLE001 — chat degrades, the page still works
             logger.warning("Enablement chat engine unavailable: %s", exc)
             self._engine = None
@@ -1648,6 +1743,22 @@ class EnablementPage(QWidget):
 
     def _on_engine_error(self, message: str):
         self.chat.add_message("a", f"Sorry — I hit an error: {message}")
+
+    def _on_engine_stopped(self):
+        """The user aborted the in-flight turn (Stop). Surface it on the
+        native Qt ChatPanel and run the same refresh the response path does —
+        a tool that completed before the kill may have revised or created
+        content the canvas is not showing. The panel is written DIRECTLY
+        (like _on_engine_response / _on_engine_error), never via the
+        say-to-everywhere notice relay: the bridge already re-emits
+        runStopped into every web drawer, and a pushed notice would double
+        the line there."""
+        self.chat.add_message("a", "Run stopped.")
+        try:
+            self._load_live(prefer_draft_id=self.workbench.active_draft_id)
+            self._reload_active_draft_canvas()
+        except Exception as exc:  # noqa: BLE001
+            self._set_status(f"Refresh error: {exc}")
 
     # ── live connections + existing Guru cards (Phase 7) ──────────
     def _fetch_existing_cards(self):

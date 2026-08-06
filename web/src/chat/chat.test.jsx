@@ -16,7 +16,7 @@
 //      outage, and the natural response to an outage is to click again.
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { DraftCard, ResolveNotice, ReviewPanel } from "./ChatApp.jsx";
+import { Bubble, Composer, DraftCard, ResolveNotice, ReviewPanel, unbadgeDispatched } from "./ChatApp.jsx";
 
 const noop = () => {};
 
@@ -94,6 +94,109 @@ describe("DraftCard — the exact-bytes disclosure", () => {
     const out = render({ notice: '<img src=x onerror=alert(1)>' });
     expect(out).toContain("&lt;img");
     expect(out).not.toContain("<img src=x");
+  });
+});
+
+describe("Composer — stop the run + add context while busy", () => {
+  function composer(props) {
+    return renderToStaticMarkup(
+      <Composer input="more context" onInput={noop} onSend={noop} onStop={noop}
+                busy={false} stopping={false} disabled={false} mic={null}
+                {...props} />);
+  }
+
+  it("keeps the input ENABLED while a turn runs (extra context queues)", () => {
+    expect(composer({ busy: true })).not.toMatch(/<input[^>]*disabled/);
+    expect(composer({ busy: false })).not.toMatch(/<input[^>]*disabled/);
+  });
+
+  it("swaps Send for Stop while busy", () => {
+    const busyOut = composer({ busy: true });
+    expect(busyOut).toContain(">Stop</button>");
+    expect(busyOut).not.toContain(">Send</button>");
+    const idleOut = composer({ busy: false });
+    expect(idleOut).toContain(">Send</button>");
+    expect(idleOut).not.toContain(">Stop</button>");
+  });
+
+  it("disables Stop after the click until busy clears", () => {
+    const out = composer({ busy: true, stopping: true });
+    expect(out).toMatch(/<button[^>]*class="send stop"[^>]*disabled/);
+  });
+
+  it("leaves Stop clickable before the click", () => {
+    const out = composer({ busy: true, stopping: false });
+    expect(out).not.toMatch(/<button[^>]*class="send stop"[^>]*disabled/);
+  });
+});
+
+describe("Bubble — the queued badge", () => {
+  it("badges a message parked while a turn runs", () => {
+    const out = renderToStaticMarkup(
+      <Bubble m={{ role: "user", text: "later please", queued: true }} />);
+    expect(out).toContain("queued-badge");
+    expect(out).toContain("later please");
+  });
+
+  it("has no badge once the message is no longer queued", () => {
+    const out = renderToStaticMarkup(
+      <Bubble m={{ role: "user", text: "later please" }} />);
+    expect(out).not.toContain("queued-badge");
+  });
+
+  it("renders the stopped-run system line", () => {
+    const out = renderToStaticMarkup(
+      <Bubble m={{ role: "system", text: "Run stopped." }} />);
+    expect(out).toContain("msg system");
+    expect(out).toContain("Run stopped.");
+  });
+});
+
+describe("unbadgeDispatched — the badge clears on the named text only", () => {
+  // The bridge's queuedDispatched(text) names EXACTLY what Python drained.
+  // Un-badging must match on that text — never "the oldest queued bubble on
+  // busyChanged(true)", because the Python queue interleaves items with no
+  // bubble here ([SYSTEM] picker triggers, sends from the other surface).
+  const msgs = [
+    { role: "user", text: "first", queued: true },
+    { role: "user", text: "second", queued: true },
+    { role: "user", text: "not queued twin" },
+  ];
+
+  it("clears the first queued bubble whose text matches", () => {
+    const out = unbadgeDispatched(msgs, "second");
+    expect(out[0].queued).toBe(true);   // untouched — a different text
+    expect(out[1].queued).toBe(false);  // the named one
+  });
+
+  it("does not clear anything when the dispatched item has no bubble here", () => {
+    // A [SYSTEM] trigger or an other-surface send drained: this surface's
+    // queued bubbles keep their badges.
+    const out = unbadgeDispatched(msgs, "[SYSTEM: operator selected a board]");
+    expect(out).toBe(msgs);             // same array — no state churn either
+    expect(out[0].queued).toBe(true);
+    expect(out[1].queued).toBe(true);
+  });
+
+  it("clears only ONE bubble when duplicates are queued", () => {
+    const dupes = [
+      { role: "user", text: "again", queued: true },
+      { role: "user", text: "again", queued: true },
+    ];
+    const out = unbadgeDispatched(dupes, "again");
+    expect(out[0].queued).toBe(false);
+    expect(out[1].queued).toBe(true);
+  });
+
+  it("ignores a non-queued bubble with the same text", () => {
+    const out = unbadgeDispatched(msgs, "not queued twin");
+    expect(out).toBe(msgs);
+  });
+
+  it("does not mutate the input array", () => {
+    const before = msgs.map((m) => ({ ...m }));
+    unbadgeDispatched(msgs, "first");
+    expect(msgs).toEqual(before);
   });
 });
 

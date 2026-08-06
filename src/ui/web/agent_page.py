@@ -31,7 +31,7 @@ class AgentPage(QWidget):
                  asana_resolve_fn=None, asana_projects_signal=None,
                  guru_list_fn=None, guru_resolve_fn=None,
                  guru_targets_signal=None, confirm_fn=None, cancel_fn=None,
-                 parent=None):
+                 stop_fn=None, queue_fn=None, parent=None):
         super().__init__(parent)
         self.bridge = ChatBridge(engine, send_fn=send_fn, tool_poll=tool_poll,
                                  session_api=session_api, job_poll=job_poll,
@@ -48,6 +48,7 @@ class AgentPage(QWidget):
                                  guru_resolve_fn=guru_resolve_fn,
                                  guru_targets_signal=guru_targets_signal,
                                  confirm_fn=confirm_fn, cancel_fn=cancel_fn,
+                                 stop_fn=stop_fn, queue_fn=queue_fn,
                                  parent=self)
         # The chat is the SPA's default route — no fragment, so pre-router
         # bundles keep working unchanged.

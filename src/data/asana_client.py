@@ -53,7 +53,8 @@ _OFFSET_REJECT_CODES = frozenset({400, 401})
 # never rendered as HTML), start_on, and the task assignee as a fallback.
 _TASK_FIELDS = (
     "name,due_on,start_on,permalink_url,completed,modified_at,notes,html_notes,"
-    "num_subtasks,assignee.name,assignee.gid,assignee.email,created_by.name,"
+    "num_subtasks,parent.gid,parent.name,"
+    "assignee.name,assignee.gid,assignee.email,created_by.name,"
     "custom_fields.gid,custom_fields.name,custom_fields.display_value,"
     "custom_fields.enum_value.gid,custom_fields.enum_value.name,"
     "custom_fields.people_value.gid,custom_fields.people_value.name,"
@@ -442,11 +443,27 @@ class AsanaClient:
         ]
 
     def list_subtasks(self, task_gid: str) -> list[dict]:
-        """List an Asana task's subtasks (gid + name + completed) for read-back."""
+        """List an Asana task's subtasks for read-back + assigned-subtask
+        promotion. The original gid/name/completed shape is extended
+        ADDITIVELY (existing consumers keep reading those three keys)."""
         data = self._paginate(f"/tasks/{task_gid}/subtasks",
-                              {"opt_fields": "name,completed"})
-        return [{"gid": s["gid"], "name": s.get("name", ""),
-                 "completed": bool(s.get("completed"))} for s in data]
+                              {"opt_fields": "name,completed,assignee.gid,"
+                                             "assignee.name,due_on,modified_at,"
+                                             "permalink_url,notes"})
+        out = []
+        for s in data:
+            assignee = s.get("assignee") or {}
+            out.append({
+                "gid": s["gid"], "name": s.get("name", ""),
+                "completed": bool(s.get("completed")),
+                "assignee_gid": assignee.get("gid", ""),
+                "assignee_name": assignee.get("name", ""),
+                "due_on": s.get("due_on"),
+                "modified_at": s.get("modified_at", ""),
+                "permalink_url": s.get("permalink_url", ""),
+                "notes": s.get("notes", ""),
+            })
+        return out
 
     def list_attachments(self, task_gid: str) -> list[dict]:
         """List a task's attachments (gid + name + subtype).

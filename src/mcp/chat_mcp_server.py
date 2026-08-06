@@ -1393,8 +1393,10 @@ TOOL_SCHEMAS = [
         "name": "list_tasks",
         "description": (
             "List enablement tasks, optionally filtered by status/source/kind/due "
-            "date. Pass task_id to get ONE task in detail — including its Asana "
-            "custom fields, attachment names, and latest comments."
+            "date. Assigned Asana subtasks are included as first-class rows, "
+            "flagged is_subtask with parent_task_ref/parent_title. Pass task_id "
+            "to get ONE task in detail — including its Asana custom fields, "
+            "attachment names, and latest comments."
         ),
         "inputSchema": {
             "type": "object",

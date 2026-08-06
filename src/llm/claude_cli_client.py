@@ -38,6 +38,7 @@ class ClaudeCliClient:
         self._bridge = None  # lazily initialized in _ensure_bridge
         self._call_counter = 0
         self._mcp_config: list[dict] = []
+        self._active_request_id: str | None = None
 
     # ─── Public API (matches ClaudeClient + GeminiClient) ─────
 
@@ -74,7 +75,11 @@ class ClaudeCliClient:
         self._call_counter += 1
         if on_token is None:
             request_id = f"cli_client_{self._call_counter}_{int(time.time())}"
-            return bridge.call_blocking(full_prompt, request_id, timeout=timeout)
+            self._active_request_id = request_id
+            try:
+                return bridge.call_blocking(full_prompt, request_id, timeout=timeout)
+            finally:
+                self._active_request_id = None
 
         request_id = f"cli_client_stream_{self._call_counter}_{int(time.time())}"
 
@@ -87,9 +92,13 @@ class ClaudeCliClient:
                     except Exception:  # noqa: BLE001 — streaming is best-effort, never fatal
                         pass
 
-        result = bridge.call_streaming(
-            full_prompt, request_id, on_token=_on_token, timeout=timeout,
-        )
+        self._active_request_id = request_id
+        try:
+            result = bridge.call_streaming(
+                full_prompt, request_id, on_token=_on_token, timeout=timeout,
+            )
+        finally:
+            self._active_request_id = None
         if result.get("error"):
             raise RuntimeError(
                 f"Claude CLI streaming call failed: {result['error']} - "
@@ -126,9 +135,13 @@ class ClaudeCliClient:
                 if txt:
                     deltas.append(txt)
 
-        result = bridge.call_streaming(
-            full_prompt, request_id, on_token=_on_token, timeout=timeout,
-        )
+        self._active_request_id = request_id
+        try:
+            result = bridge.call_streaming(
+                full_prompt, request_id, on_token=_on_token, timeout=timeout,
+            )
+        finally:
+            self._active_request_id = None
         if result.get("error"):
             raise RuntimeError(
                 f"Claude CLI streaming call failed: {result['error']} - "
@@ -160,6 +173,31 @@ class ClaudeCliClient:
         self._usage_source = source
         if self._bridge is not None:
             self._bridge.set_usage_sink(sink, source=source)
+
+    def abort_active(self) -> bool:
+        """Kill the in-flight CLI call, if any (safe from the main thread).
+
+        The generate paths record the request_id just before each bridge call
+        and clear it in a ``finally``; ``ClaudeCliBridge.abort`` is thread-safe
+        (``_active_proc_lock``) and only kills the subprocess whose id still
+        matches, so a late abort against a finished call is a no-op. The killed
+        call surfaces to the caller as the normal error path.
+
+        Returns True only when the bridge actually matched + killed the
+        subprocess; False when there is no bridge, no recorded request, the
+        bridge no longer tracks the id (the call already finished), or the
+        abort raised — so ``ChatEngine.stop()`` never reports a stop it
+        cannot prove.
+        """
+        bridge = self._bridge
+        request_id = self._active_request_id
+        if bridge is None or not request_id:
+            return False
+        try:
+            return bool(bridge.abort(request_id))
+        except Exception as e:  # noqa: BLE001 — an abort must never crash the caller
+            logger.debug("ClaudeCliClient abort_active failed: %s", e)
+            return False
 
     def shutdown(self) -> None:
         """Tear down the underlying bridge if alive. Idempotent."""

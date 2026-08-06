@@ -168,6 +168,9 @@ def test_get_web_chat_bridge_none_without_engine_and_cached_with():
     inst._engine = _FakeEngine()
     inst._web_chat_send = lambda t: None
     inst._web_chat_tool_poll = lambda since_id=0: []
+    inst._web_chat_stop = lambda: False
+    inst._web_chat_queue = lambda t: "sent"
+    inst._on_web_chat_busy_changed = lambda b: None
     b1 = pg.EnablementPage._get_web_chat_bridge(inst)
     b2 = pg.EnablementPage._get_web_chat_bridge(inst)
     assert isinstance(b1, ChatBridge) and b1 is b2
@@ -201,6 +204,9 @@ def test_get_web_chat_bridge_caches_the_bridge_object():
     inst._engine = _FakeEngine()
     inst._web_chat_send = lambda t: None
     inst._web_chat_tool_poll = lambda since_id=0: []
+    inst._web_chat_stop = lambda: False
+    inst._web_chat_queue = lambda t: "sent"
+    inst._on_web_chat_busy_changed = lambda b: None
     b = pg.EnablementPage._get_web_chat_bridge(inst)
     assert b is not None and inst._web_chat_bridge is b
     assert pg.EnablementPage._get_web_chat_bridge(inst) is b   # cached, same object

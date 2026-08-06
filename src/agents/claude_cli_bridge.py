@@ -32,7 +32,7 @@ from pathlib import Path
 
 from src.agents.acp_bridge import BridgeEvent
 from src.agents.claude_cli_stream import StreamParser, StreamResult
-from src.agents.claude_cli_subprocess import CliSubprocess
+from src.agents.claude_cli_subprocess import CliSubprocess, kill_process_tree
 
 logger = logging.getLogger("alma.claude_cli_bridge")
 
@@ -57,12 +57,9 @@ class ClaudeCliBridge:
     @classmethod
     def _cleanup_all(cls) -> None:
         for proc in cls._all_processes:
-            try:
-                if proc.poll() is None:
-                    proc.kill()
-                    proc.wait(timeout=5)
-            except Exception:
-                pass
+            # Tree-kill, same as every other kill site: at exit the MCP-server
+            # child must die with the CLI or it outlives the app as a zombie.
+            kill_process_tree(proc)
         cls._all_processes.clear()
 
     def __init__(
@@ -401,11 +398,19 @@ class ClaudeCliBridge:
             )
         return result["full_text"]
 
-    def abort(self, request_id: str) -> None:
-        """Kill the active subprocess if it matches ``request_id``."""
+    def abort(self, request_id: str) -> bool:
+        """Kill the active subprocess if it matches ``request_id``.
+
+        Returns True only when a tracked in-flight call matched and the kill
+        was issued — the honesty contract ``ChatEngine.stop()`` relies on. A
+        non-matching id (the call already finished and untracked itself, or a
+        stale abort) returns False: nothing was aborted, so nothing may be
+        reported as stopped."""
         with self._active_proc_lock:
             if self._active_request_id == request_id and self._active_proc:
                 self._kill_proc(self._active_proc)
+                return True
+        return False
 
     # ─── call_streaming helpers ─────────────────────────────────
 
@@ -619,12 +624,12 @@ class ClaudeCliBridge:
             logger.debug("Usage tracking failed: %s", e)
 
     def _kill_proc(self, proc: subprocess.Popen) -> None:
-        try:
-            if proc.poll() is None:
-                proc.kill()
-                proc.wait(timeout=5)
-        except Exception:
-            pass
+        # The abort/shutdown choke point. Routes through kill_process_tree —
+        # on Windows a bare proc.kill() leaves the MCP-server child the CLI
+        # spawned alive (it kept committing tool rows after a Stop). The
+        # timeout/early_stop paths kill via CliSubprocess.kill(), which routes
+        # through the same helper.
+        kill_process_tree(proc)
 
     # ─── Health ────────────────────────────────────────────────
 

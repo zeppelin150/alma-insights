@@ -1689,6 +1689,8 @@ def _list_tasks_impl(conn, *, status=None, source=None, kind=None, due_before=No
         return {"ok": True, "task": task}
     rows = tasks.list_tasks(conn, source=source, status=status, kind=kind,
                             due_before=due_before, limit=int(limit or 50))
+    for r in rows:
+        r["is_subtask"] = r.get("parent_task_ref") is not None
     return {"tasks": rows, "count": len(rows)}
 
 
@@ -1821,7 +1823,11 @@ def handle_create_task(conn, args, filters):
 
 
 def handle_update_task(conn, args, filters):
-    fields = {k: v for k, v in args.items() if k != "task_id"}
+    # parent_task_ref is promotion lineage owned by asana_monitor — stripped
+    # here so a model turn can't fake a subtask or orphan a promoted row (the
+    # monitor keeps writing it through update_task directly).
+    fields = {k: v for k, v in args.items()
+              if k not in ("task_id", "parent_task_ref")}
     return _update_task_impl(conn, args.get("task_id"), fields)
 
 

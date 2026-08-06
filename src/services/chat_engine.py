@@ -116,6 +116,12 @@ _DEGRADED_PHRASES = (
 )
 _DEFAULT_RECYCLE_THRESHOLD = 3
 
+#: The transcript marker for a user-aborted turn. ``_on_worker_error`` appends
+#: it to the in-memory history; consumers that persist transcripts (the Agent
+#: controller) write the SAME text on ``run_stopped`` so a reloaded session
+#: replays coherently.
+RUN_STOPPED_MARKER = "[Response stopped by the user before completion.]"
+
 # Tool prompt addendum — extracted to src/data/chat_tools/tool_prompts.py
 from src.data.chat_tools.tool_prompts import TOOL_PROMPT_ADDENDUM as _TOOL_PROMPT_ADDENDUM
 
@@ -321,6 +327,7 @@ class ChatEngine(QObject):
     busy_changed = Signal(bool)
     status_update = Signal(str)
     token_streamed = Signal(str)   # per-token text delta while a turn streams
+    run_stopped = Signal()         # the user aborted the in-flight turn
     # Adaptive bridge-recycle (F-9, bug-bash 2026-04-23):
     # fires when N consecutive responses look degraded. Consumers that
     # own a warm client should shut it down and set_client() a fresh one.
@@ -364,6 +371,12 @@ class ChatEngine(QObject):
         # Adaptive bridge-recycle state (F-9)
         self._recycle_threshold = max(1, int(recycle_threshold))
         self._degraded_streak = 0
+
+        # Stop control: set by stop(), consumed by whichever worker signal
+        # lands first (the killed subprocess surfaces as the error path; a
+        # run that completed before the kill landed clears it as a normal
+        # completion).
+        self._stop_requested = False
 
         # Unexecuted-tool-call guard: suppress-once, so a retry that trips
         # the same deterministic trigger is not eaten a second time.
@@ -557,6 +570,42 @@ class ChatEngine(QObject):
         self.status_update.emit("Gemini is thinking...")
         self._launch_worker(client, prompt, system)
 
+    def stop(self) -> bool:
+        """Abort the in-flight turn. Returns True only when an abort was sent.
+
+        Degrades gracefully: not busy, a client with no ``abort_active`` (the
+        Gemini ReportBridgeClient has none), an ``abort_active`` that raises,
+        or one that reports ``False`` (it matched nothing — nothing was
+        killed) → False, ``_stop_requested`` cleared, and the run continues
+        untouched. The False is load-bearing honesty: the Stop button re-arms,
+        and if the worker later errors on its own that surfaces as a REAL
+        error (``error_occurred`` + degraded streak), never a fake user stop.
+        On success the abort kills the CLI subprocess tree; the worker then
+        errors, and ``_on_worker_error`` converts that into ``run_stopped``
+        instead of ``error_occurred``. Call from the main thread — never a
+        QThread kill.
+        """
+        if not self.is_busy:
+            return False
+        client = getattr(self, "_current_client", None)
+        if client is None or not hasattr(client, "abort_active"):
+            return False
+        self._stop_requested = True
+        try:
+            aborted = client.abort_active()
+        except Exception as e:  # noqa: BLE001 — a failed abort is a refused stop
+            logger.debug("stop(): abort_active failed: %s", e)
+            self._stop_requested = False
+            return False
+        if aborted is False:
+            # The client looked and found nothing in flight to kill (it raced
+            # a completion, or the bridge lost the request id). ``None`` — a
+            # legacy abort_active with no return contract — keeps the old
+            # success path.
+            self._stop_requested = False
+            return False
+        return True
+
     def _capture_turn_evidence(self, prompt: str, system: str):
         """Build this turn's ``TurnEvidence`` and take the ledger watermark.
 
@@ -626,6 +675,10 @@ class ChatEngine(QObject):
     # ── Worker signal handlers ────────────────────────────
 
     def _on_worker_finished(self, raw_response: str, telemetry: dict = None):
+        # A stop that raced a normal completion: the run finished before the
+        # kill landed, so treat it as an ordinary turn.
+        self._stop_requested = False
+
         # Normalized ONCE, up front: two `{**telemetry, ...}` splats downstream
         # would raise TypeError on a non-mapping, and one of them now runs on
         # every turn rather than only on a fabricated one.
@@ -820,6 +873,18 @@ class ChatEngine(QObject):
             return None
 
     def _on_worker_error(self, error_text: str):
+        if self._stop_requested:
+            # The user killed the run: not an error, not a degraded bridge.
+            # The marker keeps the full-history replay coherent next turn.
+            self._stop_requested = False
+            self._history.append({
+                "role": "assistant",
+                "content": RUN_STOPPED_MARKER,
+            })
+            self.busy_changed.emit(False)
+            self.status_update.emit("")
+            self.run_stopped.emit()
+            return
         self.busy_changed.emit(False)
         self.status_update.emit("")
         self.error_occurred.emit(error_text)

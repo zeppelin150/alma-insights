@@ -24,7 +24,7 @@ VALID_PRIORITY = {"low", "normal", "high"}
 _UPDATABLE = {
     "status", "priority", "due_date", "summary", "title", "description",
     "assignee", "assignee_gid", "submitter", "scratchpad", "draft_id",
-    "source_url", "kind", "remote_modified_at",
+    "source_url", "kind", "remote_modified_at", "parent_task_ref",
     "brief_json", "brief_status", "brief_source_modified_at",
 }
 
@@ -67,11 +67,16 @@ def create_task(
     created_by: str = "agent",
     key: str | None = None,
     board_source_id: str | None = None,
+    parent_task_ref: str | None = None,
 ) -> str:
     """Create a task (idempotent on dedup_key). Returns the task_id.
 
     If a task with the same dedup_key already exists, its id is returned and no
     new row is created — so a monitor can call this every poll cycle safely.
+
+    ``parent_task_ref`` is the Asana gid of the PARENT task when this row is a
+    promoted subtask (migration 056); NULL for normal tasks. A row is a subtask
+    iff parent_task_ref IS NOT NULL.
 
     ``board_source_id`` is IMMUTABLE PROVENANCE — the monitor_sources.source_id
     of the board whose poll created this row (migration 054). It is stored,
@@ -92,12 +97,13 @@ def create_task(
                (task_id, source, source_ref, source_url, kind, title, summary,
                 description, submitter, due_date, priority, status, draft_id,
                 llm_rationale, dedup_key, created_by, created_at, updated_at,
-                board_source_id)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                board_source_id, parent_task_ref)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(dedup_key) DO NOTHING""",
             (tid, source, source_ref, source_url, kind, title, summary,
              description, submitter, due_date, priority, status, draft_id,
-             llm_rationale, key, created_by, now, now, board_source_id),
+             llm_rationale, key, created_by, now, now, board_source_id,
+             parent_task_ref),
         )
     row = conn.execute(
         "SELECT task_id FROM enablement_tasks WHERE dedup_key = ?", (key,)
@@ -150,28 +156,34 @@ def list_tasks(
     on the Asana GID (unambiguous) or, for legacy/manual rows with no GID, a
     case-insensitive exact match of the display name/email. Pass neither for
     "all" (the show-all toggle) — never string-interpolate, always parameterized.
+
+    Promoted-subtask rows (migration 056) additionally carry ``parent_title`` —
+    the tracked parent row's title, joined on the parent's Asana gid; NULL for
+    normal tasks and for subtasks whose parent is not tracked.
     """
     where, params = [], []
     if source:
-        where.append("source = ?"); params.append(source)
+        where.append("t.source = ?"); params.append(source)
     if status:
-        where.append("status = ?"); params.append(status)
+        where.append("t.status = ?"); params.append(status)
     if kind:
-        where.append("kind = ?"); params.append(kind)
+        where.append("t.kind = ?"); params.append(kind)
     if due_before:
-        where.append("due_date IS NOT NULL AND due_date <= ?"); params.append(due_before)
+        where.append("t.due_date IS NOT NULL AND t.due_date <= ?"); params.append(due_before)
     if assignee_gid and assignee:
-        where.append("(assignee_gid = ? OR (assignee_gid IS NULL AND LOWER(assignee) = LOWER(?)))")
+        where.append("(t.assignee_gid = ? OR (t.assignee_gid IS NULL AND LOWER(t.assignee) = LOWER(?)))")
         params.append(assignee_gid); params.append(assignee)
     elif assignee_gid:
-        where.append("assignee_gid = ?"); params.append(assignee_gid)
+        where.append("t.assignee_gid = ?"); params.append(assignee_gid)
     elif assignee:
-        where.append("LOWER(assignee) = LOWER(?)"); params.append(assignee)
+        where.append("LOWER(t.assignee) = LOWER(?)"); params.append(assignee)
     clause = (" WHERE " + " AND ".join(where)) if where else ""
     params.append(limit)
     rows = conn.execute(
-        f"SELECT * FROM enablement_tasks{clause} "
-        f"ORDER BY created_at DESC LIMIT ?", params
+        f"SELECT t.*, p.title AS parent_title FROM enablement_tasks t "
+        f"LEFT JOIN enablement_tasks p "
+        f"ON p.source = 'asana' AND p.source_ref = t.parent_task_ref"
+        f"{clause} ORDER BY t.created_at DESC LIMIT ?", params
     ).fetchall()
     out = []
     for r in rows:

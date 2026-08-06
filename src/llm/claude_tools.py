@@ -1111,7 +1111,11 @@ TOOL_DEFINITIONS = [
     },
     {
         "name": "list_tasks",
-        "description": "List enablement tasks, optionally filtered by status/source/kind/due date.",
+        "description": (
+            "List enablement tasks, optionally filtered by status/source/kind/due "
+            "date. Assigned Asana subtasks are included as first-class rows, "
+            "flagged is_subtask with parent_task_ref/parent_title."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {

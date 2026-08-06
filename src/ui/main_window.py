@@ -862,7 +862,9 @@ class MainWindow(QMainWindow):
                                         guru_resolve_fn=self._agent_controller.resolve_guru_target,
                                         guru_targets_signal=self._agent_controller.guruTargetsListed,
                                         confirm_fn=self._agent_controller.execute_write,
-                                        cancel_fn=self._agent_controller.cancel_write)
+                                        cancel_fn=self._agent_controller.cancel_write,
+                                        stop_fn=self._agent_controller.stop_run,
+                                        queue_fn=self._agent_controller.queue_user_message)
             return self.agent_page
         except Exception as exc:  # noqa: BLE001 — never break the mode
             import logging

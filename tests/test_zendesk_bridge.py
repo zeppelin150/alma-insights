@@ -9,9 +9,12 @@ Load-bearing invariants locked here:
   un-dispatched, single-winner reentrancy, post-approve count recompute);
 * the claim-before-nested-event-loop rule for the import pickers and the
   mutation freeze while either claim is held;
-* copy-exact reads DB bytes with target-kind disambiguation, the
-  pending-draft clipboard refusal, and the body_rich mime-laundering guard
-  (drafts included — draft rich copies pass sanitize_html too);
+* copy-exact reads DB bytes with target-kind disambiguation, draft copies
+  release at EVERY status (pending/ready/copied/pushed — status is workflow
+  bookkeeping, never a clipboard gate; the review record + native confirm
+  are the protection, owner decision 2026-08-05), and the body_rich
+  mime-laundering guard (drafts included — draft rich copies pass
+  sanitize_html too);
 * js_save_draft is RENAME-ONLY (article {title}; macro {name, description})
   and the review diff is computed over the clipboard projection
   (html_to_review_text(body_html) when set), so reviewed == copied always;
@@ -953,23 +956,67 @@ def test_copy_target_kind_disambiguation(empty_db):
     assert len(confirms) == 1 and "Draft one" in _confirm_visible(confirms)
 
 
-def test_copy_pending_draft_refused_ready_allowed(empty_db):
+def test_copy_pending_draft_releases_under_review_and_confirm(empty_db):
+    """Owner decision 2026-08-05: draft status never gates the clipboard.
+    A PENDING draft with a recorded review copies behind the universal
+    native confirm — and marking it ready changes nothing (the review
+    survives, the content is unchanged)."""
     _seed_mirror(empty_db.conn)
     conn = empty_db.conn
     did = zendesk_store.save_article_draft(
         conn, title="T", body="**bold** body", article_id=101, rationale="r")
     calls = []
-    ctrl, seen, _confirms = _gated(empty_db, answer=True,
-                                   clipboard_fn=_clipboard(calls))
+    ctrl, seen, confirms = _gated(empty_db, answer=True,
+                                  clipboard_fn=_clipboard(calls))
     _serve_revisions(ctrl)
     _review(ctrl, "article", did)
     ctrl.js_copy_field("article_draft", str(did), "body_html")
-    assert calls == [] and seen["copies"] == []    # pending → silent refusal
+    assert len(calls) == 1 and len(confirms) == 1  # pending → copies, gated
+    assert "bold" in calls[0][0] and "**" not in calls[0][0]  # rendered md
+    assert seen["copies"][-1]["ok"] is True
     zendesk_store.set_draft_status(conn, "article", did, "ready")
     # marking ready does NOT invalidate the review (content is unchanged)
     ctrl.js_copy_field("article_draft", str(did), "body_html")
-    assert len(calls) == 1
-    assert "bold" in calls[0][0] and "**" not in calls[0][0]  # rendered md
+    assert len(calls) == 2 and calls[1] == calls[0]
+
+
+def test_copy_body_text_ready_draft_reaches_the_clipboard(empty_db):
+    """The SPA's PRIMARY "Copy content" button asks for ``body_text`` — the
+    drafted prose. For a reviewed READY draft behind the approved native
+    confirm the stored markdown must land on the clipboard, text flavour
+    only. This was a silent no-op for every article and draft at every
+    status (the field was absent from _COPY_FIELDS and _html_payloads built
+    no payload for it)."""
+    _seed_mirror(empty_db.conn)
+    conn = empty_db.conn
+    calls = []
+    ctrl, seen, confirms = _gated(empty_db, answer=True,
+                                  clipboard_fn=_clipboard(calls))
+    did = _ready_draft(conn, ctrl, title="T", body="**bold** drafted prose")
+    _review(ctrl, "article", did)
+    ctrl.js_copy_field("article_draft", str(did), "body_text")
+    # stored markdown, verbatim, text-only clipboard flavour
+    assert calls == [("**bold** drafted prose", None)]
+    assert len(confirms) == 1                      # draft ⇒ native confirm
+    assert "**bold** drafted prose" in _confirm_content(confirms)
+    res = seen["copies"][-1]
+    assert res["ok"] is True and res["field"] == "body_text"
+    assert res["target"] == "article_draft"
+
+
+def test_spa_primary_copy_field_is_a_python_copy_field():
+    """CROSS-BOUNDARY PARITY: the SPA's primary copy button sends
+    shape.js's COPY_DRAFTED_FIELD through the bridge verbatim, so Python
+    must accept that field for both article targets — otherwise the primary
+    copy is a silent no-op, which is exactly the defect that shipped
+    because no test read both sides."""
+    src = (REPO / "web" / "src" / "zendesk" / "shape.js").read_text(
+        encoding="utf-8")
+    m = re.search(r'export const COPY_DRAFTED_FIELD\s*=\s*"([^"]+)"', src)
+    assert m, "COPY_DRAFTED_FIELD not found in web/src/zendesk/shape.js"
+    field = m.group(1)
+    assert field in zendesk_web._COPY_FIELDS["article"]
+    assert field in zendesk_web._COPY_FIELDS["article_draft"]
 
 
 def test_import_origin_stores_sanitized_bytes(empty_db):
@@ -1795,14 +1842,17 @@ def test_no_copy_can_release_bytes_the_review_never_showed(empty_db):
 def test_every_recorded_hash_is_shown_or_derived_from_shown_bytes(empty_db):
     """Closes the last gap in the invariant's wording.
 
-    Of everything ``_record_review`` binds, the plain text flavours are
-    rendered literally on the review surface (the diff rows / body_source /
-    the title row). The rich (text/html mime) flavour is not independent
-    content: it is ``sanitize_html`` of the string the reviewer WAS shown,
-    and sanitize only removes and escapes — it can never introduce a tag,
-    attribute or URL that was absent from the source. Assert that derivation
-    (and the accompanying notice) so the claim is mechanically checked, not
-    assumed.
+    Of everything ``_record_review`` binds, the DIFFED plain text flavours
+    are rendered literally on the review surface (the diff rows /
+    body_source / the title row). ``body_text`` is not one of them — it is
+    the markdown SOURCE of the same reviewed content, never diffed, and its
+    release-time disclosure on a draft is the native byte-showing confirm
+    (``_confirm_copy_release``). The rich (text/html mime) flavour is not
+    independent content: it is ``sanitize_html`` of the string the reviewer
+    WAS shown, and sanitize only removes and escapes — it can never
+    introduce a tag, attribute or URL that was absent from the source.
+    Assert that derivation (and the accompanying notice) so the claim is
+    mechanically checked, not assumed.
 
     Note the RENDERED preview srcdoc is a third, WIDER rendering
     (sanitize_html_preview + Help Center CSS) and is deliberately NOT a
@@ -1851,6 +1901,55 @@ def test_every_recorded_hash_is_shown_or_derived_from_shown_bytes(empty_db):
     assert sanitize_html_preview(
         '<p><span style="font-size: 0">hidden</span></p>',
         report=True)[1] == ["font-size:0"]
+
+
+def test_body_text_scope_limit_is_real_and_the_confirm_covers_it(empty_db):
+    """Pins the SCOPED wording of the reviewed-bytes claim (docstring fix,
+    2026-08-05): the character-for-character guarantee holds for the DIFFED
+    flavours only. ``body_text`` is the markdown SOURCE of the reviewed
+    content and is NOT diffed — a markdown link reference definition
+    renders to nothing in HTML, so its bytes can be present in the
+    body_text copy while appearing in NO diff row. The release-time
+    protection is the native byte-showing confirm: every draft copy of
+    body_text displays the exact released bytes, definition included, and
+    a declined confirm releases nothing."""
+    _seed_mirror(empty_db.conn)
+    conn = empty_db.conn
+    # An UNUSED link reference definition: python-markdown consumes it and
+    # renders nothing, so no body_html-derived surface carries its bytes.
+    body = ("See the doc for details.\n\n"
+            '[ref]: https://example.com/hidden-target "never rendered"')
+    calls = []
+    ctrl, seen, confirms = _gated(empty_db, answer=True,
+                                  clipboard_fn=_clipboard(calls))
+    did = _ready_draft(conn, ctrl, title="T", body=body)
+    ctrl.js_request_diff("article", str(did))
+    diff = seen["diffs"][-1]
+    # the definition line renders to nothing: NO diff surface carries it
+    joined_rows = "\n".join(r["text"] for r in diff["rows"])
+    joined_text = "\n".join(r["text"] for r in diff["text_rows"])
+    assert "hidden-target" not in joined_rows
+    assert "hidden-target" not in joined_text
+    # ...yet the review record binds the body_text bytes (defence in depth)
+    rec = ctrl._reviewed[("article_draft", did)]
+    assert zendesk_web._sha(body) in rec["bytes"]
+    # the release-time disclosure: the native confirm shows the EXACT
+    # released bytes, link reference definition included
+    ctrl.js_copy_field("article_draft", str(did), "body_text")
+    assert len(confirms) == 1
+    assert body in _confirm_content(confirms)
+    assert "hidden-target" in _confirm_content(confirms)
+    assert calls == [(body, None)]
+    # declined confirm ⇒ no clipboard write and no receipt
+    calls2 = []
+    ctrl2, seen2, confirms2 = _gated(empty_db, answer=False,
+                                     clipboard_fn=_clipboard(calls2))
+    _serve_revisions(ctrl2)
+    ctrl2.js_request_diff("article", str(did))
+    ctrl2.js_copy_field("article_draft", str(did), "body_text")
+    assert len(confirms2) == 1
+    assert calls2 == []
+    assert seen2["copies"] == []
 
 
 def test_zero_change_with_differing_bytes_is_surfaced_as_a_warning(empty_db):
@@ -3655,8 +3754,15 @@ def test_every_html_copy_target_takes_the_confirm(empty_db):
     for target, fields in zendesk_web._COPY_FIELDS.items():
         for field in fields:
             ctrl.js_copy_field(target, str(ids[target]), field)
-    assert [c[0] for c in calls] == ["Setting up SSO", "Refund apology"]
-    assert all(c["field"] in ("title", "macro_name") for c in seen["copies"])
+    # the plain-text mirror fields — title, drafted-content prose, macro
+    # name — are all that survives without a confirm host
+    assert [c[0] for c in calls] == [
+        "Setting up SSO",
+        zendesk_web.ZendeskWebController._article_body_text(
+            zendesk_store.get_article(conn, 101)),
+        "Refund apology"]
+    assert all(c["field"] in ("title", "body_text", "macro_name")
+               for c in seen["copies"])
 
 
 # ── destructive gates: delete_revision ───────────────────────────────

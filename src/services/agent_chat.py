@@ -877,6 +877,13 @@ class AgentChatController(QObject):
     # They still load in-process into React for the picker confirmation.
     guruTargetsListed = Signal(str)
 
+    # Busy-queue drain announcement (stop/queue review wave, FIX 4). Emitted
+    # with the EXACT text the drain just dispatched, so the web surfaces
+    # un-badge precisely the bubble that ran. The bridge re-emits it as
+    # ``queuedDispatched``. Never inferred from busy alone: the queue also
+    # carries [SYSTEM] triggers and other-surface sends with no JS bubble.
+    queued_dispatched = Signal(str)
+
     def __init__(self, db=None, demo: bool = False, parent=None,
                  confirm_host=None):
         super().__init__(parent)
@@ -971,6 +978,19 @@ class AgentChatController(QObject):
         self._persist_message("user", text or "")   # so history has the transcript + a title
         self._prepare_provider()
         self._engine.send(text or "")
+
+    def _on_run_stopped(self) -> None:
+        """Persist the stop marker as an assistant row (FIX 2c).
+
+        Mirrors what ``_on_worker_error`` already stamped into the engine's
+        in-memory history, so a reloaded transcript replays coherently.
+        One row per stopped turn by construction: ``run_stopped`` fires
+        exactly once per stop (the engine consumes ``_stop_requested`` before
+        emitting) and the telemetry-callback persistence path
+        (``_persist_turn``) runs only on ``_on_worker_finished`` — never on
+        the stop path — so this is the marker row's ONLY writer."""
+        from src.services.chat_engine import RUN_STOPPED_MARKER
+        self._persist_message("assistant", RUN_STOPPED_MARKER)
 
     def _persist_turn(self, role, content, telemetry):
         """Telemetry callback (the assistant turn) → persist with model/tokens."""
@@ -1081,14 +1101,60 @@ class AgentChatController(QObject):
             return
         self.send(text or "")
 
+    def queue_user_message(self, text: str) -> str:
+        """The composer's send while Renn may be busy: dispatch now when idle
+        ('sent'), else park it on the busy-queue to run as its own turn when
+        the engine frees up ('queued'). Same queue as ``enqueue_trigger``, so
+        drain order interleaves fairly with system follow-ups."""
+        if self._engine is None:
+            return "error"
+        if self._engine.is_busy:
+            self._pending_triggers.append(text or "")
+            return "queued"
+        self.send(text or "")
+        return "sent"
+
+    def stop_run(self) -> bool:
+        """Abort Renn's in-flight turn (the Stop control). Delegates to the
+        engine; False when idle or when the active client can't abort."""
+        if self._engine is None or not hasattr(self._engine, "stop"):
+            return False
+        try:
+            return bool(self._engine.stop())
+        except Exception:  # noqa: BLE001 — a failed stop must never crash the chat
+            return False
+
     def _on_busy_changed(self, busy: bool) -> None:
         """Drain ONE queued trigger when the engine goes idle. One-at-a-time so
         each follow-up runs as its own turn (and re-queues correctly if another
-        arrives mid-turn)."""
+        arrives mid-turn).
+
+        The drain is DEFERRED (queued dispatch), never run inside this
+        ``busy_changed(False)`` delivery: a synchronous ``send`` here makes the
+        new turn's ``busy_changed(True)`` reach later slots BEFORE the False
+        they are still processing, leaving the web UI showing not-busy during a
+        live run with its poll timer stopped."""
         if busy or not self._pending_triggers:
+            return
+        from PySide6.QtCore import QCoreApplication, QTimer
+        if QCoreApplication.instance() is not None:
+            QTimer.singleShot(0, self._drain_pending_trigger)
+        else:
+            self._drain_pending_trigger()
+
+    def _drain_pending_trigger(self) -> None:
+        """Run the head of the busy-queue if the engine is still idle. If a
+        turn started between the schedule and now, leave the queue intact and
+        wait for the next ``busy_changed(False)``. After dispatch the text is
+        announced on ``queued_dispatched`` so the web UI un-badges exactly the
+        bubble that ran (FIX 4)."""
+        if not self._pending_triggers or self._engine is None:
+            return
+        if self._engine.is_busy:
             return
         text = self._pending_triggers.pop(0)
         self.send(text)
+        self.queued_dispatched.emit(text)
 
     # ── Drive folder picker round-trip (M3) ─────────────────────────
 
@@ -2315,6 +2381,14 @@ class AgentChatController(QObject):
             except Exception:  # noqa: BLE001
                 pass
         self._session_id = session_id
+        # FIX 1 (wrong-session drain): a session switch DROPS anything still
+        # parked on the busy-queue. A queued message referred to the OLD
+        # conversation's context; draining it here would replay it into the
+        # newly-loaded thread (verified cross-session contamination). The loss
+        # is intentional — there is no re-queue affordance this round. Note
+        # this line is only reached AFTER the enablement decoupling guard: a
+        # refused load switches nothing, so it drops nothing.
+        self._pending_triggers.clear()
         self._write_session_pointer(session_id)
         return {"session_id": session_id, "messages": msgs}
 
@@ -2339,6 +2413,9 @@ class AgentChatController(QObject):
         """Start a fresh thread: clear engine history and drop the active session
         so the next send creates a new one; clear the tools→session pointer."""
         self._session_id = None
+        # FIX 1: same rule as load_session — queued texts referred to the old
+        # thread and must not seed the new one. Intentional drop.
+        self._pending_triggers.clear()
         if self._engine is not None:
             try:
                 self._engine.clear_history()
@@ -2396,6 +2473,12 @@ class AgentChatController(QObject):
             # M0 busy-queue: when a turn finishes, drain one queued trigger (a
             # picker-resolve follow-up that arrived while Renn was busy).
             self._engine.busy_changed.connect(self._on_busy_changed)
+            # FIX 2c (transcript divergence): the stop path never runs the
+            # telemetry callback, so the persisted transcript would silently
+            # diverge from the engine's in-memory history (which already
+            # carries the stop marker). hasattr-guarded for engine fakes.
+            if hasattr(self._engine, "run_stopped"):
+                self._engine.run_stopped.connect(self._on_run_stopped)
             # Persist the assistant turn (content + telemetry) to chat_messages so
             # past chats actually have a transcript + a title. The bridge CHAINS
             # this callback (it adds the live meter on top), so both survive.

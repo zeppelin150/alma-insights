@@ -54,9 +54,13 @@ export function statusInfo(status) {
 export function canMarkReady(status) { return status === "pending"; }
 export function canMarkCopied(status) { return status === "pending" || status === "ready"; }
 export function canSaveDraft(status) { return status === "pending" || status === "ready"; }
-// The clipboard gate is Python's; the UI mirrors it so buttons don't invite
-// clicks the controller will silently refuse.
-export function canCopyDraft(status) { return status === "ready" || status === "copied"; }
+// Status never gates the clipboard (owner decision 2026-08-05): any draft
+// with a served review copies behind Python's native confirm. Every known
+// status is copyable; only an unknown one keeps the buttons off.
+export function canCopyDraft(status) {
+  return status === "pending" || status === "ready" ||
+    status === "copied" || status === "pushed";
+}
 
 // Ordered status lanes for the Revision Center. Pending/Ready/Copied always
 // render (empty lanes included — the review flow reads left to right);

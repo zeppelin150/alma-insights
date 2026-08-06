@@ -16,6 +16,7 @@ import {
 
 const LEGEND = [
   ["drive", "Drive"], ["guru", "Guru"], ["asana", "Asana"], ["high", "Due / high"],
+  ["subtask", "Subtask"],
 ];
 const WEEK = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
 
@@ -45,6 +46,7 @@ function Chip({ e, compact, onOpen, onHover, onLeave, draggable, onDragStart, on
     >
       {e.priority === "high" && <span className="cal-chip-dot" aria-hidden="true" />}
       {e.is_card_due && <span className="cal-chip-glyph" aria-hidden="true">↻</span>}
+      {e.is_subtask && <span className="cal-chip-sub" aria-hidden="true">↳</span>}
       <span className={"cal-chip-title" + (compact ? " compact" : "")}>{e.title}</span>
     </button>
   );
@@ -77,6 +79,9 @@ function HoverCard({ e, brief, pos }) {
         <span>{shortDate(e.date)}</span>
       </div>
       {e.assignee && <div className="cal-hc-row">Assignee: {e.assignee}</div>}
+      {e.is_subtask && e.parent_title && (
+        <div className="cal-hc-row">Subtask of {e.parent_title}</div>
+      )}
       {e.subs && <div className="cal-hc-row">Subtasks: {e.subs}</div>}
       {e.description && <div className="cal-hc-desc">{e.description}</div>}
       <BriefBlock brief={brief} />
@@ -391,7 +396,10 @@ export default function CalendarApp() {
         <span className="cal-legend">
           {LEGEND.map(([kind, label]) => (
             <span key={kind} className="cal-legend-item">
-              <span className={"cal-legend-dot kind-" + kind} aria-hidden="true" />{label}
+              {kind === "subtask"
+                ? <span className="cal-legend-glyph" aria-hidden="true">↳</span>
+                : <span className={"cal-legend-dot kind-" + kind} aria-hidden="true" />}
+              {label}
             </span>
           ))}
         </span>
