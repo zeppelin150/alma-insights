@@ -301,3 +301,11 @@ def test_extras_db_roundtrip_renders(qapp, empty_db):
     assert any(t.startswith("COMMENTS (1)") for t in texts)
     assert "DB bold body" in p.findChildren(QTextBrowser)[0].toPlainText()
     assert any(b.text() == "sheet.xlsx ›" for b in p.findChildren(QPushButton))
+
+
+def test_freshness_label_paints_transparent(qapp):
+    """2026-08-10 report: inside the drilldown scroll host a bare QLabel
+    inherits an opaque ancestor background and paints a white box over its
+    neighbors. Offscreen grabs are blank, so lock the property itself."""
+    p = TaskDetailPanel(_task(extras={"fetched_at": "2026-08-10T12:00:00"}))
+    assert "background:transparent" in p._updated_lbl.styleSheet()

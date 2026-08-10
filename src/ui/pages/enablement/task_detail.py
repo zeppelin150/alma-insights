@@ -160,8 +160,12 @@ class TaskDetailPanel(QWidget):
             self._updated_lbl = QLabel(
                 f"Updated {self._rel_time(fetched)}" if fetched else "Not synced yet")
             self._updated_lbl.setTextFormat(Qt.PlainText)
+            # background:transparent is load-bearing: inside the drilldown's
+            # scroll host a bare QLabel inherits an opaque ancestor rule and
+            # paints a white box over its neighbors (2026-08-10 report).
             self._updated_lbl.setStyleSheet(
-                f"color:{ALMA_TEXT_LIGHT}; font-size:11px; border:none;")
+                f"background:transparent; color:{ALMA_TEXT_LIGHT}; "
+                f"font-size:11px; border:none;")
             self._refresh_btn = self._action_btn("Refresh")
             self._refresh_btn.clicked.connect(self._on_refresh_clicked)
             fresh_row = QHBoxLayout()
@@ -537,7 +541,7 @@ class TaskDetailPanel(QWidget):
 
     def _label(self, text: str) -> QLabel:
         lbl = QLabel(text)
-        lbl.setStyleSheet(f"color:{ALMA_TEXT_LIGHT}; font-size:10.5px; font-weight:700; letter-spacing:0.5px; border:none;")
+        lbl.setStyleSheet(f"background:transparent; color:{ALMA_TEXT_LIGHT}; font-size:10.5px; font-weight:700; letter-spacing:0.5px; border:none;")
         return lbl
 
     def _status_pill(self, status: str) -> QLabel:
