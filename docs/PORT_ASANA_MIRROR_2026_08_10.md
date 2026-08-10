@@ -68,6 +68,10 @@ python -m pytest tests/test_task_detail_panel.py tests/test_asana_monitor.py -q
 # expected: 23 passed
 npm --prefix web run test
 # expected: 257 passed (pre-port count on this box)
+# SKIP this npm command entirely if this box has no Node toolchain —
+# do NOT install Node/npm or run `npm install`/`npm ci` for this port.
+# The shipped bundle is prebuilt + checksum-verified; the Python
+# suites and the app smoke test are sufficient verification.
 ```
 
 If the vitest count differs slightly because this box carries a different
@@ -807,6 +811,10 @@ index 58e456f..4d99226 100644
 ```bash
 npm --prefix web run test
 # expected: pre-port baseline + 96 (on the source box: 353 passed)
+# SKIP this npm command entirely if this box has no Node toolchain —
+# do NOT install Node/npm or run `npm install`/`npm ci` for this port.
+# The shipped bundle is prebuilt + checksum-verified; the Python
+# suites and the app smoke test are sufficient verification.
 # dist: either already checked out in §2 (done) or rebuild now:
 #   npm --prefix web run build
 ```
@@ -1081,6 +1089,10 @@ python -m pytest "tests/test_help_claims_plan.py::TestTaskPanelMirror" -q
 # expected: 8 passed
 npm --prefix web run test
 # expected: baseline + 96
+# SKIP this npm command entirely if this box has no Node toolchain —
+# do NOT install Node/npm or run `npm install`/`npm ci` for this port.
+# The shipped bundle is prebuilt + checksum-verified; the Python
+# suites and the app smoke test are sufficient verification.
 ```
 
 **Known-expected failures that are NOT this port's problem:** the full
