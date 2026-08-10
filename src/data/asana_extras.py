@@ -60,13 +60,14 @@ def upsert_extras(conn, task_id: str, task_payload: dict, *, client=None) -> Non
         conn.execute(
             """INSERT INTO asana_task_extras
                (task_id, html_notes, custom_fields_json, attachments_json,
-                stories_json, for_modified_at, fetched_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)
+                stories_json, task_fields_json, for_modified_at, fetched_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(task_id) DO UPDATE SET
                  html_notes=excluded.html_notes,
                  custom_fields_json=excluded.custom_fields_json,
                  attachments_json=excluded.attachments_json,
                  stories_json=excluded.stories_json,
+                 task_fields_json=excluded.task_fields_json,
                  for_modified_at=excluded.for_modified_at,
                  fetched_at=excluded.fetched_at""",
             (task_id,
@@ -74,6 +75,7 @@ def upsert_extras(conn, task_id: str, task_payload: dict, *, client=None) -> Non
              json.dumps(task_payload.get("custom_fields") or []),
              json.dumps(attachments),
              json.dumps(stories),
+             json.dumps(_task_fields(task_payload)),
              task_payload.get("modified_at") or "",
              _now()),
         )
@@ -84,6 +86,29 @@ def upsert_extras(conn, task_id: str, task_payload: dict, *, client=None) -> Non
         except Exception:  # noqa: BLE001
             pass
         raise
+
+
+def _task_fields(task_payload: dict) -> dict:
+    """Task-level extras projection (mig 058) — the fields the web mirror
+    renders that enablement_tasks deliberately never stored: the due RANGE
+    start, the collaborator stack, and the completion stamp."""
+    out = {}
+    for key in ("start_on", "due_on", "completed", "completed_at",
+                "num_subtasks", "permalink_url"):
+        val = task_payload.get(key)
+        if val is not None:
+            out[key] = val
+    followers = [
+        {"name": (f or {}).get("name", "")}
+        for f in (task_payload.get("followers") or [])
+        if (f or {}).get("name")
+    ]
+    if followers:
+        out["followers"] = followers
+    completed_by = (task_payload.get("completed_by") or {}).get("name", "")
+    if completed_by:
+        out["completed_by"] = completed_by
+    return out
 
 
 def get_extras(conn, task_id: str) -> dict | None:
@@ -98,6 +123,11 @@ def get_extras(conn, task_id: str) -> dict | None:
             out[key[:-5]] = json.loads(out.get(key) or "[]")
         except (ValueError, TypeError):
             out[key[:-5]] = []
+    try:
+        fields = json.loads(out.get("task_fields_json") or "{}")
+        out["task_fields"] = fields if isinstance(fields, dict) else {}
+    except (ValueError, TypeError):
+        out["task_fields"] = {}
     return out
 
 

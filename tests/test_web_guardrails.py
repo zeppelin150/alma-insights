@@ -100,6 +100,12 @@ GATED_SLOT_TESTS = {
     # closed), pull/import claim before the nested-event-loop pickers, and
     # the no-Zendesk-write guarantee is asserted structurally there.
     "src/ui/web/zendesk_bridge.py": "tests/test_zendesk_bridge.py",
+    # WS-D-WEB task mirror: writes relay to the host's CAS-guarded
+    # asana_writeback lanes behind current-id validation + a single-winner
+    # inflight claim; openUrl/openAttachment are gated on last-pushed-vm
+    # registries. Proven there, plus the AST no-Asana-write-verb fence in
+    # tests/test_task_web_controller.py.
+    "src/ui/web/task_bridge.py": "tests/test_task_bridge.py",
 }
 
 _KNOWN_BRIDGES = {"chat_bridge.py"}   # pre-pivot; gating reviewed 2026-06/07

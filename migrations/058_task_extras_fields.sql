@@ -1,0 +1,22 @@
+-- ─────────────────────────────────────────────────────────────────────
+-- Migration 058 — task-level extras fields for the web task mirror.
+--
+-- WS-D-WEB M2 (asana-mirror-sidebar plan): the #/task web panel renders
+-- Asana-native details the poll's lean row never stored — the due RANGE
+-- (start_on), the collaborator avatar stack (followers), and the
+-- completion stamp (completed_at / completed_by). The extras side-table
+-- already receives the full _TASK_FIELDS payload on every refresh, so the
+-- projection lands here as ONE json object column instead of widening
+-- enablement_tasks (whose list/calendar query must stay lean).
+--
+-- task_fields_json  JSON object: {start_on, due_on, completed,
+--                   completed_at, completed_by, num_subtasks,
+--                   permalink_url, followers:[{name}]}. Written by
+--                   asana_extras.upsert_extras; decoded by get_extras as
+--                   extras["task_fields"] ({} when absent/corrupt).
+--
+-- Idempotent: single-line ALTER ADD COLUMN (the schema migrator's PRAGMA
+-- table_info guard skips it when present).
+-- ─────────────────────────────────────────────────────────────────────
+
+ALTER TABLE asana_task_extras ADD COLUMN task_fields_json TEXT;

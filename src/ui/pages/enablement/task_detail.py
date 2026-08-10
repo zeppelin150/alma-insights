@@ -361,7 +361,11 @@ class TaskDetailPanel(QWidget):
             v.addWidget(self._att_error)
 
         # ── Comments (card rows: author bold · local time · pre-wrap body) ──
-        stories = extras.get("stories") or []
+        # Post-058 stories_json carries ALL subtypes for the web mirror; this
+        # panel keeps its comments-only view. Missing subtype = pre-058 row,
+        # which was comments-only by construction.
+        stories = [s for s in (extras.get("stories") or [])
+                   if (s.get("subtype") or "comment_added") == "comment_added"]
         if stories:
             cards = QWidget()
             cards.setStyleSheet("background:transparent;")

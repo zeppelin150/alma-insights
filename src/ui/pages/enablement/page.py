@@ -3513,6 +3513,24 @@ class EnablementPage(QWidget):
                         pass
             except Exception:  # noqa: BLE001 — extras/brief are enrichment only
                 pass
+        # WS-D-WEB: the Asana-mirror web panel renders when available; ANY
+        # failure — flag off, WebEngine broken, push error — keeps the native
+        # panel as the permanent fallback.
+        if self._task_web_available():
+            ctrl, host = self._get_task_web_host()
+            if ctrl is not None and host is not None:
+                try:
+                    ctrl.show_task(task)
+                    self._open_task_title = task.get("title")
+                    self._open_task_id = task.get("task_id")
+                    self._drilldown.show_widget(
+                        "Task", task.get("source", "").capitalize(), host)
+                    self._set_status(f"Opened “{task.get('title', 'task')}”.")
+                    return
+                except Exception:  # noqa: BLE001 — web push failed → native
+                    self._task_web_failed = True
+                    logger.warning("web task panel failed — native fallback",
+                                   exc_info=True)
         panel = TaskDetailPanel(task)
         panel.open_in_workbench.connect(lambda: self.tabs.setCurrentWidget(self._workbench_tab))
         panel.open_source.connect(self._open_source_url)
@@ -3537,6 +3555,40 @@ class EnablementPage(QWidget):
         self._open_task_id = task.get("task_id")
         self._drilldown.show_widget("Task", task.get("source", "").capitalize(), panel)
         self._set_status(f"Opened “{task.get('title', 'task')}”.")
+
+    def _task_web_available(self) -> bool:
+        if getattr(self, "_task_web_failed", False):
+            return False
+        try:
+            from src.ui.web.web_flags import task_web_enabled
+            return task_web_enabled()
+        except Exception:  # noqa: BLE001 — flag trouble → native panel
+            return False
+
+    def _get_task_web_host(self):
+        """ONE persistent WebHost for the task drilldown (the M1/16GB render
+        budget): built lazily on first task open, reused across every open.
+        Any construction failure marks the session native-only."""
+        if getattr(self, "_task_web_host", None) is not None:
+            return self._task_web_ctrl, self._task_web_host
+        try:
+            from src.ui.web.task_host import build_task_web_triple
+            ctrl, bridge, host = build_task_web_triple(
+                write_fn=self._run_task_writeback,
+                refresh_fn=self._run_task_refresh,
+                open_url_fn=self._open_source_url)
+            ctrl.status_text.connect(self._set_status)
+            # GC guards — WebHost parents the bridge; ctrl/host live here.
+            self._task_web_ctrl, self._task_web_bridge = ctrl, bridge
+            self._task_web_host = host
+            return ctrl, host
+        except Exception:  # noqa: BLE001 — WebEngine absent/broken → native
+            self._task_web_ctrl = self._task_web_bridge = None
+            self._task_web_host = None
+            self._task_web_failed = True
+            logger.warning("web task panel unavailable — native fallback",
+                           exc_info=True)
+            return None, None
 
     def _board_display_names(self, conn, source_ids) -> list[str]:
         """Board display names for the panel's meta line (WS-D2), resolved

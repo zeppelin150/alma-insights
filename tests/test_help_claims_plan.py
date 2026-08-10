@@ -1852,3 +1852,118 @@ class TestDragReschedule:
         # ... which is the same function name the detail panel's due field wires.
         panel_src = inspect.getsource(EnablementPage._show_task_detail)
         assert '_run_task_writeback("update_due_in_asana"' in panel_src
+
+
+class TestTaskPanelMirror:
+    """task-panel-mirror.md — the Asana-style web task panel."""
+
+    def test_on_by_default_with_the_settings_escape_hatch(self, monkeypatch):
+        """task-panel-mirror.md: "The Asana-style panel is on by default …
+        set ``enablement.task_web: false`` in the settings file" — and a
+        settings error keeps the default rather than killing the surface."""
+        import src.data.settings_manager as sm
+        from src.ui.web.web_flags import task_web_enabled
+
+        monkeypatch.setattr(sm, "get_section", lambda *_a, **_k: {})
+        assert task_web_enabled() is True, "on by default"
+        monkeypatch.setattr(sm, "get_section",
+                            lambda *_a, **_k: {"task_web": False})
+        assert task_web_enabled() is False, "the escape hatch"
+        def boom(*_a, **_k):
+            raise RuntimeError("settings unreadable")
+        monkeypatch.setattr(sm, "get_section", boom)
+        assert task_web_enabled() is True, "an unreadable kill switch is not a kill"
+
+    def test_construction_failure_quietly_shows_the_classic_panel(self, monkeypatch):
+        """task-panel-mirror.md: "if the new panel cannot be built on your
+        machine, the app quietly shows the classic panel instead"."""
+        import src.ui.web.task_host as th
+
+        def boom(**_kw):
+            raise RuntimeError("no webengine")
+
+        monkeypatch.setattr(th, "build_task_web_triple", boom)
+        stub = SimpleNamespace(_run_task_writeback=lambda *a: None,
+                               _run_task_refresh=lambda *a: None,
+                               _open_source_url=lambda u: None,
+                               _set_status=lambda s: None)
+        assert EnablementPage._get_task_web_host(stub) == (None, None)
+        assert EnablementPage._task_web_available(stub) is False
+        # ... and _show_task_detail's web branch precedes the classic panel
+        # construction, which remains in place as the fall-through.
+        import inspect
+        src = inspect.getsource(EnablementPage._show_task_detail)
+        assert "_task_web_available" in src
+        assert "TaskDetailPanel(task)" in src
+
+    def test_the_same_four_writeback_lanes(self):
+        """task-panel-mirror.md: "these are the same four background
+        write-back lanes described in *Adding subtasks, comments and due
+        dates*"."""
+        from src.services.task_web import _LANES
+        assert set(_LANES.values()) == {
+            "set_completed_in_asana", "update_due_in_asana",
+            "post_comment_to_asana", "create_subtask_in_asana"}
+        for lane in _LANES.values():
+            assert callable(getattr(awb, lane)), lane
+
+    def test_only_links_the_task_carries_will_open(self):
+        """task-panel-mirror.md: "The panel will only open a link that the
+        task actually carries — a link that isn't part of the task's own
+        content goes nowhere"."""
+        from src.services.task_web import TaskWebController
+        opened = []
+        ctrl = TaskWebController(open_url_fn=opened.append)
+        ctrl.show_task({
+            "task_id": "t1", "source": "asana", "source_ref": "9001",
+            "title": "x", "source_url": "https://app.asana.com/0/1/9001",
+            "extras": {"stories": [
+                {"gid": "s1", "subtype": "comment_added", "author": "A",
+                 "text": "see https://doc.example/z",
+                 "created_at": "2026-07-01T00:00:00Z"}]},
+        })
+        ctrl.js_open_url("https://evil.example/")
+        assert opened == []
+        ctrl.js_open_url("https://doc.example/z")
+        ctrl.js_open_url("https://app.asana.com/0/1/9001")
+        assert opened == ["https://doc.example/z",
+                          "https://app.asana.com/0/1/9001"]
+
+    def test_only_a_full_changed_date_is_sent(self):
+        """task-panel-mirror.md: "Only a full, changed date is sent"."""
+        from src.services.task_web import TaskWebController
+        writes = []
+        ctrl = TaskWebController(
+            write_fn=lambda lane, tid, *a: writes.append((lane, tid) + a))
+        ctrl.show_task({"task_id": "t1", "source": "asana",
+                        "source_ref": "9001", "title": "x",
+                        "due_iso": "2026-09-01"})
+        for bad in ("2026-9-1", "tomorrow", "", None, "2026-09-011"):
+            ctrl.js_set_due("t1", bad)
+        ctrl.js_set_due("t1", "2026-09-01")     # unchanged
+        assert writes == []
+        ctrl.js_set_due("t1", "2026-09-15")
+        assert writes == [("update_due_in_asana", "t1", "2026-09-15")]
+
+    def test_attachments_resolve_fresh_and_open_web_links_only(self):
+        """task-panel-mirror.md: "Attachment URLs are never stored. Clicking
+        one asks Asana for a fresh link right then, and only web links
+        open"."""
+        import inspect
+        from src.services import task_web
+        src = inspect.getsource(task_web.TaskWebController)
+        assert "get_attachment" in src, "a fresh per-click resolve"
+        assert 'startswith(("http://", "https://"))' in src, "web links only"
+        # show_task itself fetches nothing — the panel renders synced data.
+        shown = inspect.getsource(task_web.TaskWebController.show_task)
+        assert "client_factory" not in shown and "get_attachment" not in shown
+
+    def test_rule_posted_entries_split_from_human_comments(self):
+        """task-panel-mirror.md: "Rule-posted entries show with a ⚡ marker
+        instead of an avatar" — the split is authorless comment_added
+        stories; status changes render as quiet system rows."""
+        from src.services.task_vm import story_kind
+        assert story_kind({"subtype": "comment_added", "author": "Dana"}) == "comment"
+        assert story_kind({"subtype": "comment_added", "author": ""}) == "automation"
+        assert story_kind({"subtype": "marked_complete", "author": "Dana"}) == "system"
+        assert story_kind({"author": "Dana"}) == "comment", "pre-058 rows stay comments"

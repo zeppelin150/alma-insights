@@ -63,6 +63,31 @@ def zendesk_web_enabled() -> bool:
     return web_tabs_mode() in ("zendesk", "all")
 
 
+def task_web_enabled() -> bool:
+    """True when the task drilldown should render the SPA ``#/task`` route.
+
+    Deliberately an OPT-OUT (default on) — the owner call at WS-D-WEB M2 was
+    "default-on + construction fallback; avoid another writer-less flag".
+    The native ``TaskDetailPanel`` remains the permanent fallback on ANY
+    web-triple construction failure, so the flag exists only as a hand-edit
+    kill switch (``enablement.task_web: false``); a settings error keeps the
+    default rather than killing the surface.
+    """
+    try:
+        from src.data.settings_manager import get_section
+        section = get_section("enablement", {}) or {}
+    except Exception:  # noqa: BLE001 — an unreadable kill switch is not a kill
+        return True
+    raw = section.get("task_web", True)
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        return int(raw) == 1
+    if isinstance(raw, str):
+        return raw.strip().lower() not in ("off", "false", "no", "0")
+    return True
+
+
 def web_home_enabled() -> bool:
     """True when Home should render the SPA ``#/home`` route.
 

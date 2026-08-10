@@ -52,11 +52,17 @@ _OFFSET_REJECT_CODES = frozenset({400, 401})
 # indicator/mapping/brief logic reads, plus html_notes (rich body — stored raw,
 # never rendered as HTML), start_on, and the task assignee as a fallback.
 _TASK_FIELDS = (
-    "name,due_on,start_on,permalink_url,completed,modified_at,notes,html_notes,"
+    "name,due_on,start_on,permalink_url,completed,completed_at,modified_at,"
+    "notes,html_notes,"
     "num_subtasks,parent.gid,parent.name,"
     "assignee.name,assignee.gid,assignee.email,created_by.name,"
+    "completed_by.name,followers.name,"
     "custom_fields.gid,custom_fields.name,custom_fields.display_value,"
+    "custom_fields.resource_subtype,"
     "custom_fields.enum_value.gid,custom_fields.enum_value.name,"
+    "custom_fields.enum_value.color,"
+    "custom_fields.multi_enum_values.gid,custom_fields.multi_enum_values.name,"
+    "custom_fields.multi_enum_values.color,"
     "custom_fields.people_value.gid,custom_fields.people_value.name,"
     "custom_fields.number_value,custom_fields.text_value,"
     "custom_fields.date_value.date"
@@ -423,23 +429,28 @@ class AsanaClient:
         }
 
     def list_stories(self, task_gid: str, *, max_pages: int = 5) -> list[dict]:
-        """A task's comment stories (newest last) — ``GET /tasks/{gid}/stories``.
+        """A task's stories (newest last) — ``GET /tasks/{gid}/stories``.
 
-        Filters to ``resource_subtype == "comment_added"`` (system stories like
-        "assigned to X" are noise for the extras panel). Pages via
+        Returns ALL subtypes (WS-D-WEB: the web mirror renders system and
+        rule/automation rows, not just comments) with the subtype + rich
+        ``html_text`` carried ADDITIVELY. Consumers that want the old
+        comments-only view filter on ``subtype == "comment_added"``, treating
+        a missing subtype (pre-058 stored rows) as a comment. Pages via
         ``next_page.offset`` up to ``max_pages`` like :meth:`list_workspace_users`.
         """
         params: dict = {
-            "opt_fields": "text,created_at,created_by.name,resource_subtype",
+            "opt_fields": "text,html_text,created_at,created_by.name,"
+                          "resource_subtype",
         }
         stories = self._paginate(f"/tasks/{task_gid}/stories", params,
                                  max_pages=max_pages)
         return [
             {"gid": s.get("gid", ""), "text": s.get("text", ""),
              "created_at": s.get("created_at", ""),
-             "author": (s.get("created_by") or {}).get("name", "")}
+             "author": (s.get("created_by") or {}).get("name", ""),
+             "subtype": s.get("resource_subtype", ""),
+             "html": s.get("html_text", "")}
             for s in stories
-            if s.get("resource_subtype") == "comment_added"
         ]
 
     def list_subtasks(self, task_gid: str) -> list[dict]:
@@ -472,9 +483,10 @@ class AsanaClient:
         ``get_attachment`` for a single attachment's download URL + host.
         """
         data = self._paginate(f"/tasks/{task_gid}/attachments",
-                              {"opt_fields": "name,resource_subtype"})
+                              {"opt_fields": "name,resource_subtype,host"})
         return [{"gid": a["gid"], "name": a.get("name", ""),
-                 "subtype": a.get("resource_subtype", "")} for a in data]
+                 "subtype": a.get("resource_subtype", ""),
+                 "host": a.get("host", "")} for a in data]
 
     def get_attachment(self, attachment_gid: str) -> dict:
         """Fetch one attachment's download URL + host.
