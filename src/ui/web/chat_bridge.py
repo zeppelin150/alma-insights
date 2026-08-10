@@ -125,6 +125,22 @@ class ChatBridge(QObject):
         self._tool_timer.timeout.connect(self._poll_tools)
         self._tool_timer.timeout.connect(self._poll_jobs)
         self._tool_timer.timeout.connect(self._poll_drafts)
+        # FIX 2b's delayed catch-up, as a PERSISTENT member timer connected
+        # HERE — before WebHost registers this bridge on the QWebChannel.
+        # The functional ``QTimer.singleShot(1200, self._late_catchup)`` it
+        # replaces created a DYNAMIC SLOT on this channel-registered object
+        # at its first call, growing the metaobject AFTER registration and
+        # invalidating the publisher's precomputed signal indices — every
+        # bridge signal emitted after that call (status_update,
+        # response_ready, the next turn's tokens) was silently dropped, so
+        # Renn's reply vanished when the streamed bubble unmounted at
+        # busy(False) (2026-08-10; repro: tests/test_agent_bubble_local.py).
+        # Rule: NOTHING may create a new connection/slot ON this object once
+        # the channel has registered it.
+        self._late_timer = QTimer(self)
+        self._late_timer.setSingleShot(True)
+        self._late_timer.setInterval(1200)
+        self._late_timer.timeout.connect(self._late_catchup)
         # ``action_poll(session_id|None) -> [ {id, request_id, type, payload}, … ]``
         # atomically claims this session's unconsumed action requests (M0). It runs
         # on a SEPARATE, FREE-RUNNING timer (~500ms) — NOT gated on ``busy`` —
@@ -527,8 +543,10 @@ class ChatBridge(QObject):
             # commits in the same instant the turn ends can land AFTER the
             # final polls above (cross-process WAL latency, or a row a Stop's
             # kill raced), and the next busy(True) re-baselines _tool_cursor
-            # past it forever. One delayed catch-up closes that window.
-            QTimer.singleShot(1200, self._late_catchup)
+            # past it forever. One delayed catch-up closes that window —
+            # via the member timer (see __init__), never a functional
+            # singleShot on this channel-registered object.
+            self._late_timer.start()
 
     def _late_catchup(self):
         """The delayed final poll scheduled by ``_on_busy(False)``. Runs the
