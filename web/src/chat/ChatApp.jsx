@@ -433,7 +433,8 @@ export function isApprovable(d) {
   return state === "bound" || state === "rebound";
 }
 
-export function DraftCard({ d, onApprove, onReject, onReReview, busy }) {
+export function DraftCard({ d, onApprove, onReject, onReReview, busy,
+                            onSendToGuruDraft, onEditInWorkbench }) {
   const approvable = isApprovable(d) && !d.changed_under_review;
   const moved = d.review_state === "changed" || d.changed_under_review;
   return (
@@ -496,9 +497,35 @@ export function DraftCard({ d, onApprove, onReject, onReReview, busy }) {
         available={d.publish_body_available}
         flagged={!!d.notice} />
       <div className="dactions">
+        {/* C1: hand edits beat typed instructions for small changes. Pure
+            navigation — no authority, so it needs no review binding. */}
+        {onEditInWorkbench ? (
+          <button
+            className="dedit"
+            disabled={busy}
+            title="Open this draft in the Workbench and make the change by hand."
+            onClick={() => onEditInWorkbench(d.draft_id)}
+          >
+            Edit in Workbench
+          </button>
+        ) : null}
         <button className="dreject" disabled={busy} onClick={() => onReject(d.draft_id)}>
           Reject
         </button>
+        {/* WS-B: same review-binding + native-confirm gate as Approve; the
+            terminal act creates a Guru DRAFT (publishing happens in Guru). */}
+        {onSendToGuruDraft ? (
+          <button
+            className="dguru-draft"
+            disabled={busy || !approvable}
+            title={approvable
+              ? "Send to your My Drafts in Guru — review and publish it there."
+              : "This draft changed since it was reviewed — re-review it first."}
+            onClick={() => onSendToGuruDraft(d.draft_id)}
+          >
+            Send to Guru as draft
+          </button>
+        ) : null}
         <button
           className="dapprove"
           disabled={busy || !approvable}
@@ -533,7 +560,8 @@ export function ResolveNotice({ note, onDismiss }) {
   );
 }
 
-export function ReviewPanel({ drafts, open, onClose, onApprove, onReject, onReReview, busyId, note, onDismissNote }) {
+export function ReviewPanel({ drafts, open, onClose, onApprove, onReject, onReReview, busyId, note, onDismissNote,
+                              onSendToGuruDraft, onEditInWorkbench }) {
   if (!open) return null;
   return (
     <div className="drawer-overlay" onClick={onClose}>
@@ -554,6 +582,8 @@ export function ReviewPanel({ drafts, open, onClose, onApprove, onReject, onReRe
               onApprove={onApprove}
               onReject={onReject}
               onReReview={onReReview}
+              onSendToGuruDraft={onSendToGuruDraft}
+              onEditInWorkbench={onEditInWorkbench}
               busy={busyId === d.draft_id}
             />
           ))}
@@ -1602,6 +1632,21 @@ export default function ChatApp() {
     setResolvingId(id);
     setResolveNote(null);
     bridge.rejectDraft(String(id));
+  }
+
+  // WS-B: same click discipline as approve — the gate lives in Python.
+  function sendToGuruDraft(id) {
+    if (!bridge || !bridge.sendToGuruDraft) return;
+    setResolvingId(id);
+    setResolveNote(null);
+    bridge.sendToGuruDraft(String(id));
+  }
+
+  // C1: navigation only; close the drawer so the Workbench is visible.
+  function editInWorkbench(id) {
+    if (!bridge || !bridge.editInWorkbench) return;
+    bridge.editInWorkbench(String(id));
+    setReviewOpen(false);
   }
 
   return (

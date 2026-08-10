@@ -1,19 +1,21 @@
 """Enablement Settings — the Content Command Center's config surface.
 
 Seven sub-tabs: Connections (status + workspace basics), Providers
-(identity + the shared CredentialsPanel), Sources (Asana / Drive / the
-knowledge base), Style Guide (guide + card template libraries), and the
-three system tabs ported from the product side on 2026-07-22 — Updates
-(shared UpdatesPanel), Usage (shared CostDashboard, lazily built when a
-warehouse is wired) and Maintenance (shared MaintenancePanel).
+(identity + the shared CredentialsPanel), Sources (Asana / Drive / the Guru
+search scope / the knowledge base), Style Guide (guide + card template
+libraries + card styling), and the three system tabs ported from the product
+side on 2026-07-22 — Updates (shared UpdatesPanel), Usage (shared
+CostDashboard, lazily built when a warehouse is wired) and Maintenance
+(shared MaintenancePanel).
 """
 
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit,
-    QPushButton, QScrollArea, QTabWidget, QTextBrowser, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
+    QPlainTextEdit, QPushButton, QScrollArea, QTabWidget, QTextBrowser,
+    QVBoxLayout, QWidget,
 )
 
 from src.ui.pages.enablement._common import Toggle, card_frame, field, pill, section_label
@@ -351,10 +353,11 @@ class SettingsPage(QWidget):
         _add(self._tab([self._mode_card(), self._connections()]),
              "antenna", "Connections")
         _add(self._tab([self._identity(), self.credentials]), "sliders", "Providers")
-        _add(self._tab([self._asana(), self._drive(),
+        _add(self._tab([self._asana(), self._drive(), self._guru_scope(),
+                        self._guru_targets(),
                         self._knowledge_base()]), "database", "Sources")
-        _add(self._tab([self._style_guide(), self._card_template()]),
-             "pen", "Style Guide")
+        _add(self._tab([self._style_guide(), self._card_template(),
+                        self._card_styling()]), "pen", "Style Guide")
         # ── System tabs (shared with the product Settings page) ──
         _add(self._tab([self._updates_panel()]), "download", "Updates")
         _add(self._usage_tab(), "pie", "Usage")
@@ -928,6 +931,143 @@ class SettingsPage(QWidget):
         except Exception:
             pass
 
+    # ── CARD STYLING (pilot A4, 2026-08-09) ──────────────────────────
+    def _card_styling(self) -> QFrame:
+        """Publish-side style-pass preferences: enable toggle + two color
+        swatches + preview.
+
+        Persisted as ``enablement.guru.card_style = {"default": {...}}`` so
+        per-collection presets can ride alongside later without migration.
+        Ships OFF with placeholder brand blue until the owner confirms the
+        mined Guru palette; the style pass itself (built separately)
+        activates only when the toggle is on.
+        """
+        card = card_frame()
+        v = QVBoxLayout(card)
+        v.setContentsMargins(20, 16, 20, 16)
+        v.setSpacing(10)
+        v.addWidget(section_label("CARD STYLING"))
+        cfg = self._card_style_config()
+        self._style_heading_color = cfg["heading_color"]
+        self._style_link_color = cfg["link_color"]
+        self._style_enabled = QCheckBox("Apply card styling on publish")
+        self._style_enabled.setChecked(bool(cfg["enabled"]))
+        self._style_enabled.setStyleSheet(
+            f"QCheckBox{{color:{ALMA_TEXT_DARK}; font-size:12.5px; "
+            f"border:none; background:transparent;}}")
+        # Connected AFTER setChecked so building the page never writes.
+        self._style_enabled.toggled.connect(lambda _on: self._save_card_style())
+        v.addWidget(self._style_enabled)
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        for label, which in (("Heading color…", "heading"),
+                             ("Link color…", "link")):
+            b = QPushButton(label)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setStyleSheet(
+                f"QPushButton{{background:transparent; color:{ALMA_GREEN_DARK}; "
+                f"border:1px solid {ALMA_BORDER}; border-radius:7px; "
+                f"padding:5px 12px; font-size:11.5px; font-weight:600;}}")
+            b.clicked.connect(lambda _=False, w=which: self._pick_style_color(w))
+            row.addWidget(b)
+        self._style_preview = QLabel("")
+        self._style_preview.setTextFormat(Qt.RichText)
+        self._style_preview.setStyleSheet(
+            "font-size:12.5px; border:none; background:transparent;")
+        row.addWidget(self._style_preview)
+        row.addStretch(1)
+        v.addLayout(row)
+
+        # Fingerprint truth (fail-closed and correct): the style pass reads
+        # these settings, so changing them between review and approve flips
+        # the approval fingerprint → sign_off_scope_changed refusal.
+        warn = self._text(
+            "Changing card styling invalidates in-flight publish approvals — "
+            "re-approve after changing colors.", color=ALMA_WARNING)
+        warn.setWordWrap(True)
+        v.addWidget(warn)
+        self._refresh_style_preview()
+        return card
+
+    @staticmethod
+    def _card_style_defaults() -> dict:
+        """Default OFF + brand-blue placeholders: the owner hasn't confirmed
+        the mined Guru palette yet, so nothing styles until they opt in."""
+        return {"enabled": False,
+                "heading_color": "#0055CC",
+                "link_color": "#0055CC"}
+
+    @staticmethod
+    def _valid_hex(value: str) -> bool:
+        return (len(value) == 7 and value.startswith("#")
+                and all(c in "0123456789abcdefABCDEF" for c in value[1:]))
+
+    def _card_style_config(self) -> dict:
+        """The stored ``default`` preset merged over defaults; a malformed
+        stored color falls back rather than propagating into rich text."""
+        from src.data.settings_manager import get_section
+        try:
+            en = get_section("enablement", {}) or {}
+        except Exception:  # noqa: BLE001
+            en = {}
+        stored = ((en.get("guru") or {}).get("card_style") or {}).get("default")
+        cfg = self._card_style_defaults()
+        if isinstance(stored, dict):
+            cfg["enabled"] = bool(stored.get("enabled", cfg["enabled"]))
+            for key in ("heading_color", "link_color"):
+                val = str(stored.get(key) or "")
+                if self._valid_hex(val):
+                    cfg[key] = val.upper()
+        return cfg
+
+    def _pick_style_color(self, which: str):
+        """Open QColorDialog for one swatch; a cancelled pick changes nothing."""
+        from PySide6.QtGui import QColor
+        from PySide6.QtWidgets import QColorDialog
+        current = (self._style_heading_color if which == "heading"
+                   else self._style_link_color)
+        color = QColorDialog.getColor(
+            QColor(current), self,
+            "Heading color" if which == "heading" else "Link color")
+        if not color.isValid():
+            return
+        hex_value = color.name().upper()
+        if which == "heading":
+            self._style_heading_color = hex_value
+        else:
+            self._style_link_color = hex_value
+        self._save_card_style()
+
+    def _save_card_style(self):
+        """Persist the preset in the exact documented shape under
+        ``enablement.guru.card_style``. Sibling ``card_style`` keys (future
+        per-collection presets) and sibling ``guru`` keys are preserved."""
+        from src.data.settings_manager import get_section, set_section
+        cfg = dict(get_section("enablement", {}) or {})
+        guru = dict(cfg.get("guru") or {})
+        style = dict(guru.get("card_style") or {})
+        style["default"] = {
+            "enabled": bool(self._style_enabled.isChecked()),
+            "heading_color": self._style_heading_color,
+            "link_color": self._style_link_color,
+        }
+        guru["card_style"] = style
+        cfg["guru"] = guru
+        set_section("enablement", cfg)
+        self._refresh_style_preview()
+
+    def _refresh_style_preview(self):
+        """Inline sample rendered in the chosen colors (+ their hex values).
+        The colors are validated app-authored hex — safe in rich text."""
+        h = self._style_heading_color
+        lk = self._style_link_color
+        self._style_preview.setText(
+            f'<span style="color:{h}; font-weight:700;">Heading</span>'
+            f'&nbsp;·&nbsp;'
+            f'<span style="color:{lk}; text-decoration:underline;">link</span>'
+            f'&nbsp;&nbsp;<span style="color:{ALMA_TEXT_LIGHT};">{h} / {lk}</span>')
+
     def _default_mode_combo(self):
         """Startup-mode choice — same setting as the product Settings page."""
         combo = QComboBox()
@@ -1238,6 +1378,180 @@ class SettingsPage(QWidget):
             rl.addStretch(1)
             rl.addWidget(pill(f.get("last_status") or "pending", "#EBEFEA", ALMA_GREEN_DARK))
             self._drive_list.addWidget(row)
+
+    # ── Guru search scope (pilot G1, 2026-08-09) ─────────────────────
+    def _guru_scope(self) -> QFrame:
+        """Which Guru collections searches cover — summary row + scope editor.
+
+        The picker dialog owns reading AND writing
+        ``enablement.guru.search_collections``; this card only displays the
+        persisted scope and opens the dialog. Empty = all collections and the
+        row says so, because a scope that narrows silently is the failure
+        mode the enablement roadmap warned about.
+        """
+        card, v = self._section("GURU COLLECTIONS  ·  search scope",
+                                "Edit scope…",
+                                on_action=self._on_edit_guru_scope)
+        self._guru_scope_lbl = self._text("", color=ALMA_TEXT_DARK)
+        self._guru_scope_lbl.setWordWrap(True)
+        v.addWidget(self._guru_scope_lbl)
+        v.addWidget(self._text(
+            "Empty = all collections — the scope is never silently narrowed.",
+            color=ALMA_TEXT_LIGHT))
+        self.refresh_guru_scope()
+        return card
+
+    def refresh_guru_scope(self):
+        """Re-read the persisted scope into the summary label."""
+        from src.data.settings_manager import get_section
+        try:
+            en = get_section("enablement", {}) or {}
+        except Exception:  # noqa: BLE001
+            en = {}
+        raw = (en.get("guru") or {}).get("search_collections") or []
+        names = [str(r.get("name") or r.get("id")) for r in raw
+                 if isinstance(r, dict) and r.get("id")]
+        if not names:
+            self._guru_scope_lbl.setText("All collections")
+            return
+        shown = ", ".join(names[:3])
+        more = f" (+{len(names) - 3} more)" if len(names) > 3 else ""
+        self._guru_scope_lbl.setText(f"{len(names)} selected: {shown}{more}")
+
+    def _on_edit_guru_scope(self):
+        """Open the native Guru collections picker; it persists on OK.
+
+        The dialog is cached and reused (not destroyed per open) so a close
+        with a listing in flight never tears down a running QThread's parent —
+        see GuruCollectionPickerDialog's module docstring."""
+        from src.ui.dialogs.guru_collection_picker_dialog import (
+            GuruCollectionPickerDialog)
+        dlg = getattr(self, "_guru_scope_picker", None)
+        if dlg is None:
+            dlg = self._guru_scope_picker = GuruCollectionPickerDialog(self)
+        else:
+            dlg.reload()
+        dlg.exec()
+        self.refresh_guru_scope()   # the scope may have changed on OK
+
+    # ── Guru per-kind publish targets (pilot G3, 2026-08-09) ─────────
+
+    _TARGET_KINDS = ("quiz", "diagram", "deck", "one_pager", "battle_card")
+
+    def _guru_targets(self) -> QFrame:
+        """G3: where each content KIND publishes (kind → collection).
+
+        The map stores OVERRIDES only — "Default" rows write nothing and the
+        publish falls through to the global target. The single consumer is
+        ``enablement_store.resolve_publish_target`` (explicit arg > this map
+        > global default), which the publish belt AND the Guru-draft push
+        both route through. Collections load off the UI thread via the
+        picker's worker; until they arrive the combos stay disabled showing
+        the persisted state, so the card never *looks* editable while it
+        couldn't list a single collection.
+        """
+        card, v = self._section("GURU PUBLISH TARGETS  ·  by content kind", None)
+        self._kind_combos: dict = {}
+        from PySide6.QtWidgets import QGridLayout, QWidget
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(6)
+        for i, kind in enumerate(self._TARGET_KINDS):
+            grid.addWidget(self._text(kind.replace("_", " ").title(),
+                                      color=ALMA_TEXT_DARK), i, 0)
+            combo = QComboBox()
+            combo.addItem("Default (global publish target)", None)
+            combo.setEnabled(False)
+            self._kind_combos[kind] = combo
+            grid.addWidget(combo, i, 1)
+        grid.setColumnStretch(1, 1)
+        host = QWidget()
+        host.setStyleSheet("background:transparent;")
+        host.setLayout(grid)
+        v.addWidget(host)
+        self._targets_note = self._text(
+            "Default = the global publish target. Overrides apply to card "
+            "publishes and to Send-to-Guru-as-draft alike.",
+            color=ALMA_TEXT_LIGHT)
+        v.addWidget(self._targets_note)
+        self._load_target_collections()
+        return card
+
+    def _load_target_collections(self):
+        """Populate the kind combos from live Guru collections, off-thread.
+
+        Reuses the picker dialog's worker (same creds path, same lifetime
+        discipline: parented + referenced until the main-thread slot fires).
+        Not-connected → combos stay disabled and the note says why.
+        """
+        try:
+            from src.ui.dialogs.guru_collection_picker_dialog import (
+                GuruCollectionListWorker)
+        except Exception:  # noqa: BLE001
+            return
+        from src.data.guru_client import GuruClient
+        email, token = ("", "")
+        try:
+            email, token = GuruClient.load_credentials()
+        except Exception:  # noqa: BLE001
+            pass
+        if not (email and token):
+            self._targets_note.setText(
+                "Guru isn't connected — connect it in Providers to set "
+                "per-kind targets. Publishes use the global target meanwhile.")
+            return
+        worker = GuruCollectionListWorker("targets", parent=self)
+        self._targets_worker = worker
+        worker.finished.connect(self._on_target_collections)
+        worker.failed.connect(lambda _rid, _msg: None)
+        worker.start()
+
+    def _on_target_collections(self, _request_id, collections):
+        """Main-thread landing: fill the combos, select the persisted
+        overrides, and only THEN connect change handlers (page build and
+        programmatic selection must never write settings)."""
+        from src.data.settings_manager import get_section
+        try:
+            en = get_section("enablement", {}) or {}
+        except Exception:  # noqa: BLE001
+            en = {}
+        targets = ((en.get("guru") or {}).get("publish_targets") or {})
+        for kind, combo in self._kind_combos.items():
+            for c in collections or []:
+                if isinstance(c, dict) and c.get("id"):
+                    combo.addItem(str(c.get("name") or c["id"]), str(c["id"]))
+            stored = (targets.get(kind) or {}).get("collection_id")
+            if stored:
+                idx = combo.findData(stored)
+                if idx < 0:   # stored id no longer listed — keep it visible
+                    combo.addItem(f"{stored} (not found — kept)", stored)
+                    idx = combo.count() - 1
+                combo.setCurrentIndex(idx)
+            combo.setEnabled(True)
+            combo.currentIndexChanged.connect(
+                lambda _i, k=kind: self._save_kind_target(k))
+
+    def _save_kind_target(self, kind):
+        """Persist one kind's override (or remove it on Default)."""
+        from src.data.settings_manager import get_section, set_section
+        combo = self._kind_combos.get(kind)
+        if combo is None:
+            return
+        cid = combo.currentData()
+        try:
+            en = get_section("enablement", {}) or {}
+        except Exception:  # noqa: BLE001
+            en = {}
+        guru = dict(en.get("guru") or {})
+        targets = dict(guru.get("publish_targets") or {})
+        if cid:
+            targets[kind] = {"collection_id": str(cid)}
+        else:
+            targets.pop(kind, None)
+        guru["publish_targets"] = targets
+        en["guru"] = guru
+        set_section("enablement", en)
 
     @staticmethod
     def _clear_layout(layout):

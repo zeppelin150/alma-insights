@@ -158,3 +158,109 @@ def test_gemini_registry_asana_tools(empty_db):
         "indicator_field_name": "T", "indicator_value_gid": "V",
         "indicator_value_name": "Enablement"}, empty_db.conn))
     assert out["ok"] and out["source_id"] == "asana:P9"
+
+
+def test_list_tasks_detail_mode_includes_body_md(empty_db):
+    """WS-E1 (pilot feedback): detail mode surfaces the full task description
+    as markdown rendered from Asana html_notes, capped at 6000 chars."""
+    from src.data import asana_extras as X
+    from src.data import enablement_tasks as T
+    from src.data.chat_tools.enablement_tools import handle_list_tasks
+
+    conn = empty_db.conn
+    tid = T.create_task(conn, source="asana", kind="request",
+                        title="Task with body", source_ref="g-body")
+    T.update_task(conn, tid, remote_modified_at="2026-08-01T10:00:00.000Z")
+    X.upsert_extras(conn, tid, {
+        "gid": "g-body", "modified_at": "2026-08-01T10:00:00.000Z",
+        "html_notes": "<body><strong>Steps</strong>: update the "
+                      "<em>credentialing</em> card for BCBSMA.</body>",
+        "custom_fields": [],
+    })
+
+    out = handle_list_tasks(conn, {"task_id": tid}, {})
+    assert out["ok"] is True
+    body = out["task"]["body_md"]
+    assert "Steps" in body and "credentialing" in body and "BCBSMA" in body
+    assert len(body) <= 6000
+
+    # No html_notes -> no body_md key (never an empty-string field).
+    tid2 = T.create_task(conn, source="asana", kind="request",
+                         title="Bodyless", source_ref="g-nobody")
+    X.upsert_extras(conn, tid2, {"gid": "g-nobody",
+                                 "modified_at": "2026-08-01T10:00:00.000Z"})
+    out2 = handle_list_tasks(conn, {"task_id": tid2}, {})
+    assert out2["ok"] is True and "body_md" not in out2["task"]
+
+
+def _fake_asana_client(monkeypatch, task_payload):
+    from src.data import asana_client as ac
+
+    class FakeClient:
+        api_key = "pat-x"
+
+        def get_task(self, gid, *, opt_fields=""):
+            assert "html_notes" in opt_fields  # explicit projection is load-bearing
+            return dict(task_payload) if task_payload.get("gid") == gid else {}
+
+    monkeypatch.setattr(ac.AsanaClient, "from_store", staticmethod(FakeClient))
+    return FakeClient
+
+
+def test_get_asana_task_returns_body_and_fields(empty_db, monkeypatch):
+    """WS-E2 (owner-approved): ONE live task's detail includes body_md from
+    html_notes, custom fields, and parent; list reads stay stripped."""
+    _fake_asana_client(monkeypatch, {
+        "gid": "g77", "name": "Update BCBSMA card", "due_on": "2026-08-15",
+        "completed": False, "permalink_url": "https://app.asana.com/t/g77",
+        "assignee": {"name": "Sam"},
+        "html_notes": "<body><strong>Steps</strong>: refresh the "
+                      "<em>credentialing</em> card.</body>",
+        "notes": "Steps: refresh the credentialing card.",
+        "custom_fields": [
+            {"name": "Urgency", "display_value": "High"},
+            {"name": "Empty", "display_value": ""}],
+        "parent": {"gid": "g70", "name": "Q3 payer sweep"},
+    })
+    from src.data.chat_tools.enablement_tools import _get_asana_task_impl
+    out = _get_asana_task_impl(empty_db.conn, "g77")
+    assert out["ok"]
+    t = out["task"]
+    assert t["gid"] == "g77" and t["assignee_name"] == "Sam"
+    assert "credentialing" in t["body_md"] and len(t["body_md"]) <= 6000
+    assert t["custom_fields"] == [{"name": "Urgency", "value": "High"}]
+    assert t["parent"] == {"gid": "g70", "name": "Q3 payer sweep"}
+
+
+def test_get_asana_task_not_found_and_no_gid(empty_db, monkeypatch):
+    _fake_asana_client(monkeypatch, {"gid": "g1"})
+    from src.data.chat_tools.enablement_tools import _get_asana_task_impl
+    assert _get_asana_task_impl(empty_db.conn, "missing")["error"] == "task_not_found"
+    assert _get_asana_task_impl(empty_db.conn, "")["error"] == "task_gid_required"
+
+
+def test_get_asana_task_registered_on_both_lanes(empty_db):
+    from src.mcp.chat_mcp_server import TOOL_SCHEMAS
+    assert any(t["name"] == "get_asana_task" for t in TOOL_SCHEMAS)
+    names = {t["name"] for t in TOOL_DEFINITIONS}
+    assert "get_asana_task" in names
+    lt = next(t for t in TOOL_DEFINITIONS if t["name"] == "list_tasks")
+    assert "task_id" in lt["input_schema"]["properties"]  # E3 drift fix
+
+
+def test_list_asana_tasks_now_carries_gid(empty_db):
+    from src.data.chat_tools.enablement_tools import _filter_asana_task
+    row = _filter_asana_task({"gid": "g9", "name": "T", "notes": "SECRET",
+                              "custom_fields": [{"name": "x"}]})
+    assert row["gid"] == "g9"
+    assert "notes" not in row and "custom_fields" not in row  # still stripped
+
+
+def test_claude_lane_list_tasks_detail_mode_reachable(empty_db):
+    """E3: the claude-path wrapper must pass task_id through (it used to drop
+    it, making detail mode unreachable on that lane)."""
+    from src.data import enablement_tasks as T
+    tid = T.create_task(empty_db.conn, source="manual", kind="request",
+                        title="Detail me")
+    out = json.loads(execute_tool("list_tasks", {"task_id": tid}, empty_db))
+    assert out["ok"] is True and out["task"]["title"] == "Detail me"

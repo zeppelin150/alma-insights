@@ -241,6 +241,72 @@ class GuruClient:
             logger.info("Created Guru card '%s' in collection %s", title, collection_id)
         return data if isinstance(data, dict) else {}
 
+    # ── Drafts (WS-B — push a CCC draft into Guru's My Drafts) ──────
+    #
+    # POST/GET/PUT/DELETE /api/v1/drafts are REAL but ABSENT from Guru's
+    # official REST reference (proven via Guru's own @getguru/cli bundle).
+    # Callers must treat a 404/410 here as "the undocumented API changed"
+    # and degrade to a clear error pointing at the normal publish path —
+    # never a silent no-op. Contract pinned by tests/test_guru_drafts_local.py.
+
+    def create_draft(self, title: str, content: str,
+                     json_content: str | None = None) -> dict:
+        """Create a Guru DRAFT (lands in the creator's My Drafts).
+
+        **HUMAN-GATED ONLY** — a draft push is an off-box Guru write and is
+        gated identically to a publish (native confirm + sign-off claim).
+        The draft's target collection is set separately via
+        :meth:`set_draft_context` — cards canNOT be moved between
+        collections by API after publish, so the context call is the one
+        chance to aim it.
+        """
+        payload: dict = {"title": title, "content": content}
+        if json_content:
+            payload["jsonContent"] = json_content
+        data = self._request("POST", "/drafts", body=payload)
+        logger.info("Created Guru draft '%s'", title)
+        return data if isinstance(data, dict) else {}
+
+    def set_draft_context(self, draft_id: str, collection_id: str, *,
+                          folder_ids: list[str] | None = None,
+                          share_status: str = "TEAM") -> dict:
+        """Aim a draft at its publish target (collection / folders / share)
+        BEFORE the specialist publishes it natively in Guru.
+
+        **HUMAN-GATED ONLY** — part of the gated draft push.
+        """
+        payload: dict = {"collectionId": collection_id,
+                         "shareStatus": share_status}
+        folder_ids = [f for f in (folder_ids or []) if f]
+        if folder_ids:
+            payload["folderIds"] = folder_ids
+        data = self._request("POST", f"/drafts/{draft_id}/context", body=payload)
+        return data if isinstance(data, dict) else {}
+
+    def add_draft_collaborator(self, draft_id: str, email: str) -> dict:
+        """Invite a collaborator to a Guru draft (Guru rejects users without
+        collection-owner or an eligible custom role — surface that verbatim).
+
+        **HUMAN-GATED ONLY** — part of the gated draft push.
+        """
+        data = self._request("POST", f"/drafts/{draft_id}/collaborators",
+                             body={"email": email})
+        return data if isinstance(data, dict) else {}
+
+    def list_drafts(self) -> list[dict]:
+        """The caller's My Drafts (``GET /drafts``)."""
+        data = self._request("GET", "/drafts")
+        return data if isinstance(data, list) else []
+
+    def delete_draft(self, draft_id: str) -> dict:
+        """Discard a Guru draft (``DELETE /drafts/{id}``).
+
+        **HUMAN-GATED ONLY** — only ever a cleanup of a draft this app
+        created; published cards are never touched.
+        """
+        data = self._request("DELETE", f"/drafts/{draft_id}")
+        return data if isinstance(data, dict) else {}
+
     # ── Folder writes (M7 — Renn create/rename folders) ─────────
 
     def get_collection(self, collection_id: str) -> dict:

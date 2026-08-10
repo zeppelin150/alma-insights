@@ -884,6 +884,12 @@ class AgentChatController(QObject):
     # carries [SYSTEM] triggers and other-surface sends with no JS bubble.
     queued_dispatched = Signal(str)
 
+    # C1 (pilot feedback): "Edit in Workbench" on the review card. An
+    # AUTHORITY-FREE navigation relay — the UI layer connects this to a tab
+    # switch + set_active_draft. No state changes, no writes, so it is safe
+    # for the page-callable slot behind it.
+    edit_in_workbench_requested = Signal(int)
+
     def __init__(self, db=None, demo: bool = False, parent=None,
                  confirm_host=None):
         super().__init__(parent)
@@ -2228,6 +2234,168 @@ class AgentChatController(QObject):
             logger.warning("publish confirmation failed: %s", exc)
             return False, "confirm_failed"
         return (True, "confirmed") if accepted else (False, "declined_at_confirm")
+
+    def send_to_guru_draft(self, draft_id) -> dict:
+        """Send the reviewed draft to a GURU DRAFT (WS-B) — review in Guru,
+        publish in Guru.
+
+        Gated EXACTLY like ``approve_draft`` up to the terminal act: the
+        review binding is recomputed from the row and consumed on use, and
+        the native confirm shows the exact bytes + the draft-push target.
+        The differences are deliberate:
+
+        * the terminal act is ``store.push_draft_to_guru_draft`` — an off-box
+          write into My Drafts, not a card publish;
+        * NO sign-off is persisted. ``record_approval`` would leave a live
+          pre-authorization behind, and the M5 gate in
+          ``_push_guru_draft_impl`` could later release a model-initiated
+          card publish against it. The CCC row stays 'pending'; the
+          specialist publishes natively in Guru and closes out with
+          "Mark published in Guru" (a later CCC-side publish needs a fresh
+          sign-off — intended).
+        """
+        try:
+            did = int(draft_id)
+        except (TypeError, ValueError):
+            return self._refuse_approval(draft_id, "draft_id_required",
+                                         NO_REVIEW_REFUSAL)
+        conn = self._open_conn(readonly=False)
+        if conn is None:
+            return {"ok": False, "draft_id": did, "error": "no_db",
+                    "message": UNREADABLE_BODY_REFUSAL, "refused": True}
+        try:
+            from src.data import enablement_store as store
+
+            reviewed = self._draft_reviews.get(did)
+            if reviewed is None:
+                return self._refuse_approval(did, "not_reviewed",
+                                             NO_REVIEW_REFUSAL)
+            draft = store.get_draft(conn, did)
+            if draft is None:
+                self._draft_reviews.pop(did, None)
+                return self._refuse_approval(did, "draft_not_found",
+                                             MISSING_DRAFT_REFUSAL)
+            current = draft_fingerprint(draft)   # RECOMPUTED FROM THE ROW
+            if current is None:
+                self._draft_reviews.pop(did, None)
+                return self._refuse_approval(did, "publish_body_unavailable",
+                                             UNREADABLE_BODY_REFUSAL)
+            if current != reviewed:
+                self._draft_reviews.pop(did, None)
+                return self._refuse_approval(did, "draft_changed_after_review",
+                                             STALE_REVIEW_REFUSAL)
+
+            coll, folder = store.resolve_publish_target(draft)
+            target = {"collection_id": coll or "", "folder_id": folder or ""}
+            confirmed, why = self._confirm_guru_draft(draft, target)
+            if not confirmed:
+                self._draft_reviews.pop(did, None)   # a decision, not a retry
+                return self._refuse_approval(
+                    did, why,
+                    NO_CONFIRM_HOST_REFUSAL if why == "no_confirm_host"
+                    else DECLINED_REFUSAL)
+            self._draft_reviews.pop(did, None)       # one review, one act
+
+            client, gate = self._guru_client_for_draft_push()
+            if client is None:
+                return {"ok": False, "draft_id": did, "error": gate,
+                        "refused": True,
+                        "message": "Guru isn't connected (or demo mode is "
+                                   "on) — nothing was sent."}
+            try:
+                result = store.push_draft_to_guru_draft(conn, did, client)
+            except Exception as exc:  # noqa: BLE001 — a raise is a failed push
+                result = {"ok": False, "error": f"guru_draft_failed: {exc}"}
+            result = result if isinstance(result, dict) else {"ok": False}
+            if result.get("ok"):
+                msg = ("Sent to Guru as a draft — review and publish it in "
+                       "My Drafts, then use “Mark published in Guru”.")
+                if result.get("context_error"):
+                    msg += (" (Couldn't aim it at the publish collection — "
+                            "set the collection in Guru's editor before "
+                            "publishing.)")
+                return {"ok": True, "draft_id": did, "result": result,
+                        "guru_draft": True, "message": msg}
+            return {"ok": False, "draft_id": did, "result": result,
+                    "refused": True,
+                    "error": result.get("error") or "guru_draft_failed",
+                    "message": str(result.get("message")
+                                   or result.get("error")
+                                   or "the draft push did not complete")[:300]}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "draft_id": did, "error": str(exc)}
+        finally:
+            conn.close()
+
+    def _confirm_guru_draft(self, draft, target) -> tuple[bool, str]:
+        """Native confirm for the draft push — same fail-closed shape as
+        ``_confirm_publish`` (no host / host raising / Cancel all refuse),
+        with the target labeled as a Guru DRAFT so the operator knows no
+        card publishes from this click."""
+        host = self._confirm_host
+        if host is None or not hasattr(host, "confirm_publish"):
+            logger.warning("guru-draft push refused: no native confirmation host")
+            return False, "no_confirm_host"
+        try:
+            from src.data.enablement_store import publish_body
+            body = publish_body(draft)
+        except Exception as exc:  # noqa: BLE001 — no bytes to show → no push
+            logger.warning("guru-draft push refused: body unavailable: %s", exc)
+            return False, "confirm_failed"
+        get = draft.get if hasattr(draft, "get") else (lambda *_a: None)
+        coll = (target or {}).get("collection_id") or ""
+        payload = {
+            "draft_id": get("id"),
+            "title": get("title") or "",
+            "publish_body": body or "",
+            "card_id": "",
+            "collection_id": coll,
+            "folder_id": (target or {}).get("folder_id") or "",
+            "act": "guru_draft",
+            "target_label": ("GURU DRAFT (My Drafts) → "
+                             + (coll or "no collection set — aim it in Guru")
+                             + " — publishing happens in Guru, not here"),
+        }
+        try:
+            accepted = bool(host.confirm_publish(payload))
+        except Exception as exc:  # noqa: BLE001 — a raise is never consent
+            logger.warning("guru-draft confirmation failed: %s", exc)
+            return False, "confirm_failed"
+        return (True, "confirmed") if accepted else (False, "declined_at_confirm")
+
+    def _guru_client_for_draft_push(self):
+        """(client, gate_reason). Demo FAILS SAFE — an absent ``demo_mode``
+        key or unreadable settings means demo, mirroring
+        ``_push_guru_draft_impl``'s gate — and no creds means no client."""
+        try:
+            from src.data.settings_manager import get_section
+            en = get_section("enablement", {}) or {}
+        except Exception:  # noqa: BLE001
+            en = {}
+        if bool(en.get("demo_mode", True)):
+            return None, "demo_mode"
+        try:
+            from src.data.guru_client import GuruClient
+            email, token = GuruClient.load_credentials()
+            if email and token:
+                return GuruClient(email, token), ""
+        except Exception:  # noqa: BLE001
+            pass
+        return None, "guru_not_connected"
+
+    def edit_in_workbench(self, draft_id) -> dict:
+        """C1: authority-free navigation relay — open this draft in the
+        Workbench editor. No writes, no state changes; edits made there
+        auto-invalidate any pending sign-off via the fingerprint."""
+        try:
+            did = int(draft_id)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "draft_id_required"}
+        try:
+            self.edit_in_workbench_requested.emit(did)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, "draft_id": did}
 
     def reject_draft(self, draft_id) -> dict:
         """Decline a pending publish: drop the push request (the draft stays

@@ -1,6 +1,6 @@
 {
     "United Healthcare": ["united healthcare", "uhc", "unitedhealthcare", "optum", "united health"],
-    "Blue Cross Blue Shield": ["bcbs", "blue cross", "blue shield", "anthem", "carefirst", "premera", "highmark", "horizon bcbs"],
+    "Blue Cross Blue Shield": ["bcbs", "blue cross", "blue shield", "anthem", "carefirst", "premera", "highmark", "horizon bcbs", "bcbsma", "bcbs ma", "bcbs of massachusetts", "blue cross blue shield of massachusetts", "blue cross and blue shield of massachusetts", "bcbstx", "bcbsil", "bcbsnc", "bcbssc", "bcbsmi", "bcbsal", "bcbstn", "bcbsga", "bcbsfl", "bcbsaz", "bcbsks", "bcbsla", "bcbsmn", "bcbsms", "bcbsmt", "bcbsnd", "bcbsne", "bcbsnm", "bcbsok", "bcbsri", "bcbsvt", "bcbswy", "florida blue"],
     "Aetna": ["aetna", "cvs health", "aetna better health"],
     "Cigna": ["cigna", "evernorth", "cigna healthcare"],
     "Humana": ["humana", "humana military", "humana gold"],

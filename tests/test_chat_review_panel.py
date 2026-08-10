@@ -108,6 +108,21 @@ class SpyGuruClient:
                                    "title": title, "content": content})
         return {"id": "new-card-1"}
 
+    # WS-B drafts lane — recorded on the same class-level channel.
+    def create_draft(self, title, content, json_content=None):
+        SpyGuruClient.sent.append({"draft_title": title, "content": content})
+        return {"id": "guru-draft-1"}
+
+    def set_draft_context(self, draft_id, collection_id, *, folder_ids=None,
+                          share_status="TEAM"):
+        SpyGuruClient.sent.append({"context_for": draft_id,
+                                   "collection_id": collection_id})
+        return {}
+
+    def add_draft_collaborator(self, draft_id, email):
+        SpyGuruClient.sent.append({"collaborator": email})
+        return {}
+
 
 @pytest.fixture
 def spy_guru(monkeypatch):
@@ -1538,3 +1553,78 @@ def test_a_crafted_title_cannot_forge_the_destination_block(qapp):
     assert lines[2] == "card_id: card-LIVE-999"
     assert lines[0].startswith("Card title: Benign runbook ")
     assert "\n" not in lines[0]
+
+
+# ── WS-B: send_to_guru_draft runs the SAME gate as approve_draft ──────
+
+def _mint_binding(ctrl, conn, did):
+    """The operator opened the review panel — the one render that binds."""
+    drafts = ctrl.pending_drafts(bind=True)
+    assert any(d.get("draft_id") == did for d in drafts), drafts
+
+
+def _make_pending(conn):
+    from src.data import enablement_store as store
+    did = store.save_card_draft(conn, title="Draft to Guru",
+                                content="## Head\n\nbody")
+    store.mark_push_requested(conn, did, "col-1", None)
+    return did
+
+
+def test_guru_draft_refuses_without_review(controller, empty_db, spy_guru):
+    did = _make_pending(empty_db.conn)
+    out = controller.send_to_guru_draft(did)
+    assert out["ok"] is False and out["error"] == "not_reviewed"
+    assert not any("draft_title" in s for s in SpyGuruClient.sent)
+
+
+def test_guru_draft_happy_path_persists_no_sign_off(
+        controller, empty_db, spy_guru, confirm_host):
+    from src.data import enablement_store as store
+    conn = empty_db.conn
+    did = _make_pending(conn)
+    _mint_binding(controller, conn, did)
+    out = controller.send_to_guru_draft(did)
+    assert out["ok"] is True and out["guru_draft"] is True, out
+    sent = SpyGuruClient.sent
+    assert any(s.get("draft_title") == "Draft to Guru" for s in sent)
+    assert any(s.get("context_for") == "guru-draft-1" for s in sent)
+    row = store.get_draft(conn, did)
+    assert row["guru_draft_id"] == "guru-draft-1"
+    assert row["status"] == "pending"          # NOT pushed
+    assert row["approved_at"] is None          # NO persisted sign-off left
+    # the confirm labeled the act as a DRAFT push, with the exact bytes
+    payload = confirm_host.seen[-1]
+    assert payload["act"] == "guru_draft"
+    assert "GURU DRAFT" in payload["target_label"]
+    assert payload["publish_body"] == store.publish_body(row)
+    # the binding was consumed: one review, one act
+    again = controller.send_to_guru_draft(did)
+    assert again["ok"] is False and again["error"] == "not_reviewed"
+
+
+def test_guru_draft_declined_confirm_sends_nothing(
+        qapp, empty_db, spy_guru):
+    ctrl = AgentChatController(db=empty_db, demo=False,
+                               confirm_host=SpyConfirmHost(accept=False))
+    try:
+        conn = empty_db.conn
+        did = _make_pending(conn)
+        _mint_binding(ctrl, conn, did)
+        out = ctrl.send_to_guru_draft(did)
+        assert out["ok"] is False and out["error"] == "declined_at_confirm"
+        assert not any("draft_title" in s for s in SpyGuruClient.sent)
+    finally:
+        try:
+            ctrl.shutdown()
+        except Exception:
+            pass
+
+
+def test_edit_in_workbench_is_navigation_only(controller, empty_db):
+    """C1: the relay emits the draft id and touches nothing else."""
+    seen = []
+    controller.edit_in_workbench_requested.connect(seen.append)
+    out = controller.edit_in_workbench("41")
+    assert out["ok"] is True and seen == [41]
+    assert controller.edit_in_workbench("nope")["error"] == "draft_id_required"

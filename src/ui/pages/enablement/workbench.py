@@ -597,6 +597,11 @@ class WorkbenchPage(QWidget):
         self._existing_menu = guru.addMenu("Existing Guru card")
         self._existing_menu.aboutToShow.connect(self.existing_cards_requested.emit)
         self._render_existing_cards([{"id": None, "title": c} for c in self._DEMO_CARDS])
+        guru.addSeparator()
+        guru.addAction("Send to Guru as draft…",
+                       lambda: self.publish_requested.emit("guru_draft"))
+        guru.addAction("Mark published in Guru",
+                       lambda: self.publish_requested.emit("guru_mark_published"))
 
         drive = menu.addMenu("Save to Drive")
         drive.addAction("New Google Doc", lambda: self.publish_requested.emit("drive_new"))

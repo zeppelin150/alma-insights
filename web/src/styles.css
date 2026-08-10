@@ -180,6 +180,8 @@ body {
 .dactions button:disabled { opacity: 0.5; cursor: default; }
 .dreject { background: var(--line); color: var(--ink); }
 .dapprove { background: var(--accent); color: #fff; }
+.dedit { background: transparent; color: var(--mid); border: 1px solid var(--line) !important; margin-right: auto; }
+.dguru-draft { background: transparent; color: var(--accent); border: 1px solid var(--accent) !important; }
 
 .messages { flex: 1; overflow-y: auto; padding: 18px 16px; }
 .msg {

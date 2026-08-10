@@ -691,6 +691,24 @@ TOOL_DEFINITIONS = [
         },
     },
     {
+        "name": "get_asana_task",
+        "description": (
+            "Fetch ONE live Asana task in FULL detail — its description (body_md, "
+            "markdown, capped 6000 chars), custom fields, assignee, due date, parent "
+            "task, and permalink. Pass the task's gid from a list_asana_tasks / "
+            "search_asana_tasks result. The ONLY live read that returns a task's "
+            "body; list reads stay minimal."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task_gid": {"type": "string",
+                             "description": "The Asana task gid (from a list/search result)."},
+            },
+            "required": ["task_gid"],
+        },
+    },
+    {
         "name": "search_content",
         "description": (
             "UNIFIED cross-source SEARCH. Fan out ONE query to LIVE Guru cards + Zendesk "
@@ -1114,7 +1132,10 @@ TOOL_DEFINITIONS = [
         "description": (
             "List enablement tasks, optionally filtered by status/source/kind/due "
             "date. Assigned Asana subtasks are included as first-class rows, "
-            "flagged is_subtask with parent_task_ref/parent_title."
+            "flagged is_subtask with parent_task_ref/parent_title. Pass task_id "
+            "to get ONE task in detail — including its full description "
+            "(body_md, markdown), Asana custom fields, attachment names, and "
+            "latest comments."
         ),
         "input_schema": {
             "type": "object",
@@ -1124,6 +1145,8 @@ TOOL_DEFINITIONS = [
                 "kind": {"type": "string"},
                 "due_before": {"type": "string", "description": "ISO date."},
                 "limit": {"type": "integer"},
+                "task_id": {"type": "string",
+                            "description": "Detail mode: return just this task, enriched."},
             },
         },
     },
@@ -1826,7 +1849,12 @@ def _list_enablement_tasks(args: dict, db) -> dict:
     from src.data.chat_tools.enablement_tools import _list_tasks_impl
     return _list_tasks_impl(_ent_conn(db), status=args.get("status"), source=args.get("source"),
                             kind=args.get("kind"), due_before=args.get("due_before"),
-                            limit=args.get("limit", 50))
+                            limit=args.get("limit", 50), task_id=args.get("task_id"))
+
+
+def _get_asana_task(args: dict, db) -> dict:
+    from src.data.chat_tools.enablement_tools import _get_asana_task_impl
+    return _get_asana_task_impl(_ent_conn(db), args.get("task_gid") or args.get("gid"))
 
 
 def _search_drive_docs(args: dict, db) -> dict:
@@ -1877,6 +1905,7 @@ _DISPATCH = {
     "list_asana_projects": _list_asana_projects,
     "list_asana_tasks": _list_asana_tasks,
     "search_asana_tasks": _search_asana_tasks,
+    "get_asana_task": _get_asana_task,
     "set_asana_board": _set_asana_board,
     "list_guru_cards": _list_guru_cards,
     "list_guru_folder_items": _list_guru_folder_items,

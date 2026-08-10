@@ -1475,11 +1475,16 @@ class TestGuruPublishBehaviour:
 
     def test_renn_push_path_does_read_the_publish_folder(self):
         """publish-guru.md contrast: the chat push path is the one that reads
-        publish_folder_id."""
+        publish_folder_id — since WS-B/G3 it does so through
+        resolve_publish_target (explicit arg > per-kind map > the configured
+        global default), so the lock follows the read."""
         import inspect
+        from src.data import enablement_store
         from src.data.chat_tools import enablement_tools
         src = inspect.getsource(enablement_tools._push_guru_draft_impl)
-        assert "publish_folder_id" in src
+        assert "resolve_publish_target" in src
+        resolver = inspect.getsource(enablement_store.resolve_publish_target)
+        assert "publish_folder_id" in resolver
 
     def test_uploaded_draft_has_no_card_link_until_publish(self, empty_db):
         """publish-guru.md: 'A draft built from an uploaded file has no card
@@ -1848,3 +1853,44 @@ class TestGuideSearch:
         assert len(store.search_documents(conn, "plain language")) == 1
         assert [d["doc_id"] for d in
                 store.search_documents(conn, "confident providers")] == ["d1"]
+
+
+# ══════════════════════════════════════════════════════════════════════
+# editing-by-hand.md — "Editing a draft by hand"
+# ══════════════════════════════════════════════════════════════════════
+
+class TestEditingByHand:
+    """The auto-commit and frozen-when-pushed claims are settled above
+    (TestOverviewWorkspaces / the overview.md tests). These settle the two
+    claims unique to this article."""
+
+    def test_chat_drafts_and_workbench_drafts_are_the_same_records(self, empty_db):
+        """editing-by-hand.md: 'chat drafts and Workbench drafts are the same
+        records in the same store' — a draft Renn creates via the chat tool is
+        the row the Workbench's edit path writes back to."""
+        from src.data.chat_tools.registry import dispatch_tool
+        import json as _json
+        conn = empty_db.conn
+        out = _json.loads(dispatch_tool(
+            "create_card_draft",
+            {"title": "Chat-born card", "content": "renn wrote this"}, conn))
+        assert out["ok"]
+        did = out["draft_id"]
+        store.update_draft_content(conn, did, content="operator hand edit")
+        assert store.get_draft(conn, did)["content"] == "operator hand edit"
+
+    def test_hand_edit_drops_a_pending_scoped_sign_off(self, empty_db):
+        """editing-by-hand.md: 'Editing an approved draft drops the approval
+        ... the publish refuses because its scope changed.'"""
+        conn = empty_db.conn
+        did = _new_draft(conn, title="Approved then edited", content="reviewed bytes")
+        fp = store.draft_fingerprint(store.get_draft(conn, did))
+        claim = store.record_approval(conn, did, fingerprint=fp)
+
+        released, why = store.approval_open(store.get_draft(conn, did), claim=claim)
+        assert released and why == "claimed"
+
+        store.update_draft_content(conn, did, content="edited after approval")
+        released, why = store.approval_open(store.get_draft(conn, did), claim=claim)
+        assert not released
+        assert why == "sign_off_scope_changed"

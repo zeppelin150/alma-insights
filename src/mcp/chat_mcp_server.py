@@ -709,21 +709,27 @@ TOOL_SCHEMAS = [
     {
         "name": "search_guru_cards",
         "description": (
-            "SEARCH LIVE Guru for cards by topic or title. This is a QUERY/SEMANTIC "
-            "search — it is query-ranked and MAY MISS cards that don't match the "
-            "query. To ENUMERATE every card in a collection completely, use "
-            "list_guru_cards; to enumerate a folder's contents (cards + sub-folders) "
-            "use list_guru_folder_items. Returns each card's id, title, collection, "
-            "and a text snippet. Optionally scope to specific collections; use offset "
-            "to page through a large result set."
+            "SEARCH LIVE Guru for cards. Use SHORT KEYWORD queries (entity + topic: "
+            "'credentialing BCBSMA'), not full sentences, and never phrase negations "
+            "— cards state facts. The tool runs your literal query first, then a "
+            "bounded set of reorientations (abbreviation<->long form, topic-only) "
+            "and, for scoped searches with weak results, a content scan of the "
+            "collection's card bodies; variants_run reports what actually ran. READ "
+            "THE SCOPE FIELDS: scope = which collections were searched (a configured "
+            "default scope may apply — scope.source says so; override with "
+            "collections=[...]); why_zero = no_match | filtered_by_collection | "
+            "collection_not_found (with a closest-name suggestion) | not_connected. "
+            "Collection names resolve case-insensitively with substring matching. "
+            "Still query-ranked and MAY MISS cards — to ENUMERATE a collection "
+            "completely use list_guru_cards; for a folder use list_guru_folder_items."
         ),
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
             "properties": {
-                "query": {"type": "string", "description": "Topic or title to search for."},
+                "query": {"type": "string", "description": "Short keyword query (entity + topic), stays literal."},
                 "collections": {"type": "array", "items": {"type": "string"},
-                                "description": "Optional: limit to these collection names/ids."},
+                                "description": "Optional: limit to these collection names/ids (substring-resolved); overrides the configured default scope."},
                 "limit": {"type": "integer", "description": "Max cards to return (default 25)."},
                 "offset": {"type": "integer", "description": "Skip this many ranked results (paging; default 0)."},
             },
@@ -986,6 +992,26 @@ TOOL_SCHEMAS = [
                 "project_gid": {"type": "string", "description": "Optional — the Asana board gid (defaults to the active board)."},
             },
             "required": ["text"],
+        },
+    },
+    {
+        "name": "get_asana_task",
+        "description": (
+            "Fetch ONE live Asana task in FULL detail — its description (body_md, "
+            "markdown, capped 6000 chars), custom fields, assignee, due date, "
+            "parent task, and permalink. Pass the task's gid from a "
+            "list_asana_tasks / search_asana_tasks result. This is the ONLY live "
+            "read that returns a task's body; list reads stay minimal. Use it "
+            "whenever the operator asks what an Asana task says or is about."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "task_gid": {"type": "string",
+                             "description": "The Asana task gid (from a list/search result)."},
+            },
+            "required": ["task_gid"],
         },
     },
     {
@@ -1395,8 +1421,10 @@ TOOL_SCHEMAS = [
             "List enablement tasks, optionally filtered by status/source/kind/due "
             "date. Assigned Asana subtasks are included as first-class rows, "
             "flagged is_subtask with parent_task_ref/parent_title. Pass task_id "
-            "to get ONE task in detail — including its Asana custom fields, "
-            "attachment names, and latest comments."
+            "to get ONE task in detail — including its full description "
+            "(body_md, markdown), Asana custom fields, attachment names, and "
+            "latest comments. Use detail mode whenever the operator asks what "
+            "a task says or is about."
         ),
         "inputSchema": {
             "type": "object",

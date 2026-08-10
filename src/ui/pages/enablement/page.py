@@ -90,6 +90,31 @@ RENN_SYSTEM_PROMPT = (
     "run the pull or import a Help Center export in the Zendesk tab (only the pull "
     "needs Zendesk credentials). Use search_catalog only for the local pre-indexed "
     "summary catalog.\n"
+    "\nSEARCH STRATEGY — plan the search, don't just forward the sentence:\n"
+    "- Before searching, identify the ask's ENTITIES (payers, products — including "
+    "abbreviations: BCBSMA is Blue Cross Blue Shield of Massachusetts), and its TOPIC "
+    "terms (credentialing, claims, billing). Search with short keyword queries built "
+    "from those, not the operator's full sentence.\n"
+    "- Cards STATE facts, they don't phrase negations — search 'credentialing BCBSMA', "
+    "never 'not credentialing with BCBSMA'.\n"
+    "- Run the most specific query first. On zero/weak results, RE-SEARCH with "
+    "different orientations: swap abbreviation and long form, drop the entity "
+    "(topic-only), drop the topic (entity-only). search_guru_cards already runs a "
+    "bounded set of reorientations for you and reports them in variants_run — read it "
+    "before assuming you must retry manually.\n"
+    "- READ THE SCOPE FIELDS in every search result: scope says which collections were "
+    "actually searched (a configured default scope may apply — scope.source says so; "
+    "override it by passing collections=[...]); why_zero distinguishes 'no card "
+    "exists' (no_match) from 'the collection filter dropped everything' "
+    "(filtered_by_collection) from 'that collection name matched nothing' "
+    "(collection_not_found — use the suggested closest name). Never report 'nothing "
+    "exists' when why_zero says the scope was the problem.\n"
+    "- If ranked search still looks incomplete and the ask targets a specific "
+    "collection, ENUMERATE it (list_guru_cards) and read titles — a fact can live in "
+    "a card body under a generic title; the search tool's own content-scan fallback "
+    "covers scoped searches automatically (scope.content_scan says whether it ran).\n"
+    "- When you answer, SAY what you searched and how: the scope, the query "
+    "orientations tried, and whether the result is complete or partial.\n"
     "- ZENDESK (LOCAL MIRROR — you never touch live Zendesk): the app keeps a local "
     "mirror of the Help Center + macros (populated by the GET-only pull or a manual "
     "import). search_zendesk_mirror SEARCHES the mirror (articles + macros at once, "
@@ -968,7 +993,11 @@ class EnablementPage(QWidget):
             "drive_update": "update the selected Google Doc from this draft",
         }.get(dest_key)
         if what is None and dest_key.startswith("guru_existing:"):
-            what = f"update Guru card “{dest_key.split(':', 1)[1]}” from this draft"
+            # WS-B ride-along: Guru's PUT lane has a latent lost-write hazard
+            # against its multiplayer editor — warn on every update-path confirm.
+            what = (f"update Guru card “{dest_key.split(':', 1)[1]}” from this "
+                    f"draft?\n\nIf someone has that card open in Guru's editor, "
+                    f"publishing may overwrite their unsaved edits")
         if len(title) > 60:
             title = title[:59] + "…"
         box = QMessageBox(self)
@@ -2116,9 +2145,87 @@ class EnablementPage(QWidget):
         else:
             self._chat_say("a", f"Publish failed: {res.get('error')}")
 
+    def _confirm_guru_draft_push(self, title: str) -> bool:
+        """Native confirm for the WS-B draft push — an off-box Guru write,
+        gated like a publish (QMessageBox, unreachable from any page script)."""
+        from PySide6.QtWidgets import QMessageBox
+        from src.ui.pages.enablement._common import style_native_dialog
+        if len(title) > 60:
+            title = title[:59] + "…"
+        box = QMessageBox(self)
+        box.setWindowTitle("Send to Guru as draft")
+        box.setText(f"“{title}” — send to Guru as a DRAFT?\n\n"
+                    "It lands in My Drafts in Guru, already aimed at your "
+                    "publish collection; you review and publish it in Guru "
+                    "itself, then use “Mark published in Guru” here.")
+        box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        box.setDefaultButton(QMessageBox.No)
+        style_native_dialog(box)
+        return box.exec() == QMessageBox.Yes
+
+    def _on_push_to_guru_draft(self, draft_id):
+        try:
+            did = int(draft_id)
+        except (TypeError, ValueError):
+            self._chat_say("a", "No draft selected to send to Guru.")
+            return
+        from src.data import enablement_store as store
+        draft = store.get_draft(self._conn(), did)
+        if not draft:
+            self._chat_say("a", f"No draft {did} to send.")
+            return
+        if self.demo:
+            self._set_status("Demo mode — nothing is sent to Guru.")
+            return
+        if not self._confirm_guru_draft_push(draft.get("title") or ""):
+            return
+        try:
+            res = store.push_draft_to_guru_draft(
+                self._conn(), did, self._guru_for_push())
+        except Exception as exc:  # noqa: BLE001 — surface in chat
+            self._chat_say("a", f"Draft push failed: {exc}")
+            return
+        if res.get("ok"):
+            note = (f"Sent draft {did} to Guru as a draft — open My Drafts in "
+                    f"Guru to review and publish it, then use “Mark published "
+                    f"in Guru”.")
+            if res.get("context_error"):
+                note += (" (Couldn't aim it at the publish collection: "
+                         f"{res['context_error']} — set the collection in "
+                         "Guru's editor before publishing.)")
+            if res.get("collaborator_errors"):
+                note += " Collaborator invites failed: " + "; ".join(
+                    res["collaborator_errors"])
+            self._chat_say("a", note)
+            self._set_status(f"Draft {did} sent to Guru drafts.")
+        else:
+            self._chat_say("a", f"Draft push failed: "
+                                f"{res.get('message') or res.get('error')}")
+
+    def _on_mark_published_in_guru(self, draft_id):
+        try:
+            did = int(draft_id)
+        except (TypeError, ValueError):
+            self._chat_say("a", "No draft selected.")
+            return
+        from src.data import enablement_store as store
+        res = store.mark_published_in_guru(self._conn(), did)
+        if res.get("ok"):
+            self._set_status(f"Draft {did} marked published in Guru.")
+            self._chat_say("a", f"Marked draft {did} as published in Guru.")
+        else:
+            self._chat_say("a", f"Couldn't mark it: "
+                                f"{res.get('message') or res.get('error')}")
+
     def _on_publish(self, dest: str):
         if dest == "guru_new":
             self._on_push(self.workbench.active_draft_id)
+            return
+        if dest == "guru_draft":
+            self._on_push_to_guru_draft(self.workbench.active_draft_id)
+            return
+        if dest == "guru_mark_published":
+            self._on_mark_published_in_guru(self.workbench.active_draft_id)
             return
         if dest.startswith("guru_existing:"):
             key = dest.split(":", 1)[1]
@@ -3383,11 +3490,22 @@ class EnablementPage(QWidget):
                 try:
                     extras = asana_extras.get_extras(conn, tid_for_extras)
                     fresh = enablement_tasks.get_task(conn, tid_for_extras) or {}
+                    # WS-D2: board names for the panel's meta line + checklist
+                    # entries upgraded with assignee/due meta where a promoted
+                    # subtask row (mig 056) carries them.
+                    board_names = self._board_display_names(
+                        conn, task.get("board_source_ids") or [])
+                    rich_subs = self._rich_subtasks(
+                        conn, tid_for_extras, task.get("source_ref") or "")
                 finally:
                     conn.close()
                 task = dict(task)
                 if extras:
                     task["extras"] = extras
+                if board_names:
+                    task["board_names"] = board_names
+                if rich_subs is not None:
+                    task["subtasks"] = rich_subs
                 if fresh.get("brief_status") == "ok" and fresh.get("brief_json"):
                     try:
                         task["brief"] = _json.loads(fresh["brief_json"])
@@ -3408,12 +3526,93 @@ class EnablementPage(QWidget):
                 lambda due, tid=tid: self._run_task_writeback("update_due_in_asana", tid, due or None))
             panel.completed_changed.connect(
                 lambda done, tid=tid: self._run_task_writeback("set_completed_in_asana", tid, done))
+        # WS-D4: the panel's Refresh row asks for one on-demand extras fetch.
+        gid = (task.get("source_ref") or "").strip()
+        if tid and gid and task.get("source") == "asana":
+            panel.refresh_requested.connect(
+                lambda tid=tid, gid=gid: self._run_task_refresh(tid, gid))
         self._open_task_title = task.get("title")
         # WS1-M5 fix: reopen-by-id — the title-substring _find_task match is
         # ambiguous once writes flow both ways.
         self._open_task_id = task.get("task_id")
         self._drilldown.show_widget("Task", task.get("source", "").capitalize(), panel)
         self._set_status(f"Opened “{task.get('title', 'task')}”.")
+
+    def _board_display_names(self, conn, source_ids) -> list[str]:
+        """Board display names for the panel's meta line (WS-D2), resolved
+        from the task's task_board_links source ids. Read straight from the
+        board configs — no per-board task counting."""
+        if not source_ids:
+            return []
+        from src.data import asana_setup
+        names = {}
+        for b in asana_setup.get_asana_config(conn, include_disabled=True):
+            cfg = b.get("config") or {}
+            names[b["source_id"]] = str(
+                cfg.get("project_name") or b.get("display_name") or "").strip()
+        return [names[s] for s in source_ids if names.get(s)]
+
+    def _rich_subtasks(self, conn, task_id: str, parent_gid: str):
+        """Checklist entries upgraded with assignee/due meta (WS-D2).
+
+        The checklist mirror itself stores only text+done; assignee/due exist
+        on the PROMOTED subtask rows (mig 056 — enablement_tasks rows whose
+        parent_task_ref is this task's gid), matched by asana_subtask_gid.
+        Returns None when the task has no checklist, so the caller keeps the
+        row's original (possibly empty) subtasks value."""
+        from src.data import enablement_tasks
+        subs = enablement_tasks.list_subtasks(conn, task_id)
+        if not subs:
+            return None
+        promoted = {}
+        if parent_gid:
+            rows = conn.execute(
+                "SELECT source_ref, assignee, due_date FROM enablement_tasks "
+                "WHERE parent_task_ref = ?", (parent_gid,)).fetchall()
+            promoted = {r["source_ref"]: r for r in rows}
+        out = []
+        for s in subs:
+            p = promoted.get(s.get("asana_subtask_gid") or "")
+            out.append({
+                "text": s.get("text", ""),
+                "done": bool(s.get("done")),
+                "assignee": ((p["assignee"] if p is not None else "") or "").strip(),
+                "due": (((p["due_date"] if p is not None else "") or "")[:10]),
+            })
+        return out
+
+    def _run_task_refresh(self, task_id: str, gid: str):
+        """WS-D4: one on-demand extras fetch for a single task, off-thread —
+        get_task with the poll's field set, then upsert_extras (which also
+        re-pulls attachments/stories). Lands on task_action_done so the
+        existing handler re-opens the panel with the fresh data."""
+        import threading
+        self._set_status("Refreshing from Asana…")
+        db_path = self._engine_db_path()
+
+        def worker():
+            res = {"ok": False, "error": "unknown", "refreshed": True}
+            conn = None
+            try:
+                from src.data.connection_factory import get_connection
+                from src.data import asana_extras
+                from src.data.asana_client import AsanaClient, _TASK_FIELDS
+                conn = get_connection(db_path)
+                client = AsanaClient.from_store()
+                payload = client.get_task(gid, opt_fields=_TASK_FIELDS)
+                asana_extras.upsert_extras(conn, task_id, payload, client=client)
+                res = {"ok": True, "refreshed": True}
+            except Exception as exc:  # noqa: BLE001
+                res = {"ok": False, "error": str(exc), "refreshed": True}
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+            self.task_action_done.emit(res or {})
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _run_task_writeback(self, fn_name: str, task_id: str, *args):
         """Run an Asana write-back off-thread (the API call can block), then refresh."""
@@ -3443,7 +3642,9 @@ class EnablementPage(QWidget):
 
     def _on_task_action_done(self, res: dict):
         if res.get("ok"):
-            if res.get("synced") is True:
+            if res.get("refreshed"):
+                self._set_status("Refreshed from Asana.")
+            elif res.get("synced") is True:
                 self._set_status("Done — synced to Asana.")
             elif res.get("synced") is False:
                 note = res.get("note")

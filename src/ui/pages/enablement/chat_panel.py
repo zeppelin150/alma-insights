@@ -124,13 +124,35 @@ class ChatPanel(QWidget):
         self._prov.setText(text or "")
 
     def _append(self, who: str, text: str):
-        bubble = QLabel(text)
-        bubble.setWordWrap(True)
-        bubble.setMaximumWidth(330)
+        # E5 (pilot feedback): assistant turns carry markdown (task bodies,
+        # search results with links) — render them, instead of showing raw
+        # asterisks in a QLabel. Operator bubbles stay plain text. Any
+        # viewer failure falls back to the plain label — never a lost turn.
+        bubble = None
         if who == "a":
-            bubble.setStyleSheet(f"background:#EFF3F0; color:{ALMA_TEXT_DARK}; border-radius:10px; padding:9px 12px; font-size:12.5px;")
-        else:
-            bubble.setStyleSheet(f"background:{ALMA_GREEN_LIGHT}; color:{ALMA_TEXT_ON_DARK}; border-radius:10px; padding:9px 12px; font-size:12.5px;")
+            try:
+                from src.ui.widgets.markdown_viewer import MarkdownViewer
+                bubble = MarkdownViewer()
+                bubble.set_markdown(text)
+                bubble.setStyleSheet(
+                    f"QTextBrowser{{background:#EFF3F0; color:{ALMA_TEXT_DARK}; "
+                    f"border:none; border-radius:10px; padding:6px 9px; "
+                    f"font-size:12.5px;}}")
+                bubble.setMaximumWidth(330)
+                bubble.setOpenExternalLinks(True)
+                bubble.document().setTextWidth(310)
+                h = int(bubble.document().size().height()) + 14
+                bubble.setFixedHeight(max(34, min(h, 600)))
+            except Exception:  # noqa: BLE001
+                bubble = None
+        if bubble is None:
+            bubble = QLabel(text)
+            bubble.setWordWrap(True)
+            bubble.setMaximumWidth(330)
+            if who == "a":
+                bubble.setStyleSheet(f"background:#EFF3F0; color:{ALMA_TEXT_DARK}; border-radius:10px; padding:9px 12px; font-size:12.5px;")
+            else:
+                bubble.setStyleSheet(f"background:{ALMA_GREEN_LIGHT}; color:{ALMA_TEXT_ON_DARK}; border-radius:10px; padding:9px 12px; font-size:12.5px;")
         wrap = QHBoxLayout()
         wrap.setContentsMargins(0, 0, 0, 0)
         if who != "a":

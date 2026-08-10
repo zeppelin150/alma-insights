@@ -18,73 +18,19 @@ must never reach MATCH syntax.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
-from pathlib import Path
 
 from src.data.kb import store
+# Shared with the Guru card search lane (WS-F2) — one alias/token machinery
+# for every enablement search surface. Names re-exported for existing callers.
+from src.data.query_expand import (  # noqa: F401
+    _aliases, _singular, _tokens, expand_query,
+)
 
 logger = logging.getLogger("alma.kb.search")
 
-_ENTITIES_DIR = Path(__file__).resolve().parent.parent.parent.parent / "config" / "entities"
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
-_alias_map: dict | None = None
-
-
-def _aliases() -> dict:
-    """alias-token → canonical-name tokens, built once from the entity dicts."""
-    global _alias_map
-    if _alias_map is not None:
-        return _alias_map
-    _alias_map = {}
-    for fname in ("payers.json", "product_areas.json"):
-        try:
-            data = json.loads((_ENTITIES_DIR / fname).read_text("utf-8"))
-        except Exception:  # noqa: BLE001
-            continue
-        if isinstance(data, dict):
-            for canonical, aliases in data.items():
-                names = [canonical] + (aliases if isinstance(aliases, list) else [])
-                group = {n.lower() for n in names if isinstance(n, str)}
-                for name in group:
-                    _alias_map.setdefault(name, set()).update(group)
-    return _alias_map
-
-
-def _tokens(text: str) -> list[str]:
-    return _TOKEN_RE.findall((text or "").lower())
-
-
-def _singular(tok: str) -> str:
-    if len(tok) > 3 and tok.endswith("ies"):
-        return tok[:-3] + "y"
-    if len(tok) > 3 and tok.endswith("s") and not tok.endswith("ss"):
-        return tok[:-1]
-    return tok
-
-
-def expand_query(query: str) -> list[str]:
-    """Query → deduped term list (tokens + singulars + entity aliases)."""
-    terms: list[str] = []
-    seen: set = set()
-
-    def _add(t: str):
-        t = t.strip().lower()
-        if t and t not in seen:
-            seen.add(t)
-            terms.append(t)
-
-    lowered = (query or "").lower()
-    for tok in _tokens(query):
-        _add(tok)
-        _add(_singular(tok))
-    for alias, group in _aliases().items():
-        if alias in lowered:
-            for name in group:
-                for tok in _tokens(name):
-                    _add(tok)
-    return terms
 
 
 def _match_expr(terms: list[str]) -> str:

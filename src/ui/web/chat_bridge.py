@@ -704,6 +704,33 @@ class ChatBridge(QObject):
                         {"draft_id": draft_id, "ok": bool(result.get("ok")), "rejected": True})
         self.refreshDrafts()
 
+    @Slot(str)
+    def sendToGuruDraft(self, draft_id):
+        """WS-B: send the reviewed draft to a GURU DRAFT → ``draftResolved``.
+
+        Pure relay — the controller runs the same binding + native-confirm
+        machinery as ``approve_draft`` (this slot is page-callable, so it must
+        carry no authority of its own); its refusal ``message`` is relayed
+        verbatim for the same honesty reasons as ``approveDraft``."""
+        result = self._draft_call("send_to_guru_draft", draft_id) or {}
+        payload = {"draft_id": draft_id, "ok": bool(result.get("ok")),
+                   "guru_draft": True}
+        if result.get("error"):
+            payload["error"] = result["error"]
+        if result.get("message"):
+            payload["message"] = result["message"]
+        if result.get("refused"):
+            payload["refused"] = True
+        self._safe_emit(self.draftResolved, payload)
+        self.refreshDrafts()
+
+    @Slot(str)
+    def editInWorkbench(self, draft_id):
+        """C1: open this draft in the Workbench editor. Authority-free
+        navigation — the controller only emits a Qt signal the page connects
+        to a tab switch; nothing is written and nothing publishes."""
+        self._draft_call("edit_in_workbench", draft_id)
+
     def _draft_call(self, method, *args):
         api = self._draft_api
         if api is None or not hasattr(api, method):

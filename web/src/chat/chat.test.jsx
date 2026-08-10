@@ -237,3 +237,26 @@ describe("ReviewPanel — a refused approval is visible", () => {
     expect(out).not.toContain("<img src=x");
   });
 });
+
+describe("DraftCard — Edit in Workbench + Send to Guru as draft (WS-B/C1)", () => {
+  it("renders both buttons only when handlers are wired", () => {
+    const bare = render({});
+    expect(bare).not.toContain("Edit in Workbench");
+    expect(bare).not.toContain("Send to Guru as draft");
+    const wired = renderToStaticMarkup(
+      <DraftCard d={card({})} onApprove={noop} onReject={noop} busy={false}
+                 onSendToGuruDraft={noop} onEditInWorkbench={noop} />);
+    expect(wired).toContain("Edit in Workbench");
+    expect(wired).toContain("Send to Guru as draft");
+  });
+
+  it("gates the draft push like Approve, but never the edit button", () => {
+    const moved = renderToStaticMarkup(
+      <DraftCard d={card({ review_state: "changed" })} onApprove={noop}
+                 onReject={noop} busy={false}
+                 onSendToGuruDraft={noop} onEditInWorkbench={noop} />);
+    // stale review: draft push disabled, edit (navigation-only) still live
+    expect(moved).toMatch(/dguru-draft[^>]*disabled/);
+    expect(moved).not.toMatch(/dedit[^>]*disabled/);
+  });
+});

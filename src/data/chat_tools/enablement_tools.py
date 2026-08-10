@@ -654,18 +654,21 @@ def handle_list_asana_projects(conn, args, session_filters) -> dict:
     return _list_asana_projects_impl(conn)
 
 
-# The ONLY task fields Renn ever sees — a deliberate, minimal projection of
-# AsanaClient._TASK_FIELDS. We STRIP custom_fields / enum_value / people_value /
-# notes: those carry indicator/mapping internals (and free text that could carry
-# PHI), none of which "what's on the board" needs. assignee_name flattens the
-# nested assignee.name into a plain string (or None).
+# The ONLY task fields Renn sees in LIST reads — a deliberate, minimal
+# projection of AsanaClient._TASK_FIELDS. We STRIP custom_fields / enum_value /
+# people_value / notes: those carry indicator/mapping internals (and free text
+# that could carry PHI), none of which "what's on the board" needs. ``gid`` is
+# an opaque Asana id (not PHI) and is what makes a listed task addressable by
+# the scoped detail read (get_asana_task — WS-E2, owner-approved 2026-08-09).
+# assignee_name flattens the nested assignee.name into a plain string (or None).
 def _filter_asana_task(task: dict) -> dict:
-    """Project one raw Asana task down to {name, due_on, permalink_url,
+    """Project one raw Asana task down to {gid, name, due_on, permalink_url,
     assignee_name} ONLY (invariant 13-style minimization). assignee_name =
     task.assignee.name or None; everything else (custom_fields, notes, …) dropped."""
     assignee = task.get("assignee") or {}
     assignee_name = assignee.get("name") if isinstance(assignee, dict) else None
     return {
+        "gid": task.get("gid"),
         "name": task.get("name"),
         "due_on": task.get("due_on"),
         "permalink_url": task.get("permalink_url"),
@@ -755,6 +758,68 @@ def handle_search_asana_tasks(conn, args, session_filters) -> dict:
     """Registry handler (Gemini/MCP path). Substring search over board tasks."""
     return _search_asana_tasks_impl(conn, args.get("text", ""),
                                     project_gid=args.get("project_gid"))
+
+
+# Explicit opt_fields is LOAD-BEARING: AsanaClient.get_task's default
+# projection carries no notes, so the detail read must name every field it
+# wants. This is the ONE lane where Renn sees a live task's body — a scoped
+# single-task read on explicit operator demand (WS-E2, owner-approved
+# 2026-08-09); list reads stay stripped by _filter_asana_task.
+_DETAIL_OPT_FIELDS = ("name,due_on,completed,permalink_url,assignee.name,"
+                      "html_notes,notes,custom_fields.name,"
+                      "custom_fields.display_value,parent.gid,parent.name,"
+                      "modified_at")
+
+
+def _get_asana_task_impl(conn, task_gid) -> dict:
+    """ONE live Asana task in detail — including its description (body_md,
+    markdown from html_notes, 6000-char cap) and custom fields."""
+    from src.data.asana_client import AsanaClient
+    gid = str(task_gid or "").strip()
+    if not gid:
+        return {"ok": False, "error": "task_gid_required"}
+    client = AsanaClient.from_store()
+    if not client.api_key:
+        return {"ok": False, "error": "asana_not_connected"}
+    try:
+        raw = client.get_task(gid, opt_fields=_DETAIL_OPT_FIELDS) or {}
+    except Exception as exc:  # noqa: BLE001 — surface as a failed read
+        return {"ok": False, "error": str(exc)[:160]}
+    if not raw.get("gid"):
+        return {"ok": False, "error": "task_not_found", "task_gid": gid}
+    assignee = raw.get("assignee") or {}
+    parent = raw.get("parent") or {}
+    task = {
+        "gid": raw.get("gid"),
+        "name": raw.get("name"),
+        "due_on": raw.get("due_on"),
+        "completed": raw.get("completed"),
+        "permalink_url": raw.get("permalink_url"),
+        "assignee_name": assignee.get("name") if isinstance(assignee, dict) else None,
+        "custom_fields": [
+            {"name": cf.get("name"), "value": cf.get("display_value")}
+            for cf in (raw.get("custom_fields") or [])
+            if isinstance(cf, dict) and (cf.get("display_value") or "").strip()],
+        "parent": ({"gid": parent.get("gid"), "name": parent.get("name")}
+                   if isinstance(parent, dict) and parent.get("gid") else None),
+    }
+    html_notes = (raw.get("html_notes") or "").strip()
+    if html_notes:
+        try:
+            from src.data.html_markdown import html_to_markdown
+            body_md = html_to_markdown(html_notes).strip()
+            if body_md:
+                task["body_md"] = body_md[:6000]
+        except Exception:  # noqa: BLE001 — fall through to plain notes
+            pass
+    if "body_md" not in task and (raw.get("notes") or "").strip():
+        task["body_md"] = str(raw["notes"]).strip()[:6000]
+    return {"ok": True, "task": task}
+
+
+def handle_get_asana_task(conn, args, session_filters) -> dict:
+    """Registry handler (Gemini/MCP path). Scoped single-task detail read."""
+    return _get_asana_task_impl(conn, args.get("task_gid") or args.get("gid"))
 
 
 def _set_asana_board_impl(conn, project_gid, project_name=None) -> dict:
@@ -1427,12 +1492,11 @@ def _push_guru_draft_impl(conn, draft_id, collection_id=None, folder_id=None,
     # Defaults to True — an absent key or an unreadable settings file must
     # fail safe to demo, matching kb_tools._demo_guard.
     demo_mode = bool(en_cfg.get("demo_mode", True))
-    if not collection_id:
-        # Renn rarely knows the Guru collection — fall back to the operator's
-        # configured publish target so chat-initiated pushes land correctly.
-        collection_id = guru_cfg.get("publish_collection_id") or None
-    if not folder_id:
-        folder_id = guru_cfg.get("publish_folder_id") or None
+    # Renn rarely knows the Guru collection — resolve the target through the
+    # per-kind publish map (G3) with the configured global default as the
+    # fallback; explicit args always win.
+    collection_id, folder_id = store.resolve_publish_target(
+        draft, collection_id=collection_id, folder_id=folder_id)
     # ── Approval gate (M5) ──────────────────────────────────────────
     # A draft cannot be published to Guru without a human sign-off THAT NAMES
     # THIS PUBLISH. ``store.approval_open`` checks the recorded sign-off against
@@ -1677,6 +1741,18 @@ def _list_tasks_impl(conn, *, status=None, source=None, kind=None, due_before=No
             task["latest_comments"] = [
                 {"author": s.get("author"), "text": (s.get("text") or "")[:500]}
                 for s in stories[-3:]]
+            # Task body with formatting (pilot ask, WS-E1): the row's
+            # `description` is the plain-text notes; html_notes carries the
+            # rich structure (links, lists). 6000-char cap = task_brief input.
+            html_notes = (extras.get("html_notes") or "").strip()
+            if html_notes:
+                try:
+                    from src.data.html_markdown import html_to_markdown
+                    body_md = html_to_markdown(html_notes).strip()
+                    if body_md:
+                        task["body_md"] = body_md[:6000]
+                except Exception:  # noqa: BLE001 — enrichment only
+                    pass
         # Brief (WS1-M4): decoded only when it built cleanly. It is a CACHED
         # summary — the raw description stays authoritative.
         if task.get("brief_status") == "ok" and task.get("brief_json"):
@@ -2051,6 +2127,70 @@ def _search_documents_multi(conn, topic, *, limit=5) -> list[dict]:
     return [r for _, r in ranked[:limit]]
 
 
+def _resolve_guru_collections(client, requested):
+    """Resolve requested collection names/ids against the live collection list.
+
+    Case-insensitive, with substring fallback so "CX" finds "CX Team". Returns
+    {"allowed", "resolved", "unresolved"} — or {"error"} when the collection
+    list itself can't be fetched (caller degrades to exact matching rather than
+    hard-failing the search).
+    """
+    import difflib
+    try:
+        cols = client.list_collections()
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)[:120]}
+    names = [(c.get("name") or "") for c in cols]
+    resolved: list = []
+    unresolved: list = []
+    seen_ids: set = set()
+    for req in requested:
+        rl = req.lower()
+        hits = [c for c in cols
+                if (c.get("id") or "").lower() == rl
+                or (c.get("name") or "").lower() == rl]
+        if not hits:
+            hits = [c for c in cols if rl in (c.get("name") or "").lower()]
+        if hits:
+            for c in hits:
+                if c.get("id") not in seen_ids:
+                    seen_ids.add(c.get("id"))
+                    resolved.append({"id": c.get("id"), "name": c.get("name")})
+        else:
+            close = difflib.get_close_matches(req, names, n=1, cutoff=0.5)
+            unresolved.append({"requested": req,
+                               "closest": close[0] if close else None})
+    allowed = set()
+    for c in resolved:
+        allowed.add((c["id"] or "").lower())
+        allowed.add((c["name"] or "").lower())
+    allowed.discard("")
+    return {"allowed": allowed, "resolved": resolved, "unresolved": unresolved}
+
+
+_SCAN_CARD_CAP = 300          # content-scan fallback: max card bodies grepped
+_SCAN_WCOV_MIN = 0.35         # coverage gate for scanned-in results
+_STRONG_SCORE = 0.6           # literal-query score that short-circuits variants
+
+
+def _configured_search_collections() -> list[str]:
+    """The operator's default Guru search scope (G2): ids from
+    ``enablement.guru.search_collections``. Empty = all collections."""
+    try:
+        from src.data.settings_manager import get_section
+        guru = (get_section("enablement", {}) or {}).get("guru") or {}
+        entries = guru.get("search_collections") or []
+    except Exception:  # noqa: BLE001 — unreadable settings = no default scope
+        return []
+    out = []
+    for e in entries:
+        if isinstance(e, dict) and (e.get("id") or e.get("name")):
+            out.append(str(e.get("id") or e.get("name")))
+        elif isinstance(e, str) and e.strip():
+            out.append(e.strip())
+    return out
+
+
 def _search_guru_cards_impl(conn, query, *, collections=None, limit=25,
                             offset=0) -> dict:
     """SEMANTIC/QUERY Guru card search (POST /search/cardmgr).
@@ -2059,33 +2199,157 @@ def _search_guru_cards_impl(conn, query, *, collections=None, limit=25,
     whole collection completely, use ``list_guru_cards``; to enumerate a folder's
     contents, use ``list_guru_folder_items``. Returns id/title/collection/snippet.
     Supports an ``offset`` for paging through a large result set (client-side over
-    the ranked results). Back-compat: same result shape as before, higher default
-    limit (25).
+    the ranked results).
+
+    WS-F2/F3/G2 (pilot feedback):
+    - The ``query`` kwarg stays LITERAL, but the impl runs a bounded variant set
+      (≤5: literal, key terms, entity-alias reorientations, topic-only) when the
+      literal query's coverage is weak, unions by card id, and ranks by
+      IDF-weighted coverage of the ORIGINAL query's content terms.
+    - When ranked coverage is still weak and the scope names collections, a
+      bounded CONTENT SCAN enumerates them (``list_cards`` fetches bodies) and
+      greps locally — the completeness backstop for facts that live only in a
+      card's body under a generic title.
+    - ``collections`` entries resolve case-insensitively with substring matching
+      ("CX" finds "CX Team"); unresolved names are REPORTED, never silently
+      zero. With no ``collections`` arg, the operator's configured default scope
+      (``enablement.guru.search_collections``) applies — and is reported.
+    - ``why_zero`` ∈ no_match | filtered_by_collection | collection_not_found |
+      not_connected.
     """
     from src.data.guru_client import GuruClient
+    from src.data.query_expand import query_variants, rank_by_coverage
     email, token = GuruClient.load_credentials()
     if not (email and token):
-        return {"ok": False, "error": "guru_not_connected"}
+        return {"ok": False, "error": "guru_not_connected",
+                "why_zero": "not_connected"}
+    client = GuruClient(email, token)
+
+    scope_source = "call_arg"
+    requested = [s for s in (str(c or "").strip()
+                             for c in (collections or [])) if s]
+    if not requested:
+        requested = _configured_search_collections()
+        scope_source = "configured_default" if requested else "none"
+
+    # ── variant fan-out (bounded), union by card id ──────────────────
+    variants = query_variants(query or "") or [(query or "").strip()]
+    union: dict = {}
+    variants_run: list = []
+
+    def _run(v):
+        found = client.search_cards(v)
+        variants_run.append(v)
+        for c in found:
+            cid = c.get("id")
+            if cid and cid not in union:
+                union[cid] = c
+
     try:
-        cards = GuruClient(email, token).search_cards(query or "")
+        _run(variants[0])
     except Exception as exc:  # noqa: BLE001 — surface as a failed search
         return {"ok": False, "error": str(exc)[:160]}
-    allowed = {c.lower() for c in (collections or [])}
-    matched = []
+    probe = rank_by_coverage(list(union.values()), query or "")
+    strong = (len(union) >= 3 and bool(probe)
+              and probe[0].get("score", 0.0) >= _STRONG_SCORE)
+    if not strong:
+        for v in variants[1:]:
+            try:
+                _run(v)
+            except Exception:  # noqa: BLE001 — one variant failing never fails the search
+                continue
+    cards = list(union.values())
+
+    # ── scope resolution + filter (F3 + G2) ──────────────────────────
+    scope: dict = {"kind": "all_collections"}
+    allowed: set = set()
+    resolved_ids: list = []
+    if requested:
+        res = _resolve_guru_collections(client, requested)
+        if res.get("error"):
+            # Collection list unavailable — degrade to the legacy exact filter,
+            # but SAY so instead of silently narrowing the scope.
+            allowed = {r.lower() for r in requested}
+            scope = {"kind": "collections", "requested": requested,
+                     "source": scope_source,
+                     "note": ("collection list unavailable (%s) — exact "
+                              "name/id matching only" % res["error"])}
+        else:
+            allowed = res["allowed"]
+            resolved_ids = [c["id"] for c in res["resolved"] if c.get("id")]
+            scope = {"kind": "collections", "requested": requested,
+                     "source": scope_source,
+                     "resolved": res["resolved"],
+                     "unresolved": res["unresolved"]}
+    filtered = []
+    collections_seen: set = set()
     for c in cards:
-        coll = (c.get("collection", "") or "").lower()
+        coll = c.get("collection", "") or ""
+        if coll:
+            collections_seen.add(coll)
         coll_id = (c.get("collection_id", "") or "").lower()
-        if allowed and coll not in allowed and coll_id not in allowed:
+        if requested and coll.lower() not in allowed and coll_id not in allowed:
             continue
-        matched.append({"card_id": c.get("id"), "title": c.get("title"),
-                        "collection": c.get("collection"),
-                        "url": _card_url(c.get("id")),
-                        "snippet": _strip_html(c.get("content", ""))[:200]})
+        filtered.append(c)
+
+    # ── cross-reference rank over the original ask ───────────────────
+    ranked = rank_by_coverage(filtered, query or "")
+
+    # ── content-scan fallback (the body-only-fact backstop) ──────────
+    weak = (not ranked) or ranked[0].get("score", 0.0) < _SCAN_WCOV_MIN
+    if weak and resolved_ids:
+        scan = {"ran": True, "cards_scanned": 0, "capped": False}
+        pool = []
+        for coll_id in resolved_ids:
+            if scan["cards_scanned"] >= _SCAN_CARD_CAP:
+                scan["capped"] = True
+                break
+            try:
+                members = client.list_cards(coll_id)
+            except Exception:  # noqa: BLE001 — scan is best-effort
+                continue
+            room = _SCAN_CARD_CAP - scan["cards_scanned"]
+            if len(members) > room:
+                members = members[:room]
+                scan["capped"] = True
+            scan["cards_scanned"] += len(members)
+            pool.extend(m for m in members if m.get("id") not in union)
+        scanned_in = rank_by_coverage(pool, query or "",
+                                      min_wcov=_SCAN_WCOV_MIN)
+        if scanned_in:
+            ranked = sorted(ranked + scanned_in,
+                            key=lambda r: -r.get("score", 0.0))
+        scope["content_scan"] = scan
+
+    matched = [{"card_id": c.get("id"), "title": c.get("title"),
+                "collection": c.get("collection"),
+                "url": _card_url(c.get("id")),
+                "snippet": _strip_html(c.get("content", ""))[:200],
+                "score": c.get("score")}
+               for c in ranked]
     off = max(0, int(offset or 0))
     lim = int(limit or 25)
-    out = matched[off:off + lim]
-    return {"ok": True, "query": query, "count": len(out),
-            "total": len(matched), "offset": off, "cards": out}
+    page = matched[off:off + lim]
+    out = {"ok": True, "query": query, "count": len(page),
+           "total": len(matched), "offset": off, "cards": page,
+           "variants_run": variants_run,
+           "pre_filter_count": len(cards),
+           "post_filter_count": len(matched),
+           "collections_seen": sorted(collections_seen)[:20],
+           "scope": scope}
+    if not matched:
+        if requested and scope.get("resolved") == [] and scope.get("unresolved"):
+            out["why_zero"] = "collection_not_found"
+            out["message"] = "; ".join(
+                "no collection matching '%s'%s" % (
+                    u["requested"],
+                    ("; closest: '%s'" % u["closest"]) if u.get("closest") else "")
+                for u in scope["unresolved"])
+        elif requested and cards:
+            out["why_zero"] = "filtered_by_collection"
+        else:
+            out["why_zero"] = "no_match"
+    return out
 
 
 def handle_search_guru_cards(conn, args, session_filters) -> dict:
@@ -2391,11 +2655,20 @@ def _guru_items(conn, query, collections, limit) -> list[dict]:
     email, token = GuruClient.load_credentials()
     if not (email and token):
         return []
+    client = GuruClient(email, token)
     try:
-        cards = GuruClient(email, token).search_cards(query or "")
+        cards = client.search_cards(query or "")
     except Exception:  # noqa: BLE001
         return []
-    allowed = {c.lower() for c in (collections or [])}
+    # G2: no explicit collections → the operator's configured default scope,
+    # resolved the same way the card search resolves (substring, not exact).
+    requested = [str(c).strip() for c in (collections or []) if str(c).strip()] \
+        or _configured_search_collections()
+    allowed: set = set()
+    if requested:
+        res = _resolve_guru_collections(client, requested)
+        allowed = res.get("allowed") if not res.get("error") \
+            else {r.lower() for r in requested}
     out = []
     for c in (cards or [])[:limit]:
         cid = c.get("id")
@@ -2403,7 +2676,7 @@ def _guru_items(conn, query, collections, limit) -> list[dict]:
             continue  # a card with no id would index as 'card:None' and break pull/fetch
         coll = (c.get("collection", "") or "").lower()
         coll_id = (c.get("collection_id", "") or "").lower()
-        if allowed and coll not in allowed and coll_id not in allowed:
+        if requested and coll not in allowed and coll_id not in allowed:
             continue
         out.append({"item_id": f"card:{cid}", "item_type": "card",
                     "title": c.get("title", ""), "source": "guru",
@@ -2593,33 +2866,16 @@ def _search_content_impl(conn, query, *, sources=None, limit=8) -> dict:
         status[src] = entry
         merged.extend(rows)
 
-    # "Ranked-ish": interleave sources round-robin so no single source dominates
-    # the head of the list, then cap at `limit`. Within a source, order is the
-    # per-source rank order returned by its search impl.
-    interleaved = _interleave_by_source(merged, ordered)
-    out = interleaved[:limit]
+    # Coverage-scored merge (WS-F2): rank every labeled row by IDF-weighted
+    # coverage of the query over title+snippet, so the best answer tops the
+    # list regardless of which source it came from. Ties keep the fan-out
+    # order (guru, zendesk, drive) and each source's own rank.
+    from src.data.query_expand import rank_by_coverage
+    ranked = rank_by_coverage(merged, query or "",
+                              text_keys=("snippet",), title_key="title")
+    out = ranked[:limit]
     return {"ok": True, "query": query, "count": len(out),
             "results": out, "sources": status}
-
-
-def _interleave_by_source(rows, order) -> list[dict]:
-    """Round-robin merge so the top of the list samples every source that hit,
-    instead of returning all of source A then all of source B."""
-    buckets: dict[str, list] = {s: [] for s in order}
-    for r in rows:
-        buckets.setdefault(r.get("source"), []).append(r)
-    out, idx = [], 0
-    while True:
-        added = False
-        for s in order:
-            b = buckets.get(s) or []
-            if idx < len(b):
-                out.append(b[idx])
-                added = True
-        if not added:
-            break
-        idx += 1
-    return out
 
 
 def handle_search_content(conn, args, session_filters) -> dict:

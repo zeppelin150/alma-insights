@@ -412,3 +412,131 @@ class _MarkdownParser(HTMLParser):
         text = re.sub(r"[ \t]+\n", "\n", text)
         text = re.sub(r"\n{3,}", "\n\n", text)
         return text.strip()
+
+
+# ── Deterministic card styling (WS-A1, pilot feedback 2026-08-07) ─────
+#
+# Guru's REST lane stores inline styles byte-identical (verified live,
+# 2026-08-09 A2 spike), and the strict web-preview sanitizer only lets
+# `style` through on span/div/p/td/th/mark/li/font — so the color rides
+# <span style=…> wrappers around the TEXT of h1-h3/a, never a style attr on
+# the heading/anchor tag itself. Applied INSIDE enablement_store.publish_body
+# (the single publish composition) so previews, belts, and the approval
+# fingerprint all see the styled bytes.
+
+_HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
+_STYLE_HAS_COLOR = re.compile(r"(?:^|;)\s*color\s*:", re.IGNORECASE)
+_STYLED_HEADINGS = {"h1", "h2", "h3"}
+
+
+class _CardStyler(HTMLParser):
+    """Wrap heading/anchor text runs in color spans.
+
+    Idempotent + merge-aware by the same mechanism: any text already inside
+    an element carrying a `color:` style — the author's own span from the
+    rich editor, or a wrapper from a previous run of this pass — is left
+    alone (`_color_depth` gates the wrap).
+    """
+
+    def __init__(self, heading_color: str, link_color: str):
+        super().__init__(convert_charrefs=False)
+        self._heading = heading_color
+        self._link = link_color
+        self._out: list[str] = []
+        self._stack: list[tuple[str, bool]] = []
+        self._heading_depth = 0
+        self._anchor_depth = 0
+        self._color_depth = 0
+        self._wrap_open = False
+
+    def _flush_wrap(self):
+        if self._wrap_open:
+            self._out.append("</span>")
+            self._wrap_open = False
+
+    def _current_color(self):
+        if self._anchor_depth > 0:
+            return self._link
+        if self._heading_depth > 0:
+            return self._heading
+        return None
+
+    def handle_starttag(self, tag, attrs):
+        self._flush_wrap()
+        style = next((v or "" for k, v in attrs if k == "style"), "")
+        has_color = bool(_STYLE_HAS_COLOR.search(style))
+        self._stack.append((tag, has_color))
+        if has_color:
+            self._color_depth += 1
+        if tag in _STYLED_HEADINGS:
+            self._heading_depth += 1
+        if tag == "a":
+            self._anchor_depth += 1
+        self._out.append(self.get_starttag_text())
+
+    def handle_startendtag(self, tag, attrs):
+        self._flush_wrap()
+        self._out.append(self.get_starttag_text())
+
+    def handle_endtag(self, tag):
+        self._flush_wrap()
+        for i in range(len(self._stack) - 1, -1, -1):
+            t, has_color = self._stack[i]
+            if t == tag:
+                del self._stack[i]
+                if has_color:
+                    self._color_depth -= 1
+                break
+        if tag in _STYLED_HEADINGS:
+            self._heading_depth = max(0, self._heading_depth - 1)
+        if tag == "a":
+            self._anchor_depth = max(0, self._anchor_depth - 1)
+        self._out.append(f"</{tag}>")
+
+    def _inline(self, raw: str, *, is_text: bool):
+        color = self._current_color()
+        if color and self._color_depth == 0 and (not is_text or raw.strip()):
+            if not self._wrap_open:
+                self._out.append(f'<span style="color:{color}">')
+                self._wrap_open = True
+        self._out.append(raw)
+
+    def handle_data(self, data):
+        self._inline(data, is_text=True)
+
+    def handle_entityref(self, name):
+        self._inline(f"&{name};", is_text=False)
+
+    def handle_charref(self, name):
+        self._inline(f"&#{name};", is_text=False)
+
+    def handle_comment(self, data):
+        self._flush_wrap()
+        self._out.append(f"<!--{data}-->")
+
+    def handle_decl(self, decl):
+        self._flush_wrap()
+        self._out.append(f"<!{decl}>")
+
+    def result(self) -> str:
+        self._flush_wrap()
+        return "".join(self._out)
+
+
+def apply_guru_card_styles(html: str, *, heading_color: str,
+                           link_color: str) -> str:
+    """Color h1-h3 heading text and link text via span wrappers (see the
+    module note above for why spans). Invalid hex → the input unchanged
+    (fail-closed: settings can never inject style syntax)."""
+    if not (html or "").strip():
+        return html or ""
+    if not (_HEX_COLOR.match(heading_color or "")
+            and _HEX_COLOR.match(link_color or "")):
+        return html
+    styler = _CardStyler(heading_color, link_color)
+    try:
+        styler.feed(html)
+        styler.close()
+        return styler.result()
+    except Exception:  # noqa: BLE001 — never break a publish over styling
+        return html

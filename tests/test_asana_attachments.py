@@ -8,12 +8,15 @@ from src.data.asana_client import AsanaClient
 def test_list_attachments_parses(monkeypatch):
     client = AsanaClient("tok")
 
+    # list_attachments pages via _paginate → _get_raw (full payload with
+    # next_page) since ff430fe; patching _get here used to leak a LIVE call.
     def fake_get(path, params=None):
         assert path == "/tasks/T1/attachments"
-        return [{"gid": "a1", "name": "policy.md", "resource_subtype": "asana"},
-                {"gid": "a2", "name": "old.md", "resource_subtype": "asana"}]
+        return {"data": [
+            {"gid": "a1", "name": "policy.md", "resource_subtype": "asana"},
+            {"gid": "a2", "name": "old.md", "resource_subtype": "asana"}]}
 
-    monkeypatch.setattr(client, "_get", fake_get)
+    monkeypatch.setattr(client, "_get_raw", fake_get)
     out = client.list_attachments("T1")
     assert out == [{"gid": "a1", "name": "policy.md", "subtype": "asana"},
                    {"gid": "a2", "name": "old.md", "subtype": "asana"}]

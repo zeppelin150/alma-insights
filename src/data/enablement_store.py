@@ -121,7 +121,22 @@ def list_documents(conn: sqlite3.Connection, *, limit: int = 100) -> list[dict]:
 
 # ── the published body: ONE definition ───────────────────────────────
 
-def publish_body(draft, *, md_to_html=None) -> str:
+def _card_style_from_settings() -> dict | None:
+    """The operator's card-style preset (``enablement.guru.card_style``), or
+    None when disabled/unset/unreadable — styling FAILS CLOSED to plain."""
+    try:
+        from src.data.settings_manager import get_section
+        guru = (get_section("enablement", {}) or {}).get("guru") or {}
+        cs = (guru.get("card_style") or {}).get("default") or {}
+        if not cs.get("enabled"):
+            return None
+        return {"heading_color": cs.get("heading_color") or "#0055CC",
+                "link_color": cs.get("link_color") or "#0055CC"}
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def publish_body(draft, *, md_to_html=None, card_style=None) -> str:
     """THE published body — exactly the bytes ``publish_draft`` sends to Guru.
 
     This is the single definition of "the card body". Every approval surface
@@ -162,7 +177,19 @@ def publish_body(draft, *, md_to_html=None) -> str:
     # Expand native-block directives (callout / collapsible / card-link) into
     # Guru's markup — on the captured rich HTML and the markdown-derived HTML
     # alike. Idempotent when there are no directives.
-    return expand_blocks(html or "")
+    body = expand_blocks(html or "")
+    # WS-A1 card styling: INSIDE the single composition, so previews, belts,
+    # and the approval fingerprint all certify the styled bytes (changing the
+    # preset between review and approve flips the fingerprint — deliberate).
+    # ``card_style`` overrides for tests; None reads settings; disabled/unset
+    # styles nothing and the bytes are exactly the pre-A1 bytes.
+    style = card_style if card_style is not None else _card_style_from_settings()
+    if style:
+        from src.data.html_markdown import apply_guru_card_styles
+        body = apply_guru_card_styles(
+            body, heading_color=style.get("heading_color", ""),
+            link_color=style.get("link_color", ""))
+    return body
 
 
 def review_text(draft, *, md_to_html=None) -> str:
@@ -1046,3 +1073,145 @@ def publish_draft(
             pass
     return {"ok": True, "draft_id": draft_id, "status": "pushed",
             "card_id": card_id, "guru_result": guru_result}
+
+
+def resolve_publish_target(draft, *, collection_id: str | None = None,
+                           folder_id: str | None = None) -> tuple:
+    """The publish destination for one draft: explicit args win, then the
+    per-kind map (``enablement.guru.publish_targets[draft_type]`` — G3), then
+    the global default (``publish_collection_id`` / ``publish_folder_id``).
+    Collection and folder resolve independently, preserving the old
+    each-defaults-separately behavior."""
+    if collection_id and folder_id:
+        return collection_id, folder_id
+    guru: dict = {}
+    try:
+        from src.data.settings_manager import get_section
+        guru = (get_section("enablement", {}) or {}).get("guru") or {}
+    except Exception:  # noqa: BLE001
+        guru = {}
+    get = getattr(draft, "get", None)
+    kind = str(get("draft_type") or "").strip() if get else ""
+    ent = (guru.get("publish_targets") or {}).get(kind) or {}
+    coll = collection_id or ent.get("collection_id") \
+        or guru.get("publish_collection_id") or None
+    fold = folder_id or ent.get("folder_id") \
+        or guru.get("publish_folder_id") or None
+    return coll, fold
+
+
+def _draft_collaborator_emails(guru_client) -> list[str]:
+    """Configured draft collaborators (``enablement.guru.draft_collaborators``)
+    minus the credential identity — the pilot/single-user case creates the
+    draft AS the specialist, who is already its owner (B3)."""
+    try:
+        from src.data.settings_manager import get_section
+        guru = (get_section("enablement", {}) or {}).get("guru") or {}
+        emails = [str(e).strip() for e in (guru.get("draft_collaborators") or [])
+                  if str(e).strip()]
+    except Exception:  # noqa: BLE001
+        return []
+    self_email = str(getattr(guru_client, "_email", "") or "").lower()
+    return [e for e in emails if e.lower() != self_email]
+
+
+def push_draft_to_guru_draft(
+    conn: sqlite3.Connection,
+    draft_id: int,
+    guru_client,
+    *,
+    collection_id: str | None = None,
+    folder_id: str | None = None,
+) -> dict:
+    """Send a draft's publish bytes to a GURU DRAFT — "view in Guru before
+    publishing" (WS-B, owner-approved 2026-08-09).
+
+    An off-box Guru write, gated IDENTICALLY to a publish: callers take the
+    native confirm, and the chat lane consumes the one-shot sign-off claim.
+    The body is ``publish_body(draft)`` — the same bytes any publish ships,
+    so belts and fingerprints certify exactly what lands in My Drafts. The
+    CCC row's status STAYS 'pending' (the row is not frozen); the specialist
+    publishes natively in Guru and closes out via
+    :func:`mark_published_in_guru`.
+
+    The drafts endpoints are official-but-undocumented — a 404/410 degrades
+    to a clear error pointing at the normal publish path, never a silent
+    no-op.
+    """
+    draft = get_draft(conn, draft_id)
+    if not draft:
+        return {"ok": False, "error": "draft_not_found", "draft_id": draft_id}
+    if draft.get("status") == "pushed":
+        return {"ok": False, "error": "already_pushed", "draft_id": draft_id}
+    if guru_client is None:
+        return {"ok": False, "error": "guru_not_connected",
+                "message": "Connect Guru credentials to send drafts to Guru."}
+    tgt_coll, tgt_folder = resolve_publish_target(
+        draft, collection_id=collection_id, folder_id=folder_id)
+    if not tgt_coll:
+        return {"ok": False, "error": "no_collection",
+                "message": "No target collection — set a Guru publish target "
+                           "in Settings or pass one."}
+    html_body = publish_body(draft)
+    try:
+        created = guru_client.create_draft(draft.get("title") or "", html_body)
+    except Exception as exc:  # noqa: BLE001
+        msg = str(exc)
+        if "404" in msg or "410" in msg:
+            return {"ok": False, "error": "drafts_api_unavailable",
+                    "message": "Guru's drafts API rejected the request (the "
+                               "endpoints are undocumented and may have "
+                               "changed) — publish normally instead."}
+        return {"ok": False, "error": f"guru_draft_failed: {exc}"[:200]}
+    guru_draft_id = str((created or {}).get("id") or "")
+    if not guru_draft_id:
+        return {"ok": False,
+                "error": "guru_draft_failed: no draft id returned"}
+    out: dict = {"ok": True, "draft_id": draft_id,
+                 "guru_draft_id": guru_draft_id, "collection_id": tgt_coll,
+                 "status": draft.get("status")}
+    try:
+        guru_client.set_draft_context(
+            guru_draft_id, tgt_coll,
+            folder_ids=[tgt_folder] if tgt_folder else None)
+    except Exception as exc:  # noqa: BLE001 — draft exists but untargeted: SAY it
+        out["context_error"] = str(exc)[:160]
+    collab_errors = []
+    for email in _draft_collaborator_emails(guru_client):
+        try:
+            guru_client.add_draft_collaborator(guru_draft_id, email)
+        except Exception as exc:  # noqa: BLE001 — Guru silently rejects
+            collab_errors.append(f"{email}: {exc}"[:160])  # wrong-role users
+    if collab_errors:
+        out["collaborator_errors"] = collab_errors
+    now = _now()
+    with atomic(conn):
+        conn.execute(
+            "UPDATE guru_content_drafts SET guru_draft_id = ?, "
+            "guru_draft_created_at = ? WHERE id = ?",
+            (guru_draft_id, now, int(draft_id)),
+        )
+    return out
+
+
+def mark_published_in_guru(conn: sqlite3.Connection, draft_id: int, *,
+                           approved_by: str = "user") -> dict:
+    """Close out a draft the specialist published NATIVELY in Guru.
+
+    v1 has no API detection of native publishes — this is the explicit local
+    mark (status → 'pushed'). A later CCC-side publish of the same row would
+    need a fresh sign-off, which is intended.
+    """
+    draft = get_draft(conn, draft_id)
+    if not draft:
+        return {"ok": False, "error": "draft_not_found", "draft_id": draft_id}
+    if not draft.get("guru_draft_id"):
+        return {"ok": False, "error": "no_guru_draft",
+                "message": "This draft was never sent to Guru as a draft."}
+    with atomic(conn):
+        conn.execute(
+            "UPDATE guru_content_drafts SET status='pushed', approved_by=?, "
+            "pushed_at=? WHERE id=?",
+            (approved_by, _now(), int(draft_id)),
+        )
+    return {"ok": True, "draft_id": draft_id, "status": "pushed"}

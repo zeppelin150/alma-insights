@@ -98,7 +98,9 @@ def test_push_guru_draft_with_creds(empty_db, mock_guru_client):
     guru_mock = MagicMock()
     guru_mock.load_credentials.return_value = ("ops@alma.com", "tok")
     guru_mock.return_value = mock_guru_client
-    with patch("src.data.guru_client.GuruClient", guru_mock):
+    with patch("src.data.guru_client.GuruClient", guru_mock), \
+         patch("src.data.settings_manager.get_section",
+               return_value={"demo_mode": False}):
         out = _call(conn, "push_guru_draft", {"draft_id": did, "collection_id": "coll-1"})
     assert out["ok"] and out["status"] == "pushed"
     mock_guru_client.create_card.assert_called_once()
@@ -120,7 +122,9 @@ def test_create_card_draft_from_scratch_then_push(empty_db, mock_guru_client):
     guru_mock = MagicMock()
     guru_mock.load_credentials.return_value = ("ops@alma.com", "tok")
     guru_mock.return_value = mock_guru_client
-    with patch("src.data.guru_client.GuruClient", guru_mock):
+    with patch("src.data.guru_client.GuruClient", guru_mock), \
+         patch("src.data.settings_manager.get_section",
+               return_value={"demo_mode": False}):
         pub = _call(conn, "push_guru_draft", {"draft_id": out["draft_id"], "collection_id": "coll-1"})
     assert pub["ok"] and pub["status"] == "pushed"
     mock_guru_client.create_card.assert_called_once()
@@ -142,7 +146,8 @@ def test_push_guru_draft_defaults_collection_from_settings(empty_db, mock_guru_c
     guru_mock.return_value = mock_guru_client
     with patch("src.data.guru_client.GuruClient", guru_mock), \
          patch("src.data.settings_manager.get_section",
-               return_value={"guru": {"publish_collection_id": "coll-cfg"}}):
+               return_value={"demo_mode": False,
+                             "guru": {"publish_collection_id": "coll-cfg"}}):
         out = _call(conn, "push_guru_draft", {"draft_id": did})
     assert out["ok"]
     args, _ = mock_guru_client.create_card.call_args

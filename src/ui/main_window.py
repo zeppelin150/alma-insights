@@ -839,6 +839,10 @@ class MainWindow(QMainWindow):
                 # the page. Without this injection the controller refuses to
                 # publish at all (fail closed).
                 confirm_host=PublishConfirmHost(self))
+            # C1 (pilot feedback): "Edit in Workbench" on the review card —
+            # an authority-free navigation relay from the chat's DraftCard.
+            self._agent_controller.edit_in_workbench_requested.connect(
+                self._on_edit_draft_in_workbench)
             if self._agent_controller.engine is None:
                 raise RuntimeError("chat engine unavailable")
             self.agent_page = AgentPage(self._agent_controller.engine,
@@ -870,6 +874,20 @@ class MainWindow(QMainWindow):
             import logging
             logging.getLogger("alma.main").warning("Agent page unavailable: %s", exc)
             return self._native_agent_fallback()
+
+    def _on_edit_draft_in_workbench(self, draft_id: int):
+        """C1: open a draft in the enablement Workbench, from the Agent chat's
+        review card. Pure navigation — the Workbench's own editing rules
+        (auto-commit, fingerprint invalidation, pushed-frozen) apply unchanged."""
+        try:
+            self._set_active_page("en_workbench")
+            page = getattr(self, "guru_page", None)
+            if page is not None and hasattr(page, "_open_draft_workspace"):
+                page._open_draft_workspace(int(draft_id))
+        except Exception:  # noqa: BLE001 — a failed jump must never crash the chat
+            import logging
+            logging.getLogger("alma.main").warning(
+                "edit-in-workbench navigation failed for draft %s", draft_id)
 
     def _native_agent_fallback(self):
         """Fallback when the embedded Agent web view can't be built.

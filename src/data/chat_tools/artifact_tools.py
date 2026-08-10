@@ -451,7 +451,10 @@ def handle_attach_artifact(conn, args: dict, filters: dict) -> dict:
                     "message": "Pass draft_id (an existing draft) or "
                                "new_draft_title (start a fresh card draft)."}
         kwargs = {"title": new_title, "content": section_md.strip(),
-                  "source_ref": f"artifact:{artifact['artifact_id']}"}
+                  "source_ref": f"artifact:{artifact['artifact_id']}",
+                  # G3: the artifact KIND rides the draft so per-kind publish
+                  # targets (resolve_publish_target) have something to route on.
+                  "draft_type": kind}
         if section_html:
             kwargs["content_html"] = section_html
         did = enablement_store.save_card_draft(conn, **kwargs)

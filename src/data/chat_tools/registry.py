@@ -324,6 +324,7 @@ def _ensure_registered():
         handle_list_zendesk_articles,
         handle_list_zendesk_macros,
         handle_search_asana_tasks,
+        handle_get_asana_task,
         handle_research_topic,
         handle_open_guru_card,
         handle_index_content,
@@ -345,7 +346,7 @@ def _ensure_registered():
     _register("update_card_from_doc", handle_update_card_from_doc,
               phi_level=0, desc="Review a source doc, find the existing Guru card, identify changes, write the update, and stage a draft for review")
     _register("search_guru_cards", handle_search_guru_cards,
-              phi_level=0, desc="SEARCH LIVE Guru for cards by topic/title — query-ranked, MAY MISS cards that don't match (returns id, title, snippet; offset for paging). To ENUMERATE a whole collection completely use list_guru_cards; for a folder's contents use list_guru_folder_items.")
+              phi_level=0, desc="SEARCH LIVE Guru for cards — short keyword queries (entity + topic), never negations. Runs bounded reorientations + a scoped content-scan fallback; result reports variants_run, scope (collections searched, substring-resolved) and why_zero. Query-ranked, MAY MISS — to ENUMERATE a whole collection use list_guru_cards; for a folder use list_guru_folder_items.")
     _register("list_guru_cards", handle_list_guru_cards,
               phi_level=0, desc="LIST (enumerate) every card in a Guru collection — DETERMINISTIC + COMPLETE (paginates to the end). Answers 'what cards are in this collection'; reports the total count. Prefer this over search_guru_cards when you need ALL cards in a collection.")
     _register("list_guru_folder_items", handle_list_guru_folder_items,
@@ -358,6 +359,8 @@ def _ensure_registered():
               phi_level=0, desc="LIST (enumerate) the mirrored Zendesk macros — DETERMINISTIC + COMPLETE over the LOCAL mirror (id, title, active). Degrades to zendesk_mirror_empty when nothing has been pulled/imported. Zendesk is READ-ONLY in this app: no tool can publish or push anything to Zendesk — a specialist copies approved content in by hand.")
     _register("search_asana_tasks", handle_search_asana_tasks,
               phi_level=0, desc="SEARCH the tasks on an Asana board by a case-insensitive name substring (lists the paginated board, then filters by name). Defaults to the active board when project_gid is omitted.")
+    _register("get_asana_task", handle_get_asana_task,
+              phi_level=1, desc="Fetch ONE live Asana task in FULL detail — description as body_md (markdown, 6000-char cap), custom fields, assignee, due, parent, permalink. Pass the gid from a list/search result. The ONLY live read that returns a task's body; list reads stay minimal.")
     _register("research_topic", handle_research_topic,
               phi_level=1, desc="Gather reference points on a topic from every source: Guru cards + local docs + ticket signals")
     _register("open_guru_card", handle_open_guru_card,

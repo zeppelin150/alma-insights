@@ -33,6 +33,16 @@ from src.data.chat_tools.artifact_tools import handle_attach_artifact
 from src.data.html_markdown import markdown_to_html
 
 
+@pytest.fixture(autouse=True)
+def _no_card_style(monkeypatch):
+    """Pin the WS-A1 style pass OFF for the byte-parity matrix — a machine
+    with ``enablement.guru.card_style`` enabled would otherwise style every
+    publish here and the byte-identity assertions would become env-dependent.
+    The style pass has its own test class below (TestCardStylePass)."""
+    from src.data import settings_manager
+    monkeypatch.setattr(settings_manager, "get_section", lambda *a, **k: {})
+
+
 # ── spies / stubs ────────────────────────────────────────────────────
 
 class SpyGuru:
@@ -583,3 +593,70 @@ def test_matrix_covers_both_representations(matrix):
     assert {"markdown_only", "guru_blocks", "empty_body"} & with_html == set()
     # and the JSON-serialisable spy really recorded bytes
     assert json.dumps(list(shapes))
+
+
+# ── WS-A1 (pilot feedback): the deterministic card-style pass ─────────
+
+_STYLE = {"heading_color": "#0055CC", "link_color": "#0055CC"}
+
+
+class TestCardStylePass:
+    def test_disabled_is_byte_identical(self):
+        d = {"content": "# Head\n[link](https://x.example)"}
+        assert store.publish_body(d, card_style=False) == store.publish_body(d)
+
+    def test_headings_and_links_get_span_wrapped(self):
+        d = {"content": "## Setup Steps\n\nSee [the guide](https://x.example)."}
+        body = store.publish_body(d, card_style=_STYLE)
+        assert '<h2><span style="color:#0055CC">Setup Steps</span></h2>' in body
+        assert '><span style="color:#0055CC">the guide</span></a>' in body
+        # the style NEVER rides the heading/anchor tag itself (sanitizer drops it there)
+        assert '<h2 style' not in body and '<a style' not in body
+
+    def test_idempotent(self):
+        from src.data.html_markdown import apply_guru_card_styles
+        d = {"content": "# T\n[l](https://x.example)"}
+        once = store.publish_body(d, card_style=_STYLE)
+        twice = apply_guru_card_styles(once, heading_color="#0055CC",
+                                       link_color="#0055CC")
+        assert twice == once
+
+    def test_merge_aware_author_color_wins(self):
+        d = {"content_html":
+             '<h2><span style="color:#BB0000">Author red</span></h2>'}
+        body = store.publish_body(d, card_style=_STYLE)
+        assert body.count("<span") == 1          # no second wrapper
+        assert "#BB0000" in body and "#0055CC" not in body
+
+    def test_web_preview_sanitizer_keeps_the_color(self):
+        from src.data.html_sanitize import sanitize_html
+        d = {"content": "## Colored Heading"}
+        cleaned = sanitize_html(store.publish_body(d, card_style=_STYLE))
+        assert "color:#0055CC" in cleaned.replace(" ", "")
+
+    def test_invalid_hex_fails_closed(self):
+        from src.data.html_markdown import apply_guru_card_styles
+        html = "<h2>T</h2>"
+        bad = apply_guru_card_styles(
+            html, heading_color='#00C"><script>', link_color="#0055CC")
+        assert bad == html
+
+    def test_publish_ships_styled_bytes_when_enabled(self, empty_db, monkeypatch):
+        """The create branch sends EXACTLY the styled publish_body when the
+        settings preset is enabled — reviewed-bytes == shipped-bytes holds."""
+        from src.data import settings_manager
+        monkeypatch.setattr(
+            settings_manager, "get_section",
+            lambda *a, **k: {"guru": {"card_style": {"default": {
+                "enabled": True, "heading_color": "#0055CC",
+                "link_color": "#0055CC"}}}})
+        conn = empty_db.conn
+        did = store.save_card_draft(conn, title="Styled",
+                                    content="## Head\n\nbody")
+        store.approve_draft(conn, did, approved_by="reviewer")
+        spy = SpyGuru()
+        out = store.publish_draft(conn, did, guru_client=spy,
+                                  collection_id="coll-1")
+        assert out["ok"]
+        assert spy.sent == store.publish_body(store.get_draft(conn, did))
+        assert '<span style="color:#0055CC">Head</span>' in spy.sent

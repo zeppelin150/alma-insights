@@ -233,12 +233,21 @@ class DrilldownPanel(QFrame):
         """)
         self._detail_stack.addWidget(self._thread_browser)
 
-        # Index 1: Widget host (for embedded panels like AI suggestions, term manager)
+        # Index 1: Widget host (for embedded panels like AI suggestions, term manager).
+        # Wrapped in a scroll area (2026-08-09, WS-D): the Asana-parity task
+        # detail panel is taller than the 440px overlay and widget mode had no
+        # scrolling — configuration copied from the list-mode scroll above.
+        self._widget_scroll = QScrollArea()
+        self._widget_scroll.setWidgetResizable(True)
+        self._widget_scroll.setFrameShape(QFrame.NoFrame)
+        self._widget_scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+
         self._widget_host = QWidget()
         self._widget_host_layout = QVBoxLayout(self._widget_host)
         self._widget_host_layout.setContentsMargins(8, 4, 8, 4)
         self._widget_host_layout.setSpacing(0)
-        self._detail_stack.addWidget(self._widget_host)
+        self._widget_scroll.setWidget(self._widget_host)
+        self._detail_stack.addWidget(self._widget_scroll)
 
         thread_layout.addWidget(self._detail_stack, 1)
 
