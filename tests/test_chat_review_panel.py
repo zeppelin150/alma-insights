@@ -1628,3 +1628,152 @@ def test_edit_in_workbench_is_navigation_only(controller, empty_db):
     out = controller.edit_in_workbench("41")
     assert out["ok"] is True and seen == [41]
     assert controller.edit_in_workbench("nope")["error"] == "draft_id_required"
+
+# ── (i) the Guru-look preview lane (WS-D-WEB M4) ─────────────────────
+#
+# pending_drafts additionally carries a DISPLAY-ONLY rendering of the same
+# bytes: ``preview_srcdoc`` = sanitize_html_preview(publish_body) — fit only
+# for a sandbox="" iframe — plus ``preview_notes`` naming every way the
+# preview differs from the bytes. Locked here: the preview is derived and
+# subordinate (the bytes panel and the fingerprint arithmetic are untouched),
+# hostile carriers never survive into it, Guru native-block markup DOES
+# survive into it, and a preview failure can neither blank the panel nor go
+# unlabelled.
+
+
+def test_preview_strips_the_hostile_carriers_the_bytes_keep(
+        controller, empty_db, spy_guru):
+    conn = empty_db.conn
+    _import_and_request_push(conn)
+    item = controller.pending_drafts()[0]
+    # the bytes keep the payload (that is the point of the bytes panel) …
+    assert "<script>" in item["publish_body"]
+    assert "onerror" in item["publish_body"]
+    # … the preview does not, and the divergence is NAMED, not silent
+    assert "<script" not in item["preview_srcdoc"]
+    assert "onerror" not in item["preview_srcdoc"]
+    assert "evil.example/steal" not in item["preview_srcdoc"]
+    assert item["preview_notes"], "a lossy preview must carry notes"
+    # visible prose still renders
+    assert "Refunds are issued within 30 days." in item["preview_srcdoc"]
+
+
+def test_preview_keeps_guru_native_block_markup(controller, empty_db):
+    """The reason the preview uses the PREVIEW profile at all: section/details,
+    class= and data-ghq-* must survive or the popup cannot look like Guru.
+    Authored through the real directive path (the test_guru_block_directives
+    shape), so this locks the whole chain markdown → expand_blocks → preview."""
+    conn = empty_db.conn
+    did = store.save_card_draft(
+        conn, title="Blocks",
+        content="> [!WARNING]\n> Rollout is June 24.\n\n"
+                "::: details Extra\n\nhidden body\n\n:::\n")
+    _push_guru_draft_impl(conn, did)
+    item = controller.pending_drafts()[0]
+    pv = item["preview_srcdoc"]
+    assert "ghq-card-content__callout" in pv
+    assert "data-ghq-" in pv
+    assert "<details" in pv and "<summary" in pv
+    assert "background-color" in pv          # the inline callout tint survives
+    assert item["preview_notes"] == []       # pure block markup: faithful
+
+
+def test_preview_failure_is_labelled_and_takes_nothing_down(
+        controller, empty_db, spy_guru, monkeypatch):
+    conn = empty_db.conn
+    _import_and_request_push(conn)
+    import src.data.html_sanitize as hs
+
+    def boom(*a, **k):
+        raise RuntimeError("sanitizer exploded")
+
+    monkeypatch.setattr(hs, "sanitize_html_preview", boom)
+    items = controller.pending_drafts()
+    assert len(items) == 1                    # the panel is not blanked
+    item = items[0]
+    assert item["preview_srcdoc"] == ""
+    assert any("preview_failed" in n for n in item["preview_notes"])
+    # the approval surface proper is intact
+    assert item["publish_body_available"] is True
+    assert item["publish_body"]
+
+
+def test_a_sanitizer_that_cannot_even_import_does_not_blank_the_panel(
+        controller, empty_db, spy_guru, monkeypatch):
+    """Review finding (wf_2c7aac54, live-reproduced): with the import at the
+    method top, an import-time failure of html_sanitize hit the outer
+    ``return []`` and the panel showed NOTHING awaiting approval — pending
+    pushes hidden behind a decorative preview. The import now lives inside
+    the per-draft guard, so the same failure degrades to preview_failed."""
+    import sys
+    conn = empty_db.conn
+    _import_and_request_push(conn)
+    monkeypatch.delitem(sys.modules, "src.data.html_sanitize", raising=False)
+
+    class _Blocker:
+        def find_spec(self, name, path=None, target=None):
+            if name == "src.data.html_sanitize":
+                raise ImportError("html_sanitize import blocked (test)")
+            return None
+
+    blocker = _Blocker()
+    sys.meta_path.insert(0, blocker)
+    try:
+        items = controller.pending_drafts()
+    finally:
+        sys.meta_path.remove(blocker)
+    assert len(items) == 1                     # the panel is NOT blanked
+    item = items[0]
+    assert item["preview_srcdoc"] == ""
+    assert any("preview_failed" in n for n in item["preview_notes"])
+    assert item["publish_body_available"] is True
+    assert item["publish_body"]
+
+
+def test_preview_is_not_part_of_the_fingerprint(controller, empty_db, spy_guru):
+    """The preview is derived display data: rendering it must not perturb the
+    binding, and a draft is approvable with or without it."""
+    conn = empty_db.conn
+    did = _import_and_request_push(conn)
+    item = controller.pending_drafts()[0]
+    assert item["review_state"] == "bound"
+    draft = store.get_draft(conn, did)
+    # the fingerprint arithmetic sees title/target/bytes — not the preview
+    fp = draft_fingerprint(draft)
+    assert fp == draft_fingerprint(dict(draft, preview_srcdoc="X",
+                                        preview_notes=["Y"]))
+    assert controller.approve_draft(did)["ok"] is True
+
+
+def test_unreadable_body_means_empty_preview(controller, empty_db,
+                                             spy_guru, monkeypatch):
+    conn = empty_db.conn
+    _import_and_request_push(conn)
+    monkeypatch.setattr(store, "publish_body",
+                        lambda d, **k: (_ for _ in ()).throw(RuntimeError("x")))
+    item = controller.pending_drafts()[0]
+    assert item["publish_body_available"] is False
+    assert item["preview_srcdoc"] == ""
+    assert item["preview_notes"] == []
+
+
+def test_react_popup_never_reads_the_publish_body():
+    """Structural: the popup component frames preview_srcdoc only. The
+    ChatApp.jsx no-iframe lock above stays intact because the frame lives in
+    its own module — locked separately here."""
+    import re
+    jsx = (Path(__file__).resolve().parents[1] / "web" / "src" / "chat"
+           / "GuruCardPreview.jsx").read_text(encoding="utf-8")
+    # comments may (and do) NAME publish_body to state this rule; the CODE
+    # may not touch it
+    code = re.sub(r"/\*.*?\*/", "", jsx, flags=re.S)
+    code = re.sub(r"^\s*//.*$", "", code, flags=re.M)
+    assert "preview_srcdoc" in code
+    assert "publish_body" not in code
+    assert 'sandbox=""' in code
+    assert "allow-scripts" not in code
+    assert "dangerouslySetInnerHTML" not in code and "innerHTML" not in code
+    # and the host file still composes without framing
+    host = _chat_jsx()
+    assert "PreviewCardButton" in host
+    assert "<iframe" not in host

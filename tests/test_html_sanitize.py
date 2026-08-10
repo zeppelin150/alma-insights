@@ -236,6 +236,55 @@ def test_parser_failure_fails_closed(monkeypatch):
     assert "<b>" not in out and "&lt;b&gt;" in out
 
 
+# ── hex-alpha colours in the PREVIEW profile (gpv popup, 2026-08-10) ──
+#
+# Guru's own callout tints ship as verbatim 8-digit #RRGGBBAA
+# (guru_blocks.CALLOUT_VARIANTS). The 3/6-only _HEX_RE refused them, so the
+# preview gate dropped every callout background and injected the not-honoured
+# badge INSIDE the card body — the Guru-look popup rendered wrong on the most
+# common native block. The alpha rule mirrors the rgba() branch.
+
+def test_preview_keeps_guru_callout_tint_verbatim_with_no_notes():
+    from src.data.guru_blocks import callout_html
+    from src.data.html_sanitize import sanitize_html_preview
+    pv, notes = sanitize_html_preview(
+        callout_html("<p>heads up</p>", "warning"), report=True)
+    assert "background-color: #ffc20042" in pv
+    assert "alma-unhidden" not in pv          # no badge inside the callout
+    assert notes == []
+
+
+def test_every_guru_callout_variant_survives_the_preview():
+    from src.data.guru_blocks import CALLOUT_VARIANTS, callout_html
+    from src.data.html_sanitize import sanitize_html_preview
+    for variant in CALLOUT_VARIANTS:
+        pv, notes = sanitize_html_preview(
+            callout_html("<p>x</p>", variant), report=True)
+        assert notes == [], (variant, notes)
+        assert "background-color" in pv, variant
+
+
+def test_css_color_parses_hex_alpha_forms():
+    from src.data.html_sanitize import _css_color
+    assert _css_color("#ffc20042") == (255, 194, 0)   # alpha 0.26: base colour
+    assert _css_color("#f7412d26") == "transparent"   # alpha 0.149 < 0.15
+    assert _css_color("#fc08") == (255, 204, 0)       # 4-digit, alpha 0.53
+    assert _css_color("#fc02") == "transparent"       # 4-digit, alpha 0.13
+    assert _css_color("#abc") == (170, 187, 204)      # 3-digit unchanged
+
+
+def test_near_invisible_hex_alpha_text_colour_is_still_refused():
+    """color:transparent stays refused when spelled as 8-digit hex."""
+    from src.data.html_sanitize import sanitize_html_preview
+    pv, notes = sanitize_html_preview(
+        '<p style="color:#00000010">secret</p>', report=True)
+    # the declaration is refused (it may be NAMED in the badge — that is the
+    # point), so no kept style attribute carries it
+    assert 'style="color:#00000010"' not in pv.replace(": ", ":")
+    assert any("color" in n for n in notes)
+    assert "secret" in pv                      # the text itself still paints
+
+
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-q"]))

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Markdown } from "../lib/markdown.jsx";
 import { useBridge } from "../lib/bridge.js";
+import { PreviewCardButton } from "./GuruCardPreview.jsx";
 
 function ToolRow({ t }) {
   return (
@@ -497,6 +498,11 @@ export function DraftCard({ d, onApprove, onReject, onReReview, busy,
         available={d.publish_body_available}
         flagged={!!d.notice} />
       <div className="dactions">
+        {/* WS-D-WEB M4: the Guru-look rendering of the SAME bytes, read-only.
+            The frame lives in GuruCardPreview.jsx and reads preview_srcdoc
+            (Python-sanitized) — never publish_body; approval stays on the
+            bytes panel above. */}
+        <PreviewCardButton d={d} />
         {/* C1: hand edits beat typed instructions for small changes. Pure
             navigation — no authority, so it needs no review binding. */}
         {onEditInWorkbench ? (

@@ -1975,6 +1975,32 @@ class AgentChatController(QObject):
                     body = None
                 item["publish_body"] = body or ""
                 item["publish_body_available"] = body is not None
+                # Display-only Guru-look rendering of the SAME bytes, for the
+                # gpv popup. PREVIEW sanitizer profile → fit only for a
+                # sandbox="" iframe; publish_body stays the approval object and
+                # never reaches an HTML sink in JS. ``notes`` names every way
+                # the preview differs from the bytes — non-empty means the
+                # popup must tell the operator to read the exact bytes. A
+                # preview failure must never take the review lane down.
+                try:
+                    if body:
+                        # Imported HERE, inside the isolated guard: at the
+                        # method top an import-time failure of html_sanitize
+                        # would hit the outer `return []` and blank the whole
+                        # panel — hiding pending pushes behind a decorative
+                        # preview (review finding, wf_2c7aac54).
+                        from src.data.html_sanitize import sanitize_html_preview
+                        preview, notes = sanitize_html_preview(body, report=True)
+                    else:
+                        preview, notes = "", []
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("draft %s: preview unavailable: %s",
+                                   d.get("id"), exc)
+                    preview = ""
+                    notes = ["preview_failed: sanitizer error — read the "
+                             "exact bytes panel"]
+                item["preview_srcdoc"] = preview
+                item["preview_notes"] = list(notes)
                 # BIND THE APPROVAL TO THIS WHOLE ACT, before anything that can
                 # fail. Bound to what was rendered — title, target card,
                 # collection/folder and the exact publish body — not to the

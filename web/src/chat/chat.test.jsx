@@ -17,6 +17,7 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { Bubble, Composer, DraftCard, ResolveNotice, ReviewPanel, unbadgeDispatched } from "./ChatApp.jsx";
+import { GuruCardPreview, PreviewCardButton, guruCardDoc } from "./GuruCardPreview.jsx";
 
 const noop = () => {};
 
@@ -258,5 +259,98 @@ describe("DraftCard — Edit in Workbench + Send to Guru as draft (WS-B/C1)", ()
     // stale review: draft push disabled, edit (navigation-only) still live
     expect(moved).toMatch(/dguru-draft[^>]*disabled/);
     expect(moved).not.toMatch(/dedit[^>]*disabled/);
+  });
+});
+
+// ── Guru-card mirror preview (WS-D-WEB M4) ─────────────────────────────
+// The popup frames ONLY d.preview_srcdoc (Python-sanitized, PREVIEW profile);
+// d.publish_body stays escaped-text-only. attr helper mirrors task.test.jsx.
+
+function unescapeAttr(s) {
+  return s.replace(/&quot;/g, '"').replace(/&#x27;/g, "'")
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+}
+
+const PREVIEW_HTML = '<h1>Refund policy</h1>'
+  + '<section class="ghq-card-content__callout"'
+  + ' data-ghq-card-content-type="CALLOUT"'
+  + ' style="background-color:#00bcd62b">note</section>';
+
+function previewCard(extra) {
+  return card({ preview_srcdoc: PREVIEW_HTML, preview_notes: [],
+                publish_body: HOSTILE, ...extra });
+}
+
+function renderPreview(extra) {
+  return renderToStaticMarkup(
+    <GuruCardPreview d={previewCard(extra)} onClose={noop} />);
+}
+
+describe("GuruCardPreview — the Guru-look popup", () => {
+  it("renders a fully sandboxed frame — no scripts, ever", () => {
+    const out = renderPreview();
+    expect(out).toContain('sandbox=""');
+    expect(out).not.toContain("allow-scripts");
+  });
+
+  it("frames ONLY the Python-sanitized preview, never publish_body", () => {
+    const out = renderPreview();
+    const m = out.match(/srcdoc="([^"]*)"/i);
+    expect(m).toBeTruthy();
+    const doc = unescapeAttr(m[1]);
+    expect(doc).toContain("ghq-card-content__callout");   // preview content
+    expect(doc).not.toContain("evil.example");            // publish_body content
+    expect(doc).not.toContain("document.cookie");
+  });
+
+  it("ships the Guru block styling inside the frame document", () => {
+    const doc = guruCardDoc("<p>x</p>");
+    expect(doc).toContain(".ghq-card-content__collapsible");
+    expect(doc).toContain(".ghq-card-content__guru-card");
+    expect(doc).toContain("<p>x</p>");
+  });
+
+  it("shows the unverified state — a pending draft is never Verified", () => {
+    const out = renderPreview();
+    expect(out).toContain("Needs verification");
+  });
+
+  it("no preview bytes → no frame, and points at the bytes panel", () => {
+    const out = renderPreview({ preview_srcdoc: "" });
+    expect(out).not.toContain("<iframe");
+    expect(out).toContain("No preview is available");
+  });
+
+  it("divergence notes surface as a warning with the count", () => {
+    const out = renderPreview(
+      { preview_notes: ["REMOVED: script", "REMOVED: handler"] });
+    expect(out).toContain("differs from the exact bytes in 2 ways");
+    expect(out).toContain("gpv-note warn");
+  });
+
+  it("a faithful preview says so without crying wolf", () => {
+    const out = renderPreview({ preview_notes: [] });
+    expect(out).toContain("same bytes you approve");
+    expect(out).not.toContain("gpv-note warn");
+  });
+});
+
+describe("DraftCard — preview entry point", () => {
+  it("offers the button and the closed card stays frame-free", () => {
+    const out = render({ preview_srcdoc: PREVIEW_HTML, publish_body: HOSTILE });
+    expect(out).toContain("Preview card");
+    expect(out).not.toContain("<iframe");   // popup opens only on click
+  });
+
+  it("disables the button when no preview is available", () => {
+    const out = render({ preview_srcdoc: "" });
+    expect(out).toMatch(/dpreview[^>]*disabled/);
+  });
+
+  it("PreviewCardButton alone never renders a frame while closed", () => {
+    const out = renderToStaticMarkup(
+      <PreviewCardButton d={previewCard({})} />);
+    expect(out).toContain("dpreview");
+    expect(out).not.toContain("<iframe");
   });
 });

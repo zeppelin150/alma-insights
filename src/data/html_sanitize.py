@@ -829,7 +829,8 @@ _LEN_RE = re.compile(
     re.IGNORECASE)
 _LEN_TO_PX = {"": 1.0, "px": 1.0, "pt": 4.0 / 3.0, "em": 16.0, "rem": 16.0,
               "ex": 8.0, "ch": 8.0}
-_HEX_RE = re.compile(r"^#([0-9a-f]{3}|[0-9a-f]{6})$", re.IGNORECASE)
+_HEX_RE = re.compile(
+    r"^#([0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$", re.IGNORECASE)
 _RGB_RE = re.compile(r"^rgba?\(([^)]*)\)$", re.IGNORECASE)
 _NAMED_RGB = {
     "white": (255, 255, 255), "snow": (255, 250, 250),
@@ -882,9 +883,18 @@ def _css_color(value):
     m = _HEX_RE.match(val)
     if m:
         h = m.group(1)
-        if len(h) == 3:
+        if len(h) in (3, 4):               # CSS Color 4 shorthand forms
             h = "".join(c * 2 for c in h)
-        return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+        rgb = tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+        # 8-digit hex is #RRGGBBAA — the verbatim form Guru's own callout
+        # tints ship (guru_blocks.CALLOUT_VARIANTS), which the old 3/6-only
+        # regex refused, so every callout preview lost its tint and grew a
+        # spurious not-honoured badge. Alpha follows the same rule as the
+        # rgba() branch below: near-invisible → "transparent", else the base
+        # colour stands in for the composite.
+        if len(h) == 8 and int(h[6:8], 16) / 255.0 < _HIDE_MIN_OPACITY:
+            return "transparent"
+        return rgb
     m = _RGB_RE.match(val)
     if m:
         parts = [p.strip() for p in m.group(1).split(",")]
