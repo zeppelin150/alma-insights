@@ -171,6 +171,12 @@ def list_artifacts(conn, *, kind: str | None = None, status: str | None = None,
     return [_row_to_dict(r) for r in conn.execute(sql, params).fetchall()]
 
 
+def artifacts_root() -> Path:
+    """Public accessor for the artifacts root (read-only use, e.g. the
+    documents-tree backfill sweep). Does not create the directory."""
+    return _ARTIFACTS_ROOT
+
+
 def artifact_dir(artifact_id: str) -> Path:
     """The artifact's managed on-disk directory (created on first use).
     Anchored to the project root — NEVER the cwd."""

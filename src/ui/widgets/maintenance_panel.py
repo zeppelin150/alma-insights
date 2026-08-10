@@ -60,6 +60,11 @@ class MaintenancePanel(QWidget):
         lay.addWidget(self._section_label("DATA MANAGEMENT"))
         lay.addSpacing(8)
         lay.addWidget(self._build_reset_card())
+        lay.addSpacing(24)
+
+        lay.addWidget(self._section_label("DOCUMENTS"))
+        lay.addSpacing(8)
+        lay.addWidget(self._build_docs_card())
 
     def _build_memory_card(self) -> QFrame:
         card = self._card()
@@ -176,7 +181,110 @@ class MaintenancePanel(QWidget):
         card_layout.addLayout(title_row)
         return card
 
+    def _build_docs_card(self) -> QFrame:
+        """Managed documents tree — open it, or backfill it from app content."""
+        card = self._card()
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(20, 18, 20, 18)
+        card_layout.setSpacing(10)
+
+        title_row = QHBoxLayout()
+        title_col = QVBoxLayout()
+        title_col.setSpacing(2)
+        title = QLabel("Documents Folder")
+        title.setStyleSheet(f"font-size: 14px; font-weight: 600; color: {ALMA_TEXT_DARK};")
+        desc = QLabel(
+            "One organized home for app files — Downloads, Exports, Zendesk "
+            "Imports, Zendesk Edits, and Worksheets. Backfill re-creates the "
+            "folders and exports existing decks and Zendesk revision drafts "
+            "into them. Safe to run any time."
+        )
+        desc.setStyleSheet(f"font-size: 12px; color: {ALMA_TEXT_LIGHT};")
+        desc.setWordWrap(True)
+        title_col.addWidget(title)
+        title_col.addWidget(desc)
+        title_row.addLayout(title_col, 1)
+
+        open_btn = QPushButton("Open Folder")
+        open_btn.setCursor(Qt.PointingHandCursor)
+        open_btn.setFixedHeight(32)
+        open_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {ALMA_WHITE}; color: {ALMA_TEXT_MID};
+                border: 1px solid {ALMA_BORDER}; border-radius: 8px;
+                padding: 6px 18px; font-size: 12px; font-weight: 600;
+            }}
+            QPushButton:hover {{ border-color: {ALMA_GREEN_MID}; color: {ALMA_GREEN_DARK}; }}
+        """)
+        open_btn.clicked.connect(self._on_open_docs_folder)
+        title_row.addWidget(open_btn)
+
+        self._docs_backfill_btn = QPushButton("Run Backfill")
+        self._docs_backfill_btn.setCursor(Qt.PointingHandCursor)
+        self._docs_backfill_btn.setFixedHeight(32)
+        self._docs_backfill_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {ALMA_GREEN_DARK}; color: {ALMA_WHITE};
+                border: none; border-radius: 8px;
+                padding: 6px 18px; font-size: 12px; font-weight: 600;
+            }}
+            QPushButton:hover {{ background: {ALMA_GREEN_MID}; }}
+        """)
+        self._docs_backfill_btn.clicked.connect(self._on_docs_backfill)
+        title_row.addWidget(self._docs_backfill_btn)
+
+        card_layout.addLayout(title_row)
+
+        self._docs_status = QLabel("")
+        self._docs_status.setStyleSheet(f"font-size: 12px; color: {ALMA_TEXT_MID};")
+        self._docs_status.setWordWrap(True)
+        card_layout.addWidget(self._docs_status)
+        return card
+
     # ── handlers ────────────────────────────────────────────────────
+
+    def _on_open_docs_folder(self):
+        """Open the managed documents root in Explorer/Finder.
+
+        The root can come from the documents.root SETTING, so it is not
+        blindly trusted: docs_root() mkdirs it and we refuse anything that
+        is not a real directory before handing it to the OS — the local-file
+        analogue of the http/https-only openUrl guards elsewhere."""
+        try:
+            from PySide6.QtCore import QUrl
+            from PySide6.QtGui import QDesktopServices
+            from src.data.app_paths import docs_root
+            root = docs_root()
+            if not root.is_dir():
+                self._docs_status.setText(f"Documents folder unavailable: {root}")
+                return
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(root)))
+        except Exception as exc:
+            self._docs_status.setText(f"Could not open folder: {exc}")
+
+    def _on_docs_backfill(self):
+        """Synchronous backfill (mkdir + small file exports — instant)."""
+        self._docs_backfill_btn.setText("Backfilling...")
+        self._docs_backfill_btn.setEnabled(False)
+        from PySide6.QtWidgets import QApplication
+        QApplication.processEvents()
+        try:
+            from src.data.docs_backfill import run_backfill
+            report = run_backfill()
+            created = sum(1 for t in report["tree"] if t["created"])
+            bits = [
+                f"{created} folders created" if created else "folders present",
+                f"{report['exports_copied']} exports copied",
+                f"{report['zendesk_edits_written']} Zendesk drafts exported",
+            ]
+            if report["errors"]:
+                bits.append(f"{len(report['errors'])} errors — first: {report['errors'][0]}")
+            self._docs_status.setText("Backfill done: " + " · ".join(bits))
+        except Exception as exc:
+            self._docs_status.setText(f"Backfill failed: {exc}")
+        finally:
+            self._docs_backfill_btn.setText("Run Backfill")
+            self._docs_backfill_btn.setEnabled(True)
 
     def _on_memory_snapshot(self):
         """Take a memory snapshot and display the report."""

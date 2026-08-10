@@ -601,8 +601,9 @@ class ABComparePage(QWidget):
         if not text:
             return
         from PySide6.QtWidgets import QFileDialog
+        from src.data.app_paths import start_dir
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save Report", "", "Markdown (*.md);;Text (*.txt)"
+            self, "Save Report", start_dir("downloads"), "Markdown (*.md);;Text (*.txt)"
         )
         if path:
             with open(path, "w", encoding="utf-8") as f:

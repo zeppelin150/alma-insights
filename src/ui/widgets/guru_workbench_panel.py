@@ -677,8 +677,9 @@ class GuruWorkbenchPanel(QWidget):
         md = self._card_viewer.get_card_markdown()
         if not md:
             return
+        from src.data.app_paths import start_dir
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save Card Draft", "", "Markdown (*.md);;Text (*.txt)"
+            self, "Save Card Draft", start_dir("downloads"), "Markdown (*.md);;Text (*.txt)"
         )
         if path:
             with open(path, "w", encoding="utf-8") as f:
@@ -689,8 +690,9 @@ class GuruWorkbenchPanel(QWidget):
     def _export_save_html(self):
         if not self._current_card:
             return
+        from src.data.app_paths import start_dir
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save Card Draft as HTML", "", "HTML (*.html)"
+            self, "Save Card Draft as HTML", start_dir("downloads"), "HTML (*.html)"
         )
         if path:
             html = guru_card_to_html(self._current_card, self._current_redlines)

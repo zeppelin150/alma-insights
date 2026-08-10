@@ -1427,8 +1427,9 @@ class SmartReportingPage(QWidget):
         md = self._report_viewer.get_markdown()
         if not md:
             return
+        from src.data.app_paths import start_dir
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save Report", "", "Markdown (*.md);;Text (*.txt)"
+            self, "Save Report", start_dir("downloads"), "Markdown (*.md);;Text (*.txt)"
         )
         if path:
             with open(path, "w", encoding="utf-8") as f:
@@ -1441,8 +1442,9 @@ class SmartReportingPage(QWidget):
         md = self._report_viewer.get_markdown()
         if not md:
             return
+        from src.data.app_paths import start_dir
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save Report as HTML", "", "HTML (*.html)"
+            self, "Save Report as HTML", start_dir("downloads"), "HTML (*.html)"
         )
         if path:
             from src.ui.widgets.markdown_viewer import md_to_html

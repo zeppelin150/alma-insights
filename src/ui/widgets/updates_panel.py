@@ -346,8 +346,10 @@ class UpdatesPanel(QWidget):
             return
 
         suggested = f"alma-crash-reports-{datetime.now():%Y%m%d-%H%M%S}.zip"
+        from src.data.app_paths import start_dir
         path, _ = QFileDialog.getSaveFileName(
-            self, "Export crash reports", suggested, "Zip archive (*.zip)"
+            self, "Export crash reports", start_dir("downloads", suggested),
+            "Zip archive (*.zip)"
         )
         if not path:
             return
