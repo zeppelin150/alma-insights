@@ -38,6 +38,10 @@ panel, because Asana itself has them:
 - **Subtask names open the subtask** — subtasks are tasks. One that has its
   own row here opens in this same panel; one that hasn't been synced as its
   own task opens in Asana in your browser.
+- **A subtask shows its parent as a breadcrumb** — the parent task's name
+  sits above the title, exactly where Asana puts it, and clicking it goes
+  back up. A parent tracked here reopens in this same panel; one that isn't
+  opens in Asana in your browser.
 - **The description is editable.** *Edit* switches to a plain-text editor
   (Markdown — bold, lists and links survive the round trip), and *Save*
   pushes it to Asana as rich text. This write is conflict-protected and

@@ -87,6 +87,7 @@ export function buildDemoTask() {
         projects: [{ board: "CX Requests", section: "Complete" }],
         freshness: "Updated 5m ago",
         permalink: "https://app.asana.com/0/1215565058346588/1217331081535747",
+        parent: null,
       },
       fields: [
         { gid: "f1", name: "Request Type", kind: "enum", value: "Guru: Update",

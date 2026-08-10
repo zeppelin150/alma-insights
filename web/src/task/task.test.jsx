@@ -157,8 +157,8 @@ describe("demo fixture contract", () => {
   it("header carries exactly the contract keys", () => {
     expect(keysOf(FX.task_data.header)).toEqual([
       "assignee", "collaborators", "completed", "completed_on", "due_display",
-      "due_iso", "freshness", "overdue", "permalink", "projects", "status_pill",
-      "title",
+      "due_iso", "freshness", "overdue", "parent", "permalink", "projects",
+      "status_pill", "title",
     ]);
   });
 
@@ -317,6 +317,47 @@ describe("Header", () => {
     const out = renderHeader();
     expect(out).toContain("Updated 5m ago");
     expect(out).toContain("Open in Asana ›");
+  });
+
+  // ── parent breadcrumb (subtasks open as tasks need a way back) ──────
+  it("a subtask renders the parent breadcrumb; a top-level task does not", () => {
+    const out = renderHeader({ parent: { gid: "800", title: "Parent card" } });
+    expect(out).toContain("tk-parent-crumb");
+    expect(out).toContain("‹ Parent card");
+    expect(renderHeader()).not.toContain("tk-parent-crumb");
+  });
+
+  it("an untracked parent (no local title) still renders a usable crumb", () => {
+    const out = renderHeader({ parent: { gid: "800", title: "" } });
+    expect(out).toContain("Parent task");
+  });
+
+  it("a hostile parent title renders as ESCAPED TEXT, never markup", () => {
+    const out = renderHeader({ parent: { gid: "800", title: HOSTILE } });
+    expect(out).toContain("&lt;script&gt;");
+    expect(out).not.toContain("<script>steal");
+  });
+
+  it("breadcrumb click relays openParent", () => {
+    const asked = [];
+    const tree = Header({
+      header: { ...VM.header, parent: { gid: "800", title: "Parent card" } },
+      capabilities: CAPS_ON, busy: false,
+      onToggleComplete: noop, onRefresh: noop, onOpenUrl: noop, onSetDue: noop,
+      onOpenParent: () => asked.push(true),
+    });
+    const btns = collectElements(tree, (n) =>
+      n.props && String(n.props.className || "").includes("tk-parent-crumb"));
+    btns[0].props.onClick();
+    expect(asked).toEqual([true]);
+  });
+
+  it("normalizeData keeps a parent with a gid and drops one without", () => {
+    expect(normalizeData({ header: { parent: { gid: "800", title: "P" } } })
+      .header.parent).toEqual({ gid: "800", title: "P" });
+    expect(normalizeData({ header: { parent: { title: "no gid" } } })
+      .header.parent).toBeNull();
+    expect(normalizeData({}).header.parent).toBeNull();
   });
 
   it("renders a status pill when present", () => {

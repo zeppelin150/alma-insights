@@ -60,13 +60,15 @@ class TaskWebController(QObject):
     _att_done = Signal(object)     # worker→UI hop for attachment resolution
 
     def __init__(self, *, write_fn=None, refresh_fn=None, open_url_fn=None,
-                 open_subtask_fn=None, client_factory=None, now_fn=None,
-                 parent=None):
+                 open_subtask_fn=None, open_parent_fn=None,
+                 client_factory=None, now_fn=None, parent=None):
         super().__init__(parent)
         self._write_fn = write_fn
         self._refresh_fn = refresh_fn
         self._open_url_fn = open_url_fn
         self._open_subtask_fn = open_subtask_fn
+        self._open_parent_fn = open_parent_fn
+        self._parent_gid = ""
         self._client_factory = client_factory
         self._now_fn = now_fn
         self._task_id = ""
@@ -103,6 +105,7 @@ class TaskWebController(QObject):
         self._links = task_vm.link_registry(vm)
         self._att_gids = {a["gid"] for a in vm["attachments"] if a["gid"]}
         self._sub_gids = {s["gid"] for s in vm["subtasks"] if s["gid"]}
+        self._parent_gid = (vm["header"].get("parent") or {}).get("gid") or ""
         self._inflight = False
         self._emit(self.task_data, vm)
 
@@ -186,6 +189,21 @@ class TaskWebController(QObject):
             return
         try:
             self._open_subtask_fn(self._task_id, gid)
+        except Exception:  # noqa: BLE001 — a broken opener opens nothing
+            pass
+
+    def js_open_parent(self, task_id):
+        """Parent breadcrumb clicked — the reverse of js_open_subtask. Only
+        the parent gid the last-pushed viewmodel actually served navigates
+        (a top-level task serves none, so the slot is inert there); the host
+        resolves it — a tracked parent reopens in this panel, an untracked
+        one opens in Asana itself. Navigation only — no write."""
+        if not self._is_current(task_id) or not self._parent_gid:
+            return
+        if self._open_parent_fn is None:
+            return
+        try:
+            self._open_parent_fn(self._task_id, self._parent_gid)
         except Exception:  # noqa: BLE001 — a broken opener opens nothing
             pass
 

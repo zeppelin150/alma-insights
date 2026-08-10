@@ -102,6 +102,21 @@
   line-height: 1.25;
   overflow-wrap: anywhere;
 }
+/* Parent breadcrumb — subtasks open as tasks; this is the way back up. */
+.tk-parent-crumb {
+  display: block;
+  margin: 8px 0 0;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--tk-text-2);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+.tk-parent-crumb:hover { color: var(--tk-text); text-decoration: underline; }
 
 /* ---- avatars ---- */
 .tk-avatar {

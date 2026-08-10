@@ -99,6 +99,7 @@ class TasksPage(QWidget):
     """Filterable task list; rows expand to show subtasks + scratch pad."""
 
     scope_changed = Signal(str)   # "mine" | "all" — the operator task filter (M2)
+    open_workbench = Signal()     # expanded row's "Open in Workbench ›" button
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -352,6 +353,7 @@ class TasksPage(QWidget):
             f"QPushButton{{background:{ALMA_BG_ELEVATED}; color:{ALMA_GREEN_DARK}; border:1px solid {ALMA_BORDER}; "
             f"border-radius:7px; padding:7px 14px; font-size:12px; font-weight:600;}}"
         )
+        openw.clicked.connect(self.open_workbench.emit)
         col = QVBoxLayout()
         col.addStretch(1)
         col.addWidget(openw)

@@ -1980,3 +1980,53 @@ class TestTaskPanelMirror:
         assert story_kind({"subtype": "comment_added", "author": ""}) == "automation"
         assert story_kind({"subtype": "marked_complete", "author": "Dana"}) == "system"
         assert story_kind({"author": "Dana"}) == "comment", "pre-058 rows stay comments"
+
+
+class TestTaskPanelParentBreadcrumb:
+    """task-panel-mirror.md: "A subtask shows its parent as a breadcrumb …
+    clicking it goes back up. A parent tracked here reopens in this same
+    panel; one that isn't opens in Asana in your browser"."""
+
+    def test_the_vm_serves_the_parent_and_the_slot_navigates_it(self):
+        from PySide6.QtCore import QCoreApplication
+        QCoreApplication.instance() or QCoreApplication([])
+        from src.services import task_vm
+        from src.services.task_web import TaskWebController
+
+        sub = {"task_id": "t1", "source": "asana", "source_ref": "9",
+               "title": "Child", "is_subtask": True,
+               "parent_task_ref": "800", "parent_title": "Parent card"}
+        vm = task_vm.build_task_vm(sub)
+        assert vm["header"]["parent"] == {"gid": "800", "title": "Parent card"}
+
+        opened = []
+        ctrl = TaskWebController(
+            open_parent_fn=lambda tid, gid: opened.append((tid, gid)))
+        ctrl.show_task(dict(sub))
+        ctrl.js_open_parent("t1")
+        assert opened == [("t1", "800")]
+
+    def test_an_untracked_parent_falls_back_to_the_asana_url(self):
+        """The article's second sentence, on the page host itself."""
+        from types import SimpleNamespace
+
+        from src.ui.pages.enablement.page import EnablementPage
+
+        urls = []
+        stub = SimpleNamespace(_all_tasks=[], _show_task_detail=lambda t: None,
+                               _open_source_url=lambda u: urls.append(u))
+        EnablementPage._open_parent_from_web(stub, "t1", "800")
+        assert urls == ["https://app.asana.com/0/0/800/f"]
+
+    def test_a_tracked_parent_reopens_in_the_panel(self):
+        from types import SimpleNamespace
+
+        from src.ui.pages.enablement.page import EnablementPage
+
+        shown, urls = [], []
+        parent_row = {"task_id": "t9", "source_ref": "800", "title": "Parent"}
+        stub = SimpleNamespace(_all_tasks=[parent_row],
+                               _show_task_detail=lambda t: shown.append(t),
+                               _open_source_url=lambda u: urls.append(u))
+        EnablementPage._open_parent_from_web(stub, "t1", "800")
+        assert shown == [parent_row] and urls == []

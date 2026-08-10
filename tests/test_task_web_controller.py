@@ -118,14 +118,31 @@ def test_top_level_keys_match_js_contract():
 def test_header_keys_match_js_contract():
     assert sorted(_vm()["header"]) == [
         "assignee", "collaborators", "completed", "completed_on",
-        "due_display", "due_iso", "freshness", "overdue", "permalink",
-        "projects", "status_pill", "title",
+        "due_display", "due_iso", "freshness", "overdue", "parent",
+        "permalink", "projects", "status_pill", "title",
     ]
 
 
 def test_capabilities_keys_match_js_contract():
     assert sorted(_vm()["capabilities"]) == [
         "comment", "complete", "description", "due", "refresh", "subtask"]
+
+
+# ── parent breadcrumb (subtasks-open-as-tasks needs a way BACK) ──────────
+
+def test_a_subtask_vm_carries_its_parent_breadcrumb():
+    """A promoted subtask (mig 056) opened as a task must expose its parent
+    so the panel can render the breadcrumb — reported 2026-08-10: opening a
+    subtask was a dead end (the drilldown back button is hidden in web
+    mode)."""
+    task = dict(TASK, is_subtask=True, parent_task_ref="800",
+                parent_title="Parent card")
+    vm = _vm(task)
+    assert vm["header"]["parent"] == {"gid": "800", "title": "Parent card"}
+
+
+def test_a_top_level_task_has_no_parent_breadcrumb():
+    assert _vm()["header"]["parent"] is None
 
 
 def test_description_markdown_round_trip_for_the_editor():
@@ -372,6 +389,7 @@ def _page_stub():
         _run_task_refresh=lambda *a: None,
         _open_source_url=lambda u: None,
         _open_subtask_from_web=lambda *a: None,
+        _open_parent_from_web=lambda *a: None,
         _set_status=lambda s: None,
         task_action_done=SimpleNamespace(connect=lambda fn: None),
     )

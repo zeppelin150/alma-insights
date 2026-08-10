@@ -124,6 +124,9 @@ export function normalizeData(raw) {
       projects: arr(h.projects).map(project).filter((x) => x.board),
       freshness: str(h.freshness),
       permalink: str(h.permalink),
+      parent: h.parent && str(obj(h.parent).gid)
+        ? { gid: str(obj(h.parent).gid), title: str(obj(h.parent).title) }
+        : null,
     },
     fields: arr(p.fields).map(field).filter((f) => f.name),
     description: {

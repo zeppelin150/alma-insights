@@ -213,6 +213,44 @@ def test_open_subtask_without_fn_or_broken_fn_is_silent():
     ctrl2.js_open_subtask("t1", "sub900")    # must not raise
 
 
+# ── parent breadcrumb navigation (the reverse of subtask-open) ───────────
+
+_SUBTASK_ROW = dict(TASK, is_subtask=True, parent_task_ref="800",
+                    parent_title="Parent card")
+
+
+def test_open_parent_navigates_the_served_parent_only():
+    opened = []
+    ctrl, _c, _s2 = _controller(
+        open_parent_fn=lambda tid, gid: opened.append((tid, gid)))
+    ctrl.show_task(dict(_SUBTASK_ROW))
+    ctrl.js_open_parent("t2")                # stale task id → no-op
+    assert opened == []
+    ctrl.js_open_parent("t1")
+    assert opened == [("t1", "800")]
+
+
+def test_open_parent_on_a_top_level_task_is_silent():
+    """A task that serves no parent gid must make the slot inert — the page
+    script cannot navigate to a parent the viewmodel never showed."""
+    opened = []
+    ctrl, _c, _s2 = _shown(open_parent_fn=lambda *a: opened.append(a))
+    ctrl.js_open_parent("t1")
+    assert opened == []
+
+
+def test_open_parent_without_fn_or_broken_fn_is_silent():
+    ctrl, _c, _s2 = _controller()
+    ctrl.show_task(dict(_SUBTASK_ROW))
+    ctrl.js_open_parent("t1")                # no fn injected
+
+    def boom(*_a):
+        raise RuntimeError("nope")
+    ctrl2, _c2, _s3 = _controller(open_parent_fn=boom)
+    ctrl2.show_task(dict(_SUBTASK_ROW))
+    ctrl2.js_open_parent("t1")               # must not raise
+
+
 def test_update_description_gates_and_caps():
     ctrl, calls, seen = _shown()
     ctrl.js_update_description("forged", "new body")

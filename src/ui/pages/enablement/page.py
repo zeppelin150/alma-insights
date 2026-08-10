@@ -395,6 +395,10 @@ class EnablementPage(QWidget):
         self.tasks.set_scope(self._task_scope)
         self.calendar.set_scope(self._task_scope)
         self.tasks.scope_changed.connect(self._on_scope_changed)
+        # The list-row "Open in Workbench ›" takes the same route as
+        # TaskDetailPanel.open_in_workbench (dead-button fix, 2026-08-10).
+        self.tasks.open_workbench.connect(
+            lambda: self.tabs.setCurrentWidget(self._workbench_tab))
         self.calendar.scope_changed.connect(self._on_scope_changed)
         self.settings.asana_setup_requested.connect(self._on_asana_setup)
         self.settings.identity_detect_email_requested.connect(self._on_detect_operator_email)
@@ -611,6 +615,9 @@ class EnablementPage(QWidget):
                 "board_source_ids": list(links.get(t["task_id"], ())),
                 "is_subtask": t.get("parent_task_ref") is not None,
                 "parent_title": t.get("parent_title") or "",
+                # The parent's gid — list_tasks already selects it; without
+                # this the panel's breadcrumb has nothing to navigate to.
+                "parent_task_ref": t.get("parent_task_ref") or "",
             })
         return rows
 
@@ -3586,7 +3593,8 @@ class EnablementPage(QWidget):
                 write_fn=self._run_task_writeback,
                 refresh_fn=self._run_task_refresh,
                 open_url_fn=self._open_source_url,
-                open_subtask_fn=self._open_subtask_from_web)
+                open_subtask_fn=self._open_subtask_from_web,
+                open_parent_fn=self._open_parent_from_web)
             ctrl.status_text.connect(self._set_status)
             # Writeback OUTCOMES (incl. CAS conflicts) must be visible from
             # inside the panel, not only on the app status line.
@@ -3610,6 +3618,21 @@ class EnablementPage(QWidget):
         in Asana itself (permalink pattern /0/0/<gid>/f, scheme-validated
         by _open_source_url)."""
         gid = (subtask_gid or "").strip()
+        if not gid:
+            return
+        task = next((t for t in getattr(self, "_all_tasks", [])
+                     if t.get("source_ref") == gid), None)
+        if task is not None:
+            self._show_task_detail(task)
+        else:
+            self._open_source_url(f"https://app.asana.com/0/0/{gid}/f")
+
+    def _open_parent_from_web(self, task_id: str, parent_gid: str):
+        """Parent breadcrumb clicked in the web panel — the reverse of
+        _open_subtask_from_web. A locally-tracked parent reopens in the same
+        panel; an untracked one (parent_title was NULL in the join) opens in
+        Asana itself."""
+        gid = (parent_gid or "").strip()
         if not gid:
             return
         task = next((t for t in getattr(self, "_all_tasks", [])

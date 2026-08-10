@@ -22,13 +22,25 @@ function MetaRow({ label, children }) {
 
 export default function Header({
   header, capabilities, busy,
-  onToggleComplete, onRefresh, onOpenUrl, onSetDue,
+  onToggleComplete, onRefresh, onOpenUrl, onSetDue, onOpenParent,
 }) {
   const h = header;
   const stack = h.assignee ? [h.assignee, ...h.collaborators] : h.collaborators;
   return (
     <div className="tk-header">
       {h.completed && <div className="tk-banner">✓ Completed</div>}
+      {/* Subtasks open as tasks — the breadcrumb is the way BACK. Asana
+          renders the parent task's name above the title; so do we. */}
+      {h.parent && (
+        <button
+          type="button"
+          className="tk-parent-crumb"
+          title="Open the parent task"
+          onClick={() => onOpenParent && onOpenParent()}
+        >
+          ‹ {h.parent.title || "Parent task"}
+        </button>
+      )}
       <div className="tk-actions">
         <button
           type="button"

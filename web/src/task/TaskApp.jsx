@@ -129,6 +129,7 @@ export default function TaskApp() {
           if (iso && iso !== vm.header.due_iso) relay("setDue", vm.task_id, iso);
         }}
         onOpenUrl={(url) => call("openUrl", url)}
+        onOpenParent={() => call("openParent", vm.task_id)}
       />
       {status && <div className="tk-status">{status}</div>}
       <FieldGrid

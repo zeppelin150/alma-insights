@@ -316,6 +316,12 @@ def header_vm(task: dict, extras: dict, *, now=None) -> dict:
         "freshness": f"Updated {rel_time(fetched)}" if fetched else "Not synced yet",
         "permalink": _s(task.get("source_url")).strip()
                      or _s(tf.get("permalink_url")).strip(),
+        # Subtasks open as tasks (mig 056) — the breadcrumb back UP. gid is
+        # the PARENT's Asana gid; title may be "" when the parent row isn't
+        # tracked locally (list_tasks' LEFT JOIN found nothing).
+        "parent": ({"gid": _s(task.get("parent_task_ref")).strip(),
+                    "title": _s(task.get("parent_title")).strip()}
+                   if _s(task.get("parent_task_ref")).strip() else None),
     }
 
 

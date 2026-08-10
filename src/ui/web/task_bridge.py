@@ -35,7 +35,7 @@ class TaskBridge(QObject):
                  resolved_signal=None, refresh_fn=None, refresh_task_fn=None,
                  complete_fn=None, due_fn=None, comment_fn=None,
                  subtask_fn=None, subtask_toggle_fn=None, subtask_open_fn=None,
-                 description_fn=None, attachment_fn=None,
+                 parent_open_fn=None, description_fn=None, attachment_fn=None,
                  url_fn=None, parent=None):
         super().__init__(parent)
         self._refresh_fn = refresh_fn
@@ -46,6 +46,7 @@ class TaskBridge(QObject):
         self._subtask_fn = subtask_fn
         self._subtask_toggle_fn = subtask_toggle_fn
         self._subtask_open_fn = subtask_open_fn
+        self._parent_open_fn = parent_open_fn
         self._description_fn = description_fn
         self._attachment_fn = attachment_fn
         self._url_fn = url_fn
@@ -111,6 +112,13 @@ class TaskBridge(QObject):
         """Subtask name clicked → the host opens it as its own task
         (promoted rows in-panel, unsynced rows in Asana). Navigation only."""
         self._call(self._subtask_open_fn, task_id or "", subtask_gid or "")
+
+    @Slot(str)
+    def openParent(self, task_id):
+        """Parent breadcrumb clicked → the host reopens the parent task
+        (the controller validates against the served parent gid).
+        Navigation only."""
+        self._call(self._parent_open_fn, task_id or "")
 
     @Slot(str, str)
     def updateDescription(self, task_id, markdown):
