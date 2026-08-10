@@ -136,6 +136,7 @@ export default function TaskApp() {
         capabilities={vm.capabilities}
         busy={busy}
         onAdd={(text) => relay("addSubtask", vm.task_id, text)}
+        onToggle={(gid, done) => relay("toggleSubtask", vm.task_id, gid, done)}
       />
       <AppsRow
         attachments={vm.attachments}

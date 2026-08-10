@@ -2,9 +2,26 @@ import React from "react";
 
 // Subtask checklist + composer. Promoted subtasks (mig 056) carry the ↳
 // marker. The composer is an uncontrolled form — submit relays the text and
-// resets; creation authority lives entirely Python-side.
+// resets. Check circles on Asana-linked rows (gid present) relay a completion
+// toggle; authority (gid registry + writeback lane) lives entirely Python-side.
 
-export default function Subtasks({ subtasks, capabilities, busy, onAdd }) {
+export function CheckCircle({ sub, canToggle, busy, onToggle }) {
+  const cls = `tk-subcheck${sub.done ? " tk-subcheck--done" : ""}`;
+  if (!canToggle) return <span className={cls}>✓</span>;
+  return (
+    <button
+      type="button"
+      className={`${cls} tk-subcheck--btn`}
+      title={sub.done ? "Mark incomplete" : "Mark complete"}
+      disabled={busy}
+      onClick={() => onToggle(sub.gid, !sub.done)}
+    >
+      ✓
+    </button>
+  );
+}
+
+export default function Subtasks({ subtasks, capabilities, busy, onAdd, onToggle }) {
   const list = Array.isArray(subtasks) ? subtasks : [];
   if (!list.length && !capabilities.subtask) return null;
   return (
@@ -12,7 +29,12 @@ export default function Subtasks({ subtasks, capabilities, busy, onAdd }) {
       <div className="tk-section-label">Subtasks</div>
       {list.map((s, i) => (
         <div key={s.gid || s.name + i} className="tk-subtask-row">
-          <span className={`tk-subcheck${s.done ? " tk-subcheck--done" : ""}`}>✓</span>
+          <CheckCircle
+            sub={s}
+            canToggle={!!(s.gid && capabilities.subtask && onToggle)}
+            busy={busy}
+            onToggle={onToggle}
+          />
           <span className={`tk-subtask-name${s.done ? " tk-subtask-name--done" : ""}`}>
             {s.promoted && <span className="tk-subtask-promoted">↳ </span>}
             {s.name}

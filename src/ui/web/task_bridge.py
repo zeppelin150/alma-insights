@@ -34,8 +34,8 @@ class TaskBridge(QObject):
     def __init__(self, data_signal=None, status_signal=None,
                  resolved_signal=None, refresh_fn=None, refresh_task_fn=None,
                  complete_fn=None, due_fn=None, comment_fn=None,
-                 subtask_fn=None, attachment_fn=None, url_fn=None,
-                 parent=None):
+                 subtask_fn=None, subtask_toggle_fn=None, attachment_fn=None,
+                 url_fn=None, parent=None):
         super().__init__(parent)
         self._refresh_fn = refresh_fn
         self._refresh_task_fn = refresh_task_fn
@@ -43,6 +43,7 @@ class TaskBridge(QObject):
         self._due_fn = due_fn
         self._comment_fn = comment_fn
         self._subtask_fn = subtask_fn
+        self._subtask_toggle_fn = subtask_toggle_fn
         self._attachment_fn = attachment_fn
         self._url_fn = url_fn
         # Re-emit the controller's signals as the bridge's (signal-to-signal).
@@ -94,6 +95,13 @@ class TaskBridge(QObject):
     def addSubtask(self, task_id, text):
         """Subtask composer submitted → the host's subtask lane."""
         self._call(self._subtask_fn, task_id or "", text or "")
+
+    @Slot(str, str, bool)
+    def toggleSubtask(self, task_id, subtask_gid, done):
+        """Subtask check circle clicked → the host's subtask completion
+        lane (gids validated against the last-pushed viewmodel)."""
+        self._call(self._subtask_toggle_fn, task_id or "", subtask_gid or "",
+                   bool(done))
 
     @Slot(str)
     def openAttachment(self, gid):

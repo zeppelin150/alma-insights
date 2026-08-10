@@ -34,6 +34,16 @@ _LANES = {
     "due": "update_due_in_asana",
     "comment": "post_comment_to_asana",
     "subtask": "create_subtask_in_asana",
+    "subtask_toggle": "set_subtask_completed_in_asana",
+}
+
+# Which viewmodel capability authorizes each action.
+_CAP_FOR = {
+    "complete": "complete",
+    "due": "due",
+    "comment": "comment",
+    "subtask": "subtask",
+    "subtask_toggle": "subtask",
 }
 
 
@@ -58,6 +68,7 @@ class TaskWebController(QObject):
         self._vm = None
         self._links: set = set()
         self._att_gids: set = set()
+        self._sub_gids: set = set()
         self._inflight = False
         self._att_threads: list = []   # tests join these
         self._att_done.connect(self._on_att_done)
@@ -84,6 +95,7 @@ class TaskWebController(QObject):
         self._vm = vm
         self._links = task_vm.link_registry(vm)
         self._att_gids = {a["gid"] for a in vm["attachments"] if a["gid"]}
+        self._sub_gids = {s["gid"] for s in vm["subtasks"] if s["gid"]}
         self._inflight = False
         self._emit(self.task_data, vm)
 
@@ -124,6 +136,16 @@ class TaskWebController(QObject):
         if not text:
             return self._resolve("subtask", task_id, False, "text_required")
         self._relay_write("subtask", task_id, text)
+
+    def js_toggle_subtask(self, task_id, subtask_gid, done):
+        """Check circle clicked on a subtask row. The gid must be one the
+        last-pushed viewmodel actually served (forged/stale = silent
+        no-op ack), then the shared write gate relays to the subtask
+        completion lane."""
+        gid = str(subtask_gid or "").strip()
+        if gid not in self._sub_gids:
+            return self._resolve("subtask_toggle", task_id, False, "unknown_subtask")
+        self._relay_write("subtask_toggle", task_id, gid, bool(done))
 
     def js_open_attachment(self, gid):
         """Resolve-on-click, exactly the native panel's lane: stored rows
@@ -167,7 +189,7 @@ class TaskWebController(QObject):
         if not self._is_current(task_id):
             return self._resolve(action, task_id, False, "not_current")
         vm = self._vm or {}
-        if not (vm.get("capabilities") or {}).get(action if action != "due" else "due"):
+        if not (vm.get("capabilities") or {}).get(_CAP_FOR[action]):
             return self._resolve(action, task_id, False, "not_allowed")
         if self._inflight:
             return self._resolve(action, task_id, False, "busy")

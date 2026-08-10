@@ -29,6 +29,12 @@ TASK = {
     "assignee": "Jordan Avery", "due_iso": "2026-09-01",
     "due_date": "2026-09-01",
     "source_url": "https://app.asana.com/0/1/900100",
+    "subtasks": [
+        {"text": "Draft card", "done": False, "gid": "sub900",
+         "assignee": "", "due": ""},
+        {"text": "Local-only step", "done": False, "gid": "",
+         "assignee": "", "due": ""},
+    ],
     "extras": {
         "fetched_at": "2026-08-10T11:55:00+00:00",
         "attachments": [{"gid": "a1", "name": "thread", "host": "slack"}],
@@ -162,6 +168,102 @@ def test_comment_and_subtask_require_text_and_cap_at_6000():
     assert calls["write"] == []
     ctrl.js_post_comment("t1", "x" * 9000)
     assert len(calls["write"][0][2]) == 6000
+
+
+def test_toggle_subtask_relays_served_gids_only():
+    ctrl, calls, seen = _shown()
+    ctrl.js_toggle_subtask("t1", "forged", True)
+    ctrl.js_toggle_subtask("t1", "", True)
+    ctrl.js_toggle_subtask("t1", None, True)
+    assert calls["write"] == []
+    assert seen["resolved"][-1]["error"] == "unknown_subtask"
+    ctrl.js_toggle_subtask("t1", "sub900", True)
+    assert calls["write"] == [
+        ("set_subtask_completed_in_asana", "t1", "sub900", True)]
+    assert seen["resolved"][-1]["ok"] is True
+
+
+def test_toggle_subtask_respects_capability_and_current_id():
+    ctrl, calls, seen = _shown(write_fn=None)
+    ctrl.js_toggle_subtask("t1", "sub900", True)
+    assert seen["resolved"][-1]["error"] == "not_allowed"
+    ctrl2, calls2, seen2 = _shown()
+    ctrl2.js_toggle_subtask("t2", "sub900", True)
+    assert calls2["write"] == []
+    assert seen2["resolved"][-1]["ok"] is False
+
+
+# ── the subtask completion LANE (asana_writeback) ────────────────────────
+
+class _FakeAsana:
+    def __init__(self, fail=False):
+        self.calls = []
+        self.fail = fail
+        self.api_key = "k"
+
+    def update_task(self, gid, **fields):
+        self.calls.append((gid, fields))
+        if self.fail:
+            raise RuntimeError("HTTP 500")
+        return {"gid": gid, "modified_at": "2026-08-10T13:00:00Z"}
+
+
+def _seed_subtask(conn):
+    from src.data import enablement_tasks as et
+    tid = et.create_task(conn, source="asana", kind="request",
+                         title="Parent", source_ref="900100")
+    sid = et.add_subtask(conn, tid, "Draft card")
+    conn.execute(
+        "UPDATE enablement_subtasks SET asana_subtask_gid = 'sub900' "
+        "WHERE subtask_id = ?", (sid,))
+    conn.commit()
+    return tid, sid
+
+
+def test_subtask_lane_flips_local_and_remote(empty_db):
+    from src.data import asana_writeback as awb
+    from src.data import enablement_tasks as et
+    conn = empty_db.conn
+    tid, _sid = _seed_subtask(conn)
+    client = _FakeAsana()
+    res = awb.set_subtask_completed_in_asana(conn, tid, "sub900", True,
+                                            client=client)
+    assert res == {"ok": True, "synced": True, "done": True}
+    assert client.calls == [("sub900", {"completed": True})]
+    subs = et.list_subtasks(conn, tid)
+    assert subs[0]["done"] == 1
+
+
+def test_subtask_lane_reverts_local_flip_on_api_failure(empty_db):
+    from src.data import asana_writeback as awb
+    from src.data import enablement_tasks as et
+    conn = empty_db.conn
+    tid, _sid = _seed_subtask(conn)
+    res = awb.set_subtask_completed_in_asana(conn, tid, "sub900", True,
+                                            client=_FakeAsana(fail=True))
+    assert res["ok"] is False and res["reverted"] is True
+    assert et.list_subtasks(conn, tid)[0]["done"] == 0
+
+
+def test_subtask_lane_unknown_gid_and_missing_gid_refuse(empty_db):
+    from src.data import asana_writeback as awb
+    conn = empty_db.conn
+    tid, _sid = _seed_subtask(conn)
+    assert awb.set_subtask_completed_in_asana(
+        conn, tid, "nope", True, client=_FakeAsana())["error"] == "subtask_not_found"
+    assert awb.set_subtask_completed_in_asana(
+        conn, tid, "", True, client=_FakeAsana())["error"] == "subtask_gid_required"
+
+
+def test_subtask_lane_degrades_local_only_without_client(empty_db, monkeypatch):
+    from src.data import asana_writeback as awb
+    from src.data import enablement_tasks as et
+    conn = empty_db.conn
+    tid, _sid = _seed_subtask(conn)
+    monkeypatch.setattr(awb, "_client", lambda c: None)
+    res = awb.set_subtask_completed_in_asana(conn, tid, "sub900", True)
+    assert res["ok"] is True and res["synced"] is False
+    assert et.list_subtasks(conn, tid)[0]["done"] == 1
 
 
 # ── url + attachment gates ───────────────────────────────────────────────

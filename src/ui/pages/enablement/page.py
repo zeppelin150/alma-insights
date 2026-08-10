@@ -3630,6 +3630,7 @@ class EnablementPage(QWidget):
             out.append({
                 "text": s.get("text", ""),
                 "done": bool(s.get("done")),
+                "gid": (s.get("asana_subtask_gid") or "").strip(),
                 "assignee": ((p["assignee"] if p is not None else "") or "").strip(),
                 "due": (((p["due_date"] if p is not None else "") or "")[:10]),
             })

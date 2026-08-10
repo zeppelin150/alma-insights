@@ -313,7 +313,8 @@ _ASANA_WRITE_IDENTIFIERS = {
     "create_task", "create_subtask", "add_comment", "update_due_date",
     "update_task", "_send",
     "set_completed_in_asana", "update_due_in_asana", "post_comment_to_asana",
-    "create_subtask_in_asana", "asana_writeback",
+    "create_subtask_in_asana", "set_subtask_completed_in_asana",
+    "toggle_subtask", "asana_writeback",
 }
 
 _WEB_TASK_SURFACES = [

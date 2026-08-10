@@ -10,7 +10,7 @@ import TaskApp from "./TaskApp.jsx";
 import Header from "./Header.jsx";
 import FieldGrid from "./FieldGrid.jsx";
 import Description from "./Description.jsx";
-import Subtasks from "./Subtasks.jsx";
+import Subtasks, { CheckCircle } from "./Subtasks.jsx";
 import AppsRow, { hostLabel } from "./AppsRow.jsx";
 import Activity, { TokenText } from "./Activity.jsx";
 
@@ -439,7 +439,8 @@ describe("Description sandbox contract", () => {
 
 function renderSubs(subtasks = VM.subtasks, caps = CAPS_ON) {
   return renderToStaticMarkup(
-    <Subtasks subtasks={subtasks} capabilities={caps} busy={false} onAdd={noop} />);
+    <Subtasks subtasks={subtasks} capabilities={caps} busy={false}
+              onAdd={noop} onToggle={noop} />);
 }
 
 describe("Subtasks", () => {
@@ -491,6 +492,32 @@ describe("Subtasks", () => {
     const out = renderSubs(vm.subtasks);
     expect(out).toContain("&lt;script&gt;");
     expect(out).not.toContain("<script>steal");
+  });
+
+  it("Asana-linked rows get a clickable check circle; unlinked rows do not", () => {
+    const out = renderSubs();
+    // fixture rows all carry gids → buttons with the mirror titles
+    expect(out).toContain("tk-subcheck--btn");
+    expect(out).toContain('title="Mark complete"');
+    expect(out).toContain('title="Mark incomplete"');
+    const unlinked = normalizeData({ subtasks: [{ name: "Local only" }] });
+    const out2 = renderSubs(unlinked.subtasks);
+    expect(out2).not.toContain("tk-subcheck--btn");
+  });
+
+  it("no toggle affordance without the subtask capability", () => {
+    expect(renderSubs(VM.subtasks, CAPS_OFF)).not.toContain("tk-subcheck--btn");
+  });
+
+  it("check click relays the gid with the FLIPPED done state", () => {
+    const asked = [];
+    const onToggle = (gid, done) => asked.push([gid, done]);
+    for (const sub of [{ gid: "s1", done: false }, { gid: "s2", done: true }]) {
+      const tree = CheckCircle({ sub, canToggle: true, busy: false, onToggle });
+      const btns = collectElements(tree, (n) => n.type === "button");
+      btns[0].props.onClick();
+    }
+    expect(asked).toEqual([["s1", true], ["s2", false]]);
   });
 });
 

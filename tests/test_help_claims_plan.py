@@ -1896,14 +1896,16 @@ class TestTaskPanelMirror:
         assert "_task_web_available" in src
         assert "TaskDetailPanel(task)" in src
 
-    def test_the_same_four_writeback_lanes(self):
+    def test_the_writeback_lanes_four_shared_plus_subtask_completion(self):
         """task-panel-mirror.md: "these are the same four background
-        write-back lanes described in *Adding subtasks, comments and due
-        dates*"."""
+        write-back lanes … New with this panel: subtask check circles are
+        clickable" — five lanes total, every one a real asana_writeback
+        function."""
         from src.services.task_web import _LANES
         assert set(_LANES.values()) == {
             "set_completed_in_asana", "update_due_in_asana",
-            "post_comment_to_asana", "create_subtask_in_asana"}
+            "post_comment_to_asana", "create_subtask_in_asana",
+            "set_subtask_completed_in_asana"}
         for lane in _LANES.values():
             assert callable(getattr(awb, lane)), lane
 

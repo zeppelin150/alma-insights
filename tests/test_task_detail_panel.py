@@ -306,6 +306,41 @@ def test_drilldown_persistent_widget_mode_never_reparents(qapp):
     assert native.parent() is None              # native panels still detach
 
 
+def test_drilldown_web_mode_drops_shadow_and_skips_the_slide(qapp):
+    """WS-D-WEB input fix: a QGraphicsEffect on an ancestor of a
+    QWebEngineView is unsupported (QTBUG-47848 class — stale composite,
+    dead input, stalled sibling repaints) and geometry-animating a live
+    view desyncs Chromium's input mapping (QTBUG-68440 class). Web mode
+    must disable the shadow and open/close with NO animation; native
+    modes keep both."""
+    from src.ui.widgets.drilldown_panel import DrilldownPanel
+    parent = QWidget()
+    parent.resize(1200, 800)
+    parent.show()
+    dp = DrilldownPanel(parent)
+    web_host = QWidget()
+
+    assert dp.graphicsEffect() is not None
+    assert dp.graphicsEffect().isEnabled()
+
+    dp.show_persistent_widget("Task", "Asana", web_host)
+    assert dp.graphicsEffect().isEnabled() is False   # no effect over the view
+    assert dp._anim is None                           # no open animation
+    assert dp.isVisible()
+    assert dp.geometry().width() == 440               # at final geometry now
+
+    dp._slide_closed()                                # web mode: instant close
+    assert dp._anim is None
+    assert not dp.isVisible()
+    assert dp.graphicsEffect().isEnabled() is True    # restored on close
+
+    dp.show_persistent_widget("Task", "Asana", web_host)
+    assert dp.graphicsEffect().isEnabled() is False
+    native = QWidget()
+    dp.show_widget("Task", "Asana", native)
+    assert dp.graphicsEffect().isEnabled() is True    # native mode restores
+
+
 # ── DB round-trip: extras as stored by asana_extras render faithfully ─
 
 def test_extras_db_roundtrip_renders(qapp, empty_db):

@@ -334,7 +334,7 @@ def subtasks_vm(task: dict) -> list[dict]:
         if not name.strip():
             continue
         out.append({
-            "gid": "",
+            "gid": _s(s.get("gid")).strip() if isinstance(s, dict) else "",
             "name": name,
             "done": done,
             "assignee": who,

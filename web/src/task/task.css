@@ -261,6 +261,11 @@
   color: var(--tk-green);
 }
 .tk-subcheck--ghost { border-style: dashed; }
+.tk-subcheck--btn { padding: 0; background: var(--tk-bg); cursor: pointer; }
+.tk-subcheck--btn:hover:not(:disabled) {
+  border-color: var(--tk-green);
+  color: var(--tk-green);
+}
 .tk-subtask-name { flex: 1; font-size: 13.5px; overflow-wrap: anywhere; }
 .tk-subtask-name--done { color: var(--tk-text-2); }
 .tk-subtask-promoted { color: var(--tk-text-2); }

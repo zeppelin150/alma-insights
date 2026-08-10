@@ -323,6 +323,17 @@ class DrilldownPanel(QFrame):
         shadow.setColor(QColor(0, 0, 0, 30))
         self.setGraphicsEffect(shadow)
 
+    def _set_shadow_enabled(self, on: bool):
+        """A QGraphicsEffect on an ancestor of a QWebEngineView is an
+        unsupported combination (QTBUG-47848 class): the subtree renders
+        through an offscreen pixmap path the GL-backed Chromium delegate
+        can't join — stale-composited fragments, dead input in the view,
+        and stalled repaints of sibling widgets. Web mode turns the shadow
+        OFF; every native mode restores it."""
+        eff = self.graphicsEffect()
+        if eff is not None:
+            eff.setEnabled(on)
+
     # ═══════════════════════════════════════════
     #  PUBLIC API
     # ═══════════════════════════════════════════
@@ -433,6 +444,7 @@ class DrilldownPanel(QFrame):
         self._mode = "widget"
         self._level = 2
         self._saved_title = title
+        self._set_shadow_enabled(True)   # native content tolerates the shadow
 
         # Detach any previously hosted widget
         self._detach_hosted_widget()
@@ -493,7 +505,17 @@ class DrilldownPanel(QFrame):
         self._nav_label.hide()
         self._load_main_btn.hide()
         self._thread_frame.show()
-        self._slide_open()
+        # Web mode: no ancestor effect, no geometry animation (both break
+        # the Chromium delegate — see _set_shadow_enabled/_open_immediate).
+        self._set_shadow_enabled(False)
+        self._open_immediate()
+        # Chromium's delegate caches widget geometry across hide/show; a
+        # down-up resize forces a fresh geometry push so input mapping
+        # matches the composited texture.
+        size = widget.size()
+        if size.height() > 1:
+            widget.resize(size.width(), size.height() - 1)
+            widget.resize(size)
 
     def show_pattern(self, pattern_data: dict):
         """Open the panel showing sub-pattern stats, ticket list, and deep dive.
@@ -1058,6 +1080,22 @@ class DrilldownPanel(QFrame):
     #  ANIMATION
     # ═══════════════════════════════════════════
 
+    def _open_immediate(self):
+        """Open with NO geometry animation — the persistent-web-mode path.
+        Animating an ancestor of a live QWebEngineView leaves the Chromium
+        delegate's input-coordinate mapping stale (QTBUG-68440 class): the
+        page renders correctly but wheel/clicks land dead. The panel
+        appears at its final geometry instead."""
+        if not self.parentWidget():
+            return
+        if self._anim is not None:
+            self._anim.stop()
+            self._anim = None
+        self._position_panel()
+        self.show()
+        self.raise_()
+        self.panel_opened.emit()
+
     def _slide_open(self):
         if self.isVisible() and self._anim is None:
             # Already visible, no animation needed — just ensure position
@@ -1094,6 +1132,12 @@ class DrilldownPanel(QFrame):
         self.panel_opened.emit()
 
     def _slide_closed(self):
+        # Web mode closes without the geometry animation too — the live
+        # QWebEngineView must never be geometry-animated (see _open_immediate).
+        if (getattr(self, "_persistent_widget", None) is not None
+                and self._detail_stack.currentWidget() is self._persistent_widget):
+            self._on_close_finished()
+            return
         parent = self.parentWidget()
         if not parent:
             self.hide()
@@ -1116,6 +1160,7 @@ class DrilldownPanel(QFrame):
     def _on_close_finished(self):
         self._anim = None
         self._level = 0
+        self._set_shadow_enabled(True)   # restore for the native modes
         self._detach_hosted_widget()
         self._mode = "tickets"
         self._report_detail_cb = None

@@ -26,12 +26,16 @@ synced — nothing extra is fetched when it opens. The *Updated … ago* stamp i
 the header tells you how fresh that data is, and the refresh arrow next to it
 re-fetches this one task from Asana on demand.
 
-**The four actions are unchanged.** Mark complete or reopen, change the due
-date, post a comment, add a subtask — these are the same four background
-write-back lanes described in *Adding subtasks, comments and due dates*, with
-the same safeguards (local-first subtasks, conflict protection, automatic
-revert if Asana rejects a completion). The panel is a different face on the
-same machinery, and your click is still the consent.
+**The actions are unchanged — plus one the mirror adds.** Mark complete or
+reopen, change the due date, post a comment, add a subtask — these are the
+same four background write-back lanes described in *Adding subtasks, comments
+and due dates*, with the same safeguards (local-first subtasks, conflict
+protection, automatic revert if Asana rejects a completion). New with this
+panel: **subtask check circles are clickable** — checking one completes that
+subtask in Asana too, exactly as it would in Asana itself, with the same
+local-first-and-revert discipline. Circles are only clickable on subtasks
+that are linked to Asana. The panel is a different face on the same
+machinery, and your click is still the consent.
 
 **Dates come from a picker.** Instead of typing `YYYY-MM-DD`, the due-date row
 carries a small date picker. Only a full, changed date is sent.

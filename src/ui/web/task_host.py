@@ -29,6 +29,7 @@ def build_task_web_triple(*, write_fn, refresh_fn, open_url_fn):
         refresh_fn=ctrl.js_refresh, refresh_task_fn=ctrl.js_refresh_task,
         complete_fn=ctrl.js_toggle_complete, due_fn=ctrl.js_set_due,
         comment_fn=ctrl.js_post_comment, subtask_fn=ctrl.js_add_subtask,
+        subtask_toggle_fn=ctrl.js_toggle_subtask,
         attachment_fn=ctrl.js_open_attachment, url_fn=ctrl.js_open_url)
     host = WebHost(bridge=bridge, channel_name="taskBridge", route="/task",
                    log_name="alma.enablement.web.task")

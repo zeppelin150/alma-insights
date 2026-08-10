@@ -153,6 +153,64 @@ def create_subtask_in_asana(conn, task_id: str, text: str, *,
     return {"ok": True, "subtask_id": sid, "synced": True, "asana_subtask_gid": gid}
 
 
+def set_subtask_completed_in_asana(conn, task_id: str, subtask_gid: str,
+                                   done: bool, *, client=None) -> dict:
+    """Complete/reopen ONE subtask locally AND in Asana (WS-D-WEB mirror verb).
+
+    ``task_id`` is the PARENT's local id (the caller validated the subtask
+    belongs to it); ``subtask_gid`` is the Asana subtask GID, which is itself
+    a task for the PUT. Local-first like the sibling verbs: the checklist row
+    (enablement_subtasks) and any PROMOTED row (mig 056 — an enablement_tasks
+    row whose source_ref is this gid) both flip before the API call, and an
+    API failure REVERTS both — a diverged done-state misleads exactly like a
+    parent's would. No CAS: checklist rows carry no remote_modified_at
+    anchor; the poll's subtask re-read self-heals the sub-second race."""
+    from src.data import enablement_tasks as et
+    gid = str(subtask_gid or "").strip()
+    if not gid:
+        return {"ok": False, "error": "subtask_gid_required"}
+    row = conn.execute(
+        "SELECT subtask_id FROM enablement_subtasks "
+        "WHERE task_id = ? AND asana_subtask_gid = ?",
+        (str(task_id), gid),
+    ).fetchone()
+    promoted = conn.execute(
+        "SELECT task_id, status FROM enablement_tasks "
+        "WHERE source_ref = ? AND parent_task_ref IS NOT NULL",
+        (gid,),
+    ).fetchone()
+    if row is None and promoted is None:
+        return {"ok": False, "error": "subtask_not_found"}
+
+    new_status = "done" if done else "open"
+
+    def _flip(to_done: bool, status: str):
+        if row is not None:
+            et.toggle_subtask(conn, row[0], to_done)
+        if promoted is not None:
+            et.update_task(conn, promoted[0], status=status)
+
+    _flip(bool(done), new_status)
+    c = _client(client)
+    if c is None:
+        return {"ok": True, "synced": False, "done": bool(done),
+                "note": "updated locally — Asana not configured"}
+    if promoted is not None:
+        _set_inflight(promoted[0], new_status)
+    try:
+        try:
+            c.update_task(gid, completed=bool(done))
+        except Exception as exc:  # noqa: BLE001 — revert, the flip would mislead
+            prev_status = (promoted[1] if promoted is not None else "open") or "open"
+            _flip(not bool(done), prev_status)
+            logger.warning("Asana subtask write-back failed: %s", exc)
+            return {"ok": False, "error": str(exc), "reverted": True}
+        return {"ok": True, "synced": True, "done": bool(done)}
+    finally:
+        if promoted is not None:
+            _clear_inflight(promoted[0])
+
+
 def post_comment_to_asana(conn, task_id: str, text: str, *, client=None) -> dict:
     """Post a comment on the linked Asana task (no local mirror — Asana owns it)."""
     text = (text or "").strip()
