@@ -285,7 +285,12 @@ def _process_task(conn, client, board: dict, task: dict, results: dict) -> None:
         return
     if task.get("completed"):
         return
-    if not _matches_indicators(task, indicators):
+    # ``sync_all`` is a PER-BOARD opt-in for workspaces where the indicator
+    # filter is unsatisfiable — Asana free tier 402s custom-field writes, so
+    # no new task can ever carry the trigger value (hit on the cambric dev
+    # workspace 2026-08-10 when its premium trial lapsed). Absent the flag,
+    # the fail-closed indicator gate stands unchanged.
+    if not cfg.get("sync_all") and not _matches_indicators(task, indicators):
         return
     tid = _create_task_from_asana(conn, board, task, mappings)
     if tid:

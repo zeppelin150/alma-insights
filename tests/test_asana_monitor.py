@@ -119,3 +119,34 @@ def test_monitor_constructs():
     mon = AsanaMonitor(MagicMock())
     assert mon.source_name == "asana"
     assert mon.status == "paused"
+
+
+def test_sync_all_board_ingests_indicatorless_tasks(empty_db):
+    """A workspace without premium custom fields can never satisfy an
+    indicator filter (Asana 402s field writes there), so a board explicitly
+    flagged ``sync_all`` ingests every open task instead. Absent flag, the
+    fail-closed indicator gate stands — the production posture."""
+    import json
+    conn = empty_db.conn
+    _configure_board(conn)
+    bare = {"gid": "task9", "name": "Render test task", "due_on": "2026-08-13",
+            "permalink_url": "https://app.asana.com/0/1/task9",
+            "completed": False, "modified_at": "2026-08-10T12:00:00.000Z",
+            "assignee": {"name": "Chris"}, "custom_fields": []}
+
+    # Without the flag: fail-closed, nothing ingested (unchanged behavior).
+    assert poll_once(conn, client=_client([bare])) == []
+
+    row = conn.execute(
+        "SELECT source_id, config_json FROM monitor_sources").fetchone()
+    cfg = json.loads(row[1])
+    cfg["sync_all"] = True
+    conn.execute("UPDATE monitor_sources SET config_json=? WHERE source_id=?",
+                 (json.dumps(cfg), row[0]))
+    conn.commit()
+
+    created = poll_once(conn, client=_client([bare]))
+    assert len(created) == 1, "sync_all board must ingest the field-less task"
+    t = T.get_task(conn, created[0])
+    assert t["title"] == "Render test task"
+    assert t["due_date"] == "2026-08-13"
