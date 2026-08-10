@@ -195,6 +195,31 @@ describe("TaskApp without a bridge", () => {
   });
 });
 
+describe("task.css layout contracts", () => {
+  const css = readFileSync(new URL("./task.css", import.meta.url), "utf-8");
+
+  it("the surface owns its scrolling (the global .app shell is a fixed-height flex column)", () => {
+    // .app.tk-app double-class specificity — order-proof against the
+    // bundler injecting task.css before styles.css.
+    const appBlock = css.slice(css.indexOf(".app.tk-app {"), css.indexOf(".tk-app *"));
+    expect(appBlock).toContain("display: block");
+    expect(appBlock).toContain("height: 100vh");
+    expect(appBlock).toContain("overflow-y: auto");
+    expect(appBlock).not.toContain("flex-direction");
+  });
+
+  it("action-row items never squeeze-wrap at the 440px drilldown width", () => {
+    expect(css).toMatch(/\.tk-actions \{[^}]*flex-wrap: wrap/);
+    expect(css).toMatch(/\.tk-complete-btn \{[^}]*white-space: nowrap/);
+    expect(css).toMatch(/\.tk-freshness \{[^}]*white-space: nowrap/);
+    expect(css).toMatch(/\.tk-permalink \{[^}]*white-space: nowrap/);
+  });
+
+  it("the due picker collapses to its glyph (no duplicate date text)", () => {
+    expect(css).toContain(".tk-due-input::-webkit-datetime-edit { display: none; }");
+  });
+});
+
 describe("source guardrails", () => {
   const files = [
     "TaskApp.jsx", "Header.jsx", "FieldGrid.jsx", "Description.jsx",

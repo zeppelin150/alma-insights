@@ -269,6 +269,43 @@ def test_drilldown_widget_mode_hosts_inside_scroll_area(qapp):
     assert inner.parent() is None
 
 
+def test_drilldown_persistent_widget_mode_never_reparents(qapp):
+    """WS-D-WEB blank-panel fix: the web task host is added to the detail
+    stack ONCE and survives close/reopen with its parent intact. The old
+    show_widget path ran setParent(None) on every close — reparenting a
+    QWebEngineView tears down its Chromium compositor and every reopen
+    after the first rendered a white view."""
+    from src.ui.widgets.drilldown_panel import DrilldownPanel
+    dp = DrilldownPanel()
+    web_host = QWidget()
+
+    dp.show_persistent_widget("Task", "Asana", web_host)
+    stack = dp._detail_stack
+    idx = stack.indexOf(web_host)
+    assert idx >= 2, "index 1 (the native scroll area) must not shift"
+    assert isinstance(stack.widget(1), QScrollArea)
+    assert stack.currentIndex() == idx
+    assert web_host.parent() is not None
+
+    dp._on_close_finished()                     # the close path
+    assert web_host.parent() is not None, "close must NEVER orphan the host"
+
+    dp.show_persistent_widget("Task", "Asana", web_host)
+    assert stack.indexOf(web_host) == idx, "added once, reused forever"
+    assert stack.currentIndex() == idx
+    count = stack.count()
+    dp.show_persistent_widget("Task", "Asana", web_host)
+    assert stack.count() == count
+
+    # a native panel can still take over (web → native fallback mid-session)
+    native = QWidget()
+    dp.show_widget("Task", "Asana", native)
+    assert stack.currentIndex() == 1
+    assert web_host.parent() is not None        # persistent page untouched
+    dp._on_close_finished()
+    assert native.parent() is None              # native panels still detach
+
+
 # ── DB round-trip: extras as stored by asana_extras render faithfully ─
 
 def test_extras_db_roundtrip_renders(qapp, empty_db):

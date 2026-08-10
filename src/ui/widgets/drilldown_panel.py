@@ -460,6 +460,41 @@ class DrilldownPanel(QFrame):
         self._thread_frame.show()
         self._slide_open()
 
+    def show_persistent_widget(self, title: str, subtitle: str, widget: QWidget):
+        """Widget mode for a PERSISTENT host (the WS-D-WEB task WebHost).
+
+        The widget is added to the detail stack ONCE and never detached —
+        reparenting a QWebEngineView (what show_widget's detach cycle does)
+        tears down its Chromium compositor and every reopen after the first
+        renders a white view. Close only hides the panel; the widget stays
+        parented to the stack for the life of the session. Appended after
+        index 1 so the native scroll-area contract (widget(1)) never shifts.
+        """
+        if getattr(self, "_persistent_widget", None) is not widget:
+            self._persistent_index = self._detail_stack.addWidget(widget)
+            self._persistent_widget = widget
+        self._mode = "widget"
+        self._level = 2
+        self._saved_title = title
+
+        # A native panel may have been hosted before (web→native fallback
+        # alternation); clear it from index 1 without touching our page.
+        self._detach_hosted_widget()
+        widget.show()
+        self._detail_stack.setCurrentIndex(self._persistent_index)
+
+        self._panel_title.setText(title)
+        self._thread_header.setText(title)
+        self._thread_meta.setText(subtitle)
+        self._list_frame.hide()
+        self._back_btn.hide()
+        self._prev_btn.hide()
+        self._next_btn.hide()
+        self._nav_label.hide()
+        self._load_main_btn.hide()
+        self._thread_frame.show()
+        self._slide_open()
+
     def show_pattern(self, pattern_data: dict):
         """Open the panel showing sub-pattern stats, ticket list, and deep dive.
 

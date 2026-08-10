@@ -25,9 +25,16 @@
   font-family: var(--tk-font);
   font-size: 14px;
   line-height: 20px;
-  min-height: 100vh;
-  display: flex;
-  flex-direction: column;
+}
+/* The global .app shell is a FIXED-HEIGHT flex column (styles.css) and every
+   surface must own its scrolling — without this override the flex column
+   squeezes sections (the 280px description frame shrinks first) and nothing
+   below the fold is reachable. Double-class specificity beats .app no matter
+   which stylesheet the bundler injects first. */
+.app.tk-app {
+  display: block;
+  height: 100vh;
+  overflow-y: auto;
 }
 .tk-app * { box-sizing: border-box; }
 .tk-app button { font-family: var(--tk-font); cursor: pointer; }
@@ -46,7 +53,8 @@
 .tk-actions {
   display: flex;
   align-items: center;
-  gap: 10px;
+  flex-wrap: wrap;             /* 440px drilldown: wrap whole items, never squeeze */
+  gap: 6px 10px;
   padding: 10px 0;
   border-bottom: 1px solid var(--tk-line);
 }
@@ -59,6 +67,8 @@
   background: var(--tk-bg);
   color: var(--tk-text);
   font-size: 12.5px;
+  white-space: nowrap;
+  flex: none;
   transition: background 150ms ease, border-color 150ms ease;
 }
 .tk-complete-btn:hover:not(:disabled) { background: var(--tk-hover); }
@@ -77,8 +87,8 @@
   font-size: 14px;
 }
 .tk-icon-btn:hover:not(:disabled) { background: var(--tk-hover); }
-.tk-freshness { font-size: 12px; color: var(--tk-text-2); }
-.tk-permalink { font-size: 12px; color: var(--tk-blue); text-decoration: none; }
+.tk-freshness { font-size: 12px; color: var(--tk-text-2); white-space: nowrap; }
+.tk-permalink { font-size: 12px; color: var(--tk-blue); text-decoration: none; white-space: nowrap; }
 .tk-permalink:hover { text-decoration: underline; }
 .tk-status {
   margin: 6px 20px 0;
@@ -136,8 +146,13 @@
   color: var(--tk-text-2);
   font-family: var(--tk-font);
   font-size: 12px;
-  padding: 2px 4px;
+  padding: 2px;
+  width: 30px;                 /* picker glyph only — the display string is
+                                  the tk-due text; showing both reads as a
+                                  duplicate date */
 }
+.tk-due-input::-webkit-datetime-edit { display: none; }
+.tk-due-input::-webkit-calendar-picker-indicator { cursor: pointer; }
 .tk-due-input:hover { border-color: var(--tk-line-strong); }
 .tk-empty { color: var(--tk-text-2); }
 .tk-project-board { font-size: 14px; }
@@ -296,10 +311,10 @@
 
 /* ---- activity ---- */
 .tk-activity {
-  flex: 1;
   background: var(--tk-bg-feed);
   border-top: 1px solid var(--tk-line);
   padding: 10px 20px 16px;
+  min-height: 180px;
 }
 .tk-activity-bar {
   display: flex;

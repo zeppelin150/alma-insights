@@ -3523,7 +3523,9 @@ class EnablementPage(QWidget):
                     ctrl.show_task(task)
                     self._open_task_title = task.get("title")
                     self._open_task_id = task.get("task_id")
-                    self._drilldown.show_widget(
+                    if hasattr(host, "on_page_shown"):
+                        host.on_page_shown()   # reload if the renderer died
+                    self._drilldown.show_persistent_widget(
                         "Task", task.get("source", "").capitalize(), host)
                     self._set_status(f"Opened “{task.get('title', 'task')}”.")
                     return
