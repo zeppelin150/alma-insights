@@ -125,7 +125,16 @@ def test_header_keys_match_js_contract():
 
 def test_capabilities_keys_match_js_contract():
     assert sorted(_vm()["capabilities"]) == [
-        "comment", "complete", "due", "refresh", "subtask"]
+        "comment", "complete", "description", "due", "refresh", "subtask"]
+
+
+def test_description_markdown_round_trip_for_the_editor():
+    desc = _vm()["description"]
+    assert sorted(desc) == ["markdown", "srcdoc"]
+    assert "Name" in desc["markdown"]           # html→md of the rich body
+    assert "<" not in desc["markdown"].replace("<https", "")  # no tags leak
+    plain = _vm(dict(TASK, extras={}, description="plain body"))
+    assert plain["description"]["markdown"] == "plain body"
 
 
 # ── header ───────────────────────────────────────────────────────────────
@@ -314,7 +323,7 @@ _ASANA_WRITE_IDENTIFIERS = {
     "update_task", "_send",
     "set_completed_in_asana", "update_due_in_asana", "post_comment_to_asana",
     "create_subtask_in_asana", "set_subtask_completed_in_asana",
-    "toggle_subtask", "asana_writeback",
+    "update_description_in_asana", "toggle_subtask", "asana_writeback",
 }
 
 _WEB_TASK_SURFACES = [
@@ -362,7 +371,9 @@ def _page_stub():
         _run_task_writeback=lambda *a: None,
         _run_task_refresh=lambda *a: None,
         _open_source_url=lambda u: None,
+        _open_subtask_from_web=lambda *a: None,
         _set_status=lambda s: None,
+        task_action_done=SimpleNamespace(connect=lambda fn: None),
     )
 
 
@@ -387,7 +398,8 @@ def test_page_builds_the_web_host_once_and_reuses_it(monkeypatch):
     from src.ui.pages.enablement.page import EnablementPage
 
     fake_ctrl = SimpleNamespace(
-        status_text=SimpleNamespace(connect=lambda _fn: None))
+        status_text=SimpleNamespace(connect=lambda _fn: None),
+        notify_action_outcome=lambda res: None)
     fake_bridge, fake_host = object(), object()
     calls = []
 

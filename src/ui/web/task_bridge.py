@@ -34,7 +34,8 @@ class TaskBridge(QObject):
     def __init__(self, data_signal=None, status_signal=None,
                  resolved_signal=None, refresh_fn=None, refresh_task_fn=None,
                  complete_fn=None, due_fn=None, comment_fn=None,
-                 subtask_fn=None, subtask_toggle_fn=None, attachment_fn=None,
+                 subtask_fn=None, subtask_toggle_fn=None, subtask_open_fn=None,
+                 description_fn=None, attachment_fn=None,
                  url_fn=None, parent=None):
         super().__init__(parent)
         self._refresh_fn = refresh_fn
@@ -44,6 +45,8 @@ class TaskBridge(QObject):
         self._comment_fn = comment_fn
         self._subtask_fn = subtask_fn
         self._subtask_toggle_fn = subtask_toggle_fn
+        self._subtask_open_fn = subtask_open_fn
+        self._description_fn = description_fn
         self._attachment_fn = attachment_fn
         self._url_fn = url_fn
         # Re-emit the controller's signals as the bridge's (signal-to-signal).
@@ -102,6 +105,18 @@ class TaskBridge(QObject):
         lane (gids validated against the last-pushed viewmodel)."""
         self._call(self._subtask_toggle_fn, task_id or "", subtask_gid or "",
                    bool(done))
+
+    @Slot(str, str)
+    def openSubtask(self, task_id, subtask_gid):
+        """Subtask name clicked → the host opens it as its own task
+        (promoted rows in-panel, unsynced rows in Asana). Navigation only."""
+        self._call(self._subtask_open_fn, task_id or "", subtask_gid or "")
+
+    @Slot(str, str)
+    def updateDescription(self, task_id, markdown):
+        """Description editor saved → the host's CAS-guarded description
+        lane (remote-first; a failed PUT changes nothing locally)."""
+        self._call(self._description_fn, task_id or "", markdown or "")
 
     @Slot(str)
     def openAttachment(self, gid):

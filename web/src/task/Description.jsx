@@ -6,6 +6,11 @@ import React from "react";
 // same-origin, no forms, no popups, no top-level navigation. Links render in
 // Asana blue but cannot navigate from inside the sandbox — matching the
 // Zendesk clone's accepted trade-off for preview frames.
+//
+// Editing: the textarea round-trips MARKDOWN (the same html↔md conversion
+// the Renn lanes use); Save relays it and Python serializes to Asana's
+// html_notes dialect behind the CAS-guarded, remote-first lane. No HTML is
+// ever composed in JS.
 
 const FRAME_CSS = `
   html, body { margin: 0; padding: 0; }
@@ -33,22 +38,66 @@ const FRAME_CSS = `
   td, th { border: 1px solid #edeae9; padding: 4px 8px; }
 `;
 
-export default function Description({ srcdoc }) {
-  if (!srcdoc) return null;
+export default function Description({
+  srcdoc, markdown, canEdit, editing, busy, status, onEdit, onCancel, onSave,
+}) {
+  if (!srcdoc && !canEdit) return null;
   const doc =
     `<!doctype html><html><head><meta charset="utf-8">` +
     `<meta name="color-scheme" content="light">` +
     `<style>${FRAME_CSS}</style></head><body>` +
-    `<div class="task-notes">${srcdoc}</div></body></html>`;
+    `<div class="task-notes">${srcdoc || ""}</div></body></html>`;
   return (
     <div className="tk-section tk-description">
-      <div className="tk-section-label">Description</div>
-      <iframe
-        className="tk-notes-frame"
-        title="Task description (sandboxed)"
-        sandbox=""
-        srcDoc={doc}
-      />
+      <div className="tk-desc-head">
+        <span className="tk-section-label">Description</span>
+        {canEdit && !editing && (
+          <button type="button" className="tk-desc-edit-btn" disabled={busy}
+                  onClick={onEdit}>
+            Edit
+          </button>
+        )}
+      </div>
+      {editing ? (
+        <form
+          className="tk-desc-editor"
+          onSubmit={(e) => {
+            e.preventDefault();
+            const box = e.currentTarget.elements.desc;
+            if (onSave && !busy) onSave(box && box.value != null ? box.value : "");
+          }}
+        >
+          <textarea
+            name="desc"
+            className="tk-desc-input"
+            defaultValue={markdown}
+            rows={10}
+            disabled={busy}
+          />
+          <div className="tk-desc-editor-bar">
+            {status && <span className="tk-desc-status">{status}</span>}
+            <button type="button" className="tk-desc-cancel" disabled={busy}
+                    onClick={onCancel}>
+              Cancel
+            </button>
+            <button type="submit" className="tk-comment-btn" disabled={busy}>
+              Save
+            </button>
+          </div>
+        </form>
+      ) : srcdoc ? (
+        <iframe
+          className="tk-notes-frame"
+          title="Task description (sandboxed)"
+          sandbox=""
+          srcDoc={doc}
+        />
+      ) : (
+        <button type="button" className="tk-desc-empty" disabled={busy}
+                onClick={onEdit}>
+          What is this task about?
+        </button>
+      )}
     </div>
   );
 }

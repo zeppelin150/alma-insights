@@ -25,6 +25,7 @@ export default function TaskApp() {
   const [busy, setBusy] = useState(false);
   const [resolving, setResolving] = useState("");
   const [status, setStatus] = useState("");
+  const [editingDesc, setEditingDesc] = useState(false);
   const prevIdRef = useRef("");
 
   useEffect(() => {
@@ -51,6 +52,11 @@ export default function TaskApp() {
           setOldestFirst(true);
           setExpanded(false);
           setFieldsHidden(false);
+          // Editor state resets ONLY on task change. The background
+          // reconcile silently re-opens the current task (WS1-M7) — a
+          // same-task push must never stomp an operator mid-edit; the
+          // uncontrolled textarea keeps their draft across the re-render.
+          setEditingDesc(false);
         }
         setVm(next);
         setBusy(false);
@@ -130,13 +136,24 @@ export default function TaskApp() {
         hidden={fieldsHidden}
         onToggleHidden={() => setFieldsHidden(!fieldsHidden)}
       />
-      <Description srcdoc={vm.description.srcdoc} />
+      <Description
+        srcdoc={vm.description.srcdoc}
+        markdown={vm.description.markdown}
+        canEdit={vm.capabilities.description}
+        editing={editingDesc}
+        busy={busy}
+        status={status}
+        onEdit={() => setEditingDesc(true)}
+        onCancel={() => setEditingDesc(false)}
+        onSave={(md) => relay("updateDescription", vm.task_id, md)}
+      />
       <Subtasks
         subtasks={vm.subtasks}
         capabilities={vm.capabilities}
         busy={busy}
         onAdd={(text) => relay("addSubtask", vm.task_id, text)}
         onToggle={(gid, done) => relay("toggleSubtask", vm.task_id, gid, done)}
+        onOpen={(gid) => call("openSubtask", vm.task_id, gid)}
       />
       <AppsRow
         attachments={vm.attachments}

@@ -26,16 +26,26 @@ synced — nothing extra is fetched when it opens. The *Updated … ago* stamp i
 the header tells you how fresh that data is, and the refresh arrow next to it
 re-fetches this one task from Asana on demand.
 
-**The actions are unchanged — plus one the mirror adds.** Mark complete or
+**The actions are unchanged — plus what the mirror adds.** Mark complete or
 reopen, change the due date, post a comment, add a subtask — these are the
 same four background write-back lanes described in *Adding subtasks, comments
 and due dates*, with the same safeguards (local-first subtasks, conflict
 protection, automatic revert if Asana rejects a completion). New with this
-panel: **subtask check circles are clickable** — checking one completes that
-subtask in Asana too, exactly as it would in Asana itself, with the same
-local-first-and-revert discipline. Circles are only clickable on subtasks
-that are linked to Asana. The panel is a different face on the same
-machinery, and your click is still the consent.
+panel, because Asana itself has them:
+
+- **Subtask check circles are clickable** — checking one completes that
+  subtask in Asana too, with the same local-first-and-revert discipline.
+- **Subtask names open the subtask** — subtasks are tasks. One that has its
+  own row here opens in this same panel; one that hasn't been synced as its
+  own task opens in Asana in your browser.
+- **The description is editable.** *Edit* switches to a plain-text editor
+  (Markdown — bold, lists and links survive the round trip), and *Save*
+  pushes it to Asana as rich text. This write is conflict-protected and
+  remote-first: if Asana refuses it, nothing changes anywhere, so a save
+  that looks successful is one that actually landed.
+
+Both kinds of clickability appear only on Asana-linked content. The panel is
+a different face on the same machinery, and your click is still the consent.
 
 **Dates come from a picker.** Instead of typing `YYYY-MM-DD`, the due-date row
 carries a small date picker. Only a full, changed date is sent.
@@ -84,6 +94,12 @@ task name.
 **An attachment says it failed to resolve.** Asana declined to hand out a
 fresh link — usually a connection or permission problem. Check the Asana
 connection in Settings and retry.
+
+**A save says the task changed in Asana.** Someone (or something — a rule, a
+comment) touched the task since it was last synced, and the conflict guard
+refused to overwrite what you haven't seen. The message shows right next to
+the Save button and your draft is kept. Click the **↻** in the panel header —
+that pulls the fresh state and re-arms the guard — review, then Save again.
 
 **Fields show em dashes.** An em dash is an empty field, faithfully mirrored
 from Asana — fill the field in Asana and refresh the task.

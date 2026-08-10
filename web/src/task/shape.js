@@ -126,7 +126,10 @@ export function normalizeData(raw) {
       permalink: str(h.permalink),
     },
     fields: arr(p.fields).map(field).filter((f) => f.name),
-    description: { srcdoc: str(obj(p.description).srcdoc) },
+    description: {
+      srcdoc: str(obj(p.description).srcdoc),
+      markdown: str(obj(p.description).markdown),
+    },
     subtasks: arr(p.subtasks).map(subtask).filter((s) => s.name),
     attachments: arr(p.attachments).map(attachment).filter((a) => a.name),
     stories: arr(p.stories).map(story),
@@ -135,6 +138,7 @@ export function normalizeData(raw) {
       due: !!caps.due,
       comment: !!caps.comment,
       subtask: !!caps.subtask,
+      description: !!caps.description,
       refresh: !!caps.refresh,
     },
   };

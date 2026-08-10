@@ -35,6 +35,7 @@ _LANES = {
     "comment": "post_comment_to_asana",
     "subtask": "create_subtask_in_asana",
     "subtask_toggle": "set_subtask_completed_in_asana",
+    "description": "update_description_in_asana",
 }
 
 # Which viewmodel capability authorizes each action.
@@ -44,7 +45,10 @@ _CAP_FOR = {
     "comment": "comment",
     "subtask": "subtask",
     "subtask_toggle": "subtask",
+    "description": "description",
 }
+
+DESCRIPTION_CAP = 60000   # Asana notes ceiling is ~64k; leave headroom
 
 
 class TaskWebController(QObject):
@@ -56,11 +60,13 @@ class TaskWebController(QObject):
     _att_done = Signal(object)     # worker→UI hop for attachment resolution
 
     def __init__(self, *, write_fn=None, refresh_fn=None, open_url_fn=None,
-                 client_factory=None, now_fn=None, parent=None):
+                 open_subtask_fn=None, client_factory=None, now_fn=None,
+                 parent=None):
         super().__init__(parent)
         self._write_fn = write_fn
         self._refresh_fn = refresh_fn
         self._open_url_fn = open_url_fn
+        self._open_subtask_fn = open_subtask_fn
         self._client_factory = client_factory
         self._now_fn = now_fn
         self._task_id = ""
@@ -86,6 +92,7 @@ class TaskWebController(QObject):
             "due": bool(is_asana and gid and self._write_fn),
             "comment": bool(is_asana and gid and self._write_fn),
             "subtask": bool(self._write_fn and task.get("task_id")),
+            "description": bool(is_asana and gid and self._write_fn),
             "refresh": bool(is_asana and gid and self._refresh_fn),
         }
         vm = task_vm.build_task_vm(
@@ -98,6 +105,27 @@ class TaskWebController(QObject):
         self._sub_gids = {s["gid"] for s in vm["subtasks"] if s["gid"]}
         self._inflight = False
         self._emit(self.task_data, vm)
+
+    def notify_action_outcome(self, res: dict):
+        """Host-facing: the writeback worker's RESULT (page.task_action_done).
+        The action_resolved ack only says a write DISPATCHED — this is the
+        outcome, and it must be visible from inside the panel (a CAS
+        conflict that only flashes the app status line reads as a silently
+        swallowed save — the round-3 phantom-save lesson)."""
+        res = res if isinstance(res, dict) else {}
+        if res.get("ok"):
+            if res.get("refreshed"):
+                text = "Refreshed from Asana."
+            elif res.get("synced") is False:
+                note = str(res.get("note") or "")
+                text = f"Saved locally{(' — ' + note) if note else '.'}"
+            else:
+                text = "Synced to Asana."
+        elif res.get("conflict"):
+            text = "Task changed in Asana — refreshed. Please retry."
+        else:
+            text = f"Asana action failed: {res.get('error', 'unknown')}"
+        self._emit_status(text)
 
     # ── bridge-facing (untrusted) ────────────────────────────────────
     def js_refresh(self):
@@ -146,6 +174,27 @@ class TaskWebController(QObject):
         if gid not in self._sub_gids:
             return self._resolve("subtask_toggle", task_id, False, "unknown_subtask")
         self._relay_write("subtask_toggle", task_id, gid, bool(done))
+
+    def js_open_subtask(self, task_id, subtask_gid):
+        """Subtask name clicked — subtasks ARE tasks. The host resolves the
+        gid: a promoted row (mig 056) opens in this panel; an unsynced
+        checklist row opens in Asana itself. Navigation only — no write."""
+        gid = str(subtask_gid or "").strip()
+        if not self._is_current(task_id) or gid not in self._sub_gids:
+            return
+        if self._open_subtask_fn is None:
+            return
+        try:
+            self._open_subtask_fn(self._task_id, gid)
+        except Exception:  # noqa: BLE001 — a broken opener opens nothing
+            pass
+
+    def js_update_description(self, task_id, markdown):
+        """Description editor saved → the remote-first, CAS-guarded
+        description lane. Empty is legal (clearing a description mirrors
+        Asana); the cap guards the notes ceiling, not intent."""
+        md = str(markdown if markdown is not None else "")[:DESCRIPTION_CAP]
+        self._relay_write("description", task_id, md)
 
     def js_open_attachment(self, gid):
         """Resolve-on-click, exactly the native panel's lane: stored rows

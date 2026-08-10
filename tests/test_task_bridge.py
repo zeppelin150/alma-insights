@@ -80,7 +80,7 @@ def test_show_task_pushes_viewmodel_with_capabilities():
     assert vm["task_id"] == "t1"
     assert vm["capabilities"] == {"complete": True, "due": True,
                                   "comment": True, "subtask": True,
-                                  "refresh": True}
+                                  "description": True, "refresh": True}
 
 
 def test_capabilities_fail_closed_without_injected_lanes():
@@ -191,6 +191,121 @@ def test_toggle_subtask_respects_capability_and_current_id():
     ctrl2.js_toggle_subtask("t2", "sub900", True)
     assert calls2["write"] == []
     assert seen2["resolved"][-1]["ok"] is False
+
+
+def test_open_subtask_navigates_served_gids_only():
+    opened = []
+    ctrl, _c, _s2 = _shown(open_subtask_fn=lambda tid, gid: opened.append((tid, gid)))
+    ctrl.js_open_subtask("t1", "forged")
+    ctrl.js_open_subtask("t2", "sub900")     # stale task id
+    assert opened == []
+    ctrl.js_open_subtask("t1", "sub900")
+    assert opened == [("t1", "sub900")]
+
+
+def test_open_subtask_without_fn_or_broken_fn_is_silent():
+    ctrl, _c, _s2 = _shown()
+    ctrl.js_open_subtask("t1", "sub900")     # no fn injected
+
+    def boom(*_a):
+        raise RuntimeError("nope")
+    ctrl2, _c2, _s3 = _shown(open_subtask_fn=boom)
+    ctrl2.js_open_subtask("t1", "sub900")    # must not raise
+
+
+def test_update_description_gates_and_caps():
+    ctrl, calls, seen = _shown()
+    ctrl.js_update_description("forged", "new body")
+    assert calls["write"] == []
+    ctrl.js_update_description("t1", "x" * 70000)
+    lane, tid, md = calls["write"][0]
+    assert lane == "update_description_in_asana" and tid == "t1"
+    assert len(md) == 60000
+    ctrl.show_task(dict(TASK))               # release the claim
+    ctrl.js_update_description("t1", "")     # clearing is legal
+    assert calls["write"][-1] == ("update_description_in_asana", "t1", "")
+    assert seen["resolved"][-1]["ok"] is True
+
+
+def test_update_description_requires_capability():
+    ctrl, calls, seen = _shown(write_fn=None)
+    ctrl.js_update_description("t1", "body")
+    assert seen["resolved"][-1]["error"] == "not_allowed"
+
+
+# ── the description LANE (asana_writeback) ───────────────────────────────
+
+class _FakeAsanaRich:
+    def __init__(self, fail=False, remote_modified="2026-08-10T13:00:00Z"):
+        self.puts = []
+        self.fail = fail
+        self.remote_modified = remote_modified
+        self.api_key = "k"
+
+    def get_task(self, gid, **_kw):
+        return {"gid": gid, "modified_at": self.remote_modified}
+
+    def update_task(self, gid, **fields):
+        self.puts.append((gid, fields))
+        if self.fail:
+            raise RuntimeError("HTTP 400")
+        return {"gid": gid, "modified_at": "2026-08-10T14:00:00Z"}
+
+
+def test_description_lane_remote_first_then_local(empty_db):
+    from src.data import asana_writeback as awb
+    from src.data import enablement_tasks as et
+    conn = empty_db.conn
+    tid, _sid = _seed_subtask(conn)
+    client = _FakeAsanaRich()
+    res = awb.update_description_in_asana(conn, tid, "**new** body",
+                                          client=client)
+    assert res == {"ok": True, "synced": True}
+    gid, fields = client.puts[0]
+    assert gid == "900100"
+    assert fields["html_notes"].startswith("<body>")
+    assert "<strong>new</strong>" in fields["html_notes"]
+    assert (et.get_task(conn, tid) or {}).get("description") == "**new** body"
+
+
+def test_description_lane_put_failure_changes_nothing_locally(empty_db):
+    from src.data import asana_writeback as awb
+    from src.data import enablement_tasks as et
+    conn = empty_db.conn
+    tid, _sid = _seed_subtask(conn)
+    before = (et.get_task(conn, tid) or {}).get("description")
+    res = awb.update_description_in_asana(conn, tid, "won't land",
+                                          client=_FakeAsanaRich(fail=True))
+    assert res["ok"] is False
+    assert (et.get_task(conn, tid) or {}).get("description") == before
+
+
+def test_description_lane_cas_conflict_blocks_then_refresh_unblocks(empty_db):
+    from src.data import asana_writeback as awb
+    from src.data import enablement_tasks as et
+    conn = empty_db.conn
+    tid, _sid = _seed_subtask(conn)
+    et.update_task(conn, tid, remote_modified_at="2026-08-01T00:00:00Z")
+    client = _FakeAsanaRich(remote_modified="2026-08-09T00:00:00Z")
+    res = awb.update_description_in_asana(conn, tid, "clobber", client=client)
+    assert res.get("conflict") is True
+    assert client.puts == []
+    # The documented remedy: the operator refreshes (the panel's ↻ restamps
+    # the anchor to the observed remote), reviews, and the retry proceeds.
+    et.update_task(conn, tid, remote_modified_at="2026-08-09T00:00:00Z")
+    res2 = awb.update_description_in_asana(conn, tid, "seen and retried",
+                                           client=client)
+    assert res2 == {"ok": True, "synced": True}
+
+
+def test_panel_refresh_restamps_the_cas_anchor():
+    """Promoted subtask rows drift (subtask-local changes emit no board
+    event), so the panel's explicit refresh MUST restamp — without it,
+    every CAS write on a drifted promoted row conflicts forever."""
+    import inspect
+    from src.ui.pages.enablement.page import EnablementPage
+    src = inspect.getsource(EnablementPage._run_task_refresh)
+    assert 'remote_modified_at=payload["modified_at"]' in src
 
 
 # ── the subtask completion LANE (asana_writeback) ────────────────────────
@@ -350,6 +465,25 @@ def test_open_attachment_resolve_error_surfaces_status(monkeypatch, _qt_app):
     _drain(ctrl, _qt_app)
     assert seen["resolved"][-1]["error"] == "resolve_failed"
     assert any("HTTP 401" in s for s in seen["status"])
+
+
+def test_action_outcomes_surface_in_panel_status():
+    """The phantom-save lesson: a CAS conflict or API failure whose only
+    trace is the app status line reads as a silently swallowed save. The
+    host relays writeback OUTCOMES into the panel's own status signal."""
+    ctrl, _c, seen = _shown()
+    ctrl.notify_action_outcome({"ok": False, "conflict": True})
+    assert seen["status"][-1] == "Task changed in Asana — refreshed. Please retry."
+    ctrl.notify_action_outcome({"ok": False, "error": "HTTP 400"})
+    assert seen["status"][-1] == "Asana action failed: HTTP 400"
+    ctrl.notify_action_outcome({"ok": True, "synced": True})
+    assert seen["status"][-1] == "Synced to Asana."
+    ctrl.notify_action_outcome({"ok": True, "synced": False, "note": "not linked"})
+    assert seen["status"][-1] == "Saved locally — not linked"
+    ctrl.notify_action_outcome({"ok": True, "refreshed": True})
+    assert seen["status"][-1] == "Refreshed from Asana."
+    ctrl.notify_action_outcome("garbage")     # never raises
+    ctrl.notify_action_outcome(None)
 
 
 # ── refreshTask ──────────────────────────────────────────────────────────

@@ -56,8 +56,10 @@ describe("normalizeData totals", () => {
     expect(vm.subtasks).toEqual([]);
     expect(vm.attachments).toEqual([]);
     expect(vm.description.srcdoc).toBe("");
+    expect(vm.description.markdown).toBe("");
     expect(vm.capabilities).toEqual(
-      { complete: false, due: false, comment: false, subtask: false, refresh: false });
+      { complete: false, due: false, comment: false, subtask: false,
+        description: false, refresh: false });
   });
 
   it("garbage-typed sections degrade to defaults, never throw", () => {
@@ -162,7 +164,7 @@ describe("demo fixture contract", () => {
 
   it("capabilities carries exactly the contract keys", () => {
     expect(keysOf(FX.task_data.capabilities)).toEqual(
-      ["comment", "complete", "due", "refresh", "subtask"]);
+      ["comment", "complete", "description", "due", "refresh", "subtask"]);
   });
 
   it("is CX-Requests-shaped: 20 fields, 16 comments, automation + system rows", () => {
@@ -217,6 +219,23 @@ describe("task.css layout contracts", () => {
 
   it("the due picker collapses to its glyph (no duplicate date text)", () => {
     expect(css).toContain(".tk-due-input::-webkit-datetime-edit { display: none; }");
+  });
+});
+
+describe("editor survives background pushes", () => {
+  it("editingDesc resets only inside the task-change branch", () => {
+    // The WS1-M7 reconcile silently re-opens the current task; a same-task
+    // push closing the editor stomps an operator mid-edit (the phantom-save
+    // bug). The reset must live inside the prevIdRef task-change guard.
+    const src = readFileSync(new URL("./TaskApp.jsx", import.meta.url), "utf-8");
+    const start = src.indexOf("bridge.taskData.connect");
+    const handler = src.slice(start, src.indexOf("window.__almaTaskVm", start));
+    const guardStart = handler.indexOf("prevIdRef.current = next.task_id");
+    const guardEnd = handler.indexOf("}", guardStart);
+    const resets = [...handler.matchAll(/setEditingDesc\(false\)/g)];
+    expect(resets).toHaveLength(1);
+    expect(resets[0].index).toBeGreaterThan(guardStart);
+    expect(resets[0].index).toBeLessThan(guardEnd);
   });
 });
 
@@ -424,8 +443,50 @@ describe("Description sandbox contract", () => {
     expect(out).not.toContain('<img src="/logo.png"');
   });
 
-  it("renders nothing when the description is empty", () => {
-    expect(renderToStaticMarkup(<Description srcdoc="" />)).toBe("");
+  it("renders nothing when empty and not editable", () => {
+    expect(renderToStaticMarkup(<Description srcdoc="" canEdit={false} />)).toBe("");
+  });
+
+  it("shows the Edit affordance when editable, and the editor on demand", () => {
+    const base = {
+      srcdoc: "<p>body</p>", markdown: "body", canEdit: true, busy: false,
+      onEdit: noop, onCancel: noop, onSave: noop,
+    };
+    const view = renderToStaticMarkup(<Description {...base} editing={false} />);
+    expect(view).toContain(">Edit</button>");
+    expect(view).toContain('sandbox=""');
+    const edit = renderToStaticMarkup(<Description {...base} editing={true} />);
+    expect(edit).toContain("tk-desc-input");
+    expect(edit).toContain(">body</textarea>");
+    expect(edit).toContain(">Save</button>");
+    expect(edit).toContain(">Cancel</button>");
+    expect(edit).not.toContain("<iframe");
+  });
+
+  it("empty-but-editable shows the Asana placeholder affordance", () => {
+    const out = renderToStaticMarkup(
+      <Description srcdoc="" markdown="" canEdit={true} editing={false}
+                   busy={false} onEdit={noop} onCancel={noop} onSave={noop} />);
+    expect(out).toContain("What is this task about?");
+  });
+
+  it("editor save relays the textarea markdown; hostile markdown stays escaped", () => {
+    const asked = [];
+    const tree = Description({
+      srcdoc: "<p>x</p>", markdown: HOSTILE, canEdit: true, editing: true,
+      busy: false, onEdit: noop, onCancel: noop, onSave: (md) => asked.push(md),
+    });
+    const forms = collectElements(tree, (n) => n.type === "form");
+    forms[0].props.onSubmit({
+      preventDefault: noop,
+      currentTarget: { elements: { desc: { value: "## edited body" } } },
+    });
+    expect(asked).toEqual(["## edited body"]);
+    const out = renderToStaticMarkup(
+      <Description srcdoc="" markdown={HOSTILE} canEdit={true} editing={true}
+                   busy={false} onEdit={noop} onCancel={noop} onSave={noop} />);
+    expect(out).toContain("&lt;script&gt;");
+    expect(out).not.toContain("<script>steal");
   });
 
   it("renders the form-structured demo description", () => {
@@ -440,7 +501,7 @@ describe("Description sandbox contract", () => {
 function renderSubs(subtasks = VM.subtasks, caps = CAPS_ON) {
   return renderToStaticMarkup(
     <Subtasks subtasks={subtasks} capabilities={caps} busy={false}
-              onAdd={noop} onToggle={noop} />);
+              onAdd={noop} onToggle={noop} onOpen={noop} />);
 }
 
 describe("Subtasks", () => {
@@ -507,6 +568,28 @@ describe("Subtasks", () => {
 
   it("no toggle affordance without the subtask capability", () => {
     expect(renderSubs(VM.subtasks, CAPS_OFF)).not.toContain("tk-subcheck--btn");
+  });
+
+  it("linked subtask names are navigation buttons; unlinked stay text", () => {
+    const out = renderSubs();
+    expect(out).toContain("tk-subtask-link");     // fixture rows carry gids
+    const unlinked = normalizeData({ subtasks: [{ name: "Local only" }] });
+    expect(renderSubs(unlinked.subtasks)).not.toContain("tk-subtask-link");
+  });
+
+  it("subtask name click relays its gid", () => {
+    const asked = [];
+    const tree = Subtasks({
+      subtasks: normalizeData({ subtasks: [{ name: "Child", gid: "s1" }] }).subtasks,
+      capabilities: CAPS_ON, busy: false, onAdd: noop, onToggle: noop,
+      onOpen: (gid) => asked.push(gid),
+    });
+    const names = collectElements(tree, (n) =>
+      n.type && n.type.name === "SubtaskName");
+    const inner = names[0].type(names[0].props);
+    const btns = collectElements(inner, (n) => n.type === "button");
+    btns[0].props.onClick();
+    expect(asked).toEqual(["s1"]);
   });
 
   it("check click relays the gid with the FLIPPED done state", () => {

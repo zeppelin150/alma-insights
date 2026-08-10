@@ -261,6 +261,48 @@ def update_due_in_asana(conn, task_id: str, due_on: str | None, *, client=None) 
     return {"ok": True, "synced": True, "due_on": due_on}
 
 
+def update_description_in_asana(conn, task_id: str, markdown: str, *,
+                                client=None) -> dict:
+    """Replace the task description locally AND in Asana (WS-D-WEB mirror verb).
+
+    REMOTE-FIRST, unlike the optimistic complete-flip: a description is
+    content, and a local edit that silently failed to reach Asana would
+    masquerade as saved. Order: CAS precheck (an overwrite can clobber a
+    teammate — stale anchor blocks) → serialize markdown to Asana's
+    html_notes dialect → PUT → only then mirror locally (extras html_notes +
+    the plain description column) and restamp. Unlinked/unconfigured tasks
+    degrade to the local mirror only, like the sibling verbs.
+    """
+    from src.data import asana_rich
+    from src.data import asana_extras
+    from src.data import enablement_tasks as et
+    md = str(markdown if markdown is not None else "")
+    tid = str(task_id)
+    gid = _asana_task_gid(conn, tid)
+    if not gid:
+        et.update_task(conn, tid, description=md)
+        return {"ok": True, "synced": False,
+                "note": "updated locally — this task is not linked to Asana"}
+    c = _client(client)
+    if c is None:
+        et.update_task(conn, tid, description=md)
+        return {"ok": True, "synced": False,
+                "note": "updated locally — Asana not configured"}
+    conflict = _cas_precheck(conn, tid, gid, c)
+    if conflict:
+        return conflict
+    html = asana_rich.to_asana_html(md)
+    try:
+        res = c.update_task(gid, html_notes=html)
+    except Exception as exc:  # noqa: BLE001 — nothing local changed yet
+        logger.warning("Asana description write-back failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
+    asana_extras.set_html_notes(conn, tid, html)
+    et.update_task(conn, tid, description=md)
+    _restamp(conn, tid, res)
+    return {"ok": True, "synced": True}
+
+
 def set_completed_in_asana(conn, task_id: str, done: bool, *, client=None) -> dict:
     """Complete/reopen a task locally AND in Asana (WS1-M5 panel verb).
 

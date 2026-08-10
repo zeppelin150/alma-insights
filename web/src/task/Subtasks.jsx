@@ -21,7 +21,29 @@ export function CheckCircle({ sub, canToggle, busy, onToggle }) {
   );
 }
 
-export default function Subtasks({ subtasks, capabilities, busy, onAdd, onToggle }) {
+function SubtaskName({ sub, onOpen }) {
+  const cls = `tk-subtask-name${sub.done ? " tk-subtask-name--done" : ""}`;
+  const label = (
+    <>
+      {sub.promoted && <span className="tk-subtask-promoted">↳ </span>}
+      {sub.name}
+    </>
+  );
+  // Subtasks ARE tasks — linked rows navigate (promoted → this panel,
+  // unsynced → Asana; the host decides, the gid registry gates).
+  if (!sub.gid || !onOpen) return <span className={cls}>{label}</span>;
+  return (
+    <button
+      type="button"
+      className={`${cls} tk-subtask-link`}
+      onClick={() => onOpen(sub.gid)}
+    >
+      {label}
+    </button>
+  );
+}
+
+export default function Subtasks({ subtasks, capabilities, busy, onAdd, onToggle, onOpen }) {
   const list = Array.isArray(subtasks) ? subtasks : [];
   if (!list.length && !capabilities.subtask) return null;
   return (
@@ -35,10 +57,7 @@ export default function Subtasks({ subtasks, capabilities, busy, onAdd, onToggle
             busy={busy}
             onToggle={onToggle}
           />
-          <span className={`tk-subtask-name${s.done ? " tk-subtask-name--done" : ""}`}>
-            {s.promoted && <span className="tk-subtask-promoted">↳ </span>}
-            {s.name}
-          </span>
+          <SubtaskName sub={s} onOpen={onOpen} />
           {s.assignee && <span className="tk-subtask-meta">{s.assignee}</span>}
           {s.due && <span className="tk-subtask-meta">{s.due}</span>}
         </div>

@@ -351,19 +351,34 @@ def attachments_vm(extras: dict) -> list[dict]:
             for a in rows if isinstance(a, dict) and _s(a.get("name")).strip()]
 
 
+DESCRIPTION_MD_CAP = 60000
+
+
 def description_vm(extras: dict, task: dict) -> dict:
     """The ONE html surface. html_notes is UNTRUSTED — sanitize with the
     rendering-only preview profile; the JS side adds the sandbox="" iframe
-    wall. Plain-text description degrades through the same sanitizer."""
+    wall. Plain-text description degrades through the same sanitizer.
+    ``markdown`` feeds the edit textarea (the same html→md conversion the
+    Renn lanes use); the editor round-trips md → Asana html dialect."""
     from src.data.html_sanitize import sanitize_html_preview
     html = _s((extras or {}).get("html_notes") if isinstance(extras, dict) else "").strip()
+    plain = _s(task.get("description")).strip()
+    markdown = ""
+    if html:
+        try:
+            from src.data.html_markdown import html_to_markdown
+            markdown = (html_to_markdown(html) or "").strip()
+        except Exception:  # noqa: BLE001 — editor falls back to plain text
+            markdown = ""
+    if not markdown:
+        markdown = plain
     if not html:
-        plain = _s(task.get("description")).strip()
         if not plain:
-            return {"srcdoc": ""}
+            return {"srcdoc": "", "markdown": ""}
         html = "<p>" + plain.replace("&", "&amp;").replace("<", "&lt;") \
                             .replace(">", "&gt;").replace("\n", "<br>") + "</p>"
-    return {"srcdoc": sanitize_html_preview(html[:TEXT_CAP])}
+    return {"srcdoc": sanitize_html_preview(html[:TEXT_CAP]),
+            "markdown": markdown[:DESCRIPTION_MD_CAP]}
 
 
 def build_task_vm(task: dict, *, connected: bool = True,
@@ -386,7 +401,8 @@ def build_task_vm(task: dict, *, connected: bool = True,
         "stories": stories,
         "capabilities": {
             "complete": False, "due": False, "comment": False,
-            "subtask": False, "refresh": False, **(capabilities or {}),
+            "subtask": False, "description": False, "refresh": False,
+            **(capabilities or {}),
         },
     }
 

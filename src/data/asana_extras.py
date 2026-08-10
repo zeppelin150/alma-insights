@@ -111,6 +111,23 @@ def _task_fields(task_payload: dict) -> dict:
     return out
 
 
+def set_html_notes(conn, task_id: str, html: str) -> None:
+    """Overwrite the stored rich body after a successful description PUT —
+    the reopen re-reads extras, so without this the panel would show the
+    pre-edit body until the next remote refresh."""
+    try:
+        conn.execute(
+            "UPDATE asana_task_extras SET html_notes = ? WHERE task_id = ?",
+            (html or "", str(task_id)))
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        raise
+
+
 def get_extras(conn, task_id: str) -> dict | None:
     """Extras for one task with JSON fields decoded, or None."""
     row = conn.execute(

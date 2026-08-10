@@ -132,6 +132,13 @@ export function buildDemoTask() {
           pills: [], people: [], checked: false },
       ],
       description: {
+        markdown:
+          "**Name**\n\nDana Whitfield\n\n**Email**\n\ndana.w@example.com\n\n" +
+          "**What audience is this for?**\n\n- Care Navigators\n- Billing Specialists\n\n" +
+          "**Describe your request.**\n\nBCBSMA is changing specialist copays " +
+          "effective Oct 1. We need the member-facing macro set, the Guru card, " +
+          "and the Navigator quiz updated before the window opens. Outline: " +
+          "[Copay update outline](https://docs.example.com/copay-outline)",
         srcdoc:
           "<p><strong>Name</strong></p><p>Dana Whitfield</p>" +
           "<p><strong>Email</strong></p><p>dana.w@example.com</p>" +
@@ -157,7 +164,8 @@ export function buildDemoTask() {
         { gid: "a4", name: "tier-table-v2.png", host: "asana" },
       ],
       stories,
-      capabilities: { complete: true, due: true, comment: true, subtask: true, refresh: true },
+      capabilities: { complete: true, due: true, comment: true, subtask: true,
+                      description: true, refresh: true },
     },
   };
 }

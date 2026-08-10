@@ -3527,6 +3527,13 @@ class EnablementPage(QWidget):
                         host.on_page_shown()   # reload if the renderer died
                     self._drilldown.show_persistent_widget(
                         "Task", task.get("source", "").capitalize(), host)
+                    # Keyboard needs the view (its focusProxy) to hold Qt
+                    # focus — a panel shown from a click elsewhere never
+                    # receives it on its own (recon #7.3).
+                    try:
+                        host.view.setFocus()
+                    except Exception:  # noqa: BLE001
+                        pass
                     self._set_status(f"Opened “{task.get('title', 'task')}”.")
                     return
                 except Exception:  # noqa: BLE001 — web push failed → native
@@ -3578,8 +3585,12 @@ class EnablementPage(QWidget):
             ctrl, bridge, host = build_task_web_triple(
                 write_fn=self._run_task_writeback,
                 refresh_fn=self._run_task_refresh,
-                open_url_fn=self._open_source_url)
+                open_url_fn=self._open_source_url,
+                open_subtask_fn=self._open_subtask_from_web)
             ctrl.status_text.connect(self._set_status)
+            # Writeback OUTCOMES (incl. CAS conflicts) must be visible from
+            # inside the panel, not only on the app status line.
+            self.task_action_done.connect(ctrl.notify_action_outcome)
             # GC guards — WebHost parents the bridge; ctrl/host live here.
             self._task_web_ctrl, self._task_web_bridge = ctrl, bridge
             self._task_web_host = host
@@ -3591,6 +3602,22 @@ class EnablementPage(QWidget):
             logger.warning("web task panel unavailable — native fallback",
                            exc_info=True)
             return None, None
+
+    def _open_subtask_from_web(self, parent_task_id: str, subtask_gid: str):
+        """Subtask name clicked in the web panel — subtasks ARE tasks. A
+        promoted row (mig 056: an enablement_tasks row whose source_ref is
+        this gid) opens in the same panel; an unsynced checklist row opens
+        in Asana itself (permalink pattern /0/0/<gid>/f, scheme-validated
+        by _open_source_url)."""
+        gid = (subtask_gid or "").strip()
+        if not gid:
+            return
+        task = next((t for t in getattr(self, "_all_tasks", [])
+                     if t.get("source_ref") == gid), None)
+        if task is not None:
+            self._show_task_detail(task)
+        else:
+            self._open_source_url(f"https://app.asana.com/0/0/{gid}/f")
 
     def _board_display_names(self, conn, source_ids) -> list[str]:
         """Board display names for the panel's meta line (WS-D2), resolved
@@ -3656,6 +3683,15 @@ class EnablementPage(QWidget):
                 client = AsanaClient.from_store()
                 payload = client.get_task(gid, opt_fields=_TASK_FIELDS)
                 asana_extras.upsert_extras(conn, task_id, payload, client=client)
+                # The explicit refresh restamps the CAS anchor: promoted
+                # subtask rows drift (subtask-local changes emit no board
+                # event, so no poll pass restamps them) and "refresh, then
+                # retry" is the documented conflict remedy — the operator
+                # has now been shown the fresh state this anchor reflects.
+                if payload.get("modified_at"):
+                    from src.data import enablement_tasks as _et
+                    _et.update_task(conn, task_id,
+                                    remote_modified_at=payload["modified_at"])
                 res = {"ok": True, "refreshed": True}
             except Exception as exc:  # noqa: BLE001
                 res = {"ok": False, "error": str(exc), "refreshed": True}

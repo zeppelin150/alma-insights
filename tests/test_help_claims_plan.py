@@ -1896,18 +1896,29 @@ class TestTaskPanelMirror:
         assert "_task_web_available" in src
         assert "TaskDetailPanel(task)" in src
 
-    def test_the_writeback_lanes_four_shared_plus_subtask_completion(self):
-        """task-panel-mirror.md: "these are the same four background
-        write-back lanes … New with this panel: subtask check circles are
-        clickable" — five lanes total, every one a real asana_writeback
+    def test_the_writeback_lanes_four_shared_plus_mirror_additions(self):
+        """task-panel-mirror.md: "the same four background write-back
+        lanes … New with this panel": subtask completion + description
+        editing — six lanes total, every one a real asana_writeback
         function."""
         from src.services.task_web import _LANES
         assert set(_LANES.values()) == {
             "set_completed_in_asana", "update_due_in_asana",
             "post_comment_to_asana", "create_subtask_in_asana",
-            "set_subtask_completed_in_asana"}
+            "set_subtask_completed_in_asana", "update_description_in_asana"}
         for lane in _LANES.values():
             assert callable(getattr(awb, lane)), lane
+
+    def test_description_save_is_remote_first(self):
+        """task-panel-mirror.md: "This write is conflict-protected and
+        remote-first: if Asana refuses it, nothing changes anywhere"."""
+        import inspect
+        src = inspect.getsource(awb.update_description_in_asana)
+        assert "_cas_precheck" in src, "conflict-protected"
+        # the PUT precedes every local mutation in the linked path
+        put = src.index("c.update_task(")
+        assert put < src.index("set_html_notes")
+        assert put < src.rindex("et.update_task(conn, tid, description=")
 
     def test_only_links_the_task_carries_will_open(self):
         """task-panel-mirror.md: "The panel will only open a link that the
